@@ -499,6 +499,22 @@ var ModelCapabilityIndex = []ModelCapabilities{
 	{Name: "claude-opus-4.6", Provider: "anthropic", CapScore: map[Capability]int{CapCode: 10, CapReasoning: 10, CapChinese: 7, CapToolUse: 10, CapLongContext: 10, CapSpeed: 5, CapCost: 3}},
 	{Name: "gpt-5.5", Provider: "openai", CapScore: map[Capability]int{CapCode: 9, CapReasoning: 9, CapChinese: 7, CapToolUse: 10, CapLongContext: 8, CapSpeed: 8, CapCost: 4}},
 	{Name: "glm-4.7-flash", Provider: "zhipu", CapScore: map[Capability]int{CapCode: 7, CapReasoning: 6, CapChinese: 9, CapToolUse: 6, CapLongContext: 6, CapSpeed: 10, CapCost: 10}},
+	{Name: "glm-5", Provider: "zhipu", CapScore: map[Capability]int{CapCode: 8, CapReasoning: 8, CapChinese: 9, CapToolUse: 7, CapLongContext: 7, CapSpeed: 6, CapCost: 8}},
+	{Name: "qwen-plus", Provider: "qwen", CapScore: map[Capability]int{CapCode: 8, CapReasoning: 8, CapChinese: 10, CapToolUse: 7, CapLongContext: 8, CapSpeed: 9, CapCost: 9}},
+	{Name: "qwen3-coder-next", Provider: "qwen", CapScore: map[Capability]int{CapCode: 9, CapReasoning: 8, CapChinese: 9, CapToolUse: 8, CapLongContext: 8, CapSpeed: 7, CapCost: 6}},
+	{Name: "doubao-seed-2.0-code", Provider: "doubao", CapScore: map[Capability]int{CapCode: 9, CapReasoning: 7, CapChinese: 9, CapToolUse: 7, CapLongContext: 7, CapSpeed: 9, CapCost: 9}},
+	{Name: "doubao-seed-2.0-pro", Provider: "doubao", CapScore: map[Capability]int{CapCode: 8, CapReasoning: 8, CapChinese: 9, CapToolUse: 8, CapLongContext: 8, CapSpeed: 8, CapCost: 8}},
+	{Name: "hy3-preview", Provider: "hunyuan", CapScore: map[Capability]int{CapCode: 7, CapReasoning: 7, CapChinese: 9, CapToolUse: 6, CapLongContext: 7, CapSpeed: 8, CapCost: 8}},
+	{Name: "hunyuan-lite", Provider: "hunyuan", CapScore: map[Capability]int{CapCode: 6, CapReasoning: 5, CapChinese: 8, CapToolUse: 5, CapLongContext: 5, CapSpeed: 10, CapCost: 10}},
+	{Name: "ernie-4.5", Provider: "ernie", CapScore: map[Capability]int{CapCode: 7, CapReasoning: 7, CapChinese: 9, CapToolUse: 6, CapLongContext: 7, CapSpeed: 8, CapCost: 8}},
+	{Name: "ernie-speed", Provider: "ernie", CapScore: map[Capability]int{CapCode: 5, CapReasoning: 5, CapChinese: 8, CapToolUse: 4, CapLongContext: 5, CapSpeed: 10, CapCost: 10}},
+	{Name: "kimi-k2.5", Provider: "kimi", CapScore: map[Capability]int{CapCode: 8, CapReasoning: 8, CapChinese: 9, CapToolUse: 7, CapLongContext: 10, CapSpeed: 7, CapCost: 6}},
+	{Name: "spark-4.0", Provider: "spark", CapScore: map[Capability]int{CapCode: 6, CapReasoning: 6, CapChinese: 8, CapToolUse: 5, CapLongContext: 6, CapSpeed: 8, CapCost: 8}},
+	{Name: "pangu-nlp-5.0", Provider: "pangu", CapScore: map[Capability]int{CapCode: 7, CapReasoning: 7, CapChinese: 8, CapToolUse: 6, CapLongContext: 8, CapSpeed: 6, CapCost: 5}},
+	{Name: "minimax-m2.5", Provider: "minimax", CapScore: map[Capability]int{CapCode: 7, CapReasoning: 7, CapChinese: 8, CapToolUse: 6, CapLongContext: 7, CapSpeed: 8, CapCost: 8}},
+	{Name: "baichuan-4", Provider: "baichuan", CapScore: map[Capability]int{CapCode: 6, CapReasoning: 6, CapChinese: 8, CapToolUse: 5, CapLongContext: 6, CapSpeed: 8, CapCost: 8}},
+	{Name: "yi-lightning", Provider: "yi", CapScore: map[Capability]int{CapCode: 6, CapReasoning: 6, CapChinese: 8, CapToolUse: 5, CapLongContext: 6, CapSpeed: 9, CapCost: 9}},
+	{Name: "step-2-16k", Provider: "step", CapScore: map[Capability]int{CapCode: 6, CapReasoning: 6, CapChinese: 8, CapToolUse: 5, CapLongContext: 6, CapSpeed: 8, CapCost: 9}},
 }
 
 func BestProviderFor(cfg ModelCapabilities) string {

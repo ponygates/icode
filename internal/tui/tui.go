@@ -120,14 +120,104 @@ func (a *App) handleCommand(cmd string) bool {
 
 	case cmd == "/profile":
 		prof := a.agent.Profile()
-		fmt.Printf("Provider:  %s\n", prof.Provider)
-		fmt.Printf("Model:     %s\n", prof.Model)
-		fmt.Printf("Temperature: %.1f\n", prof.Temperature)
-		fmt.Printf("TopP:      %.1f\n", prof.TopP)
-		fmt.Printf("MaxTokens: %d\n", prof.MaxTokens)
-		fmt.Printf("ToolStyle: %s\n", prof.ToolStyle)
-		fmt.Printf("StripThink: %v\n", prof.StripThinkTag)
-		fmt.Printf("PromptLen: %d chars\n", len(prof.SystemPrompt))
+		fmt.Printf("Provider:     %s\n", prof.Provider)
+		fmt.Printf("Model:        %s\n", prof.Model)
+		fmt.Printf("Temperature:  %.1f\n", prof.Temperature)
+		fmt.Printf("TopP:         %.1f\n", prof.TopP)
+		fmt.Printf("MaxTokens:    %d\n", prof.MaxTokens)
+		fmt.Printf("ToolStyle:    %s\n", prof.ToolStyle)
+		fmt.Printf("StripThink:   %v\n", prof.StripThinkTag)
+		fmt.Printf("PromptLen:    %d chars\n", len(prof.SystemPrompt))
+		if plan := optimizer.GetTokenPlan(prof.Provider, prof.Model); plan != nil {
+			fmt.Printf("Token Price:  %s\n", plan.FormatPrice())
+			fmt.Printf("Token Plan:   %s\n", plan.FormatTiers())
+			if plan.Notes != "" {
+				fmt.Printf("Notes:        %s\n", plan.Notes)
+			}
+		} else {
+			fmt.Printf("Token Price:  (unlisted)")
+		}
+		return true
+
+	case cmd == "/plan":
+		prof := a.agent.Profile()
+		fmt.Printf("Current: %s/%s\n", prof.Provider, prof.Model)
+		plan := optimizer.GetTokenPlan(prof.Provider, prof.Model)
+		if plan == nil {
+			fmt.Println("No pricing data available for this model.")
+			return true
+		}
+		fmt.Printf("Price:      %s\n", plan.FormatPrice())
+		fmt.Printf("Currency:   %s\n", plan.Currency)
+		fmt.Printf("Cache Discount: %.0f%%\n", plan.CacheDiscount*100)
+		if plan.HasFreeTier {
+			fmt.Println("Free Tier:  ✅ Available")
+		}
+		if plan.HasCodingPlan {
+			fmt.Println("Token Plan: ✅ Available")
+		}
+		fmt.Printf("Plans:      %s\n", plan.FormatTiers())
+		if plan.Notes != "" {
+			fmt.Printf("Notes:      %s\n", plan.Notes)
+		}
+		return true
+
+	case strings.HasPrefix(cmd, "/plan "):
+		key := strings.TrimSpace(strings.TrimPrefix(cmd, "/plan "))
+		parts := strings.SplitN(key, "/", 2)
+		providerName, modelName := parts[0], ""
+		if len(parts) == 2 {
+			modelName = parts[1]
+		}
+		if modelName == "" {
+			plans := optimizer.ListProviderPlans(providerName)
+			if len(plans) == 0 {
+				fmt.Printf("No plans found for '%s'\n", providerName)
+				return true
+			}
+			fmt.Printf("=== %s ===\n", providerName)
+			for _, p := range plans {
+				fmt.Printf("  %-25s %s\n", p.Model, p.FormatPrice())
+				if p.HasCodingPlan {
+					fmt.Printf("  %-25s %s\n", "", p.FormatTiers())
+				}
+			}
+		} else {
+			plan := optimizer.GetTokenPlan(providerName, modelName)
+			if plan == nil {
+				fmt.Printf("No plan data for %s/%s\n", providerName, modelName)
+				return true
+			}
+			fmt.Printf("%s/%s\n", plan.Provider, plan.Model)
+			fmt.Printf("  Price:     %s (%s)\n", plan.FormatPrice(), plan.Currency)
+			fmt.Printf("  Cache:     %.0f%% discount\n", plan.CacheDiscount*100)
+			fmt.Printf("  Free:      %v\n", plan.HasFreeTier)
+			fmt.Printf("  Plan:      %v\n", plan.HasCodingPlan)
+			fmt.Printf("  Tiers:     %s\n", plan.FormatTiers())
+			fmt.Printf("  Notes:     %s\n", plan.Notes)
+		}
+		return true
+
+	case cmd == "/plans":
+		fmt.Println("=== Token Plans Summary ===")
+		seen := make(map[string]bool)
+		for _, p := range optimizer.ListAllPlans() {
+			key := p.Provider + "/" + p.Model
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			freeMark := ""
+			if p.HasFreeTier && p.Input1M == 0 {
+				freeMark = " 🆓"
+			}
+			planMark := ""
+			if p.HasCodingPlan {
+				planMark = " 📋"
+			}
+			fmt.Printf("  %-15s %-25s %s%s%s\n",
+				p.Provider, p.Model, optimizer.FormatPlanShort(p.Provider, p.Model), freeMark, planMark)
+		}
 		return true
 
 	case strings.HasPrefix(cmd, "/model "):
@@ -150,6 +240,9 @@ func (a *App) handleCommand(cmd string) bool {
 		fmt.Printf("switched to %s/%s\n", pk.Name, pk.Model)
 		fmt.Printf("optimization: temp=%.1f topP=%.1f stripThink=%v\n",
 			prof.Temperature, prof.TopP, prof.StripThinkTag)
+		if plan := optimizer.GetTokenPlan(pk.Name, pk.Model); plan != nil {
+			fmt.Printf("token plan: %s | %s\n", plan.FormatPrice(), plan.FormatTiers())
+		}
 		return true
 
 	case cmd == "/mode":
@@ -218,22 +311,30 @@ func (a *App) printHelp() {
   /providers         List available providers
   /model <name>      Switch model (e.g. /model deepseek/deepseek-v4-flash)
   /mode              Show current modes
-  /profile           Show provider optimization profile
-  /model <name>      Auto-optimized for each provider
+  /profile           Show optimization profile + token pricing
+  /plan              Show current model's token plan details
+  /plan <name>       Show token plan for specific model (e.g. /plan zhipu/glm-4.7-flash)
+  /plans             List all token plans (free 🆓 / plan 📋)
 `)
 }
 
 func (a *App) banner() string {
+	model := a.cfg.Provider.Default
+	price := "—"
+	pk := provider.ParseModelKey(model)
+	if plan := optimizer.GetTokenPlan(pk.Name, pk.Model); plan != nil {
+		price = optimizer.FormatPlanShort(pk.Name, pk.Model)
+	}
 	return fmt.Sprintf(`  ___   ___  ___  ___  ___
  / _ \ / __|/ _ \| __|/ __|
 | (_) | (__|  __/| _| \__ \
  \___/ \___|\___/|___||___/
  iCode v0.1.0
 ────────────────────────────
- Privacy: %s   Perm: %s   Model: %s`,
+ Privacy: %s   Perm: %s   Model: %s  (%s)`,
 		a.cfg.Privacy.Mode,
 		a.cfg.Permission.Mode,
-		a.cfg.Provider.Default,
+		model, price,
 	)
 }
 
