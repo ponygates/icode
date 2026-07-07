@@ -6,21 +6,20 @@ import (
 	"os"
 
 	"github.com/ponygates/icode/internal/config"
+	"github.com/ponygates/icode/internal/provider"
 	"github.com/ponygates/icode/internal/tui"
 )
 
 func main() {
 	var (
 		privacyMode string
-		model       string
-		provider    string
+		modelKey    string
 		permMode    string
 		version     bool
 	)
 
 	flag.StringVar(&privacyMode, "privacy", "", "Privacy mode: local, china-trusted, smart, global-audited, full, custom")
-	flag.StringVar(&model, "model", "", "Model to use (e.g. deepseek-v4-flash, claude-sonnet-4.6)")
-	flag.StringVar(&provider, "provider", "", "Provider to use (e.g. zhipu, openai, deepseek)")
+	flag.StringVar(&modelKey, "model", "", "Model to use (e.g. deepseek/deepseek-v4-flash)")
 	flag.StringVar(&permMode, "perm", "", "Permission mode: plan, ask, auto, yolo")
 	flag.BoolVar(&version, "version", false, "Print version")
 	flag.Parse()
@@ -42,8 +41,21 @@ func main() {
 	if permMode != "" {
 		cfg.Permission.Mode = permMode
 	}
+	if modelKey != "" {
+		cfg.Provider.Default = modelKey
+	}
 
-	app := tui.New(cfg)
+	reg := provider.InitRegistry(cfg)
+
+	pk := provider.ParseModelKey(cfg.Provider.Default)
+	prov := reg.Get(pk.Name)
+	if prov == nil {
+		fmt.Fprintf(os.Stderr, "Provider '%s' not configured. Set %s_API_KEY or run /model\n",
+			pk.Name, pk.Name)
+		os.Exit(1)
+	}
+
+	app := tui.New(cfg, reg)
 	if err := app.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
