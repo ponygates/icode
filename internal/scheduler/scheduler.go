@@ -16,7 +16,7 @@ const (
 type PeakSlot struct {
 	Start string
 	End   string
-	Days  []time.Weekday
+	Days  []string
 	Mode  Mode
 }
 

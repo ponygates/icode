@@ -1,0 +1,52 @@
+privacy:
+  mode: smart
+  audit_log: true
+  sanitize_env: true
+
+provider:
+  default: deepseek/deepseek-v4-flash
+  fallback: openrouter/auto
+  settings:
+    deepseek:
+      api_key: ${DEEPSEEK_API_KEY}
+    zhipu:
+      api_key: ${ZHIPU_API_KEY}
+      coding_plan: lite
+    openai:
+      api_key: ${OPENAI_API_KEY}
+
+cache:
+  enabled: true
+  strategy: append-only
+  max_cache_size_mb: 500
+
+permission:
+  mode: ask
+  read_only_dirs:
+    - vendor
+    - .git
+    - node_modules
+  deny_dirs:
+    - ~/.ssh
+  bash_deny_commands:
+    - rm -rf
+    - chmod 777
+  max_turns: 200
+
+schedule:
+  enabled: true
+  peak_hours:
+    - start: "08:30"
+      end: "12:00"
+      days: [mon, tue, wed, thu, fri]
+      mode: aggressive_save
+    - start: "14:00"
+      end: "18:00"
+      days: [mon, tue, wed, thu, fri]
+      mode: aggressive_save
+  low_hours:
+    start: "22:00"
+    end: "07:00"
+    mode: full_quality
+  normal_hours:
+    mode: balanced
