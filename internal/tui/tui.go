@@ -12,6 +12,7 @@ import (
 	"github.com/ponygates/icode/internal/config"
 	"github.com/ponygates/icode/internal/permissions"
 	"github.com/ponygates/icode/internal/provider"
+	"github.com/ponygates/icode/internal/provider/optimizer"
 	"github.com/ponygates/icode/internal/tools"
 )
 
@@ -54,6 +55,7 @@ func New(cfg *config.Config, reg *provider.Registry) *App {
 		MaxTurns:     cfg.Permission.MaxTurns,
 		MaxTokens:    4096,
 		Model:        pk.Model,
+		Profile:      optimizer.ForProvider(pk.Name, pk.Model),
 	})
 
 	return &App{
@@ -112,8 +114,20 @@ func (a *App) handleCommand(cmd string) bool {
 	case cmd == "/providers":
 		for _, name := range a.reg.List() {
 			p := a.reg.Get(name)
-			fmt.Printf("  %s (%s)\n", name, strings.Join(p.Models(), ", "))
+			fmt.Printf("  %-12s %s\n", name, strings.Join(p.Models(), ", "))
 		}
+		return true
+
+	case cmd == "/profile":
+		prof := a.agent.Profile()
+		fmt.Printf("Provider:  %s\n", prof.Provider)
+		fmt.Printf("Model:     %s\n", prof.Model)
+		fmt.Printf("Temperature: %.1f\n", prof.Temperature)
+		fmt.Printf("TopP:      %.1f\n", prof.TopP)
+		fmt.Printf("MaxTokens: %d\n", prof.MaxTokens)
+		fmt.Printf("ToolStyle: %s\n", prof.ToolStyle)
+		fmt.Printf("StripThink: %v\n", prof.StripThinkTag)
+		fmt.Printf("PromptLen: %d chars\n", len(prof.SystemPrompt))
 		return true
 
 	case strings.HasPrefix(cmd, "/model "):
@@ -125,18 +139,26 @@ func (a *App) handleCommand(cmd string) bool {
 			return true
 		}
 		newTools := a.createTools()
+		prof := optimizer.ForProvider(pk.Name, pk.Model)
 		a.agent = agent.New(prov, newTools, agent.Config{
 			SystemPrompt: defaultSystemPrompt,
 			MaxTurns:     a.cfg.Permission.MaxTurns,
 			MaxTokens:    4096,
 			Model:        pk.Model,
+			Profile:      prof,
 		})
 		fmt.Printf("switched to %s/%s\n", pk.Name, pk.Model)
+		fmt.Printf("optimization: temp=%.1f topP=%.1f stripThink=%v\n",
+			prof.Temperature, prof.TopP, prof.StripThinkTag)
 		return true
 
 	case cmd == "/mode":
 		fmt.Printf("permission mode: %s\n", a.cfg.Permission.Mode)
 		fmt.Printf("privacy mode: %s\n", a.cfg.Privacy.Mode)
+		fmt.Printf("model: %s\n", a.cfg.Provider.Default)
+		prof := a.agent.Profile()
+		fmt.Printf("profile: temp=%.1f topP=%.1f maxTok=%d tool=%s stripThink=%v\n",
+			prof.Temperature, prof.TopP, prof.MaxTokens, prof.ToolStyle, prof.StripThinkTag)
 		return true
 	}
 
@@ -190,12 +212,14 @@ func (a *App) processInput(input string) {
 
 func (a *App) printHelp() {
 	fmt.Print(`Commands:
-  /quit, /exit    Exit iCode
-  /clear          Clear conversation history
-  /help           Show this help
-  /providers      List available providers
-  /model <name>   Switch model (e.g. /model deepseek/deepseek-v4-flash)
-  /mode           Show current modes
+  /quit, /exit       Exit iCode
+  /clear             Clear conversation history
+  /help              Show this help
+  /providers         List available providers
+  /model <name>      Switch model (e.g. /model deepseek/deepseek-v4-flash)
+  /mode              Show current modes
+  /profile           Show provider optimization profile
+  /model <name>      Auto-optimized for each provider
 `)
 }
 

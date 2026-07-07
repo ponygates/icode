@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/ponygates/icode/internal/provider"
+	"github.com/ponygates/icode/internal/provider/optimizer"
 )
 
 type Callback func(chunk StreamEvent)
@@ -32,6 +33,7 @@ type Config struct {
 	MaxTurns     int
 	MaxTokens    int
 	Model        string
+	Profile      optimizer.Profile
 }
 
 type Tool interface {
@@ -46,10 +48,18 @@ func New(p provider.Provider, tools []Tool, cfg Config) *Agent {
 	for _, t := range tools {
 		toolMap[t.Name()] = t
 	}
+
+	if cfg.Profile.SystemPrompt == "" {
+		cfg.Profile = optimizer.ForProvider(p.Name(), cfg.Model)
+	}
+	if cfg.MaxTokens == 0 {
+		cfg.MaxTokens = cfg.Profile.MaxTokens
+	}
+
 	return &Agent{
-		provider:  p,
-		tools:     toolMap,
-		config:    cfg,
+		provider: p,
+		tools:    toolMap,
+		config:   cfg,
 	}
 }
 
@@ -82,22 +92,29 @@ func (a *Agent) Run(ctx context.Context, input string) error {
 		messages = append(messages, a.history...)
 
 		resp, err := a.provider.Complete(ctx, provider.CompletionRequest{
-			Model:     a.config.Model,
-			Messages:  messages,
-			Tools:     a.ToolDefs(),
-			Stream:    false,
-			MaxTokens: a.config.MaxTokens,
+			Model:       a.config.Model,
+			Messages:    messages,
+			Tools:       a.ToolDefs(),
+			Stream:      false,
+			MaxTokens:   a.config.MaxTokens,
+			Temperature: a.config.Profile.Temperature,
+			TopP:        a.config.Profile.TopP,
 		})
 		if err != nil {
 			return fmt.Errorf("completion error: %w", err)
 		}
 
+		content := resp.Content
+		if a.config.Profile.StripThinkTag {
+			content = stripThinkTags(content)
+		}
+
 		a.mu.Lock()
-		a.history = append(a.history, provider.Message{Role: "assistant", Content: resp.Content})
+		a.history = append(a.history, provider.Message{Role: "assistant", Content: content})
 		a.mu.Unlock()
 
-		if resp.Content != "" {
-			a.emit(StreamEvent{Type: "text", Content: resp.Content})
+		if content != "" {
+			a.emit(StreamEvent{Type: "text", Content: content})
 		}
 
 		if len(resp.ToolCalls) == 0 {
@@ -160,11 +177,37 @@ func (a *Agent) ToolDefs() []provider.ToolDef {
 }
 
 func (a *Agent) SystemPrompt() string {
+	if a.config.Profile.SystemPrompt != "" {
+		return a.config.Profile.SystemPrompt + "\n\n## Available Tools\n\n" + a.toolList()
+	}
+	return a.config.SystemPrompt + "\n\n## Available Tools\n\n" + a.toolList()
+}
+
+func (a *Agent) toolList() string {
 	var b strings.Builder
-	b.WriteString(a.config.SystemPrompt)
-	b.WriteString("\n\n## Available Tools\n\n")
 	for _, t := range a.tools {
 		b.WriteString(fmt.Sprintf("- `%s`: %s\n", t.Name(), t.Description()))
 	}
 	return b.String()
+}
+
+func (a *Agent) Profile() optimizer.Profile {
+	return a.config.Profile
+}
+
+func stripThinkTags(s string) string {
+	tag := "```"
+	for {
+		start := strings.Index(s, tag)
+		if start < 0 {
+			break
+		}
+		after := s[start+len(tag):]
+		end := strings.Index(after, tag)
+		if end < 0 {
+			break
+		}
+		s = s[:start] + after[end+len(tag):]
+	}
+	return strings.TrimSpace(s)
 }
