@@ -1,0 +1,29 @@
+# Binaries
+icode.exe
+icode
+*.exe
+
+# Go
+vendor/
+
+# Node
+node_modules/
+desktop/dist/
+desktop/release/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Config (local)
+.icoderc.yaml
+.icoderc.yml
