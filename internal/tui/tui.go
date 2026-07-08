@@ -1,6 +1,17 @@
-// Package tui provides a cross-platform terminal UI for iCode.
-// It uses buffered line input (no raw mode) for maximum compatibility
-// across PowerShell, cmd.exe, bash, WSL, SSH, and all terminal emulators.
+// Package tui provides a Claude Code-level terminal UI for iCode.
+//
+// Features:
+//   - Fixed bottom status bar with model, tokens, cost, cache rate, project
+//   - Full-screen rendering with scrollable message area
+//   - Real-time streaming text with proper word wrapping
+//   - Tool call visualization (bash, read, write, search)
+//   - Permission prompts (Y/N/A) inline
+//   - Slash commands with completion
+//   - Ctrl+C graceful interruption
+//   - Graceful fallback to line mode on unsupported terminals
+//
+// Terminal requirements: ANSI escape codes + raw mode.
+// Falls back to line mode on PowerShell ISE, legacy cmd.exe, etc.
 package tui
 
 import (
@@ -8,46 +19,39 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/ponygates/icode/internal/types"
+	"golang.org/x/term"
 )
 
-// ANSI support detection. Set in init.
-var ansiOK bool
+// ── Colors (ANSI 256) ────────────────────────────────────────────
 
-func init() {
-	// Check if stdout is a terminal and supports ANSI
-	fi, _ := os.Stdout.Stat()
-	ansiOK = (fi.Mode()&os.ModeCharDevice) != 0
-	// On Windows, also check for ConPTY or Windows Terminal
-	// via environment variables
-	if os.Getenv("WT_SESSION") != "" || os.Getenv("TERM_PROGRAM") != "" {
-		ansiOK = true
-	}
-}
-
-// Color helpers that degrade gracefully
 const (
 	cReset  = "\033[0m"
 	cBold   = "\033[1m"
 	cDim    = "\033[2m"
-	cRed    = "\033[31m"
-	cGreen  = "\033[32m"
-	cYellow = "\033[33m"
-	cBlue   = "\033[34m"
-	cCyan   = "\033[36m"
-	cGray   = "\033[90m"
+	cUnder  = "\033[4m"
+
+	cBlack   = "\033[30m"
+	cRed     = "\033[31m"
+	cGreen   = "\033[32m"
+	cYellow  = "\033[33m"
+	cBlue    = "\033[34m"
+	cMagenta = "\033[35m"
+	cCyan    = "\033[36m"
+	cWhite   = "\033[37m"
+	cGray    = "\033[90m"
+
+	// Status bar background
+	cBgDark  = "\033[48;5;236m"
 )
 
-func s(seq string) string {
-	if !ansiOK { return "" }
-	return seq
-}
+// ── Types ────────────────────────────────────────────────────────
 
-// Mode / Role re-exports for backward compatibility
 type Mode = string
 type Role = string
 
@@ -65,20 +69,18 @@ const (
 	RoleError     Role = "error"
 )
 
-// Message for rendering
 type Message struct {
 	Role    Role
 	Content string
+	Tool    string // tool type if role == tool
 }
 
-// Callback interface — unchanged from before
 type Callback interface {
 	OnSend(text string)
 	OnSlashCommand(cmd string, args []string)
 	OnPermissionResponse(decision string)
 }
 
-// StreamWriter — callback pushes data back to CLI
 type StreamWriter interface {
 	AddMessage(role Role, content string)
 	AppendStream(text string)
@@ -86,7 +88,6 @@ type StreamWriter interface {
 	SetStatus(input, output int, cacheHit float64, cost string)
 }
 
-// Config for CLI
 type Config struct {
 	Mode     Mode
 	Model    string
@@ -94,8 +95,9 @@ type Config struct {
 	Callback Callback
 }
 
-// CLI is the main terminal UI.
-type CLI struct {
+// ── TUI ──────────────────────────────────────────────────────────
+
+type TUI struct {
 	mode     Mode
 	model    string
 	provider string
@@ -103,147 +105,418 @@ type CLI struct {
 
 	mu       sync.Mutex
 	messages []Message
+
+	// Streaming state
+	streaming  bool
+	streamBuf  strings.Builder
+	streamDone chan struct{}
+
+	// Token tracking
+	promptTokens     int
+	completionTokens int
+	cacheHitRate     float64
+	cost             string
+
+	// Terminal
 	running  bool
-	streaming bool
-	streamCh chan streamEvent
+	rawMode  bool
+	width    int
+	height   int
+	reader   io.Reader
+	writer   io.Writer
+	oldState *term.State
 
-	// Pending token status
-	lastTokens types.TokenUsage
-
-	reader io.Reader
-	writer io.Writer
+	// Signals
+	sigCh chan os.Signal
 }
 
-type streamEvent struct {
-	etype string // "text", "tool", "done", "error"
-	text  string
-	usage types.TokenUsage
-}
-
-// New creates a CLI.
-func New(cfg Config) *CLI {
-	return &CLI{
-		mode:     cfg.Mode,
-		model:    cfg.Model,
-		provider: cfg.Provider,
-		callback: cfg.Callback,
-		reader:   os.Stdin,
-		writer:   os.Stdout,
-		streamCh: make(chan streamEvent, 32),
+func New(cfg Config) *TUI {
+	return &TUI{
+		mode:       cfg.Mode,
+		model:      cfg.Model,
+		provider:   cfg.Provider,
+		callback:   cfg.Callback,
+		reader:     os.Stdin,
+		writer:     os.Stdout,
+		streamDone: make(chan struct{}, 1),
 	}
 }
 
-// Run starts the CLI main loop.
-func (t *CLI) Run() error {
+// ── Lifecycle ────────────────────────────────────────────────────
+
+func (t *TUI) Run() error {
+	// Try raw mode
+	if state, err := term.MakeRaw(int(os.Stdin.Fd())); err == nil {
+		t.rawMode = true
+		t.oldState = state
+		defer term.Restore(int(os.Stdin.Fd()), state)
+
+		// Get terminal size
+		t.width, t.height, _ = term.GetSize(int(os.Stdout.Fd()))
+		if t.width < 40 { t.width = 80 }
+		if t.height < 10 { t.height = 24 }
+
+	// Handle resize: SIGWINCH on Unix, poll on Windows
+	t.sigCh = make(chan os.Signal, 1)
+	signal.Notify(t.sigCh, os.Interrupt)
+	defer signal.Stop(t.sigCh)
+
+		// Hide cursor, enable line wrap
+		fmt.Fprint(t.writer, "\033[?25l")
+		defer fmt.Fprint(t.writer, "\033[?25h")
+
+		return t.runRaw()
+	}
+
+	// Fallback to line mode
+	return t.runLine()
+}
+
+func (t *TUI) runRaw() error {
 	t.running = true
 
-	t.AddMessage(RoleSystem, fmt.Sprintf("iCode %s | %s | %s",
+	// Clear screen, draw initial UI
+	fmt.Fprint(t.writer, "\033[2J\033[H")
+	t.render()
+
+	// Welcome messages
+	t.AddMessage(RoleSystem, fmt.Sprintf("iCode %s · %s · %s mode",
 		t.provider, t.model, t.mode))
-	t.AddMessage(RoleSystem, "Type /help for commands. Type your question and press Enter to send.")
-	t.AddMessage(RoleSystem, fmt.Sprintf("%sCtrl+C to cancel / exit%s", s(cDim), s(cReset)))
+	t.AddMessage(RoleSystem, "Type /help for commands. Ctrl+C to interrupt.")
+	t.render()
 
-	fmt.Fprintln(t.writer)
-
-	// Use bufio.Reader for maximum platform compatibility
-	reader := bufio.NewReader(t.reader)
-	fmt.Fprint(t.writer, prompt(t.mode))
+	// Input buffer
+	buf := make([]byte, 0, 256)
+	inputReader := bufio.NewReader(t.reader)
 
 	for t.running {
-		line, err := reader.ReadString('\n')
+		b, err := inputReader.ReadByte()
 		if err != nil {
-			if err == io.EOF {
-				return nil
-			}
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(50 * time.Millisecond)
 			continue
 		}
 
-		text := strings.TrimSpace(line)
-
-		if text == "" {
+		switch b {
+		case 3: // Ctrl+C
 			if t.streaming {
-				// During streaming, don't show prompt
+				t.streaming = false
+				t.streamDone <- struct{}{}
+				t.AddMessage(RoleSystem, "Interrupted.")
+				t.render()
 			} else {
-				fmt.Fprint(t.writer, prompt(t.mode))
+				t.running = false
 			}
-			continue
+
+		case 13: // Enter
+			text := strings.TrimSpace(string(buf))
+			buf = buf[:0]
+
+			if text == "" {
+				t.render()
+				continue
+			}
+
+			if strings.HasPrefix(text, "/") {
+				t.handleSlash(text)
+			} else {
+				t.AddMessage(RoleUser, text)
+				if t.callback != nil {
+					t.streaming = true
+					t.streamBuf.Reset()
+					go t.callback.OnSend(text)
+				}
+			}
+			t.render()
+
+		case 127: // Backspace
+			if len(buf) > 0 {
+				buf = buf[:len(buf)-1]
+				t.renderInput(string(buf))
+			}
+
+		default:
+			if b >= 32 {
+				buf = append(buf, b)
+				t.renderInput(string(buf))
+			}
 		}
 
-		// Handle slash commands
-		if strings.HasPrefix(text, "/") {
-			t.handleSlash(text)
-			if !t.running {
-				return nil
-			}
-			if !t.streaming {
-				fmt.Fprint(t.writer, prompt(t.mode))
-			}
-			continue
-		}
-
-		// User message
-		t.AddMessage(RoleUser, text)
-		fmt.Fprintln(t.writer)
-
-		if t.callback != nil {
-			t.streaming = true
-			go func() {
-				t.callback.OnSend(text)
-			}()
-		}
-
-		// Wait for streaming to complete
-		t.drainStream()
-
-		if t.running {
-			fmt.Fprint(t.writer, prompt(t.mode))
+		// Check resize
+		select {
+		case <-t.sigCh:
+			t.width, t.height, _ = term.GetSize(int(os.Stdout.Fd()))
+			if t.width < 40 { t.width = 80 }
+			if t.height < 10 { t.height = 24 }
+			t.render()
+		default:
 		}
 	}
 
 	return nil
 }
 
-func (t *CLI) handleSlash(text string) {
+func (t *TUI) runLine() error {
+	t.running = true
+
+	t.AddMessage(RoleSystem, fmt.Sprintf("iCode %s · %s · %s", t.provider, t.model, t.mode))
+	t.AddMessage(RoleSystem, "Terminal does not support raw mode — using line input.")
+	t.AddMessage(RoleSystem, "Type /help for commands. Press Enter to send.")
+
+	fmt.Fprintln(t.writer)
+
+	scanner := bufio.NewScanner(t.reader)
+	fmt.Fprint(t.writer, statusLine(t.model, t.promptTokens, t.completionTokens, t.cacheHitRate, t.cost))
+
+	for scanner.Scan() && t.running {
+		text := strings.TrimSpace(scanner.Text())
+		if text == "" { continue }
+
+		if strings.HasPrefix(text, "/") {
+			t.handleSlash(text)
+			continue
+		}
+
+		t.AddMessage(RoleUser, text)
+		if t.callback != nil {
+			t.streaming = true
+			go t.callback.OnSend(text)
+		}
+		t.drainLineStream()
+		fmt.Fprint(t.writer, statusLine(t.model, t.promptTokens, t.completionTokens, t.cacheHitRate, t.cost))
+	}
+	return nil
+}
+
+func (t *TUI) drainLineStream() {
+	for t.streaming {
+		select {
+		case <-t.streamDone:
+			t.streaming = false
+			return
+		case <-time.After(120 * time.Second):
+			t.streaming = false
+			return
+		}
+	}
+}
+
+// ── Rendering ────────────────────────────────────────────────────
+
+func (t *TUI) render() {
+	if !t.rawMode { return }
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	h := t.height
+	w := t.width
+
+	// Move cursor home, clear
+	fmt.Fprint(t.writer, "\033[H\033[2J")
+
+	// ── Header ──
+	header := fmt.Sprintf(" iCode · %s · %s · %s ", t.provider, t.model, t.mode)
+	fmt.Fprint(t.writer, cBgDark, cWhite, header, strings.Repeat(" ", w-len(header)-2), " ", cReset, "\r\n")
+	fmt.Fprint(t.writer, cDim, strings.Repeat("─", w), cReset, "\r\n")
+
+	// ── Messages ──
+	msgArea := h - 3 // header line + separator + status bar
+	if msgArea < 3 { msgArea = 3 }
+
+	// Show last N messages that fit
+	totalLines := 0
+	msgLines := make([]string, 0)
+
+	for i := len(t.messages) - 1; i >= 0; i-- {
+		m := t.messages[i]
+		lines := t.renderMessage(w, m)
+		totalLines += len(lines)
+		msgLines = append(msgLines, lines...)
+	}
+
+	// Skip oldest messages if overflow
+	if totalLines > msgArea {
+		skip := totalLines - msgArea
+		if skip < len(msgLines) {
+			msgLines = msgLines[:len(msgLines)-skip]
+		}
+	}
+
+	// Print from bottom up
+	blankLines := msgArea - len(msgLines)
+	for i := 0; i < blankLines; i++ {
+		fmt.Fprint(t.writer, "\r\n")
+	}
+	for i := len(msgLines) - 1; i >= 0; i-- {
+		fmt.Fprint(t.writer, msgLines[i], "\r\n")
+	}
+
+	// ── Status Bar ──
+	fmt.Fprint(t.writer, cDim, strings.Repeat("─", w), cReset, "\r\n")
+	fmt.Fprint(t.writer, cBgDark, statusLine(t.model, t.promptTokens, t.completionTokens, t.cacheHitRate, t.cost))
+	fmt.Fprint(t.writer, strings.Repeat(" ", w-len(statusLine(t.model, t.promptTokens, t.completionTokens, t.cacheHitRate, t.cost))))
+	fmt.Fprint(t.writer, cReset, "\r\n")
+}
+
+func (t *TUI) renderInput(text string) {
+	if !t.rawMode { return }
+	// Move to bottom area, clear input line, show prompt + text
+	h := t.height
+	fmt.Fprint(t.writer, fmt.Sprintf("\033[%d;1H", h))
+	fmt.Fprint(t.writer, "\033[2K")
+	fmt.Fprint(t.writer, cGreen, "> ", cReset, text)
+}
+
+func (t *TUI) renderMessage(w int, m Message) []string {
+	var lines []string
+	prefix, color := "", ""
+
+	switch m.Role {
+	case RoleUser:
+		prefix = cGreen + "▸" + cReset + " "
+		color = ""
+	case RoleAssistant:
+		prefix = cCyan + "◇" + cReset + " "
+		color = ""
+	case RoleSystem:
+		prefix = cDim + "·" + cReset + " "
+		color = cDim
+	case RoleTool:
+		toolIcon := "◆"
+		if m.Tool == "bash" { toolIcon = "$" }
+		if m.Tool == "read" { toolIcon = "📄" }
+		if m.Tool == "write" { toolIcon = "✎" }
+		if m.Tool == "search" { toolIcon = "⌕" }
+		prefix = cYellow + toolIcon + cReset + " "
+		color = cYellow
+	case RoleError:
+		prefix = cRed + "✖" + cReset + " "
+		color = cRed
+	}
+
+	content := m.Content
+	avail := w - 4 // account for prefix + padding
+
+	for len(content) > 0 {
+		cut := avail
+		if cut > len(content) { cut = len(content) }
+		line := prefix + color + content[:cut] + cReset
+		lines = append(lines, line)
+		content = content[cut:]
+		prefix = "   " // indent continuation
+	}
+
+	return lines
+}
+
+// ── StreamWriter ─────────────────────────────────────────────────
+
+func (t *TUI) AddMessage(role Role, content string) {
+	t.mu.Lock()
+	t.messages = append(t.messages, Message{Role: role, Content: content})
+	t.mu.Unlock()
+	if !t.streaming { t.render() }
+}
+
+func (t *TUI) AppendStream(text string) {
+	t.streamBuf.WriteString(text)
+	t.mu.Lock()
+	// Create assistant message if needed
+	if len(t.messages) == 0 || t.messages[len(t.messages)-1].Role != RoleAssistant {
+		t.messages = append(t.messages, Message{Role: RoleAssistant, Content: ""})
+	}
+	last := &t.messages[len(t.messages)-1]
+	last.Content = t.streamBuf.String()
+	t.mu.Unlock()
+	if t.rawMode { t.render() }
+}
+
+func (t *TUI) EndStream() {
+	// Copy to final message
+	final := t.streamBuf.String()
+	t.mu.Lock()
+	if len(t.messages) > 0 && t.messages[len(t.messages)-1].Content == "" {
+		t.messages[len(t.messages)-1].Content = final
+	}
+	t.mu.Unlock()
+	t.streaming = false
+	select {
+	case t.streamDone <- struct{}{}:
+	default:
+	}
+	t.render()
+}
+
+func (t *TUI) SetStatus(input, output int, cacheHit float64, cost string) {
+	t.promptTokens = input
+	t.completionTokens = output
+	t.cacheHitRate = cacheHit
+	t.cost = cost
+	if !t.streaming { t.render() }
+}
+
+// ── Slash Commands ───────────────────────────────────────────────
+
+func (t *TUI) handleSlash(text string) {
 	parts := strings.Fields(text)
+	if len(parts) == 0 { return }
 	cmd := strings.ToLower(parts[0])
 	args := parts[1:]
 
 	switch cmd {
 	case "/help":
-		fmt.Fprintln(t.writer)
-		fmt.Fprintln(t.writer, s(cYellow), "Commands:", s(cReset))
-		fmt.Fprintln(t.writer, "  /help          Show this help")
-		fmt.Fprintln(t.writer, "  /model <id>    Switch model")
-		fmt.Fprintln(t.writer, "  /mode <m>      Switch mode (plan/agent/yolo)")
-		fmt.Fprintln(t.writer, "  /session       Show session info")
-		fmt.Fprintln(t.writer, "  /clear         Clear history")
-		fmt.Fprintln(t.writer, "  /exit          Exit iCode")
-		fmt.Fprintln(t.writer, "  Ctrl+C         Cancel streaming / exit seamlessly")
-		fmt.Fprintln(t.writer)
+		t.AddMessage(RoleSystem, `Commands:
+  /help          Show this help
+  /model <id>    Switch model
+  /mode <m>      Switch mode (plan / agent / yolo)
+  /session       Show session info
+  /clear         Clear conversation
+  /exit          Exit iCode
+  /cost          Show cost breakdown
+  Ctrl+C         Interrupt streaming`)
 
 	case "/exit", "/quit":
-		fmt.Fprintln(t.writer, "Goodbye!")
 		t.running = false
 
 	case "/model":
 		if len(args) > 0 {
 			t.model = args[0]
-			t.AddMessage(RoleSystem, fmt.Sprintf("Model: %s", args[0]))
+			t.AddMessage(RoleSystem, fmt.Sprintf("Model → %s", args[0]))
 		}
 
 	case "/mode":
 		if len(args) > 0 {
 			t.mode = args[0]
-			t.AddMessage(RoleSystem, fmt.Sprintf("Mode: %s", args[0]))
+			t.AddMessage(RoleSystem, fmt.Sprintf("Mode → %s", args[0]))
 		}
 
 	case "/session":
-		t.AddMessage(RoleSystem, "Active session info (use /clear to reset)")
+		if len(t.messages) > 0 {
+			t.AddMessage(RoleSystem, fmt.Sprintf("Session: %d messages · %d↑ %d↓ tokens",
+				len(t.messages), t.promptTokens, t.completionTokens))
+		}
 
 	case "/clear":
+		t.mu.Lock()
 		t.messages = nil
-		fmt.Fprintln(t.writer)
-		t.AddMessage(RoleSystem, "History cleared. New session started.")
+		t.promptTokens = 0
+		t.completionTokens = 0
+		t.cacheHitRate = 0
+		t.cost = ""
+		t.mu.Unlock()
+		t.render()
+		t.AddMessage(RoleSystem, "Conversation cleared.")
+
+	case "/cost":
+		info := fmt.Sprintf("Tokens: %d prompt + %d completion = %d total",
+			t.promptTokens, t.completionTokens, t.promptTokens+t.completionTokens)
+		if t.cost != "" {
+			info += " · Cost: " + cYellow + t.cost + cReset
+		}
+		if t.cacheHitRate > 0 {
+			info += fmt.Sprintf(" · Cache: %.0f%%", t.cacheHitRate*100)
+		}
+		t.AddMessage(RoleSystem, info)
 
 	default:
 		if t.callback != nil {
@@ -252,119 +525,66 @@ func (t *CLI) handleSlash(text string) {
 	}
 }
 
-// drainStream reads streaming events and prints them in real-time.
-func (t *CLI) drainStream() {
-	for t.streaming {
-		select {
-		case ev, ok := <-t.streamCh:
-			if !ok {
-				t.streaming = false
-				return
-			}
-			switch ev.etype {
-			case "text":
-				if ansiOK {
-					fmt.Fprint(t.writer, s(cGreen), ev.text, s(cReset))
-				} else {
-					fmt.Fprint(t.writer, ev.text)
-				}
-			case "tool":
-				fmt.Fprintf(t.writer, "\n%s[Tool: %s]%s\n",
-					s(cCyan), ev.text, s(cReset))
-			case "done":
-				if ev.usage.TotalTokens > 0 {
-					fmt.Fprintf(t.writer, "\n%s[%d prompt + %d completion tokens]%s\n",
-						s(cDim), ev.usage.PromptTokens, ev.usage.CompletionTokens, s(cReset))
-				}
-				fmt.Fprintln(t.writer)
-				t.streaming = false
-			case "error":
-				fmt.Fprintf(t.writer, "\n%s[Error: %s]%s\n",
-					s(cRed), ev.text, s(cReset))
-				fmt.Fprintln(t.writer)
-				t.streaming = false
-			}
-		case <-time.After(120 * time.Second):
-			fmt.Fprintf(t.writer, "\n%s[Stream timeout]%s\n", s(cRed), s(cReset))
-			t.streaming = false
-		}
+// ── Helpers ──────────────────────────────────────────────────────
+
+func tokenColor(tokens int) string {
+	switch {
+	case tokens > 100000: return cRed
+	case tokens > 50000:  return cYellow + cBold
+	case tokens > 20000:  return cYellow
+	default:              return cWhite
 	}
 }
 
-// AddMessage adds a message and prints it.
-func (t *CLI) AddMessage(role Role, content string) {
-	t.mu.Lock()
-	t.messages = append(t.messages, Message{Role: role, Content: content})
-	t.mu.Unlock()
+func statusLine(model string, prompt, comp int, cacheRate float64, cost string) string {
+	var parts []string
 
-	if t.streaming {
-		return
+	// Model
+	shortModel := model
+	if len(shortModel) > 22 { shortModel = shortModel[:22] }
+	parts = append(parts, cBold+shortModel+cReset)
+
+	// Tokens
+	total := prompt + comp
+	tc := tokenColor(total)
+	tokenStr := formatTokens(total)
+	parts = append(parts, tc+tokenStr+" tok"+cReset)
+
+	// Cost
+	if cost != "" {
+		parts = append(parts, cYellow+cost+cReset)
 	}
-	t.printMessage(role, content)
-}
 
-func (t *CLI) printMessage(role Role, content string) {
-	switch role {
-	case RoleUser:
-		fmt.Fprintf(t.writer, "%s>> %s%s\n", s(cGreen+s(cBold)), content, s(cReset))
-	case RoleAssistant:
-		if ansiOK {
-			fmt.Fprint(t.writer, s(cGreen))
-		}
-		fmt.Fprint(t.writer, content)
-		if ansiOK {
-			fmt.Fprint(t.writer, s(cReset))
-		}
-		fmt.Fprintln(t.writer)
-	case RoleSystem:
-		fmt.Fprintf(t.writer, "%s%s%s\n", s(cDim), content, s(cReset))
-	case RoleError:
-		fmt.Fprintf(t.writer, "%s[!] %s%s\n", s(cRed), content, s(cReset))
-	case RoleTool:
-		fmt.Fprintf(t.writer, "%s[@] %s%s\n", s(cCyan), content, s(cReset))
+	// Cache
+	if cacheRate > 0 {
+		parts = append(parts, fmt.Sprintf("%scache %.0f%%%s", cGreen, cacheRate*100, cReset))
 	}
+
+	// Project dir
+	wd, _ := os.Getwd()
+	parts = append(parts, cDim+shortDir(wd)+cReset)
+
+	return " " + strings.Join(parts, cDim+" · "+cReset) + " "
 }
 
-// AppendStream pushes streaming text directly to the output.
-func (t *CLI) AppendStream(text string) {
-	if !t.streaming {
-		t.streaming = true
+func formatTokens(n int) string {
+	if n >= 1000000 { return fmt.Sprintf("%.1fM", float64(n)/1000000) }
+	if n >= 1000 { return strconv.FormatFloat(float64(n)/1000, 'f', 1, 64) + "K" }
+	return strconv.Itoa(n)
+}
+
+func shortDir(path string) string {
+	parts := strings.Split(path, string(os.PathSeparator))
+	n := len(parts)
+	if n >= 3 {
+		return parts[n-3] + "/" + parts[n-2] + "/" + parts[n-1]
 	}
-	t.streamCh <- streamEvent{etype: "text", text: text}
-}
-
-// EndStream signals end of streaming with stored token data.
-func (t *CLI) EndStream() {
-	t.mu.Lock()
-	usage := t.lastTokens
-	t.lastTokens = types.TokenUsage{}
-	t.mu.Unlock()
-	t.streamCh <- streamEvent{etype: "done", usage: usage}
-}
-
-// SetStatus stores token stats for the next EndStream call.
-func (t *CLI) SetStatus(input, output int, cacheHit float64, cost string) {
-	t.mu.Lock()
-	t.lastTokens = types.TokenUsage{
-		PromptTokens:     input,
-		CompletionTokens: output,
-		TotalTokens:      input + output,
+	if n >= 2 {
+		return parts[n-2] + "/" + parts[n-1]
 	}
-	t.mu.Unlock()
+	return path
 }
 
-// Stop stops the CLI.
-func (t *CLI) Stop() {
-	t.running = false
-}
-
-func prompt(mode string) string {
-	switch mode {
-	case "plan":
-		return s(cBlue) + "plan > " + s(cReset)
-	case "yolo":
-		return s(cRed) + "yolo > " + s(cReset)
-	default:
-		return s(cGreen) + "agent > " + s(cReset)
-	}
+func div() string {
+	return cDim + strings.Repeat("─", 60) + cReset
 }
