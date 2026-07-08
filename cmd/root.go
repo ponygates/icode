@@ -44,6 +44,7 @@ func init() {
 	rootCmd.AddCommand(authCmd)
 	rootCmd.AddCommand(modelCmd)
 	rootCmd.AddCommand(configCmd)
+	rootCmd.AddCommand(doctorCmd)
 
 	// Persistent flags
 	rootCmd.PersistentFlags().StringP("lang", "l", "zh-CN", "Language (zh-CN, zh-TW, en)")

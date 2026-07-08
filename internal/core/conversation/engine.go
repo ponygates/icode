@@ -171,7 +171,6 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string) (<-chan ty
 				out <- types.StreamEvent{
 					Type: types.EventDone,
 					Meta: types.StreamMeta{
-						Usage: opt.Stats().Rounds[len(opt.Stats().Rounds)-1].Cost > 0,
 						Model: modelInfo.ID,
 					},
 				}

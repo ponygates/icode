@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
 
+	"github.com/ponygates/icode/internal/app"
 	"github.com/ponygates/icode/internal/config/i18n"
 	"github.com/spf13/cobra"
 )
@@ -123,13 +125,46 @@ func printDefaultModels() {
 		{"zhipu", "glm-4-flash", "Token Plan (free)"},
 		{"kimi", "moonshot-v1-8k", "Coding Plan"},
 		{"kimi", "moonshot-v1-128k", "Token Plan"},
-		{"openrouter", "openai/gpt-4o", "Token Plan"},
-		{"openrouter", "anthropic/claude-sonnet-4", "Coding Plan"},
+		{"volcengine", "doubao-pro-32k", "Coding Plan"},
+		{"volcengine", "doubao-lite-32k", "Token Plan"},
+		{"tencent", "hunyuan-pro", "Coding Plan (free)"},
+		{"tencent", "hunyuan-lite", "Token Plan (free)"},
+		{"huawei", "pangu-4-pro", "Coding Plan"},
+		{"huawei", "pangu-4-code", "Code Plan"},
+		{"scnet", "scnet-chat", "Coding Plan"},
+		{"scnet", "scnet-code", "Code Plan"},
 		{"openrouter", "auto", "Auto Router"},
 		{"openrouter", "free", "Free Tier"},
+		{"openrouter", "openai/gpt-4o", "Token Plan"},
+		{"openrouter", "anthropic/claude-sonnet-4", "Coding Plan"},
+		{"openrouter", "google/gemini-2.0-flash-exp:free", "Free Tier"},
+		{"anthropic", "claude-sonnet-4-20250514", "Coding Plan"},
+		{"anthropic", "claude-haiku-4-20250514", "Token Plan"},
 	}
 
+	fmt.Println()
+	fmt.Printf("  %-16s %-42s %s\n", "Provider", "Model", "Plan")
+	fmt.Println("  " + strings.Repeat("-", 78))
 	for _, m := range models {
-		fmt.Printf("  [%s] %-28s %s\n", m.provider, m.model, m.plan)
+		fmt.Printf("  [%-12s] %-42s %s\n", m.provider, m.model, m.plan)
 	}
+}
+
+var doctorCmd = &cobra.Command{
+	Use:   "doctor",
+	Short: "Diagnose system health and connectivity",
+	Long:  `Check provider status, database health, and overall system configuration.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		app, err := app.Bootstrap()
+		if err != nil {
+			fmt.Printf("Bootstrap error: %v\n", err)
+			return err
+		}
+		defer app.Close()
+
+		app.PrintProviderStatus()
+		fmt.Println()
+		fmt.Println("iCode system check complete.")
+		return nil
+	},
 }
