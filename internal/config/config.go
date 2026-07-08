@@ -113,6 +113,7 @@ func Load() (*Config, error) {
 	if err == nil {
 		homePaths := []string{
 			filepath.Join(home, ".icoderc.yaml"),
+			filepath.Join(home, ".icode", "config.yaml"),
 			filepath.Join(home, ".config", "icode", "config.yaml"),
 		}
 		for _, p := range homePaths {

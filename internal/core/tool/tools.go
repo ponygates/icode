@@ -4,6 +4,8 @@ package tool
 import (
 	"context"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -366,8 +368,56 @@ func (t *FetchTool) Def() types.ToolDef {
 }
 
 func (t *FetchTool) Execute(ctx context.Context, args string) (*types.ToolResult, error) {
-	// Placeholder — full HTTP fetch in Phase 2
-	return &types.ToolResult{Success: false, Error: "fetch tool coming in Phase 2"}, nil
+	url, err := parseArg(args, "url")
+	if err != nil {
+		return nil, err
+	}
+
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 3 {
+				return fmt.Errorf("too many redirects")
+			}
+			return nil
+		},
+	}
+
+	httpreq, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return &types.ToolResult{Success: false, Error: err.Error()}, nil
+	}
+	httpreq.Header.Set("User-Agent", "iCode/0.1.0")
+
+	resp, err := client.Do(httpreq)
+	if err != nil {
+		return &types.ToolResult{Success: false, Error: fmt.Sprintf("fetch failed: %v", err)}, nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return &types.ToolResult{
+			Success: false,
+			Error:   fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(body)),
+		}, nil
+	}
+
+	maxSize := int64(256 * 1024) // 256KB limit
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxSize))
+	if err != nil {
+		return &types.ToolResult{Success: false, Error: err.Error()}, nil
+	}
+
+	content := string(body)
+	if int64(len(body)) >= maxSize {
+		content += "\n\n[Response truncated at 256KB]"
+	}
+
+	return &types.ToolResult{
+		Success: true,
+		Content: content,
+	}, nil
 }
 
 // ============================================================================

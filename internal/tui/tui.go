@@ -80,6 +80,14 @@ type Callback interface {
 	OnPermissionResponse(decision string)
 }
 
+// StreamWriter is the interface callbacks use to push data back to the TUI.
+type StreamWriter interface {
+	AddMessage(role Role, content string)
+	AppendStream(text string)
+	EndStream()
+	SetStatus(input, output int, cacheHit float64, cost string)
+}
+
 // TUI is the main terminal UI controller.
 type TUI struct {
 	width    int

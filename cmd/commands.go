@@ -5,12 +5,17 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/ponygates/icode/internal/app"
+	"github.com/ponygates/icode/internal/config"
 	"github.com/ponygates/icode/internal/config/i18n"
+	"github.com/ponygates/icode/internal/core/permission"
 	"github.com/ponygates/icode/internal/server"
 	"github.com/ponygates/icode/internal/tui"
+	"github.com/ponygates/icode/internal/types"
 	"github.com/spf13/cobra"
 )
 
@@ -22,7 +27,7 @@ var chatCmd = &cobra.Command{
 		provider, _ := cmd.Flags().GetString("provider")
 		model, _ := cmd.Flags().GetString("model")
 		if model == "" {
-			model = "deepseek-chat"
+			model = "deepseek-v4-flash"
 		}
 		if provider == "" {
 			provider = "deepseek"
@@ -39,18 +44,20 @@ var chatCmd = &cobra.Command{
 			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: bootstrap failed: %v\n", err)
 		}
 
+		// Build the callback bridge
+		cb := &chatCallback{app: a}
+
 		// Create TUI with backend callbacks
 		t := tui.New(tui.Config{
 			Mode:     tui.Mode(mode),
 			Model:    model,
 			Provider: provider,
-			Callback: &chatCallback{
-				app:    a,
-				staged: false,
-			},
+			Callback: cb,
 		})
 
-		_ = a
+		// Wire TUI stream writer back to callback
+		cb.tui = t
+
 		fmt.Fprintln(cmd.OutOrStdout(), i18n.Tr("cli.welcome"))
 		return t.Run()
 	},
@@ -69,8 +76,55 @@ var execCmd = &cobra.Command{
 			return fmt.Errorf("no prompt provided; use -p or pass as argument")
 		}
 
-		fmt.Printf("[iCode] exec mode — prompt received (%d chars)\n", len(prompt))
-		fmt.Println("[iCode] full exec implementation coming in Phase 2")
+		fmt.Printf("[iCode] Executing (%d chars)...\n\n", len(prompt))
+
+		a, err := app.Bootstrap()
+		if err != nil {
+			return fmt.Errorf("bootstrap: %w", err)
+		}
+		defer a.Close()
+
+		// Create a session
+		sess := &types.Session{
+			ID:           fmt.Sprintf("exec-%x", time.Now().UnixNano()),
+			ModelID:      "deepseek-v4-flash",
+			ProviderName: "deepseek",
+			Title:        prompt,
+		}
+		if model, _ := cmd.Flags().GetString("model"); model != "" {
+			sess.ModelID = model
+		}
+		if prov, _ := cmd.Flags().GetString("provider"); prov != "" {
+			sess.ProviderName = prov
+		}
+
+		if err := a.SessStore.Create(sess); err != nil {
+			return fmt.Errorf("create session: %w", err)
+		}
+
+		ctx := context.Background()
+		eventCh, err := a.Engine.Send(ctx, sess.ID, prompt)
+		if err != nil {
+			return fmt.Errorf("engine: %w", err)
+		}
+
+		for event := range eventCh {
+			switch event.Type {
+			case types.EventText:
+				fmt.Print(event.Content)
+			case types.EventToolUse:
+				fmt.Printf("\n[Tool: %s]\n", event.ToolCall.Name)
+			case types.EventDone:
+				fmt.Println()
+				fmt.Printf("\n[%d prompt tokens, %d completion tokens]\n",
+					event.Meta.Usage.PromptTokens,
+					event.Meta.Usage.CompletionTokens)
+				return nil
+			case types.EventError:
+				fmt.Fprintf(cmd.ErrOrStderr(), "\n[Error: %s]\n", event.Content)
+				return fmt.Errorf("%s", event.Content)
+			}
+		}
 		return nil
 	},
 }
@@ -81,19 +135,70 @@ var authCmd = &cobra.Command{
 	Long:  `Configure and manage API keys for LLM providers.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		list, _ := cmd.Flags().GetBool("list")
+		provider, _ := cmd.Flags().GetString("provider")
+		key, _ := cmd.Flags().GetString("key")
+		show, _ := cmd.Flags().GetBool("show")
+		del, _ := cmd.Flags().GetBool("delete")
+
+		cfg, err := config.Load()
+		if err != nil {
+			cfg = config.Default()
+		}
 
 		if list {
-			fmt.Println("Configured providers:")
-			fmt.Println("  deepseek   — https://api.deepseek.com/v1")
-			fmt.Println("  zhipu      — https://open.bigmodel.cn/api/paas/v4")
-			fmt.Println("  kimi       — https://api.moonshot.cn/v1")
-			fmt.Println("  openrouter — https://openrouter.ai/api/v1")
-			fmt.Println()
-			fmt.Println("Use 'icode auth set --provider <name> --key <api-key>' to configure.")
+			fmt.Println("\nConfigured providers:")
+			for name, pc := range cfg.Providers {
+				masked := "********"
+				if pc.APIKey == "" {
+					masked = "(not set)"
+				}
+				base := pc.APIBase
+				if base == "" {
+					base = "(default)"
+				}
+				disabled := ""
+				if pc.Disabled {
+					disabled = " [disabled]"
+				}
+				fmt.Printf("  %-14s base: %-45s key: %s%s\n", name, base, masked, disabled)
+			}
 			return nil
 		}
 
-		fmt.Println("Auth system — coming in Phase 2")
+		if provider == "" {
+			return fmt.Errorf("--provider flag is required")
+		}
+
+		if del {
+			delete(cfg.Providers, provider)
+			fmt.Printf("Removed configuration for %s\n", provider)
+			home, _ := os.UserHomeDir()
+			return cfg.Save(filepath.Join(home, ".icode", "config.yaml"))
+		}
+
+		if show {
+			pc, ok := cfg.Providers[provider]
+			if !ok || pc.APIKey == "" {
+				return fmt.Errorf("no API key configured for %s", provider)
+			}
+			fmt.Printf("%s API Key: %s\n", provider, pc.APIKey)
+			return nil
+		}
+
+		if key == "" {
+			return fmt.Errorf("--key flag is required (use --show to view, --delete to remove)")
+		}
+
+		pc := cfg.Providers[provider]
+		pc.APIKey = key
+		cfg.Providers[provider] = pc
+
+		home, _ := os.UserHomeDir()
+		if err := cfg.Save(filepath.Join(home, ".icode", "config.yaml")); err != nil {
+			return fmt.Errorf("save config: %w", err)
+		}
+
+		fmt.Printf("API key saved for %s\n", provider)
 		return nil
 	},
 }
@@ -137,9 +242,11 @@ func init() {
 	chatCmd.Flags().StringP("model", "m", "", "Model ID to use")
 	chatCmd.Flags().String("mode", "agent", "Interaction mode (plan/agent/yolo)")
 
-	authCmd.Flags().BoolP("list", "l", false, "List configured providers")
+	authCmd.Flags().BoolP("list", "L", false, "List configured providers")
 	authCmd.Flags().String("provider", "", "Provider name")
 	authCmd.Flags().String("key", "", "API key")
+	authCmd.Flags().Bool("show", false, "Show API key for a provider")
+	authCmd.Flags().Bool("delete", false, "Remove configuration for a provider")
 
 	modelCmd.Flags().BoolP("refresh", "r", false, "Refresh model list from all providers")
 	modelCmd.Flags().String("search", "", "Filter models by name")
@@ -200,13 +307,99 @@ var doctorCmd = &cobra.Command{
 
 // chatCallback bridges the TUI to the iCode backend.
 type chatCallback struct {
-	app    *app.App
-	staged bool
+	app       *app.App
+	tui       tui.StreamWriter
+	sessionID string
 }
 
-func (c *chatCallback) OnSend(text string) {}
-func (c *chatCallback) OnSlashCommand(cmd string, args []string) {}
-func (c *chatCallback) OnPermissionResponse(decision string) {}
+func (c *chatCallback) OnSend(text string) {
+	if c.app == nil || c.app.Engine == nil {
+		c.tui.AddMessage(tui.RoleSystem, "[Engine not available. Configure an API key with 'icode auth set']")
+		return
+	}
+
+	// Create session on first message
+	if c.sessionID == "" {
+		sess := &types.Session{
+			ID:           fmt.Sprintf("%x", time.Now().UnixNano()),
+			ModelID:      "deepseek-v4-flash",
+			ProviderName: "deepseek",
+			Title:        text,
+		}
+		if len(text) > 40 {
+			sess.Title = text[:40] + "..."
+		}
+		if err := c.app.SessStore.Create(sess); err == nil {
+			c.sessionID = sess.ID
+		} else {
+			c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("[Session error: %v]", err))
+			return
+		}
+	}
+
+	ctx := context.Background()
+	eventCh, err := c.app.Engine.Send(ctx, c.sessionID, text)
+	if err != nil {
+		c.tui.AddMessage(tui.RoleError, fmt.Sprintf("Engine error: %v", err))
+		return
+	}
+
+	// Read streaming events and push to TUI
+	for event := range eventCh {
+		switch event.Type {
+		case types.EventText:
+			c.tui.AppendStream(event.Content)
+		case types.EventToolUse:
+			c.tui.AppendStream(fmt.Sprintf("\n[Tool: %s]", event.ToolCall.Name))
+		case types.EventDone:
+			c.tui.EndStream()
+			c.tui.SetStatus(
+				event.Meta.Usage.PromptTokens,
+				event.Meta.Usage.CompletionTokens,
+				0, "",
+			)
+			return
+		case types.EventError:
+			c.tui.AddMessage(tui.RoleError, event.Content)
+			c.tui.EndStream()
+			return
+		}
+	}
+}
+
+func (c *chatCallback) OnSlashCommand(cmd string, args []string) {
+	switch strings.ToLower(cmd) {
+	case "/model":
+		if len(args) > 0 {
+			c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("Switched model to: %s", args[0]))
+		}
+	case "/mode":
+		if len(args) > 0 {
+			if c.app != nil && c.app.Gate != nil {
+				c.app.Gate.SetMode(permission.Mode(strings.ToLower(args[0])))
+			}
+			c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("Mode set to: %s", args[0]))
+		}
+	case "/session":
+		if c.sessionID != "" {
+			c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("Active session: %s", c.sessionID))
+		} else {
+			c.tui.AddMessage(tui.RoleSystem, "No active session. Start typing to create one.")
+		}
+	case "/clear":
+		if c.sessionID != "" && c.app != nil && c.app.SessStore != nil {
+			c.app.SessStore.Delete(c.sessionID)
+		}
+		c.sessionID = ""
+		c.tui.AddMessage(tui.RoleSystem, "Session cleared.")
+	default:
+		c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("Unknown command: %s", cmd))
+	}
+}
+
+func (c *chatCallback) OnPermissionResponse(decision string) {
+	c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("Permission: %s", decision))
+}
 
 var serverCmd = &cobra.Command{
 	Use:   "server",
