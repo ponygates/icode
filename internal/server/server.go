@@ -378,7 +378,8 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
-		*s.cfg = cfg
+		// Update fields without copying the mutex
+		s.cfg.Language = cfg.Language
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

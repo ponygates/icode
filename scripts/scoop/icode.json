@@ -1,0 +1,22 @@
+{
+  "version": "0.1.0",
+  "description": "iCode — Multi-Model AI Coding Agent",
+  "homepage": "https://github.com/ponygates/icode",
+  "license": "Apache-2.0",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/ponygates/icode/releases/download/v0.1.0/icode-windows-amd64.exe",
+      "bin": "icode.exe"
+    }
+  },
+  "checkver": {
+    "github": "https://github.com/ponygates/icode"
+  },
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/ponygates/icode/releases/download/v$version/icode-windows-amd64.exe"
+      }
+    }
+  }
+}

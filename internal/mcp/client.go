@@ -16,7 +16,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"os/exec"
 	"strings"
 	"sync"
@@ -142,7 +141,7 @@ func (c *Client) connectStdio(ctx context.Context) error {
 	}
 
 	// Send initialized notification
-	c.notify(ctx, "notifications/initialized", nil)
+	c.sendNotification(ctx, "notifications/initialized", nil)
 
 	return nil
 }
@@ -341,7 +340,7 @@ func (c *Client) call(ctx context.Context, method string, params any) (*jsonrpcR
 	}
 }
 
-func (c *Client) notify(ctx context.Context, method string, params any) {
+func (c *Client) sendNotification(ctx context.Context, method string, params any) {
 	id := c.reqID.Add(1)
 	notif := map[string]any{
 		"jsonrpc": "2.0",

@@ -29,7 +29,7 @@ var rootCmd = &cobra.Command{
 
 A multi-model AI coding agent that supports:
   • 50+ LLM providers across China & worldwide
-  • Cache-first token optimization (up to 94% savings)
+  • Cache-first token optimization (up to 94%% savings)
   • Native zh-CN / zh-TW / en interface
   • CLI (TUI) + Electron desktop dual experience
 
