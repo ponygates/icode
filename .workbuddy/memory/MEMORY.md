@@ -20,13 +20,13 @@
 
 ## 开发路线
 - Phase 1 (已完成): 项目骨架 + 核心接口 + 配置 + i18n + 工具系统 + Provider 基础 + Electron 前端骨架
-- Phase 2 (下一步): LLM 流式集成 + 对话引擎真实调用 + Provider 一键更新服务
-- Phase 3: Token 优化器完善 + TUI 界面 + MCP 协议 + 权限系统
+- Phase 2 (已完成): LLM 流式集成 + 对话引擎真实调用 + Provider 一键更新服务 + SQLite 持久化 + 权限系统 + 国内 9 Provider + Anthropic 原生 API
+- Phase 3 (下一步): Token 优化器完善 + TUI 界面 + MCP 协议 + 权限系统
 - Phase 4: Electron 桌面版后端集成 + Provider 模型自动更新
 - Phase 5: CI/CD + 文档 + 分发渠道 + v0.1.0 发布
 
 ## 技术约束
 - Go 1.26.4+
 - Node.js >= 22
-- 依赖: cobra, yaml.v3, uuid
+- 依赖: cobra, yaml.v3, uuid, modernc.org/sqlite
 - 桌面: React 18, Zustand 4, i18next, Vite 5
