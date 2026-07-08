@@ -44,6 +44,7 @@ interface AppStore {
 
   // Messages
   addMessage: (sessionId: string, msg: Message) => void;
+  updateMessage: (sessionId: string, msg: Message) => void;
   clearMessages: (sessionId: string) => void;
 
   // Token stats
@@ -85,7 +86,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   sessions: [],
   activeSessionId: null,
 
-  createSession: (modelId, provider) => {
+  createSession: async (modelId, provider) => {
     const session: Session = {
       id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
       title: `Session ${get().sessions.length + 1}`,
@@ -94,6 +95,17 @@ export const useAppStore = create<AppStore>((set, get) => ({
       provider,
       createdAt: Date.now(),
     };
+
+    // Persist to backend
+    if (window.icode && window.icode.createSession) {
+      await window.icode.createSession({
+        id: session.id,
+        title: session.title,
+        model_id: modelId,
+        provider_name: provider,
+        created_at: new Date(session.createdAt).toISOString(),
+      });
+    }
     set((state) => ({
       sessions: [...state.sessions, session],
       activeSessionId: session.id,
@@ -113,6 +125,21 @@ export const useAppStore = create<AppStore>((set, get) => ({
       sessions: state.sessions.map((s) =>
         s.id === sessionId
           ? { ...s, messages: [...s.messages, msg] }
+          : s
+      ),
+    }));
+  },
+
+  updateMessage: (sessionId, updated) => {
+    set((state) => ({
+      sessions: state.sessions.map((s) =>
+        s.id === sessionId
+          ? {
+              ...s,
+              messages: s.messages.map((m) =>
+                m.id === updated.id ? updated : m
+              ),
+            }
           : s
       ),
     }));

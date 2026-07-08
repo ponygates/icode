@@ -1,11 +1,15 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"os/signal"
 	"strings"
 
 	"github.com/ponygates/icode/internal/app"
 	"github.com/ponygates/icode/internal/config/i18n"
+	"github.com/ponygates/icode/internal/server"
 	"github.com/ponygates/icode/internal/tui"
 	"github.com/spf13/cobra"
 )
@@ -202,3 +206,48 @@ type chatCallback struct {
 func (c *chatCallback) OnSend(text string) {}
 func (c *chatCallback) OnSlashCommand(cmd string, args []string) {}
 func (c *chatCallback) OnPermissionResponse(decision string) {}
+
+var serverCmd = &cobra.Command{
+	Use:   "server",
+	Short: "Start the iCode backend API server",
+	Long:  `Start an HTTP API server for the Electron desktop app or remote API access.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		port, _ := cmd.Flags().GetInt("port")
+
+		a, err := app.Bootstrap()
+		if err != nil {
+			return fmt.Errorf("bootstrap: %w", err)
+		}
+		defer a.Close()
+
+		srv := server.New(server.ServerConfig{
+			Config:   a.Cfg,
+			Registry: a.Reg,
+			Store:    a.SessStore,
+			DB:       a.DB,
+			Engine:   a.Engine,
+			Gate:     a.Gate,
+			Updater:  a.Updater,
+			Port:     port,
+		})
+
+		ctx := context.Background()
+		actualPort, err := srv.Start(ctx)
+		if err != nil {
+			return fmt.Errorf("start server: %w", err)
+		}
+
+		fmt.Printf("iCode server running on http://127.0.0.1:%d\n", actualPort)
+
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, os.Interrupt)
+		<-sigCh
+
+		fmt.Println("\nShutting down...")
+		return srv.Shutdown(context.Background())
+	},
+}
+
+func init() {
+	serverCmd.Flags().Int("port", 0, "Port to listen on (0 = auto)")
+}

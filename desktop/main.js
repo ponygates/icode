@@ -1,18 +1,45 @@
-const { app, BrowserWindow, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, net } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
+const fs = require('fs');
+const http = require('http');
 
 let mainWindow = null;
 let backendProcess = null;
+let backendPort = null;
+let backendReady = false;
+
+// API helper — makes HTTP calls to the Go backend
+function apiCall(method, endpoint, body) {
+  return new Promise((resolve, reject) => {
+    if (!backendPort) return reject(new Error('Backend not available'));
+
+    const options = {
+      hostname: '127.0.0.1',
+      port: backendPort,
+      path: endpoint,
+      method,
+      headers: { 'Content-Type': 'application/json' },
+    };
+
+    const req = http.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => {
+        try { resolve(JSON.parse(data)); }
+        catch { resolve(data); }
+      });
+    });
+    req.on('error', reject);
+    if (body) req.write(JSON.stringify(body));
+    req.end();
+  });
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1200,
-    height: 800,
-    minWidth: 800,
-    minHeight: 600,
+    width: 1200, height: 800, minWidth: 800, minHeight: 600,
     title: 'iCode',
-    icon: path.join(__dirname, 'assets', 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -22,9 +49,7 @@ function createWindow() {
     frame: process.platform !== 'darwin',
   });
 
-  // Development: load from Vite dev server
   const isDev = process.env.NODE_ENV !== 'production' || process.argv.includes('--dev');
-
   if (isDev) {
     mainWindow.loadURL('http://localhost:5173');
     mainWindow.webContents.openDevTools();
@@ -32,67 +57,193 @@ function createWindow() {
     mainWindow.loadFile(path.join(__dirname, 'dist', 'index.html'));
   }
 
-  mainWindow.on('closed', () => {
-    mainWindow = null;
+  mainWindow.on('closed', () => { mainWindow = null; });
+}
+
+function startBackend() {
+  return new Promise((resolve) => {
+    const cwd = process.cwd();
+    const binary = process.platform === 'win32' ? 'icode.exe' : 'icode';
+
+    // Try multiple locations for the binary
+    const candidates = [
+      path.join(cwd, binary),
+      path.join(__dirname, '..', '..', binary),
+      path.join(process.resourcesPath || '', binary),
+    ];
+
+    let backendPath = null;
+    for (const p of candidates) {
+      if (fs.existsSync(p)) { backendPath = p; break; }
+    }
+
+    if (!backendPath) {
+      console.log('[iCode] Backend binary not found, frontend-only mode');
+      resolve(false);
+      return;
+    }
+
+    try {
+      backendProcess = spawn(backendPath, ['server', '--port', '0'], {
+        cwd: path.dirname(backendPath),
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+
+      backendProcess.stdout.on('data', (data) => {
+        console.log(`[backend] ${data}`);
+      });
+      backendProcess.stderr.on('data', (data) => {
+        console.error(`[backend:err] ${data}`);
+      });
+      backendProcess.on('close', (code) => {
+        console.log(`[backend] exited (${code})`);
+        backendReady = false;
+      });
+
+      // Poll for port file
+      const portFile = path.join(require('os').tmpdir(), 'icode', 'port');
+      let attempts = 0;
+      const check = setInterval(() => {
+        try {
+          const port = parseInt(fs.readFileSync(portFile, 'utf8').trim());
+          if (port > 0) {
+            backendPort = port;
+            backendReady = true;
+            clearInterval(check);
+            console.log(`[iCode] Backend ready on port ${port}`);
+            resolve(true);
+          }
+        } catch {}
+        attempts++;
+        if (attempts > 50) { // 5 seconds
+          clearInterval(check);
+          console.log('[iCode] Backend startup timeout');
+          resolve(false);
+        }
+      }, 100);
+    } catch (err) {
+      console.log('[iCode] Backend start failed:', err.message);
+      resolve(false);
+    }
   });
 }
 
-// Start backend process
-function startBackend() {
-  const backendPath = path.join(__dirname, '..', '..');
-  const binary = process.platform === 'win32' ? 'icode.exe' : 'icode';
+// ============================================================================
+// IPC handlers — bridge between renderer and Go backend
+// ============================================================================
 
-  try {
-    backendProcess = spawn(path.join(backendPath, binary), ['server', '--port', '0'], {
-      cwd: backendPath,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
-    backendProcess.stdout.on('data', (data) => {
-      console.log(`[backend] ${data}`);
-    });
-
-    backendProcess.stderr.on('data', (data) => {
-      console.error(`[backend:err] ${data}`);
-    });
-
-    backendProcess.on('close', (code) => {
-      console.log(`[backend] exited with code ${code}`);
-    });
-  } catch (err) {
-    console.log('[iCode] Backend not found, running in frontend-only mode');
-  }
-}
-
-// IPC handlers
 ipcMain.handle('app:getVersion', () => app.getVersion());
 ipcMain.handle('app:getPlatform', () => process.platform);
 ipcMain.handle('app:openExternal', (_, url) => shell.openExternal(url));
+ipcMain.handle('app:getBackendPort', () => backendPort);
 
-// Model management
+// Models
 ipcMain.handle('model:list', async () => {
-  // Phase 4: connect to backend API
-  return [
-    { id: 'deepseek-chat', name: 'DeepSeek-V3', provider: 'deepseek', plan: 'Coding Plan' },
-    { id: 'deepseek-reasoner', name: 'DeepSeek-R1', provider: 'deepseek', plan: 'Reasoning Plan' },
-    { id: 'glm-4-plus', name: 'GLM-4-Plus', provider: 'zhipu', plan: 'Coding Plan' },
-    { id: 'glm-4-flash', name: 'GLM-4-Flash', provider: 'zhipu', plan: 'Token Plan (free)' },
-    { id: 'moonshot-v1-8k', name: 'Moonshot v1 8K', provider: 'kimi', plan: 'Coding Plan' },
-    { id: 'moonshot-v1-128k', name: 'Moonshot v1 128K', provider: 'kimi', plan: 'Token Plan' },
-    { id: 'auto', name: 'OpenRouter Auto', provider: 'openrouter', plan: 'Auto Router' },
-    { id: 'free', name: 'OpenRouter Free', provider: 'openrouter', plan: 'Free Tier' },
-    { id: 'anthropic/claude-sonnet-4', name: 'Claude Sonnet 4', provider: 'openrouter', plan: 'Coding Plan' },
-    { id: 'openai/gpt-4o', name: 'GPT-4o', provider: 'openrouter', plan: 'Token Plan' },
-    { id: 'google/gemini-2.0-flash-exp:free', name: 'Gemini 2.0 Flash', provider: 'openrouter', plan: 'Free Tier' },
-  ];
+  if (!backendReady) return [];
+  try { return await apiCall('GET', '/api/models'); }
+  catch { return []; }
 });
 
 ipcMain.handle('model:refresh', async () => {
-  return { success: true, message: 'Model list refreshed' };
+  if (!backendReady) return { success: false, error: 'Backend unavailable' };
+  try { return await apiCall('POST', '/api/models/refresh'); }
+  catch (e) { return { success: false, error: e.message }; }
 });
 
-app.whenReady().then(() => {
-  startBackend();
+// Sessions
+ipcMain.handle('session:list', async () => {
+  if (!backendReady) return [];
+  try { return await apiCall('GET', '/api/sessions'); }
+  catch { return []; }
+});
+
+ipcMain.handle('session:get', async (_, id) => {
+  if (!backendReady) return null;
+  try { return await apiCall('GET', `/api/sessions/${id}`); }
+  catch { return null; }
+});
+
+ipcMain.handle('session:create', async (_, session) => {
+  if (!backendReady) return null;
+  try { return await apiCall('POST', '/api/sessions', session); }
+  catch { return null; }
+});
+
+ipcMain.handle('session:delete', async (_, id) => {
+  if (!backendReady) return { ok: false };
+  try { return await apiCall('DELETE', `/api/sessions/${id}`); }
+  catch { return { ok: false }; }
+});
+
+// Chat (via SSE)
+ipcMain.handle('chat:send', async (event, { sessionId, content }) => {
+  if (!backendPort) return { error: 'Backend not available' };
+
+  return new Promise((resolve, reject) => {
+    const options = {
+      hostname: '127.0.0.1', port: backendPort, path: '/api/chat',
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+    };
+
+    const req = http.request(options, (res) => {
+      let buffer = '';
+      res.on('data', (chunk) => {
+        buffer += chunk;
+        // Parse SSE events and forward to renderer
+        const lines = buffer.split('\n');
+        buffer = '';
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const event = JSON.parse(line.slice(6));
+              mainWindow.webContents.send('chat:stream', event);
+            } catch {}
+          }
+        }
+      });
+      res.on('end', resolve);
+    });
+    req.on('error', (e) => {
+      mainWindow.webContents.send('chat:stream', { type: 'error', content: e.message });
+      resolve({ error: e.message });
+    });
+    req.write(JSON.stringify({ session_id: sessionId, content }));
+    req.end();
+  });
+});
+
+ipcMain.handle('chat:stop', async (_, sessionId) => {
+  if (!backendReady) return { ok: false };
+  try { return await apiCall('POST', '/api/chat/stop', { session_id: sessionId }); }
+  catch { return { ok: false }; }
+});
+
+// Config
+ipcMain.handle('config:get', async () => {
+  if (!backendReady) return null;
+  try { return await apiCall('GET', '/api/config'); }
+  catch { return null; }
+});
+
+ipcMain.handle('config:setLang', async (_, lang) => {
+  if (!backendReady) return { ok: false };
+  try { return await apiCall('POST', '/api/config/lang', { language: lang }); }
+  catch { return { ok: false }; }
+});
+
+// Permission
+ipcMain.handle('permission:setMode', async (_, mode) => {
+  if (!backendReady) return { ok: false };
+  try { return await apiCall('POST', '/api/permission/mode', { mode }); }
+  catch { return { ok: false }; }
+});
+
+// ============================================================================
+// App lifecycle
+// ============================================================================
+
+app.whenReady().then(async () => {
+  await startBackend();
   createWindow();
 
   app.on('activate', () => {
@@ -106,5 +257,11 @@ app.on('window-all-closed', () => {
   }
   if (process.platform !== 'darwin') {
     app.quit();
+  }
+});
+
+app.on('before-quit', () => {
+  if (backendProcess) {
+    backendProcess.kill('SIGTERM');
   }
 });

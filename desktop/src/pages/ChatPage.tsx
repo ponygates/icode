@@ -13,7 +13,7 @@ const ChatPage: React.FC = () => {
   const {
     sessions, activeSessionId, selectedModel,
     createSession, setActiveSession, deleteSession,
-    addMessage, clearMessages, models,
+    addMessage, updateMessage, clearMessages, models,
     updateTokenUsage,
   } = useAppStore();
 
@@ -43,7 +43,7 @@ const ChatPage: React.FC = () => {
     setInput('');
     setIsStreaming(true);
 
-    // Simulate streaming response (Phase 4: real backend integration)
+    // Send via backend API
     const assistantMsg: Message = {
       id: (Date.now() + 1).toString(36),
       role: 'assistant',
@@ -52,34 +52,47 @@ const ChatPage: React.FC = () => {
     };
     addMessage(activeSessionId, assistantMsg);
 
-    // Simulated token usage
-    const inputTokens = Math.ceil(input.length / 3);
-    updateTokenUsage({
-      input: inputTokens,
-      output: 0,
-      cacheHit: Math.floor(inputTokens * 0.4),
-    });
+    try {
+      if (window.icode && window.icode.sendMessage) {
+        // Register stream listener
+        let accumulated = '';
+        const unsub = window.icode.onChatStream((event: any) => {
+          if (event.type === 'text') {
+            accumulated += event.content;
+            // Update the assistant message in-place
+            const updated: Message = { ...assistantMsg, content: accumulated };
+            updateMessage(activeSessionId, updated);
+          } else if (event.type === 'tool_use') {
+            accumulated += `\n[Tool: ${event.tool_call?.name}]`;
+            const updated: Message = { ...assistantMsg, content: accumulated };
+            updateMessage(activeSessionId, updated);
+          } else if (event.type === 'done') {
+            setIsStreaming(false);
+            if (event.meta?.usage) {
+              updateTokenUsage({
+                input: event.meta.usage.prompt_tokens,
+                output: event.meta.usage.completion_tokens,
+                cacheHit: event.meta.usage.cache_hit_tokens || 0,
+                cost: estimateCost(event.meta.usage, currentModel),
+              });
+            }
+            unsub();
+          } else if (event.type === 'error') {
+            accumulated += `\n[Error: ${event.content}]`;
+            setIsStreaming(false);
+            unsub();
+          }
+        });
 
-    setTimeout(() => {
-      const response = `[iCode] 你好！我是基于 ${currentModel?.name || selectedModel} 的 AI 编程助手。
-
-你可以让我：
-- 📝 编写和修改代码
-- 🔍 搜索和分析代码库
-- 🐛 调试和修复问题
-- 📊 解释代码逻辑
-- 🚀 执行 Shell 命令
-
-当前会话使用的是 ${currentModel?.plan || 'Coding Plan'} 方案。
-
-（完整后端集成将在 Phase 2 实现，届时你将获得真实的 AI 对话体验。）`;
-
+        await window.icode.sendMessage(activeSessionId, input.trim());
+      } else {
+        // Fallback: mock response for dev mode
+        await mockStreamResponse(input, assistantMsg, activeSessionId, currentModel);
+      }
+    } catch (e) {
       setIsStreaming(false);
-      updateTokenUsage({
-        output: Math.ceil(response.length / 3),
-        cost: '\xA5' + ((inputTokens * 0.00027 + Math.ceil(response.length / 3) * 0.0011).toFixed(4)),
-      });
-    }, 800);
+      console.error('[iCode] Chat error:', e);
+    }
   }, [input, activeSessionId, isStreaming, selectedModel, currentModel]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -271,5 +284,31 @@ const ChatPage: React.FC = () => {
     </div>
   );
 };
+
+// Helper: mock streaming response for dev mode without backend
+function mockStreamResponse(input: string, assistantMsg: Message, sessionId: string, model: any) {
+  const response = `[iCode] 你好！我是基于 ${model?.name || 'iCode'} 的 AI 编程助手。
+
+你可以让我：
+- 编写和修改代码
+- 搜索和分析代码库
+- 调试和修复问题
+- 解释代码逻辑
+- 执行 Shell 命令
+
+当前使用的是 ${model?.plan || 'Coding Plan'} 方案。`;
+
+  return new Promise<void>((resolve) => {
+    setTimeout(() => resolve(), 500);
+  });
+}
+
+// Helper: estimate cost from token usage
+function estimateCost(usage: any, model: any): string {
+  if (!model) return '\xA50.00';
+  const inputCost = (usage.prompt_tokens || 0) * 0.00027;
+  const outputCost = (usage.completion_tokens || 0) * 0.0011;
+  return '\xA5' + (inputCost + outputCost).toFixed(4);
+}
 
 export default ChatPage;
