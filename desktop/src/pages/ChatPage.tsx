@@ -54,44 +54,55 @@ const ChatPage: React.FC = () => {
 
     try {
       if (window.icode && window.icode.sendMessage) {
-        // Register stream listener
         let accumulated = '';
         const unsub = window.icode.onChatStream((event: any) => {
-          if (event.type === 'text') {
-            accumulated += event.content;
-            // Update the assistant message in-place
-            const updated: Message = { ...assistantMsg, content: accumulated };
-            updateMessage(activeSessionId, updated);
-          } else if (event.type === 'tool_use') {
-            accumulated += `\n[Tool: ${event.tool_call?.name}]`;
-            const updated: Message = { ...assistantMsg, content: accumulated };
-            updateMessage(activeSessionId, updated);
-          } else if (event.type === 'done') {
+          if (event.type === 'EventText' || event.type === 'text') {
+            accumulated += event.content || event.Content || '';
+            updateMessage(activeSessionId, { ...assistantMsg, content: accumulated });
+          } else if (event.type === 'EventToolUse' || event.type === 'tool_use') {
+            const name = event.tool_call?.name || event.ToolCall?.Name || '';
+            accumulated += `\n[Tool: ${name}]`;
+            updateMessage(activeSessionId, { ...assistantMsg, content: accumulated });
+          } else if (event.type === 'EventDone' || event.type === 'done') {
             setIsStreaming(false);
-            if (event.meta?.usage) {
-              updateTokenUsage({
-                input: event.meta.usage.prompt_tokens,
-                output: event.meta.usage.completion_tokens,
-                cacheHit: event.meta.usage.cache_hit_tokens || 0,
-                cost: estimateCost(event.meta.usage, currentModel),
-              });
-            }
+            const usage = event.meta?.Usage || event.meta?.usage || {};
+            updateTokenUsage({
+              input: usage.PromptTokens || usage.prompt_tokens || 0,
+              output: usage.CompletionTokens || usage.completion_tokens || 0,
+              cacheHit: usage.CacheHitTokens || usage.cache_hit_tokens || 0,
+              cost: estimateCost(usage, currentModel),
+            });
             unsub();
-          } else if (event.type === 'error') {
-            accumulated += `\n[Error: ${event.content}]`;
+          } else if (event.type === 'EventError' || event.type === 'error') {
+            accumulated += `\n[Error: ${event.content || event.Content}]`;
+            updateMessage(activeSessionId, { ...assistantMsg, content: accumulated });
             setIsStreaming(false);
             unsub();
           }
         });
-
         await window.icode.sendMessage(activeSessionId, input.trim());
       } else {
-        // Fallback: mock response for dev mode
-        await mockStreamResponse(input, assistantMsg, activeSessionId, currentModel);
+        // Standalone mode — no backend, show demo response
+        const demoText = `iCode Desktop — standalone mode
+
+No backend server detected. 
+
+To connect to the AI backend:
+1. Build the Go server: \`go build -o icode.exe .\`
+2. Start the server: \`./icode.exe server\`
+3. Relaunch the desktop app
+
+Or run in CLI mode: \`./icode.exe chat\`
+
+Currently selected: ${currentModel?.name || selectedModel} (${currentModel?.provider || 'unknown'})`;
+        simulateTyping(demoText, assistantMsg, activeSessionId, updateMessage, setIsStreaming);
       }
     } catch (e) {
       setIsStreaming(false);
-      console.error('[iCode] Chat error:', e);
+      updateMessage(activeSessionId, {
+        ...assistantMsg,
+        content: `[Error: ${e}]`,
+      });
     }
   }, [input, activeSessionId, isStreaming, selectedModel, currentModel]);
 
@@ -285,30 +296,33 @@ const ChatPage: React.FC = () => {
   );
 };
 
-// Helper: mock streaming response for dev mode without backend
-function mockStreamResponse(input: string, assistantMsg: Message, sessionId: string, model: any) {
-  const response = `[iCode] 你好！我是基于 ${model?.name || 'iCode'} 的 AI 编程助手。
-
-你可以让我：
-- 编写和修改代码
-- 搜索和分析代码库
-- 调试和修复问题
-- 解释代码逻辑
-- 执行 Shell 命令
-
-当前使用的是 ${model?.plan || 'Coding Plan'} 方案。`;
-
-  return new Promise<void>((resolve) => {
-    setTimeout(() => resolve(), 500);
-  });
+function simulateTyping(
+  text: string,
+  assistantMsg: Message,
+  sessionId: string,
+  updateMsg: any,
+  setStreaming: any
+) {
+  let i = 0;
+  const interval = setInterval(() => {
+    i += 1;
+    updateMsg(sessionId, {
+      ...assistantMsg,
+      content: text.slice(0, Math.min(i * 3, text.length)),
+    });
+    if (i * 3 >= text.length) {
+      clearInterval(interval);
+      setStreaming(false);
+    }
+  }, 30);
 }
 
-// Helper: estimate cost from token usage
 function estimateCost(usage: any, model: any): string {
-  if (!model) return '\xA50.00';
-  const inputCost = (usage.prompt_tokens || 0) * 0.00027;
-  const outputCost = (usage.completion_tokens || 0) * 0.0011;
-  return '\xA5' + (inputCost + outputCost).toFixed(4);
+  if (!usage || (!usage.PromptTokens && !usage.prompt_tokens && !usage.TotalTokens && !usage.total_tokens))
+    return '\xA50.00';
+  const input = usage.PromptTokens || usage.prompt_tokens || 0;
+  const output = usage.CompletionTokens || usage.completion_tokens || 0;
+  return '\xA5' + ((input * 0.00014 + output * 0.00028) / 1000).toFixed(4);
 }
 
 export default ChatPage;

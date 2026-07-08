@@ -19,6 +19,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const clearLine = "\033[2K\r"
+
 var chatCmd = &cobra.Command{
 	Use:   "chat",
 	Short: i18n.Tr("cmd.chat.desc"),
@@ -39,9 +41,12 @@ var chatCmd = &cobra.Command{
 		}
 
 		// Try to bootstrap the full app with real backends
+		fmt.Fprintf(cmd.OutOrStdout(), "Initializing iCode backend...")
 		a, err := app.Bootstrap()
 		if err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: bootstrap failed: %v\n", err)
+			fmt.Fprintf(cmd.ErrOrStderr(), "\rWarning: bootstrap failed: %v\n", err)
+		} else {
+			fmt.Fprintf(cmd.OutOrStdout(), "\r" + clearLine)
 		}
 
 		// Build the callback bridge
@@ -352,12 +357,12 @@ func (c *chatCallback) OnSend(text string) {
 		case types.EventToolUse:
 			c.tui.AppendStream(fmt.Sprintf("\n[Tool: %s]", event.ToolCall.Name))
 		case types.EventDone:
-			c.tui.EndStream()
 			c.tui.SetStatus(
 				event.Meta.Usage.PromptTokens,
 				event.Meta.Usage.CompletionTokens,
 				0, "",
 			)
+			c.tui.EndStream()
 			return
 		case types.EventError:
 			c.tui.AddMessage(tui.RoleError, event.Content)
