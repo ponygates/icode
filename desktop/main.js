@@ -65,11 +65,12 @@ function startBackend() {
     const cwd = process.cwd();
     const binary = process.platform === 'win32' ? 'icode.exe' : 'icode';
 
-    // Try multiple locations for the binary
+    // In dev: look in project directory. In packaged: look in resources.
+    const isDev = process.env.NODE_ENV !== 'production' && !app.isPackaged;
     const candidates = [
-      path.join(cwd, binary),
-      path.join(__dirname, '..', '..', binary),
       path.join(process.resourcesPath || '', binary),
+      path.join(__dirname, '..', '..', binary),
+      path.join(cwd, binary),
     ];
 
     let backendPath = null;

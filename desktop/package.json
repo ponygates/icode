@@ -35,14 +35,33 @@
     "directories": {
       "output": "release"
     },
+    "files": [
+      "dist/**/*",
+      "main.js",
+      "preload.js"
+    ],
+    "extraResources": [
+      {
+        "from": "../icode.exe",
+        "to": "icode.exe"
+      }
+    ],
     "win": {
-      "target": "nsis"
+      "target": ["nsis", "portable"],
+      "icon": "assets/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "iCode"
     },
     "mac": {
-      "target": "dmg"
+      "target": "dmg",
+      "icon": "assets/icon.png"
     },
     "linux": {
-      "target": "AppImage"
+      "target": ["AppImage", "deb"],
+      "icon": "assets/icon.png"
     }
   }
 }
