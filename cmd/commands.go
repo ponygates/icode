@@ -6,6 +6,7 @@ import (
 
 	"github.com/ponygates/icode/internal/app"
 	"github.com/ponygates/icode/internal/config/i18n"
+	"github.com/ponygates/icode/internal/tui"
 	"github.com/spf13/cobra"
 )
 
@@ -14,21 +15,40 @@ var chatCmd = &cobra.Command{
 	Short: i18n.Tr("cmd.chat.desc"),
 	Long:  `Start an interactive AI coding session with multi-turn conversation, tool use, and real-time streaming.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Println(i18n.Tr("cli.welcome"))
-		fmt.Println()
-		fmt.Println("┌─────────────────────────────────────────────────────────────┐")
-		fmt.Println("│  iCode Chat — interactive mode coming in Phase 3           │")
-		fmt.Println("│                                                             │")
-		fmt.Println("│  Slash commands:                                            │")
-		fmt.Println("│    /help     Show help                                      │")
-		fmt.Println("│    /model    Select model                                   │")
-		fmt.Println("│    /mode     Switch mode (plan/agent/yolo)                  │")
-		fmt.Println("│    /session  Manage sessions                                │")
-		fmt.Println("│    /exit     Exit chat                                      │")
-		fmt.Println("└─────────────────────────────────────────────────────────────┘")
-		fmt.Println()
-		fmt.Println(i18n.Tr("cli.goodbye"))
-		return nil
+		provider, _ := cmd.Flags().GetString("provider")
+		model, _ := cmd.Flags().GetString("model")
+		if model == "" {
+			model = "deepseek-chat"
+		}
+		if provider == "" {
+			provider = "deepseek"
+		}
+
+		mode, _ := cmd.Flags().GetString("mode")
+		if mode == "" {
+			mode = "agent"
+		}
+
+		// Try to bootstrap the full app with real backends
+		a, err := app.Bootstrap()
+		if err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Warning: bootstrap failed: %v\n", err)
+		}
+
+		// Create TUI with backend callbacks
+		t := tui.New(tui.Config{
+			Mode:     tui.Mode(mode),
+			Model:    model,
+			Provider: provider,
+			Callback: &chatCallback{
+				app:    a,
+				staged: false,
+			},
+		})
+
+		_ = a
+		fmt.Fprintln(cmd.OutOrStdout(), i18n.Tr("cli.welcome"))
+		return t.Run()
 	},
 }
 
@@ -109,6 +129,10 @@ func init() {
 	execCmd.Flags().StringP("file", "f", "", "Read prompt from file")
 	execCmd.Flags().IntP("max-turns", "t", 10, "Maximum conversation turns")
 
+	chatCmd.Flags().StringP("provider", "p", "", "LLM provider to use")
+	chatCmd.Flags().StringP("model", "m", "", "Model ID to use")
+	chatCmd.Flags().String("mode", "agent", "Interaction mode (plan/agent/yolo)")
+
 	authCmd.Flags().BoolP("list", "l", false, "List configured providers")
 	authCmd.Flags().String("provider", "", "Provider name")
 	authCmd.Flags().String("key", "", "API key")
@@ -168,3 +192,13 @@ var doctorCmd = &cobra.Command{
 		return nil
 	},
 }
+
+// chatCallback bridges the TUI to the iCode backend.
+type chatCallback struct {
+	app    *app.App
+	staged bool
+}
+
+func (c *chatCallback) OnSend(text string) {}
+func (c *chatCallback) OnSlashCommand(cmd string, args []string) {}
+func (c *chatCallback) OnPermissionResponse(decision string) {}

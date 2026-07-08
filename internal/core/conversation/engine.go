@@ -218,7 +218,7 @@ func (e *Engine) continueAgentLoop(
 		SessionID:    sessionID,
 		Messages:     messages,
 		Model:        modelInfo.ID,
-		ProviderName: provider.Name(),
+		ProviderName: modelInfo.Provider,
 		SystemPrompt: opt.BuildPrefix(),
 		Tools:        e.toolReg.ListDefs(),
 		MaxTokens:    modelInfo.MaxOutputTokens,
@@ -317,7 +317,11 @@ Instructions:
 
 Current session ID: %s`, sessionID)
 
-	opt := tokenopt.New(modelInfo, systemPrompt)
+	opt := tokenopt.New(tokenopt.Config{
+		ModelInfo:    modelInfo,
+		SystemPrompt: systemPrompt,
+		ProviderName: modelInfo.Provider,
+	})
 	opt.SetTools(e.toolReg.ListDefs())
 	e.optimizers[sessionID] = opt
 	return opt
