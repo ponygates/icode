@@ -29,18 +29,19 @@ func New(apiKey, apiBase string) types.Provider {
 func DefaultModels() []types.ModelInfo {
 	return []types.ModelInfo{
 		{
-			ID:              "hunyuan-pro",
-			Name:            "混元 Pro",
-			Description:     "腾讯混元大模型旗舰版，多轮对话与代码生成能力均衡",
+			ID:              "hunyuan-turbos",
+			Name:            "混元 TurboS",
+			Description:     "腾讯混元旗舰快速模型，超大上下文，代码生成能力强，每日免费额度丰富",
 			Provider:        ProviderName,
-			ContextWindow:   32000,
-			MaxOutputTokens: 8192,
+			ContextWindow:   256000,
+			MaxOutputTokens: 16384,
 			Plans: []types.TokenPlan{
 				{
 					Name:        "coding-plan",
-					Description: "标准编程计划",
+					Description: "标准编程计划（丰富免费额度）",
 					InputPrice:  0.0,
 					OutputPrice: 0.0,
+					Currency:    "CNY",
 					FreeTier: &types.FreeTier{
 						DailyTokens:   10000000,
 						DailyRequests: 100,
@@ -55,27 +56,25 @@ func DefaultModels() []types.ModelInfo {
 			UpdatedAt: time.Now(),
 		},
 		{
-			ID:              "hunyuan-lite",
-			Name:            "混元 Lite",
-			Description:     "腾讯混元轻量版，响应快速，适合日常编程辅助",
+			ID:              "hunyuan-t1",
+			Name:            "混元 T1",
+			Description:     "腾讯混元深度推理模型，长思维链+检索增强，擅长复杂逻辑与架构设计",
 			Provider:        ProviderName,
-			ContextWindow:   32000,
-			MaxOutputTokens: 4096,
+			ContextWindow:   256000,
+			MaxOutputTokens: 32768,
 			Plans: []types.TokenPlan{
 				{
-					Name:        "token-plan",
-					Description: "轻量Token计划（免费）",
-					InputPrice:  0.0,
-					OutputPrice: 0.0,
-					FreeTier: &types.FreeTier{
-						DailyTokens:   10000000,
-						DailyRequests: 100,
-					},
+					Name:        "reasoning-plan",
+					Description: "推理增强计划",
+					InputPrice:  1.0,
+					OutputPrice: 4.0,
+					Currency:    "CNY",
 				},
 			},
 			Capabilities: types.ModelCap{
 				Tools:     true,
 				Streaming: true,
+				Reasoning: true,
 			},
 			UpdatedAt: time.Now(),
 		},

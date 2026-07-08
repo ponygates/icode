@@ -29,46 +29,52 @@ func New(apiKey, apiBase string) types.Provider {
 func DefaultModels() []types.ModelInfo {
 	return []types.ModelInfo{
 		{
-			ID:              "moonshot-v1-8k",
-			Name:            "Moonshot v1 8K",
-			Description:     "Kimi 标准模型，8K 上下文窗口",
+			ID:              "kimi-k2.7-code",
+			Name:            "Kimi K2.7 Code",
+			Description:     "Kimi 编程旗舰模型，SWE-Bench Pro 领先，256K 超长上下文，代码生成卓越",
 			Provider:        ProviderName,
-			ContextWindow:   8192,
-			MaxOutputTokens: 4096,
+			ContextWindow:   262144,
+			MaxOutputTokens: 32768,
 			Plans: []types.TokenPlan{
 				{
 					Name:        "coding-plan",
-					Description: "标准编程计划",
+					Description: "编程计划",
 					InputPrice:  12.0,
 					OutputPrice: 12.0,
+					Currency:    "CNY",
 				},
 			},
 			Capabilities: types.ModelCap{
 				Tools:     true,
 				Streaming: true,
+				JSONMode:  true,
+				Reasoning: true,
 			},
-			UpdatedAt: time.Now(),
+			SupportsVision: true,
+			UpdatedAt:      time.Now(),
 		},
 		{
-			ID:              "moonshot-v1-128k",
-			Name:            "Moonshot v1 128K",
-			Description:     "Kimi 长上下文模型，128K 窗口",
+			ID:              "kimi-k2.6",
+			Name:            "Kimi K2.6",
+			Description:     "Kimi 通用旗舰模型，256K 上下文，超长文档理解，智能对话",
 			Provider:        ProviderName,
-			ContextWindow:   131072,
-			MaxOutputTokens: 4096,
+			ContextWindow:   262144,
+			MaxOutputTokens: 16384,
 			Plans: []types.TokenPlan{
 				{
 					Name:        "token-plan",
-					Description: "长上下文计划",
-					InputPrice:  60.0,
-					OutputPrice: 60.0,
+					Description: "通用Token计划",
+					InputPrice:  8.0,
+					OutputPrice: 8.0,
+					Currency:    "CNY",
 				},
 			},
 			Capabilities: types.ModelCap{
 				Tools:     true,
 				Streaming: true,
 			},
-			UpdatedAt: time.Now(),
+			SupportsVision: true,
+			UpdatedAt:      time.Now(),
 		},
 	}
 }

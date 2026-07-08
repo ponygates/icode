@@ -155,6 +155,7 @@ type TokenPlan struct {
 	InputPrice  float64 `json:"input_price_per_mtok"`
 	OutputPrice float64 `json:"output_price_per_mtok"`
 	CachePrice  float64 `json:"cache_price_per_mtok"`
+	Currency    string  `json:"currency,omitempty"` // CNY, USD — defaults to USD
 
 	// FreeTier indicates whether this plan has a free daily quota.
 	FreeTier *FreeTier `json:"free_tier,omitempty"`

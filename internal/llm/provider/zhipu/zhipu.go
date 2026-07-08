@@ -29,31 +29,34 @@ func New(apiKey, apiBase string) types.Provider {
 func DefaultModels() []types.ModelInfo {
 	return []types.ModelInfo{
 		{
-			ID:              "glm-4-plus",
-			Name:            "GLM-4-Plus",
-			Description:     "智谱旗舰模型，综合能力最强",
+			ID:              "glm-5",
+			Name:            "GLM-5",
+			Description:     "智谱旗舰模型，全球TOP4，Coding能力逼近Claude Opus，擅长复杂系统工程",
 			Provider:        ProviderName,
 			ContextWindow:   128000,
-			MaxOutputTokens: 4096,
+			MaxOutputTokens: 32768,
 			Plans: []types.TokenPlan{
 				{
 					Name:        "coding-plan",
 					Description: "标准编程计划",
-					InputPrice:  50.0,
-					OutputPrice: 50.0,
+					InputPrice:  4.0,
+					OutputPrice: 4.0,
+					Currency:    "CNY",
 				},
 			},
 			Capabilities: types.ModelCap{
 				Tools:     true,
 				Streaming: true,
 				JSONMode:  true,
+				Reasoning: true,
 			},
-			UpdatedAt: time.Now(),
+			SupportsVision: true,
+			UpdatedAt:      time.Now(),
 		},
 		{
 			ID:              "glm-4-flash",
-			Name:            "GLM-4-Flash",
-			Description:     "智谱轻量模型，速度快，免费使用",
+			Name:            "GLM-4 Flash",
+			Description:     "智谱高速免费模型，2M tokens/日免费，适合日常编程辅助",
 			Provider:        ProviderName,
 			ContextWindow:   128000,
 			MaxOutputTokens: 4096,
@@ -63,6 +66,7 @@ func DefaultModels() []types.ModelInfo {
 					Description: "免费计划",
 					InputPrice:  0,
 					OutputPrice: 0,
+					Currency:    "CNY",
 					FreeTier: &types.FreeTier{
 						DailyTokens:   2000000,
 						DailyRequests: 2000,

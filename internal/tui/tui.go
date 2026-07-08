@@ -505,16 +505,19 @@ func renderModelPicker(out *strings.Builder) {
 	out.WriteString("│                                                    │\n")
 
 	models := []struct{ id, provider string }{
-		{"deepseek-chat", "deepseek"},
-		{"deepseek-reasoner", "deepseek"},
-		{"glm-4-plus", "zhipu"},
+		{"deepseek-v4-flash", "deepseek"},
+		{"deepseek-v4-pro", "deepseek"},
+		{"glm-5", "zhipu"},
 		{"glm-4-flash", "zhipu (free)"},
-		{"moonshot-v1-8k", "kimi"},
-		{"doubao-pro-32k", "volcengine"},
-		{"hunyuan-pro", "tencent (free)"},
+		{"kimi-k2.7-code", "kimi"},
+		{"doubao-seed-2.1-pro", "volcengine"},
+		{"hunyuan-turbos", "tencent (free)"},
+		{"hunyuan-t1", "tencent"},
+		{"pangu-5.0-code", "huawei"},
+		{"scnet-code", "scnet"},
 		{"auto", "openrouter"},
 		{"free", "openrouter (free)"},
-		{"claude-sonnet-4", "anthropic"},
+		{"claude-sonnet-4-20250514", "anthropic"},
 	}
 
 	for _, m := range models {
