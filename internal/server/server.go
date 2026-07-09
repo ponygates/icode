@@ -96,6 +96,9 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 	// Permission
 	mux.HandleFunc("/api/permission/mode", s.handleSetPermissionMode)
 
+	// Static frontend — serve the desktop UI at /
+	mux.HandleFunc("/", s.handleFrontend)
+
 	// CORS middleware
 	handler := corsMiddleware(mux)
 
@@ -447,6 +450,51 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
+}
+
+// handleFrontend serves the desktop UI.
+// It looks for the Vite build output in several locations.
+func (s *Server) handleFrontend(w http.ResponseWriter, r *http.Request) {
+	// API routes are handled by other handlers
+	if len(r.URL.Path) >= 4 && r.URL.Path[:4] == "/api" {
+		http.NotFound(w, r)
+		return
+	}
+
+	// Try to serve from Vite dist directory
+	distDirs := []string{
+		"desktop/dist",
+		"../desktop/dist",
+		filepath.Join("desktop", "dist"),
+	}
+
+	for _, dir := range distDirs {
+		indexPath := filepath.Join(dir, "index.html")
+		if _, err := os.Stat(indexPath); err == nil {
+			// If path is "/", serve index.html
+			if r.URL.Path == "/" || r.URL.Path == "" {
+				http.ServeFile(w, r, indexPath)
+				return
+			}
+			// Serve static files
+			fs := http.FileServer(http.Dir(dir))
+			http.StripPrefix("/", fs).ServeHTTP(w, r)
+			return
+		}
+	}
+
+	// Fallback: redirect to the standalone HTML
+	standaloneHTML := filepath.Join("desktop", "index.html")
+	if _, err := os.Stat(standaloneHTML); err == nil {
+		http.ServeFile(w, r, standaloneHTML)
+		return
+	}
+
+	// No UI found, show API info
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprintf(w, `<html><body style="font-family:system-ui;padding:40px;background:#1e1e2e;color:#cdd6f4">
+<h1>iCode API Server</h1><p>Desktop UI not built. Run: <code>cd desktop && npm run build</code></p>
+<p>API available at <a href="/api/health" style="color:#89b4fa">/api/health</a></p></body></html>`)
 }
 
 func corsMiddleware(next http.Handler) http.Handler {
