@@ -145,6 +145,15 @@ func New(cfg Config) *TUI {
 // ── Lifecycle ────────────────────────────────────────────────────
 
 func (t *TUI) Run() error {
+	// Detect double-click launch (no real terminal)
+	doubleClick := !term.IsTerminal(int(os.Stdin.Fd()))
+	if doubleClick {
+		fmt.Fprintln(t.writer)
+		fmt.Fprintln(t.writer, "  iCode — Multi-Model AI Coding Agent")
+		fmt.Fprintln(t.writer, "  Type /help for commands, /exit to quit.")
+		fmt.Fprintln(t.writer)
+	}
+
 	// Try raw mode
 	if state, err := term.MakeRaw(int(os.Stdin.Fd())); err == nil {
 		t.rawMode = true
@@ -156,20 +165,34 @@ func (t *TUI) Run() error {
 		if t.width < 40 { t.width = 80 }
 		if t.height < 10 { t.height = 24 }
 
-	// Handle resize: SIGWINCH on Unix, poll on Windows
-	t.sigCh = make(chan os.Signal, 1)
-	signal.Notify(t.sigCh, os.Interrupt)
-	defer signal.Stop(t.sigCh)
+		// Handle resize: SIGWINCH on Unix, poll on Windows
+		t.sigCh = make(chan os.Signal, 1)
+		signal.Notify(t.sigCh, os.Interrupt)
+		defer signal.Stop(t.sigCh)
 
 		// Hide cursor, enable line wrap
 		fmt.Fprint(t.writer, "\033[?25l")
 		defer fmt.Fprint(t.writer, "\033[?25h")
 
-		return t.runRaw()
+		result := t.runRaw()
+
+		if doubleClick {
+			fmt.Fprintln(t.writer)
+			fmt.Fprintln(t.writer, "Press Enter to exit...")
+			bufio.NewReader(t.reader).ReadString('\n')
+		}
+		return result
 	}
 
 	// Fallback to line mode
-	return t.runLine()
+	result := t.runLine()
+
+	if doubleClick {
+		fmt.Fprintln(t.writer)
+		fmt.Fprintln(t.writer, "Press Enter to exit...")
+		bufio.NewReader(t.reader).ReadString('\n')
+	}
+	return result
 }
 
 func (t *TUI) runRaw() error {
