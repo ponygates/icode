@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strconv"
 	"strings"
@@ -494,8 +495,12 @@ func (t *TUI) handleSlash(text string) {
   /mode <m>      Switch mode (plan / agent / yolo)
   /session       Show session info
   /clear         Clear conversation
-  /exit          Exit iCode
+  /compact       Compact conversation context
+  /resume <id>   Resume a previous session
+  /export [file] Export conversation to markdown
+  /diff          Show git diff
   /cost          Show cost breakdown
+  /exit          Exit iCode
   Ctrl+C         Interrupt streaming`)
 
 	case "/exit", "/quit":
@@ -518,6 +523,22 @@ func (t *TUI) handleSlash(text string) {
 			t.AddMessage(RoleSystem, fmt.Sprintf("Session: %d messages · %d↑ %d↓ tokens",
 				len(t.messages), t.promptTokens, t.completionTokens))
 		}
+
+	case "/compact":
+		t.compact()
+
+	case "/resume":
+		if len(args) > 0 {
+			t.AddMessage(RoleSystem, fmt.Sprintf("Resuming session: %s (placeholder)", args[0]))
+		} else {
+			t.AddMessage(RoleSystem, "Usage: /resume <session-id>")
+		}
+
+	case "/export":
+		t.exportMarkdown(args)
+
+	case "/diff":
+		t.showGitDiff()
 
 	case "/clear":
 		t.mu.Lock()
@@ -546,6 +567,96 @@ func (t *TUI) handleSlash(text string) {
 			t.callback.OnSlashCommand(cmd, args)
 		}
 	}
+}
+
+// compact summarizes the conversation to save context.
+func (t *TUI) compact() {
+	if len(t.messages) < 4 {
+		t.AddMessage(RoleSystem, "Not enough messages to compact.")
+		return
+	}
+
+	// Keep system messages + last 2 exchanges, summarize the rest
+	var keep []Message
+	var summary strings.Builder
+	summary.WriteString("[Compact] Summarized previous conversation:\n")
+
+	count := 0
+	for _, m := range t.messages {
+		if m.Role == RoleSystem || count >= len(t.messages)-4 {
+			keep = append(keep, m)
+		} else {
+			summary.WriteString(fmt.Sprintf("  %s: %s\n", m.Role, truncate(m.Content, 80)))
+			count++
+		}
+	}
+
+	t.mu.Lock()
+	t.messages = keep
+	t.mu.Unlock()
+	t.render()
+	t.AddMessage(RoleSystem, summary.String())
+}
+
+// exportMarkdown exports the conversation to a file.
+func (t *TUI) exportMarkdown(args []string) {
+	filename := "icode-export.md"
+	if len(args) > 0 {
+		filename = args[0]
+	}
+
+	var sb strings.Builder
+	sb.WriteString("# iCode Conversation Export\n\n")
+	sb.WriteString(fmt.Sprintf("**Model:** %s  \n", t.model))
+	sb.WriteString(fmt.Sprintf("**Provider:** %s  \n", t.provider))
+	sb.WriteString(fmt.Sprintf("**Mode:** %s  \n", t.mode))
+	sb.WriteString(fmt.Sprintf("**Tokens:** %d prompt + %d completion  \n\n", t.promptTokens, t.completionTokens))
+	sb.WriteString("---\n\n")
+
+	for _, m := range t.messages {
+		switch m.Role {
+		case RoleUser:
+			sb.WriteString("## User\n\n")
+		case RoleAssistant:
+			sb.WriteString("## Assistant\n\n")
+		case RoleSystem:
+			sb.WriteString("> ")
+		case RoleTool:
+			sb.WriteString("### Tool\n\n")
+		case RoleError:
+			sb.WriteString("### Error\n\n")
+		}
+		sb.WriteString(m.Content)
+		sb.WriteString("\n\n")
+	}
+
+	if err := os.WriteFile(filename, []byte(sb.String()), 0644); err != nil {
+		t.AddMessage(RoleError, fmt.Sprintf("Export failed: %v", err))
+		return
+	}
+	t.AddMessage(RoleSystem, fmt.Sprintf("Exported to %s (%d messages)", filename, len(t.messages)))
+}
+
+// showGitDiff runs git diff and displays output.
+func (t *TUI) showGitDiff() {
+	cmd := exec.Command("git", "diff")
+	output, err := cmd.CombinedOutput()
+	if err != nil && len(output) == 0 {
+		t.AddMessage(RoleError, fmt.Sprintf("git diff: %v", err))
+		return
+	}
+	if len(output) == 0 {
+		t.AddMessage(RoleSystem, "No unstaged changes.")
+		return
+	}
+	t.AddMessage(RoleTool, string(output))
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
 
 // ── Helpers ──────────────────────────────────────────────────────

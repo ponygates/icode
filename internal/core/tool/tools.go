@@ -3,6 +3,7 @@ package tool
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -28,10 +29,14 @@ func NewRegistry() *Registry {
 	r.Register(&BashTool{})
 	r.Register(&ReadFileTool{})
 	r.Register(&WriteFileTool{})
+	r.Register(&EditTool{})
 	r.Register(&GrepTool{})
 	r.Register(&GlobTool{})
 	r.Register(&LSTool{})
 	r.Register(&FetchTool{})
+	r.Register(&GitDiffTool{})
+	r.Register(&GitCommitTool{})
+	r.Register(&GitStatusTool{})
 
 	return r
 }
@@ -243,17 +248,68 @@ func (t *GrepTool) Execute(ctx context.Context, args string) (*types.ToolResult,
 	}
 	searchPath, err := parseArg(args, "path")
 	if err != nil {
-		return nil, err
+		// Default to current directory
+		searchPath = "."
 	}
 
-	// Use grep command for reliability
-	ctx2, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
+	// Use Go-native grep (cross-platform, no external dependency)
+	var results []string
+	filepath.Walk(searchPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			// Skip common directories
+			if info != nil && info.IsDir() {
+				name := info.Name()
+				if name == ".git" || name == "node_modules" || name == "vendor" || name == "dist" || name == "release" {
+					return filepath.SkipDir
+				}
+			}
+			return nil
+		}
 
-	cmd := exec.CommandContext(ctx2, "grep", "-rn", "-I", pattern, searchPath)
-	output, _ := cmd.CombinedOutput()
+		// Skip binary files
+		if isBinaryFile(path) {
+			return nil
+		}
 
-	return &types.ToolResult{Success: true, Content: string(output)}, nil
+		// Read file and search
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+
+		lines := strings.Split(string(content), "\n")
+		for i, line := range lines {
+			if strings.Contains(line, pattern) {
+				results = append(results, fmt.Sprintf("%s:%d: %s", path, i+1, strings.TrimSpace(line)))
+			}
+		}
+		return nil
+	})
+
+	if len(results) == 0 {
+		return &types.ToolResult{Success: true, Content: "No matches found."}, nil
+	}
+
+	// Limit results
+	if len(results) > 100 {
+		results = results[:100]
+		results = append(results, fmt.Sprintf("\n... (%d more matches truncated)", len(results)-100))
+	}
+
+	return &types.ToolResult{Success: true, Content: strings.Join(results, "\n")}, nil
+}
+
+func isBinaryFile(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	binaryExts := map[string]bool{
+		".exe": true, ".dll": true, ".so": true, ".dylib": true,
+		".png": true, ".jpg": true, ".jpeg": true, ".gif": true,
+		".bmp": true, ".ico": true, ".woff": true, ".woff2": true,
+		".ttf": true, ".eot": true, ".zip": true, ".gz": true,
+		".tar": true, ".7z": true, ".rar": true, ".pdf": true,
+		".mp3": true, ".mp4": true, ".avi": true, ".mov": true,
+	}
+	return binaryExts[ext]
 }
 
 // ============================================================================
@@ -296,6 +352,279 @@ func (t *GlobTool) Execute(ctx context.Context, args string) (*types.ToolResult,
 		sb.WriteString("\n")
 	}
 	return &types.ToolResult{Success: true, Content: sb.String()}, nil
+}
+
+// ============================================================================
+// EditTool — precise in-place string replacement (Claude Code style)
+// ============================================================================
+
+type EditTool struct{}
+
+func (t *EditTool) Def() types.ToolDef {
+	return types.ToolDef{
+		Name:        "edit",
+		Description: "Edit a file by replacing an exact string match. Preserves indentation. Fails if old_string is not found or appears multiple times (use replace_all for multiple).",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"file_path": map[string]any{
+					"type":        "string",
+					"description": "Path to the file to edit",
+				},
+				"old_string": map[string]any{
+					"type":        "string",
+					"description": "The exact string to find and replace",
+				},
+				"new_string": map[string]any{
+					"type":        "string",
+					"description": "The replacement string",
+				},
+				"replace_all": map[string]any{
+					"type":        "boolean",
+					"description": "If true, replace all occurrences. Default: false (fails on multiple matches)",
+				},
+			},
+			"required": []string{"file_path", "old_string", "new_string"},
+		},
+	}
+}
+
+func (t *EditTool) Execute(ctx context.Context, args string) (*types.ToolResult, error) {
+	filePath, err := parseArg(args, "file_path")
+	if err != nil {
+		return nil, err
+	}
+	oldStr, err := parseArg(args, "old_string")
+	if err != nil {
+		return nil, err
+	}
+	newStr, err := parseArg(args, "new_string")
+	if err != nil {
+		return nil, err
+	}
+	replaceAll, _ := parseBoolArg(args, "replace_all")
+
+	// Read file
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return &types.ToolResult{Success: false, Error: fmt.Sprintf("read file: %v", err)}, nil
+	}
+
+	text := string(content)
+
+	// Count occurrences
+	count := strings.Count(text, oldStr)
+	if count == 0 {
+		// Try to show context for debugging
+		return &types.ToolResult{
+			Success: false,
+			Error:   fmt.Sprintf("old_string not found in %s. Make sure the string matches exactly, including whitespace and indentation.", filePath),
+		}, nil
+	}
+
+	if count > 1 && !replaceAll {
+		return &types.ToolResult{
+			Success: false,
+			Error:   fmt.Sprintf("old_string appears %d times in %s. Provide more context to make it unique, or set replace_all=true.", count, filePath),
+		}, nil
+	}
+
+	// Perform replacement
+	var newText string
+	if replaceAll {
+		newText = strings.ReplaceAll(text, oldStr, newStr)
+	} else {
+		newText = strings.Replace(text, oldStr, newStr, 1)
+	}
+
+	// Write back
+	if err := os.WriteFile(filePath, []byte(newText), 0644); err != nil {
+		return &types.ToolResult{Success: false, Error: fmt.Sprintf("write file: %v", err)}, nil
+	}
+
+	// Generate diff summary
+	diffLines := generateDiffSummary(text, newText)
+
+	return &types.ToolResult{
+		Success: true,
+		Content: fmt.Sprintf("Edited %s (%d replacement%s)\n%s",
+			filePath, count, pluralS(count), diffLines),
+	}, nil
+}
+
+func generateDiffSummary(old, new string) string {
+	oldLines := strings.Split(old, "\n")
+	newLines := strings.Split(new, "\n")
+
+	var sb strings.Builder
+	maxLen := len(oldLines)
+	if len(newLines) > maxLen {
+		maxLen = len(newLines)
+	}
+
+	for i := 0; i < maxLen; i++ {
+		var oldLine, newLine string
+		if i < len(oldLines) {
+			oldLine = oldLines[i]
+		}
+		if i < len(newLines) {
+			newLine = newLines[i]
+		}
+		if oldLine != newLine {
+			if oldLine != "" {
+				sb.WriteString(fmt.Sprintf("  - %s\n", oldLine))
+			}
+			if newLine != "" {
+				sb.WriteString(fmt.Sprintf("  + %s\n", newLine))
+			}
+		}
+	}
+	return sb.String()
+}
+
+func pluralS(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
+func parseBoolArg(args, key string) (bool, error) {
+	parsed, err := parseJSONArgs(args)
+	if err != nil {
+		return false, nil
+	}
+	if v, ok := parsed[key]; ok {
+		if b, ok := v.(bool); ok {
+			return b, nil
+		}
+	}
+	return false, nil
+}
+
+// parseJSONArgs parses a JSON argument string into a map.
+func parseJSONArgs(rawJSON string) (map[string]any, error) {
+	rawJSON = strings.TrimSpace(rawJSON)
+	if rawJSON == "" {
+		return map[string]any{}, nil
+	}
+	var result map[string]any
+	if err := json.Unmarshal([]byte(rawJSON), &result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// ============================================================================
+// GitTool — git diff/commit/status
+// ============================================================================
+
+type GitDiffTool struct{}
+
+func (t *GitDiffTool) Def() types.ToolDef {
+	return types.ToolDef{
+		Name:        "git_diff",
+		Description: "Show git diff for staged or unstaged changes.",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"staged": map[string]any{
+					"type":        "boolean",
+					"description": "If true, show staged (cached) changes. Default: false.",
+				},
+			},
+		},
+	}
+}
+
+func (t *GitDiffTool) Execute(ctx context.Context, args string) (*types.ToolResult, error) {
+	staged, _ := parseBoolArg(args, "staged")
+
+	cmdArgs := []string{"diff"}
+	if staged {
+		cmdArgs = append(cmdArgs, "--cached")
+	}
+
+	ctx2, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx2, "git", cmdArgs...)
+	output, err := cmd.CombinedOutput()
+	if err != nil && len(output) == 0 {
+		return &types.ToolResult{Success: false, Error: fmt.Sprintf("git diff: %v", err)}, nil
+	}
+
+	return &types.ToolResult{Success: true, Content: string(output)}, nil
+}
+
+type GitCommitTool struct{}
+
+func (t *GitCommitTool) Def() types.ToolDef {
+	return types.ToolDef{
+		Name:        "git_commit",
+		Description: "Stage all changes and commit with a message.",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"message": map[string]any{
+					"type":        "string",
+					"description": "Commit message",
+				},
+			},
+			"required": []string{"message"},
+		},
+	}
+}
+
+func (t *GitCommitTool) Execute(ctx context.Context, args string) (*types.ToolResult, error) {
+	msg, err := parseArg(args, "message")
+	if err != nil {
+		return nil, err
+	}
+
+	ctx2, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	// git add -A
+	addCmd := exec.CommandContext(ctx2, "git", "add", "-A")
+	if err := addCmd.Run(); err != nil {
+		return &types.ToolResult{Success: false, Error: fmt.Sprintf("git add: %v", err)}, nil
+	}
+
+	// git commit -m
+	commitCmd := exec.CommandContext(ctx2, "git", "commit", "-m", msg)
+	output, err := commitCmd.CombinedOutput()
+	if err != nil {
+		return &types.ToolResult{Success: false, Error: fmt.Sprintf("git commit: %v\n%s", err, string(output))}, nil
+	}
+
+	return &types.ToolResult{Success: true, Content: string(output)}, nil
+}
+
+type GitStatusTool struct{}
+
+func (t *GitStatusTool) Def() types.ToolDef {
+	return types.ToolDef{
+		Name:        "git_status",
+		Description: "Show git status (modified, staged, untracked files).",
+		Parameters: map[string]any{
+			"type":       "object",
+			"properties": map[string]any{},
+		},
+	}
+}
+
+func (t *GitStatusTool) Execute(ctx context.Context, args string) (*types.ToolResult, error) {
+	ctx2, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx2, "git", "status", "--short", "--branch")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return &types.ToolResult{Success: false, Error: fmt.Sprintf("git status: %v", err)}, nil
+	}
+
+	return &types.ToolResult{Success: true, Content: string(output)}, nil
 }
 
 // ============================================================================

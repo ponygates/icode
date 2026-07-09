@@ -4,9 +4,11 @@ package conversation
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
+	projectcontext "github.com/ponygates/icode/internal/core/context"
 	"github.com/ponygates/icode/internal/core/tool"
 	"github.com/ponygates/icode/internal/llm/tokenopt"
 	"github.com/ponygates/icode/internal/types"
@@ -306,7 +308,22 @@ func (e *Engine) getOrCreateOptimizer(sessionID string, modelInfo types.ModelInf
 		return opt
 	}
 
-	systemPrompt := fmt.Sprintf(`You are iCode, a powerful AI coding agent. Your task is to help the user with software development tasks.
+	systemPrompt := buildSystemPrompt(sessionID)
+
+	opt := tokenopt.New(tokenopt.Config{
+		ModelInfo:    modelInfo,
+		SystemPrompt: systemPrompt,
+		ProviderName: modelInfo.Provider,
+	})
+	opt.SetTools(e.toolReg.ListDefs())
+	e.optimizers[sessionID] = opt
+	return opt
+}
+
+// buildSystemPrompt constructs the system prompt for a session, prepending any
+// ICODE.md project context found in the current or parent directories.
+func buildSystemPrompt(sessionID string) string {
+	base := fmt.Sprintf(`You are iCode, a powerful AI coding agent. Your task is to help the user with software development tasks.
 
 Instructions:
 - Read files, write code, run commands, and search the codebase as needed.
@@ -317,14 +334,12 @@ Instructions:
 
 Current session ID: %s`, sessionID)
 
-	opt := tokenopt.New(tokenopt.Config{
-		ModelInfo:    modelInfo,
-		SystemPrompt: systemPrompt,
-		ProviderName: modelInfo.Provider,
-	})
-	opt.SetTools(e.toolReg.ListDefs())
-	e.optimizers[sessionID] = opt
-	return opt
+	projectContext := projectcontext.LoadProjectContext()
+	if strings.TrimSpace(projectContext) == "" {
+		return base
+	}
+
+	return projectContext + "\n\n---\n\n" + base
 }
 
 func calculateCost(usage types.TokenUsage, model types.ModelInfo) float64 {
