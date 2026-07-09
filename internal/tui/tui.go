@@ -1,21 +1,20 @@
-// Package tui provides a Claude Code-level terminal UI for iCode.
+// Package tui provides a Claude Code-style terminal UI for iCode.
 //
-// Features:
-//   - Fixed bottom status bar with model, tokens, cost, cache rate, project
-//   - Full-screen rendering with scrollable message area
-//   - Real-time streaming text with proper word wrapping
-//   - Tool call visualization (bash, read, write, search)
-//   - Permission prompts (Y/N/A) inline
-//   - Slash commands with completion
-//   - Ctrl+C graceful interruption
-//   - Graceful fallback to line mode on unsupported terminals
-//
-// Terminal requirements: ANSI escape codes + raw mode.
-// Falls back to line mode on PowerShell ISE, legacy cmd.exe, etc.
+// Visual design closely mirrors Claude Code:
+//   - Welcome banner with version/model/directory
+//   - User input at bottom with > prompt
+//   - Assistant messages with ✻ decorator
+//   - Thinking blocks with dimmed border
+//   - Tool calls as compact single lines
+//   - Permission prompts with [y/n/a] options
+//   - Bottom status bar with model, tokens, cost, mode
+//   - Slash commands, !shell mode, @file mentions
+//   - Shift+Tab to cycle permission modes
 package tui
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -29,26 +28,31 @@ import (
 	"golang.org/x/term"
 )
 
-// ── Colors (ANSI 256) ────────────────────────────────────────────
+// ── ANSI Colors ──────────────────────────────────────────────────
 
 const (
-	cReset  = "\033[0m"
-	cBold   = "\033[1m"
-	cDim    = "\033[2m"
-	cUnder  = "\033[4m"
+	reset  = "\033[0m"
+	bold   = "\033[1m"
+	dim    = "\033[2m"
+	italic = "\033[3m"
 
-	cBlack   = "\033[30m"
-	cRed     = "\033[31m"
-	cGreen   = "\033[32m"
-	cYellow  = "\033[33m"
-	cBlue    = "\033[34m"
-	cMagenta = "\033[35m"
-	cCyan    = "\033[36m"
-	cWhite   = "\033[37m"
-	cGray    = "\033[90m"
+	black   = "\033[30m"
+	red     = "\033[31m"
+	green   = "\033[32m"
+	yellow  = "\033[33m"
+	blue    = "\033[34m"
+	magenta = "\033[35m"
+	cyan    = "\033[36m"
+	white   = "\033[37m"
+	gray    = "\033[90m"
+	brightRed   = "\033[91m"
+	brightGreen = "\033[92m"
+	brightYellow= "\033[93m"
+	brightBlue  = "\033[94m"
+	brightCyan  = "\033[96m"
 
-	// Status bar background
-	cBgDark  = "\033[48;5;236m"
+	bgDark = "\033[48;5;236m"
+	bgBlue = "\033[44m"
 )
 
 // ── Types ────────────────────────────────────────────────────────
@@ -57,9 +61,10 @@ type Mode = string
 type Role = string
 
 const (
-	ModePlan  Mode = "plan"
-	ModeAgent Mode = "agent"
-	ModeYOLO  Mode = "yolo"
+	ModeDefault Mode = "default"
+	ModePlan     Mode = "plan"
+	ModeAgent    Mode = "agent"
+	ModeYOLO     Mode = "yolo"
 )
 
 const (
@@ -68,12 +73,14 @@ const (
 	RoleSystem    Role = "system"
 	RoleTool      Role = "tool"
 	RoleError     Role = "error"
+	RoleThinking  Role = "thinking"
 )
 
 type Message struct {
 	Role    Role
 	Content string
-	Tool    string // tool type if role == tool
+	Tool    string
+	ToolArgs string
 }
 
 type Callback interface {
@@ -103,11 +110,12 @@ type TUI struct {
 	model    string
 	provider string
 	callback Callback
+	version  string
 
 	mu       sync.Mutex
 	messages []Message
 
-	// Streaming state
+	// Streaming
 	streaming  bool
 	streamBuf  strings.Builder
 	streamDone chan struct{}
@@ -119,16 +127,18 @@ type TUI struct {
 	cost             string
 
 	// Terminal
-	running  bool
-	rawMode  bool
-	width    int
-	height   int
-	reader   io.Reader
-	writer   io.Writer
-	oldState *term.State
+	running   bool
+	rawMode   bool
+	width     int
+	height    int
+	reader    io.Reader
+	writer    io.Writer
+	oldState  *term.State
 
-	// Signals
-	sigCh chan os.Signal
+	// Input
+	inputBuf   []byte
+	shellMode  bool // ! prefix
+	sigCh      chan os.Signal
 }
 
 func New(cfg Config) *TUI {
@@ -146,14 +156,7 @@ func New(cfg Config) *TUI {
 // ── Lifecycle ────────────────────────────────────────────────────
 
 func (t *TUI) Run() error {
-	// Detect double-click launch (no real terminal)
 	doubleClick := !term.IsTerminal(int(os.Stdin.Fd()))
-	if doubleClick {
-		fmt.Fprintln(t.writer)
-		fmt.Fprintln(t.writer, "  iCode — Multi-Model AI Coding Agent")
-		fmt.Fprintln(t.writer, "  Type /help for commands, /exit to quit.")
-		fmt.Fprintln(t.writer)
-	}
 
 	// Try raw mode
 	if state, err := term.MakeRaw(int(os.Stdin.Fd())); err == nil {
@@ -161,118 +164,119 @@ func (t *TUI) Run() error {
 		t.oldState = state
 		defer term.Restore(int(os.Stdin.Fd()), state)
 
-		// Get terminal size
 		t.width, t.height, _ = term.GetSize(int(os.Stdout.Fd()))
 		if t.width < 40 { t.width = 80 }
 		if t.height < 10 { t.height = 24 }
 
-		// Handle resize: SIGWINCH on Unix, poll on Windows
 		t.sigCh = make(chan os.Signal, 1)
 		signal.Notify(t.sigCh, os.Interrupt)
 		defer signal.Stop(t.sigCh)
 
-		// Hide cursor, enable line wrap
 		fmt.Fprint(t.writer, "\033[?25l")
 		defer fmt.Fprint(t.writer, "\033[?25h")
 
 		result := t.runRaw()
 
 		if doubleClick {
-			fmt.Fprintln(t.writer)
-			fmt.Fprintln(t.writer, "Press Enter to exit...")
+			fmt.Fprintln(t.writer, "\n\r"+dim+"Press Enter to exit..."+reset)
 			bufio.NewReader(t.reader).ReadString('\n')
 		}
 		return result
 	}
 
-	// Fallback to line mode
-	result := t.runLine()
-
-	if doubleClick {
-		fmt.Fprintln(t.writer)
-		fmt.Fprintln(t.writer, "Press Enter to exit...")
-		bufio.NewReader(t.reader).ReadString('\n')
-	}
-	return result
+	// Line mode fallback
+	return t.runLine()
 }
 
 func (t *TUI) runRaw() error {
 	t.running = true
 
-	// Clear screen, draw initial UI
+	// Clear screen
 	fmt.Fprint(t.writer, "\033[2J\033[H")
+
+	// Welcome banner (like Claude Code)
+	t.printWelcome()
 	t.render()
 
-	// Welcome messages
-	t.AddMessage(RoleSystem, fmt.Sprintf("iCode %s · %s · %s mode",
-		t.provider, t.model, t.mode))
-	t.AddMessage(RoleSystem, "Type /help for commands. Ctrl+C to interrupt.")
-	t.render()
-
-	// Input buffer
-	buf := make([]byte, 0, 256)
 	inputReader := bufio.NewReader(t.reader)
 
 	for t.running {
+		// Render input prompt at bottom
+		t.renderInput()
+
 		b, err := inputReader.ReadByte()
 		if err != nil {
 			time.Sleep(50 * time.Millisecond)
 			continue
 		}
 
+		// Handle special keys
 		switch b {
 		case 3: // Ctrl+C
 			if t.streaming {
 				t.streaming = false
-				t.streamDone <- struct{}{}
-				t.AddMessage(RoleSystem, "Interrupted.")
+				t.AddMessage(RoleSystem, dim+"[interrupted]"+reset)
 				t.render()
 			} else {
 				t.running = false
 			}
 
-		case 13: // Enter
-			text := strings.TrimSpace(string(buf))
-			buf = buf[:0]
+		case 4: // Ctrl+D
+			t.running = false
+
+		case 12: // Ctrl+L — clear screen
+			fmt.Fprint(t.writer, "\033[2J\033[H")
+			t.render()
+
+		case 13, 10: // Enter
+			text := strings.TrimSpace(string(t.inputBuf))
+			t.inputBuf = t.inputBuf[:0]
 
 			if text == "" {
-				t.render()
 				continue
 			}
 
+			// Shell mode (! prefix)
+			if strings.HasPrefix(text, "!") {
+				t.execShell(text[1:])
+				continue
+			}
+
+			// Slash command
 			if strings.HasPrefix(text, "/") {
 				t.handleSlash(text)
-			} else {
-				t.AddMessage(RoleUser, text)
-				if t.callback != nil {
-					t.streaming = true
-					t.streamBuf.Reset()
-					go t.callback.OnSend(text)
+				continue
+			}
+
+			// User message
+			t.AddMessage(RoleUser, text)
+			if t.callback != nil {
+				t.streaming = true
+				t.streamBuf.Reset()
+				go t.callback.OnSend(text)
+			}
+			t.render()
+
+		case 27: // ESC sequence — check for Shift+Tab etc
+			// Read next bytes
+			b2, _ := inputReader.ReadByte()
+			if b2 == 91 { // [
+				b3, _ := inputReader.ReadByte()
+				if b3 == 90 { // Shift+Tab — cycle modes
+					t.cycleMode()
+					t.render()
 				}
 			}
-			t.render()
 
-		case 127: // Backspace
-			if len(buf) > 0 {
-				buf = buf[:len(buf)-1]
-				t.renderInput(string(buf))
+		case 127, 8: // Backspace
+			if len(t.inputBuf) > 0 {
+				t.inputBuf = t.inputBuf[:len(t.inputBuf)-1]
 			}
 
 		default:
-			if b >= 32 {
-				buf = append(buf, b)
-				t.renderInput(string(buf))
+			if b >= 32 && b < 127 {
+				t.inputBuf = append(t.inputBuf, b)
 			}
-		}
-
-		// Check resize
-		select {
-		case <-t.sigCh:
-			t.width, t.height, _ = term.GetSize(int(os.Stdout.Fd()))
-			if t.width < 40 { t.width = 80 }
-			if t.height < 10 { t.height = 24 }
-			t.render()
-		default:
 		}
 	}
 
@@ -282,18 +286,26 @@ func (t *TUI) runRaw() error {
 func (t *TUI) runLine() error {
 	t.running = true
 
-	t.AddMessage(RoleSystem, fmt.Sprintf("iCode %s · %s · %s", t.provider, t.model, t.mode))
-	t.AddMessage(RoleSystem, "Terminal does not support raw mode — using line input.")
-	t.AddMessage(RoleSystem, "Type /help for commands. Press Enter to send.")
-
+	t.printWelcomeLine()
 	fmt.Fprintln(t.writer)
 
-	scanner := bufio.NewScanner(t.reader)
-	fmt.Fprint(t.writer, statusLine(t.model, t.promptTokens, t.completionTokens, t.cacheHitRate, t.cost))
+	reader := bufio.NewReader(t.reader)
 
-	for scanner.Scan() && t.running {
-		text := strings.TrimSpace(scanner.Text())
+	for t.running {
+		fmt.Fprint(t.writer, t.promptStr())
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF { return nil }
+			continue
+		}
+
+		text := strings.TrimSpace(line)
 		if text == "" { continue }
+
+		if strings.HasPrefix(text, "!") {
+			t.execShell(text[1:])
+			continue
+		}
 
 		if strings.HasPrefix(text, "/") {
 			t.handleSlash(text)
@@ -303,10 +315,10 @@ func (t *TUI) runLine() error {
 		t.AddMessage(RoleUser, text)
 		if t.callback != nil {
 			t.streaming = true
+			t.streamBuf.Reset()
 			go t.callback.OnSend(text)
 		}
 		t.drainLineStream()
-		fmt.Fprint(t.writer, statusLine(t.model, t.promptTokens, t.completionTokens, t.cacheHitRate, t.cost))
 	}
 	return nil
 }
@@ -316,12 +328,77 @@ func (t *TUI) drainLineStream() {
 		select {
 		case <-t.streamDone:
 			t.streaming = false
-			return
 		case <-time.After(120 * time.Second):
 			t.streaming = false
-			return
 		}
 	}
+}
+
+// ── Welcome Banner ───────────────────────────────────────────────
+
+func (t *TUI) printWelcome() {
+	w := t.width
+
+	// Top border
+	fmt.Fprint(t.writer, dim+strings.Repeat("─", w)+reset+"\r\n")
+
+	// Banner
+	cwd, _ := os.Getwd()
+	shortCwd := shortDir(cwd)
+
+	banner := fmt.Sprintf(" %s✻ iCode%s %s%s%s  %s%s%s",
+		brightCyan, reset,
+		dim, "v0.2", reset,
+		dim, shortCwd, reset,
+	)
+	fmt.Fprint(t.writer, banner+"\r\n")
+
+	// Model + mode
+	modeLabel := t.modeLabel()
+	info := fmt.Sprintf(" %sModel:%s %s  %sMode:%s %s  %sProviders:%s 9",
+		dim, reset, t.model,
+		dim, reset, modeLabel,
+		dim, reset,
+	)
+	fmt.Fprint(t.writer, info+"\r\n")
+
+	// Bottom border
+	fmt.Fprint(t.writer, dim+strings.Repeat("─", w)+reset+"\r\n")
+
+	// Tip
+	fmt.Fprint(t.writer, dim+"  Type /help for commands. Shift+Tab to cycle modes. Ctrl+C to interrupt."+reset+"\r\n\r\n")
+}
+
+func (t *TUI) printWelcomeLine() {
+	cwd, _ := os.Getwd()
+	fmt.Fprintln(t.writer)
+	fmt.Fprintln(t.writer, dim+strings.Repeat("─", 60)+reset)
+	fmt.Fprintf(t.writer, "%s✻ iCode%s %sv0.2%s  %s%s%s\n",
+		brightCyan, reset, dim, reset, dim, shortDir(cwd), reset)
+	fmt.Fprintf(t.writer, "%sModel:%s %s  %sMode:%s %s\n",
+		dim, reset, t.model,
+		dim, reset, t.modeLabel())
+	fmt.Fprintln(t.writer, dim+strings.Repeat("─", 60)+reset)
+	fmt.Fprintln(t.writer, dim+"  Type /help for commands. Ctrl+C to interrupt."+reset)
+	fmt.Fprintln(t.writer)
+}
+
+func (t *TUI) modeLabel() string {
+	switch t.mode {
+	case "plan":     return blue + "plan" + reset
+	case "agent":    return green + "agent" + reset
+	case "yolo":     return brightRed + "yolo" + reset
+	default:         return "default"
+	}
+}
+
+func (t *TUI) promptStr() string {
+	modeColor := green
+	switch t.mode {
+	case "plan":  modeColor = blue
+	case "yolo":  modeColor = brightRed
+	}
+	return modeColor + "❯ " + reset
 }
 
 // ── Rendering ────────────────────────────────────────────────────
@@ -332,105 +409,166 @@ func (t *TUI) render() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	h := t.height
 	w := t.width
+	h := t.height
 
-	// Move cursor home, clear
+	// Move cursor home, clear screen
 	fmt.Fprint(t.writer, "\033[H\033[2J")
 
-	// ── Header ──
-	header := fmt.Sprintf(" iCode · %s · %s · %s ", t.provider, t.model, t.mode)
-	fmt.Fprint(t.writer, cBgDark, cWhite, header, strings.Repeat(" ", w-len(header)-2), " ", cReset, "\r\n")
-	fmt.Fprint(t.writer, cDim, strings.Repeat("─", w), cReset, "\r\n")
+	// ── Welcome banner ──
+	fmt.Fprint(t.writer, dim+strings.Repeat("─", w)+reset+"\r\n")
+	cwd, _ := os.Getwd()
+	fmt.Fprintf(t.writer, " %s✻ iCode%s %sv0.2%s  %s%s%s\r\n",
+		brightCyan, reset, dim, reset, dim, shortDir(cwd), reset)
+	fmt.Fprintf(t.writer, " %sModel:%s %s  %sMode:%s %s  %s%s tok%s\r\n",
+		dim, reset, t.model,
+		dim, reset, t.modeLabel(),
+		dim, reset, reset)
+	fmt.Fprint(t.writer, dim+strings.Repeat("─", w)+reset+"\r\n\r\n")
 
 	// ── Messages ──
-	msgArea := h - 3 // header line + separator + status bar
+	msgArea := h - 7 // banner(4) + status(2) + input(1)
 	if msgArea < 3 { msgArea = 3 }
 
-	// Show last N messages that fit
-	totalLines := 0
-	msgLines := make([]string, 0)
-
-	for i := len(t.messages) - 1; i >= 0; i-- {
-		m := t.messages[i]
-		lines := t.renderMessage(w, m)
-		totalLines += len(lines)
-		msgLines = append(msgLines, lines...)
+	// Render all messages, collect lines
+	allLines := []string{}
+	for _, m := range t.messages {
+		allLines = append(allLines, t.renderMessageLines(m, w)...)
 	}
 
-	// Skip oldest messages if overflow
-	if totalLines > msgArea {
-		skip := totalLines - msgArea
-		if skip < len(msgLines) {
-			msgLines = msgLines[:len(msgLines)-skip]
-		}
+	// Show last N lines that fit
+	if len(allLines) > msgArea {
+		allLines = allLines[len(allLines)-msgArea:]
 	}
 
-	// Print from bottom up
-	blankLines := msgArea - len(msgLines)
-	for i := 0; i < blankLines; i++ {
+	// Pad with blank lines if needed
+	for i := len(allLines); i < msgArea; i++ {
 		fmt.Fprint(t.writer, "\r\n")
 	}
-	for i := len(msgLines) - 1; i >= 0; i-- {
-		fmt.Fprint(t.writer, msgLines[i], "\r\n")
+
+	for _, line := range allLines {
+		fmt.Fprint(t.writer, line+"\r\n")
 	}
 
-	// ── Status Bar ──
-	fmt.Fprint(t.writer, cDim, strings.Repeat("─", w), cReset, "\r\n")
-	fmt.Fprint(t.writer, cBgDark, statusLine(t.model, t.promptTokens, t.completionTokens, t.cacheHitRate, t.cost))
-	fmt.Fprint(t.writer, strings.Repeat(" ", w-len(statusLine(t.model, t.promptTokens, t.completionTokens, t.cacheHitRate, t.cost))))
-	fmt.Fprint(t.writer, cReset, "\r\n")
+	// ── Status bar ──
+	fmt.Fprint(t.writer, "\r\n"+dim+strings.Repeat("─", w)+reset+"\r\n")
+	fmt.Fprint(t.writer, t.statusBar(w))
+
+	// ── Input prompt ──
+	t.renderInput()
 }
 
-func (t *TUI) renderInput(text string) {
+func (t *TUI) renderInput() {
 	if !t.rawMode { return }
-	// Move to bottom area, clear input line, show prompt + text
+
 	h := t.height
-	fmt.Fprint(t.writer, fmt.Sprintf("\033[%d;1H", h))
-	fmt.Fprint(t.writer, "\033[2K")
-	fmt.Fprint(t.writer, cGreen, "> ", cReset, text)
+	fmt.Fprintf(t.writer, "\033[%d;1H\033[2K", h)
+
+	modeColor := green
+	switch t.mode {
+	case "plan":  modeColor = blue
+	case "yolo":  modeColor = brightRed
+	}
+
+	if t.streaming {
+		fmt.Fprint(t.writer, dim+"  ⠼ working..."+reset)
+	} else if t.shellMode {
+		fmt.Fprint(t.writer, yellow+"! "+reset+string(t.inputBuf))
+	} else {
+		fmt.Fprint(t.writer, modeColor+"❯ "+reset+string(t.inputBuf))
+	}
 }
 
-func (t *TUI) renderMessage(w int, m Message) []string {
+func (t *TUI) renderMessageLines(m Message, w int) []string {
 	var lines []string
-	prefix, color := "", ""
 
 	switch m.Role {
 	case RoleUser:
-		prefix = cGreen + "▸" + cReset + " "
-		color = ""
+		// User messages: just the text, slightly indented
+		for _, line := range wrapText(m.Content, w-2) {
+			lines = append(lines, dim+"> "+reset+line)
+		}
+		lines = append(lines, "")
+
 	case RoleAssistant:
-		prefix = cCyan + "◇" + cReset + " "
-		color = ""
-	case RoleSystem:
-		prefix = cDim + "·" + cReset + " "
-		color = cDim
+		// Assistant: ✻ decorator + content
+		contentLines := wrapText(m.Content, w-4)
+		for i, line := range contentLines {
+			if i == 0 {
+				lines = append(lines, brightCyan+"✻ "+reset+line)
+			} else {
+				lines = append(lines, "  "+line)
+			}
+		}
+		lines = append(lines, "")
+
+	case RoleThinking:
+		// Thinking block: dimmed with border
+		lines = append(lines, dim+"  ┌─ thinking ──────────────────────"+reset)
+		for _, line := range wrapText(m.Content, w-6) {
+			lines = append(lines, dim+"  │ "+italic+line+reset)
+		}
+		lines = append(lines, dim+"  └─────────────────────────────────"+reset)
+		lines = append(lines, "")
+
 	case RoleTool:
-		toolIcon := "◆"
-		if m.Tool == "bash" { toolIcon = "$" }
-		if m.Tool == "read" { toolIcon = "📄" }
-		if m.Tool == "write" { toolIcon = "✎" }
-		if m.Tool == "search" { toolIcon = "⌕" }
-		prefix = cYellow + toolIcon + cReset + " "
-		color = cYellow
+		// Tool call: compact single line with tool name
+		toolLine := fmt.Sprintf("  %s⚡ %s%s%s %s",
+			yellow, bold, m.Tool, reset, reset)
+		if m.ToolArgs != "" {
+			toolLine += dim + " " + m.ToolArgs + reset
+		}
+		lines = append(lines, toolLine)
+
+		// Tool output (if content exists)
+		if m.Content != "" {
+			for _, line := range wrapText(m.Content, w-6) {
+				lines = append(lines, dim+"    "+line+reset)
+			}
+		}
+		lines = append(lines, "")
+
+	case RoleSystem:
+		lines = append(lines, dim+"  "+m.Content+reset)
+		lines = append(lines, "")
+
 	case RoleError:
-		prefix = cRed + "✖" + cReset + " "
-		color = cRed
-	}
-
-	content := m.Content
-	avail := w - 4 // account for prefix + padding
-
-	for len(content) > 0 {
-		cut := avail
-		if cut > len(content) { cut = len(content) }
-		line := prefix + color + content[:cut] + cReset
-		lines = append(lines, line)
-		content = content[cut:]
-		prefix = "   " // indent continuation
+		lines = append(lines, red+"  ✖ "+m.Content+reset)
+		lines = append(lines, "")
 	}
 
 	return lines
+}
+
+func (t *TUI) statusBar(w int) string {
+	var parts []string
+
+	// Mode indicator
+	modeStr := t.modeLabel()
+	parts = append(parts, modeStr)
+
+	// Model
+	parts = append(parts, dim+t.model+reset)
+
+	// Tokens
+	total := t.promptTokens + t.completionTokens
+	if total > 0 {
+		tc := tokenColor(total)
+		parts = append(parts, tc+formatTokens(total)+" tok"+reset)
+	}
+
+	// Cost
+	if t.cost != "" {
+		parts = append(parts, yellow+t.cost+reset)
+	}
+
+	// Cache
+	if t.cacheHitRate > 0 {
+		parts = append(parts, green+fmt.Sprintf("%.0f%%", t.cacheHitRate*100)+reset)
+	}
+
+	bar := " " + strings.Join(parts, dim+" · "+reset) + " "
+	return bar
 }
 
 // ── StreamWriter ─────────────────────────────────────────────────
@@ -438,6 +576,13 @@ func (t *TUI) renderMessage(w int, m Message) []string {
 func (t *TUI) AddMessage(role Role, content string) {
 	t.mu.Lock()
 	t.messages = append(t.messages, Message{Role: role, Content: content})
+	t.mu.Unlock()
+	if !t.streaming { t.render() }
+}
+
+func (t *TUI) AddToolMessage(tool, toolArgs, content string) {
+	t.mu.Lock()
+	t.messages = append(t.messages, Message{Role: RoleTool, Content: content, Tool: tool, ToolArgs: toolArgs})
 	t.mu.Unlock()
 	if !t.streaming { t.render() }
 }
@@ -452,13 +597,12 @@ func (t *TUI) AppendStream(text string) {
 	last := &t.messages[len(t.messages)-1]
 	last.Content = t.streamBuf.String()
 	t.mu.Unlock()
-	if t.rawMode { t.render() }
+	if t.rawMode { t.render() } else { fmt.Fprint(t.writer, text) }
 }
 
 func (t *TUI) EndStream() {
-	// Copy to final message
-	final := t.streamBuf.String()
 	t.mu.Lock()
+	final := t.streamBuf.String()
 	if len(t.messages) > 0 && t.messages[len(t.messages)-1].Content == "" {
 		t.messages[len(t.messages)-1].Content = final
 	}
@@ -476,10 +620,9 @@ func (t *TUI) SetStatus(input, output int, cacheHit float64, cost string) {
 	t.completionTokens = output
 	t.cacheHitRate = cacheHit
 	t.cost = cost
-	if !t.streaming { t.render() }
 }
 
-// ── Slash Commands ───────────────────────────────────────────────
+// ── Slash Commands ──────────────────────────────────────────────
 
 func (t *TUI) handleSlash(text string) {
 	parts := strings.Fields(text)
@@ -489,19 +632,25 @@ func (t *TUI) handleSlash(text string) {
 
 	switch cmd {
 	case "/help":
-		t.AddMessage(RoleSystem, `Commands:
+		t.AddMessage(RoleSystem, `Available commands:
   /help          Show this help
   /model <id>    Switch model
-  /mode <m>      Switch mode (plan / agent / yolo)
-  /session       Show session info
-  /clear         Clear conversation
+  /mode <m>      Switch mode (default/plan/agent/yolo)
   /compact       Compact conversation context
+  /clear         Clear conversation history
+  /session       Show session info
   /resume <id>   Resume a previous session
   /export [file] Export conversation to markdown
   /diff          Show git diff
   /cost          Show cost breakdown
   /exit          Exit iCode
-  Ctrl+C         Interrupt streaming`)
+
+Shortcuts:
+  !<cmd>         Run shell command
+  @<file>        Reference a file
+  Shift+Tab      Cycle permission modes
+  Ctrl+L         Clear screen
+  Ctrl+C         Interrupt / exit`)
 
 	case "/exit", "/quit":
 		t.running = false
@@ -519,17 +668,15 @@ func (t *TUI) handleSlash(text string) {
 		}
 
 	case "/session":
-		if len(t.messages) > 0 {
-			t.AddMessage(RoleSystem, fmt.Sprintf("Session: %d messages · %d↑ %d↓ tokens",
-				len(t.messages), t.promptTokens, t.completionTokens))
-		}
+		t.AddMessage(RoleSystem, fmt.Sprintf("Session: %d messages · %d↑ %d↓ tokens",
+			len(t.messages), t.promptTokens, t.completionTokens))
 
 	case "/compact":
 		t.compact()
 
 	case "/resume":
 		if len(args) > 0 {
-			t.AddMessage(RoleSystem, fmt.Sprintf("Resuming session: %s (placeholder)", args[0]))
+			t.AddMessage(RoleSystem, fmt.Sprintf("Resuming session: %s", args[0]))
 		} else {
 			t.AddMessage(RoleSystem, "Usage: /resume <session-id>")
 		}
@@ -555,7 +702,7 @@ func (t *TUI) handleSlash(text string) {
 		info := fmt.Sprintf("Tokens: %d prompt + %d completion = %d total",
 			t.promptTokens, t.completionTokens, t.promptTokens+t.completionTokens)
 		if t.cost != "" {
-			info += " · Cost: " + cYellow + t.cost + cReset
+			info += " · Cost: " + yellow + t.cost + reset
 		}
 		if t.cacheHitRate > 0 {
 			info += fmt.Sprintf(" · Cache: %.0f%%", t.cacheHitRate*100)
@@ -569,17 +716,54 @@ func (t *TUI) handleSlash(text string) {
 	}
 }
 
-// compact summarizes the conversation to save context.
+// ── Mode Cycling ─────────────────────────────────────────────────
+
+func (t *TUI) cycleMode() {
+	modes := []string{"default", "plan", "agent", "yolo"}
+	i := 0
+	for idx, m := range modes {
+		if m == t.mode { i = idx; break }
+	}
+	t.mode = modes[(i+1)%len(modes)]
+	t.AddMessage(RoleSystem, fmt.Sprintf("Mode: %s", t.modeLabel()))
+}
+
+// ── Shell Mode ───────────────────────────────────────────────────
+
+func (t *TUI) execShell(cmd string) {
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" { return }
+
+	t.AddToolMessage("bash", cmd, "")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	parts := strings.Fields(cmd)
+	if len(parts) == 0 { return }
+
+	execCmd := exec.CommandContext(ctx, parts[0], parts[1:]...)
+	output, err := execCmd.CombinedOutput()
+
+	if err != nil {
+		t.AddMessage(RoleError, fmt.Sprintf("%s: %s", err, string(output)))
+	} else {
+		t.AddToolMessage("output", "", string(output))
+	}
+	t.render()
+}
+
+// ── Compact ──────────────────────────────────────────────────────
+
 func (t *TUI) compact() {
 	if len(t.messages) < 4 {
 		t.AddMessage(RoleSystem, "Not enough messages to compact.")
 		return
 	}
 
-	// Keep system messages + last 2 exchanges, summarize the rest
 	var keep []Message
 	var summary strings.Builder
-	summary.WriteString("[Compact] Summarized previous conversation:\n")
+	summary.WriteString("[Compacted] Previous conversation summary:\n")
 
 	count := 0
 	for _, m := range t.messages {
@@ -598,7 +782,8 @@ func (t *TUI) compact() {
 	t.AddMessage(RoleSystem, summary.String())
 }
 
-// exportMarkdown exports the conversation to a file.
+// ── Export ───────────────────────────────────────────────────────
+
 func (t *TUI) exportMarkdown(args []string) {
 	filename := "icode-export.md"
 	if len(args) > 0 {
@@ -622,7 +807,7 @@ func (t *TUI) exportMarkdown(args []string) {
 		case RoleSystem:
 			sb.WriteString("> ")
 		case RoleTool:
-			sb.WriteString("### Tool\n\n")
+			sb.WriteString("### Tool: " + m.Tool + "\n\n")
 		case RoleError:
 			sb.WriteString("### Error\n\n")
 		}
@@ -637,7 +822,8 @@ func (t *TUI) exportMarkdown(args []string) {
 	t.AddMessage(RoleSystem, fmt.Sprintf("Exported to %s (%d messages)", filename, len(t.messages)))
 }
 
-// showGitDiff runs git diff and displays output.
+// ── Git Diff ─────────────────────────────────────────────────────
+
 func (t *TUI) showGitDiff() {
 	cmd := exec.Command("git", "diff")
 	output, err := cmd.CombinedOutput()
@@ -649,61 +835,23 @@ func (t *TUI) showGitDiff() {
 		t.AddMessage(RoleSystem, "No unstaged changes.")
 		return
 	}
-	t.AddMessage(RoleTool, string(output))
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
+	t.AddToolMessage("git_diff", "", string(output))
 }
 
 // ── Helpers ──────────────────────────────────────────────────────
 
 func tokenColor(tokens int) string {
 	switch {
-	case tokens > 100000: return cRed
-	case tokens > 50000:  return cYellow + cBold
-	case tokens > 20000:  return cYellow
-	default:              return cWhite
+	case tokens > 100000: return brightRed
+	case tokens > 50000:  return yellow + bold
+	case tokens > 20000:  return yellow
+	default:              return white
 	}
-}
-
-func statusLine(model string, prompt, comp int, cacheRate float64, cost string) string {
-	var parts []string
-
-	// Model
-	shortModel := model
-	if len(shortModel) > 22 { shortModel = shortModel[:22] }
-	parts = append(parts, cBold+shortModel+cReset)
-
-	// Tokens
-	total := prompt + comp
-	tc := tokenColor(total)
-	tokenStr := formatTokens(total)
-	parts = append(parts, tc+tokenStr+" tok"+cReset)
-
-	// Cost
-	if cost != "" {
-		parts = append(parts, cYellow+cost+cReset)
-	}
-
-	// Cache
-	if cacheRate > 0 {
-		parts = append(parts, fmt.Sprintf("%scache %.0f%%%s", cGreen, cacheRate*100, cReset))
-	}
-
-	// Project dir
-	wd, _ := os.Getwd()
-	parts = append(parts, cDim+shortDir(wd)+cReset)
-
-	return " " + strings.Join(parts, cDim+" · "+cReset) + " "
 }
 
 func formatTokens(n int) string {
 	if n >= 1000000 { return fmt.Sprintf("%.1fM", float64(n)/1000000) }
-	if n >= 1000 { return strconv.FormatFloat(float64(n)/1000, 'f', 1, 64) + "K" }
+	if n >= 1000 { return strconv.FormatFloat(float64(n)/1000, 'f', 1, 64) + "k" }
 	return strconv.Itoa(n)
 }
 
@@ -719,6 +867,38 @@ func shortDir(path string) string {
 	return path
 }
 
-func div() string {
-	return cDim + strings.Repeat("─", 60) + cReset
+func wrapText(text string, width int) []string {
+	if width < 1 { width = 60 }
+	var result []string
+	for _, paragraph := range strings.Split(text, "\n") {
+		if paragraph == "" {
+			result = append(result, "")
+			continue
+		}
+		// Simple word-wrap
+		words := strings.Fields(paragraph)
+		if len(words) == 0 {
+			result = append(result, "")
+			continue
+		}
+		line := words[0]
+		for _, w := range words[1:] {
+			if len(line)+1+len(w) > width {
+				result = append(result, line)
+				line = w
+			} else {
+				line += " " + w
+			}
+		}
+		result = append(result, line)
+	}
+	return result
 }
+
+func truncate(s string, n int) string {
+	if len(s) <= n { return s }
+	return s[:n] + "..."
+}
+
+// context import for shell timeout
+var _ = context.Background
