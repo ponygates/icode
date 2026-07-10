@@ -88,6 +88,7 @@ function startBackend() {
       backendProcess = spawn(backendPath, ['server', '--port', '0'], {
         cwd: path.dirname(backendPath),
         stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true, // suppress the backend's console window on Windows
       });
 
       backendProcess.stdout.on('data', (data) => {

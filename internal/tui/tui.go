@@ -428,10 +428,14 @@ func (t *TUI) render() {
 		H = 10
 	}
 
-	statusW := wrapText(status, W)
-	if len(statusW) == 0 {
-		statusW = []string{""}
+	// Bottom status bar: a single compact line, truncated to the terminal
+	// width so it stays a thin strip at the bottom (never wraps to several
+	// lines, which would eat vertical space).
+	statusLine := status
+	if visibleWidth(statusLine) > W {
+		statusLine = truncVisible(statusLine, W)
 	}
+	statusW := []string{statusLine}
 
 	// Overlays drawn above the input line.
 	acLines := t.autocompleteLines()
@@ -443,9 +447,9 @@ func (t *TUI) render() {
 		)
 	}
 
-	// Body height = rows between the top header/hrule and the bottom
-	// (status + input + overlays).
-	bodyH := H - 1 /*header*/ - 1 /*hrule*/ - len(statusW) - 1 /*input*/ - len(permLines) - len(acLines)
+	// Body height = rows between the top header/hrule and the bottom (status
+	// separator + status + input + overlays).
+	bodyH := H - 1 /*header*/ - 1 /*hrule*/ - 1 /*status sep*/ - len(statusW) - 1 /*input*/ - len(permLines) - len(acLines)
 	if bodyH < 3 {
 		bodyH = 3
 	}
@@ -500,6 +504,7 @@ func (t *TUI) render() {
 	out = append(out, t.headerLine())
 	out = append(out, t.hrule(W))
 	out = append(out, body...)
+	out = append(out, t.hrule(W)) // status bar separator
 	for _, sl := range statusW {
 		out = append(out, t.paint("dim", sl))
 	}
@@ -606,34 +611,37 @@ func (t *TUI) conversationLines(msgs []Message, streaming bool, streamContent st
 	return lines
 }
 
-// leftPaneLines builds the explorer pane (model, context, cost, folder, files).
+// leftPaneLines builds the explorer pane as a clean file tree: the current
+// working directory as the root, a divider, then top-level entries with
+// folder/file markers. The model/context/cost/mode info lives in the bottom
+// status bar instead, which keeps this pane uncluttered.
 func (t *TUI) leftPaneLines(paneW int) []string {
 	inner := paneW - 2
-	if inner < 4 {
-		inner = 4
+	if inner < 6 {
+		inner = 6
 	}
 	var L []string
-	title := func(s string) { L = append(L, t.paint("cyan", "◆ "+s)) }
-	title("模型")
-	L = append(L, "  "+truncate(t.model, inner))
-	title("上下文")
-	L = append(L, "  "+t.contextBar(inner))
-	title("费用")
-	cost := t.cost
-	if cost == "" {
-		cost = "$0.0000"
-	}
-	L = append(L, "  "+truncate(cost, inner))
-	title("目录")
+	// Panel title.
+	L = append(L, t.paint("cyan", "◆ 文件"))
+	// Current directory (tree root).
 	if cwd, err := os.Getwd(); err == nil {
 		L = append(L, "  "+truncate(shortDir(cwd), inner))
 	}
-	title("文件")
+	L = append(L, t.paint("dim", "  "+repeat("─", inner-2)))
+	// Entries as a compact tree.
+	if len(t.dirEntries) == 0 {
+		L = append(L, "  "+t.paint("dim", "(空目录)"))
+	}
 	for i, f := range t.dirEntries {
 		if i >= 14 {
 			break
 		}
-		L = append(L, "  "+truncate(f, inner))
+		name := strings.TrimSuffix(f, "/")
+		if strings.HasSuffix(f, "/") {
+			L = append(L, "  "+t.paint("blue", "▾")+" "+truncate(name, inner-3))
+		} else {
+			L = append(L, "  "+t.paint("dim", "•")+" "+truncate(name, inner-3))
+		}
 	}
 	return L
 }
@@ -688,25 +696,77 @@ func (t *TUI) thinkingBar() string {
 	return b.String()
 }
 
-// fit returns s padded (or truncated with an ellipsis) to exactly w display
-// columns, so split panes line up under the vertical frame line.
+// fit returns s padded (or truncated with an ellipsis) to exactly w *visible*
+// columns, so split panes line up under the vertical frame line. ANSI escape
+// sequences are measured as zero width so colored lines still align.
 func fit(s string, w int) string {
 	if w <= 0 {
 		return ""
 	}
-	if runeWidthStr(s) > w {
-		var b strings.Builder
-		cw := 0
-		for _, ch := range s {
-			if cw+runeWidth(ch) > w-1 {
-				break
-			}
-			b.WriteRune(ch)
-			cw += runeWidth(ch)
-		}
-		s = b.String() + "…"
+	if visibleWidth(s) > w {
+		return truncVisible(s, w)
 	}
-	return padEnd(s, w)
+	return s + strings.Repeat(" ", w-visibleWidth(s))
+}
+
+// visibleWidth returns the display width of s, ignoring ANSI escape sequences.
+func visibleWidth(s string) int {
+	w := 0
+	inEsc := false
+	for _, r := range s {
+		if inEsc {
+			if r == 'm' {
+				inEsc = false
+			}
+			continue
+		}
+		if r == '\x1b' {
+			inEsc = true
+			continue
+		}
+		w += runeWidth(r)
+	}
+	return w
+}
+
+// truncVisible truncates s to w visible columns, preserving ANSI sequences and
+// appending an ellipsis if anything was cut. A reset code is appended when a
+// colored run is cut, so color never bleeds past the frame line.
+func truncVisible(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	var b strings.Builder
+	cur := 0
+	inEsc := false
+	cut := false
+	for _, ch := range s {
+		if inEsc {
+			b.WriteRune(ch)
+			if ch == 'm' {
+				inEsc = false
+			}
+			continue
+		}
+		if ch == '\x1b' {
+			inEsc = true
+			b.WriteRune(ch)
+			continue
+		}
+		if cur >= w-1 {
+			cut = true
+			break
+		}
+		b.WriteRune(ch)
+		cur += runeWidth(ch)
+	}
+	if cut {
+		if inEsc {
+			b.WriteString("\x1b[0m") // close any open color before the ellipsis
+		}
+		b.WriteString("…")
+	}
+	return b.String()
 }
 
 // ensureAnim starts a lightweight ticker that repaints the screen while a

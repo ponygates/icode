@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>iCode CLI 新版界面预览</title>
+<style>
+  :root { --bg:#0d1117; --fg:#c9d1d9; --dim:#8b949e; --cyan:#39c5cf; --blue:#58a6ff; --yellow:#e3b341; --frame:#30363d; }
+  body { margin:0; background:#010409; color:var(--fg); font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; padding:28px; }
+  h1 { color:#fff; font-size:20px; }
+  h2 { color:var(--cyan); font-size:15px; margin-top:26px; }
+  p { line-height:1.6; color:var(--dim); max-width:820px; }
+  .term { background:var(--bg); border:1px solid var(--frame); border-radius:8px; padding:14px 16px; font-family:"Cascadia Code",Consolas,Menlo,monospace; font-size:13.5px; line-height:1.45; white-space:pre; overflow-x:auto; color:var(--fg); }
+  .cyan{color:var(--cyan)} .blue{color:var(--blue)} .yellow{color:var(--yellow)} .dim{color:var(--dim)} .frame{color:var(--frame)}
+  .badge { display:inline-block; background:#161b22; border:1px solid var(--frame); border-radius:6px; padding:3px 9px; font-size:12px; margin-right:8px; color:var(--dim); }
+  ul { color:var(--dim); line-height:1.7; max-width:820px; }
+  b { color:var(--fg); }
+  .ok { color:#3fb950; }
+</style>
+</head>
+<body>
+<h1>iCode CLI 新版界面预览</h1>
+<p>本次调整两处：<b>① 桌面启动隐藏后端 CMD 窗口</b>（已在 <code>main.js</code> 的 <code>spawn</code> 增加 <code>windowsHide: true</code>）；<b>② CLI 重新设计左侧面板 + 底部状态栏</b>。</p>
+
+<h2>布局示意（约 120×40 终端）</h2>
+<div class="term"><span class="cyan">◆ iCode</span> v0.2  <span class="frame">·</span>  ponygates/icode  <span class="frame">·</span>  mode: agent
+<span class="frame">──────────────────────────────────────────────────────────────────────────────────────────────────────────</span>
+<span class="cyan">◆ 文件</span>                  <span class="frame">│</span>  <span class="cyan">▸</span> 帮我写一个快速排序
+  ponygates/icode          <span class="frame">│</span>
+  <span class="frame">──────────────</span>              <span class="frame">│</span>  <span class="cyan">◆</span> 好的，下面是用 Go 实现的快速排序：
+  <span class="blue">▾</span> .git/                <span class="frame">│</span>
+  <span class="blue">▾</span> cmd/                 <span class="frame">│</span>  <span class="dim">```go</span>
+  <span class="blue">▾</span> internal/            <span class="frame">│</span>  func quicksort(a []int) {
+  <span class="blue">▾</span> desktop/             <span class="frame">│</span>      if len(a) &lt; 2 { return }
+  <span class="dim">•</span> main.go              <span class="frame">│</span>      mid := a[len(a)/2]
+  <span class="dim">•</span> go.mod               <span class="frame">│</span>      ...
+  <span class="dim">•</span> README.md            <span class="frame">│</span>  }
+  <span class="dim">•</span> LICENSE              <span class="frame">│</span>  <span class="dim">```</span>
+                           <span class="frame">│</span>
+                           <span class="frame">│</span>  <span class="yellow">» bash</span>  go build ./...
+                           <span class="frame">│</span>  <span class="dim"># 编译通过</span>
+                           <span class="frame">│</span>
+<span class="frame">──────────────────────────────────────────────────────────────────────────────────────────────────────────</span>
+<span class="dim">agent · deepseek-v4-flash · 11% ctx · $0.0123 · ↑1.2k ↓3.4k</span>
+<span class="cyan">❯</span> <span class="dim">（在此输入，底部仅此一行状态栏）</span></div>
+
+<h2>生成中（思考滑动条）</h2>
+<div class="term"><span class="frame">──────────────────────────────────────────────────────────────────────────────────────────────────────────</span>
+<span class="dim">agent · deepseek-v4-flash ·  ⏱ 3.2s [░░█░░░░░░░░░] 生成中</span>
+<span class="cyan">❯</span></div>
+
+<h2>关键改动</h2>
+<ul>
+  <li><b>左侧面板</b>：从「模型/上下文/费用/目录/文件」堆叠的文字墙，改为<b>清爽的文件树</b>——当前目录为根，分隔线，目录用 <span class="blue">▾</span>、文件用 <span class="dim">•</span>。不再和底部状态栏重复。</li>
+  <li><b>底部状态栏</b>：模型 / 上下文% / 费用 / Token 用量 全部收拢到<b>底部单独一行</b>（带上方分隔线），无论窗口多宽都只占一行，不再换行占用空间。</li>
+  <li><b>对齐修复</b>：<code>fit()</code> 改为<b>忽略 ANSI 颜色码</b>计算宽度，左右两栏的彩色行现在能严格对齐在 <span class="frame">│</span> 框线下方（之前因颜色码被算进宽度导致错位，是「左侧不好看」的主因）。</li>
+  <li><b>桌面 CMD 窗口</b>：后端进程以 <code>windowsHide: true</code> 启动，启动桌面版不再弹出黑框。</li>
+</ul>
+<p class="ok">✅ go build / go vet / 渲染冒烟测试 全部通过。</p>
+</body>
+</html>
