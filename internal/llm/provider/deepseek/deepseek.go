@@ -17,7 +17,7 @@ import (
 
 const (
 	ProviderName = "deepseek"
-	DefaultBase  = "https://api.deepseek.com/v1"
+	DefaultBase  = "https://api.deepseek.com"
 )
 
 // New creates a DeepSeek provider with prefix-cache support enabled.

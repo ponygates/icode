@@ -179,9 +179,13 @@ ipcMain.handle('session:delete', async (_, id) => {
 
 // Chat (via SSE)
 ipcMain.handle('chat:send', async (event, { sessionId, content }) => {
-  if (!backendPort) return { error: 'Backend not available' };
+  if (!backendPort) {
+    const errMsg = 'Backend not available — 后端未启动，无法发送消息';
+    if (mainWindow) mainWindow.webContents.send('chat:stream', { type: 'error', content: errMsg });
+    return { error: errMsg };
+  }
 
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const options = {
       hostname: '127.0.0.1', port: backendPort, path: '/api/chat',
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -191,27 +195,44 @@ ipcMain.handle('chat:send', async (event, { sessionId, content }) => {
       let buffer = '';
       res.on('data', (chunk) => {
         buffer += chunk;
-        // Parse SSE events and forward to renderer
+        // Parse SSE events and forward to renderer. Keep the trailing
+        // incomplete line (if any) for the next chunk so events that span
+        // multiple TCP packets are not lost.
         const lines = buffer.split('\n');
-        buffer = '';
+        buffer = lines.pop() || '';
         for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            try {
-              const event = JSON.parse(line.slice(6));
-              mainWindow.webContents.send('chat:stream', event);
-            } catch {}
-          }
+          if (!line.startsWith('data: ')) continue;
+          const payload = line.slice(6).trim();
+          if (!payload) continue;
+          try {
+            const evt = JSON.parse(payload);
+            if (mainWindow) mainWindow.webContents.send('chat:stream', evt);
+          } catch {}
         }
       });
-      res.on('end', resolve);
+      res.on('end', () => resolve({ ok: true }));
     });
     req.on('error', (e) => {
-      mainWindow.webContents.send('chat:stream', { type: 'error', content: e.message });
+      if (mainWindow) mainWindow.webContents.send('chat:stream', { type: 'error', content: e.message });
       resolve({ error: e.message });
     });
     req.write(JSON.stringify({ session_id: sessionId, content }));
     req.end();
   });
+});
+
+// API key management (desktop settings UI)
+ipcMain.handle('config:setApiKey', async (_, { provider, apiKey, apiBase }) => {
+  if (!backendReady) return { ok: false, error: 'Backend unavailable' };
+  try {
+    return await apiCall('PUT', '/api/config/key', { provider, api_key: apiKey, api_base: apiBase });
+  } catch (e) { return { ok: false, error: e.message }; }
+});
+
+ipcMain.handle('config:listKeys', async () => {
+  if (!backendReady) return { providers: [] };
+  try { return await apiCall('GET', '/api/config/keys'); }
+  catch { return { providers: [] }; }
 });
 
 ipcMain.handle('chat:stop', async (_, sessionId) => {

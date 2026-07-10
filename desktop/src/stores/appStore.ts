@@ -81,7 +81,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   setLanguage: (lang) => set({ language: lang }),
 
   models: defaultModels,
-  selectedModel: 'deepseek-chat',
+  selectedModel: 'deepseek-v4-flash',
   setModels: (models) => set({ models }),
   setSelectedModel: (id) => set({ selectedModel: id }),
 

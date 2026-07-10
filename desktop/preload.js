@@ -31,6 +31,9 @@ contextBridge.exposeInMainWorld('icode', {
   // Config
   getConfig: () => ipcRenderer.invoke('config:get'),
   setLanguage: (lang) => ipcRenderer.invoke('config:setLang', lang),
+  setApiKey: (provider, apiKey, apiBase) =>
+    ipcRenderer.invoke('config:setApiKey', { provider, apiKey, apiBase }),
+  listKeys: () => ipcRenderer.invoke('config:listKeys'),
 
   // Permission
   setPermissionMode: (mode) => ipcRenderer.invoke('permission:setMode', mode),

@@ -33,17 +33,17 @@ const ChatPage: React.FC = () => {
   const handleSend = useCallback(async () => {
     if (!input.trim() || !activeSessionId || isStreaming) return;
 
+    const text = input.trim();
     const userMsg: Message = {
       id: Date.now().toString(36),
       role: 'user',
-      content: input.trim(),
+      content: text,
       timestamp: Date.now(),
     };
     addMessage(activeSessionId, userMsg);
     setInput('');
     setIsStreaming(true);
 
-    // Send via backend API
     const assistantMsg: Message = {
       id: (Date.now() + 1).toString(36),
       role: 'assistant',
@@ -52,40 +52,12 @@ const ChatPage: React.FC = () => {
     };
     addMessage(activeSessionId, assistantMsg);
 
-    try {
-      if (window.icode && window.icode.sendMessage) {
-        let accumulated = '';
-        const unsub = window.icode.onChatStream((event: any) => {
-          if (event.type === 'EventText' || event.type === 'text') {
-            accumulated += event.content || event.Content || '';
-            updateMessage(activeSessionId, { ...assistantMsg, content: accumulated });
-          } else if (event.type === 'EventToolUse' || event.type === 'tool_use') {
-            const name = event.tool_call?.name || event.ToolCall?.Name || '';
-            accumulated += `\n[Tool: ${name}]`;
-            updateMessage(activeSessionId, { ...assistantMsg, content: accumulated });
-          } else if (event.type === 'EventDone' || event.type === 'done') {
-            setIsStreaming(false);
-            const usage = event.meta?.Usage || event.meta?.usage || {};
-            updateTokenUsage({
-              input: usage.PromptTokens || usage.prompt_tokens || 0,
-              output: usage.CompletionTokens || usage.completion_tokens || 0,
-              cacheHit: usage.CacheHitTokens || usage.cache_hit_tokens || 0,
-              cost: estimateCost(usage, currentModel),
-            });
-            unsub();
-          } else if (event.type === 'EventError' || event.type === 'error') {
-            accumulated += `\n[Error: ${event.content || event.Content}]`;
-            updateMessage(activeSessionId, { ...assistantMsg, content: accumulated });
-            setIsStreaming(false);
-            unsub();
-          }
-        });
-        await window.icode.sendMessage(activeSessionId, input.trim());
-      } else {
-        // Standalone mode — no backend, show demo response
-        const demoText = `iCode Desktop — standalone mode
+    // No backend bridge available — show a local demo reply.
+    if (!window.icode || !window.icode.sendMessage || !window.icode.onChatStream) {
+      simulateTyping(
+        `iCode Desktop — standalone mode
 
-No backend server detected. 
+No backend server detected.
 
 To connect to the AI backend:
 1. Build the Go server: \`go build -o icode.exe .\`
@@ -94,15 +66,69 @@ To connect to the AI backend:
 
 Or run in CLI mode: \`./icode.exe chat\`
 
-Currently selected: ${currentModel?.name || selectedModel} (${currentModel?.provider || 'unknown'})`;
-        simulateTyping(demoText, assistantMsg, activeSessionId, updateMessage, setIsStreaming);
+Currently selected: ${currentModel?.name || selectedModel} (${currentModel?.provider || 'unknown'})`,
+        assistantMsg,
+        activeSessionId,
+        updateMessage,
+        setIsStreaming,
+      );
+      return;
+    }
+
+    let accumulated = '';
+    let settled = false;
+
+    const unsub = window.icode.onChatStream((event: any) => {
+      if (settled) return;
+      const t = event?.type;
+      if (t === 'EventText' || t === 'text') {
+        accumulated += event.content || event.Content || '';
+        updateMessage(activeSessionId, { ...assistantMsg, content: accumulated });
+      } else if (t === 'EventToolUse' || t === 'tool_use') {
+        const name = event.tool_call?.name || event.ToolCall?.Name || 'tool';
+        accumulated += `\n[Tool: ${name}]`;
+        updateMessage(activeSessionId, { ...assistantMsg, content: accumulated });
+      } else if (t === 'EventDone' || t === 'done') {
+        const usage = event.meta?.usage || event.meta?.Usage || {};
+        updateTokenUsage({
+          input: usage.prompt_tokens || usage.PromptTokens || 0,
+          output: usage.completion_tokens || usage.CompletionTokens || 0,
+          cacheHit: usage.cache_hit_tokens || usage.CacheHitTokens || 0,
+          cost: estimateCost(usage, currentModel),
+        });
+        settled = true;
+        unsub();
+        setIsStreaming(false);
+      } else if (t === 'EventError' || t === 'error') {
+        settled = true;
+        unsub();
+        setIsStreaming(false);
+        const msg = event.content || event.Content || 'unknown error';
+        updateMessage(activeSessionId, {
+          ...assistantMsg,
+          content: (accumulated ? accumulated + '\n' : '') + '[Error] ' + msg,
+        });
       }
-    } catch (e) {
-      setIsStreaming(false);
-      updateMessage(activeSessionId, {
-        ...assistantMsg,
-        content: `[Error: ${e}]`,
-      });
+    });
+
+    try {
+      const res = await window.icode.sendMessage(activeSessionId, text);
+      if (!settled && res && res.error) {
+        settled = true;
+        unsub();
+        setIsStreaming(false);
+        updateMessage(activeSessionId, { ...assistantMsg, content: '[Error] ' + res.error });
+      }
+    } catch (e: any) {
+      if (!settled) {
+        settled = true;
+        unsub();
+        setIsStreaming(false);
+        updateMessage(activeSessionId, {
+          ...assistantMsg,
+          content: '[Error] ' + (e?.message || String(e)),
+        });
+      }
     }
   }, [input, activeSessionId, isStreaming, selectedModel, currentModel]);
 
