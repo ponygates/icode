@@ -428,16 +428,15 @@ func (t *TUI) render() {
 		H = 10
 	}
 
-	// Bottom status bar: a single compact line, truncated to the terminal
-	// width so it stays a thin strip at the bottom (never wraps to several
-	// lines, which would eat vertical space).
+	// Bottom status bar: a single compact line (model · tokens · context% ·
+	// cost · cache), truncated to the terminal width so it stays a thin strip.
 	statusLine := status
 	if visibleWidth(statusLine) > W {
 		statusLine = truncVisible(statusLine, W)
 	}
 	statusW := []string{statusLine}
 
-	// Overlays drawn above the input line.
+	// Overlays drawn above the input box.
 	acLines := t.autocompleteLines()
 	permLines := []string{}
 	if permPending {
@@ -447,66 +446,30 @@ func (t *TUI) render() {
 		)
 	}
 
+	// Input region: top border + content + bottom border + hint = 4 lines.
+	inputH := 4
+
 	// Body height = rows between the top header/hrule and the bottom (status
-	// separator + status + input + overlays).
-	bodyH := H - 1 /*header*/ - 1 /*hrule*/ - 1 /*status sep*/ - len(statusW) - 1 /*input*/ - len(permLines) - len(acLines)
+	// separator + status + input region + overlays). Claude Code is a single
+	// column, so the conversation takes the full terminal width.
+	bodyH := H - 1 /*header*/ - 1 /*hrule*/ - 1 /*status sep*/ - len(statusW) - inputH - len(permLines) - len(acLines)
 	if bodyH < 3 {
 		bodyH = 3
 	}
 
-	// Pane widths. The left explorer pane is hidden on narrow terminals so the
-	// conversation never gets squeezed.
-	paneW := 0
-	switch {
-	case W >= 110:
-		paneW = 36
-	case W >= 92:
-		paneW = 30
-	case W >= 76:
-		paneW = 24
-	case W >= 64:
-		paneW = 20
-	}
-	rightW := W - paneW
-	if paneW > 0 {
-		rightW -= 3 // " │ "
-	}
-	if rightW < 20 {
-		rightW = 20
+	conv := t.conversationLines(msgs, streaming, streamContent, W)
+	if len(conv) > bodyH {
+		conv = conv[len(conv)-bodyH:]
 	}
 
-	leftLines := t.leftPaneLines(paneW)
-	rightAll := t.conversationLines(msgs, streaming, streamContent, rightW)
-	if len(rightAll) > bodyH {
-		rightAll = rightAll[len(rightAll)-bodyH:]
-	}
-
-	// Compose the split body row-by-row so the vertical frame line stays
-	// continuous down the whole height.
-	var body []string
-	for i := 0; i < bodyH; i++ {
-		var left, right string
-		if i < len(leftLines) {
-			left = leftLines[i]
-		}
-		if i < len(rightAll) {
-			right = rightAll[i]
-		}
-		if paneW > 0 {
-			body = append(body, fit(left, paneW)+t.paint("dim", " │ ")+fit(right, rightW))
-		} else {
-			body = append(body, fit(right, rightW))
-		}
-	}
-
-	// Assemble the full screen (everything except the final input line).
+	// Assemble the full screen (everything except the final input box).
 	var out []string
 	out = append(out, t.headerLine())
 	out = append(out, t.hrule(W))
-	out = append(out, body...)
+	out = append(out, conv...)
 	out = append(out, t.hrule(W)) // status bar separator
 	for _, sl := range statusW {
-		out = append(out, t.paint("dim", sl))
+		out = append(out, sl)
 	}
 	for _, pl := range permLines {
 		out = append(out, pl)
@@ -528,17 +491,11 @@ func (t *TUI) render() {
 	for i := len(out); i < maxLines; i++ {
 		fmt.Fprintln(t.writer)
 	}
-	// Input line (no trailing newline).
-	inputLine := t.inputRenderFor(inputBuf)
-	fmt.Fprint(t.writer, inputLine)
-	runes := []rune(inputBuf)
-	if !streaming && cursor < len(runes) {
-		fmt.Fprintf(t.writer, "\x1b[%dD", len(runes)-cursor)
-	}
-	fmt.Fprint(t.writer, "\x1b[?25h") // show cursor at prompt
+	t.drawInputBox(W, inputBuf, cursor, streaming)
 }
 
-// headerLine renders the compact top bar: app name, working directory, mode.
+// headerLine renders the compact top bar: app name (Claude Code's ✻ glyph
+// style), working directory, and mode — the signature Claude Code header.
 func (t *TUI) headerLine() string {
 	cwd, _ := os.Getwd()
 	short := shortDir(cwd)
@@ -546,7 +503,7 @@ func (t *TUI) headerLine() string {
 	if modeLabel == "" {
 		modeLabel = ModeAgent
 	}
-	return t.paint("cyan", "◆ iCode") + " " + appVersionStr() +
+	return t.paint("magenta", "✻ iCode") + " " + appVersionStr() +
 		t.paint("dim", "  ·  ") + short +
 		t.paint("dim", "  ·  mode: ") + modeLabel
 }
@@ -556,28 +513,28 @@ func (t *TUI) messageLinesW(m Message, width int) []string {
 	case RoleThinking:
 		return thinkingLines(m.Content, width)
 	case RoleUser:
-		return wrapPrefixed("  ▸ ", "    ", m.Content, width)
+		return wrapPrefixed("  ❯ ", "    ", m.Content, width)
 	case RoleAssistant:
 		if t.rawMode {
-			return t.renderMarkdown(m.Content, "  ◆ ", "    ", width)
+			return t.renderMarkdown(m.Content, "", "  ", width)
 		}
-		return wrapPrefixed("  ◆ ", "    ", m.Content, width)
+		return wrapPrefixed("  ", "  ", m.Content, width)
 	case RoleSystem:
 		if t.rawMode {
-			return t.renderMarkdown(m.Content, "  ", "  ", width)
+			return t.renderMarkdown(m.Content, "", "  ", width)
 		}
 		return wrapPrefixed("  ", "  ", m.Content, width)
 	case RoleError:
 		return wrapPrefixed("  × ", "    ", m.Content, width)
 	case RoleTool:
 		var out []string
-		head := "  » " + m.Tool
+		head := "  ⏺ " + m.Tool
 		if m.ToolArgs != "" {
 			head += " " + truncate(m.ToolArgs, 60)
 		}
-		out = append(out, t.paint("yellow", head))
+		out = append(out, t.paint("cyan", head))
 		if m.Content != "" {
-			for _, l := range wrapPrefixed("    ", "    ", m.Content, width) {
+			for _, l := range wrapPrefixed("    ⎿ ", "      ", m.Content, width) {
 				out = append(out, t.paint("dim", l))
 			}
 		}
@@ -586,9 +543,9 @@ func (t *TUI) messageLinesW(m Message, width int) []string {
 	return wrapPrefixed("  ", "  ", m.Content, width)
 }
 
-// conversationLines builds the right pane: every message (+ the in-flight
-// stream), wrapped to the right-pane width. While the model is "thinking"
-// (stream started but no tokens yet) a sliding-bar indicator is shown.
+// conversationLines builds the full-width conversation: every message (+ the
+// in-flight stream). While the model is "thinking" (stream started but no
+// tokens yet) a sliding-bar indicator is shown — Claude Code's Glimmer motion.
 func (t *TUI) conversationLines(msgs []Message, streaming bool, streamContent string, width int) []string {
 	var lines []string
 	all := append([]Message{}, msgs...)
@@ -606,44 +563,9 @@ func (t *TUI) conversationLines(msgs []Message, streaming bool, streamContent st
 		lines = append(lines, t.messageLinesW(m, width)...)
 	}
 	if streaming && strings.TrimSpace(streamContent) == "" {
-		lines = append(lines, t.paint("dim", "  ◆ "+t.tstr("status.gen"))+"  "+t.thinkingBar())
+		lines = append(lines, t.paint("dim", "  "+t.tstr("status.gen"))+"  "+t.thinkingBar())
 	}
 	return lines
-}
-
-// leftPaneLines builds the explorer pane as a clean file tree: the current
-// working directory as the root, a divider, then top-level entries with
-// folder/file markers. The model/context/cost/mode info lives in the bottom
-// status bar instead, which keeps this pane uncluttered.
-func (t *TUI) leftPaneLines(paneW int) []string {
-	inner := paneW - 2
-	if inner < 6 {
-		inner = 6
-	}
-	var L []string
-	// Panel title.
-	L = append(L, t.paint("cyan", "◆ 文件"))
-	// Current directory (tree root).
-	if cwd, err := os.Getwd(); err == nil {
-		L = append(L, "  "+truncate(shortDir(cwd), inner))
-	}
-	L = append(L, t.paint("dim", "  "+repeat("─", inner-2)))
-	// Entries as a compact tree.
-	if len(t.dirEntries) == 0 {
-		L = append(L, "  "+t.paint("dim", "(空目录)"))
-	}
-	for i, f := range t.dirEntries {
-		if i >= 14 {
-			break
-		}
-		name := strings.TrimSuffix(f, "/")
-		if strings.HasSuffix(f, "/") {
-			L = append(L, "  "+t.paint("blue", "▾")+" "+truncate(name, inner-3))
-		} else {
-			L = append(L, "  "+t.paint("dim", "•")+" "+truncate(name, inner-3))
-		}
-	}
-	return L
 }
 
 // contextBar renders a "NN% ▓▓░░" usage meter of width w (display columns).
@@ -831,37 +753,42 @@ func listCwd() []string {
 	return names
 }
 
+// statusLine renders the Claude Code-style bottom status bar: a colored model
+// dot, provider, token usage, context %, cache hit rate, and running cost.
+// All coloring is applied here (the renderer appends the line verbatim, so no
+// nested ANSI wrapping occurs). During generation it shows the elapsed time
+// and the sliding thinking bar.
 func (t *TUI) statusLine() string {
+	d := func(s string) string { return t.paint("dim", s) }
 	var parts []string
-	parts = append(parts, t.mode)
+	parts = append(parts, t.paint("green", "●")+" "+t.model)
 	if t.provider != "" {
-		parts = append(parts, t.provider)
+		parts = append(parts, d(t.provider))
 	}
-	parts = append(parts, t.model)
 	if t.promptTokens > 0 || t.completionTokens > 0 {
 		parts = append(parts,
-			"↑"+formatTokens(t.promptTokens)+" ↓"+formatTokens(t.completionTokens))
+			d("↑"+formatTokens(t.promptTokens)+" ↓"+formatTokens(t.completionTokens)))
 	}
 	if t.contextWindow > 0 && t.contextTokens > 0 {
 		pct := t.contextTokens * 100 / t.contextWindow
 		if pct > 100 {
 			pct = 100
 		}
-		parts = append(parts, fmt.Sprintf("%d%% ctx", pct))
+		parts = append(parts, d(fmt.Sprintf("%d%% ctx", pct)))
 	}
 	if t.cacheHitRate > 0 {
-		parts = append(parts, fmt.Sprintf("%.0f%% cache", t.cacheHitRate*100))
+		parts = append(parts, d(fmt.Sprintf("%.0f%% cache", t.cacheHitRate*100)))
 	}
 	if t.cost != "" {
-		parts = append(parts, t.cost)
+		parts = append(parts, d(t.cost))
 	}
 	if t.streaming {
 		if !t.turnStart.IsZero() {
-			parts = append(parts, "⏱ "+formatDuration(time.Since(t.turnStart)))
+			parts = append(parts, d("⏱ "+formatDuration(time.Since(t.turnStart))))
 		}
-		parts = append(parts, t.thinkingBar()+" "+t.tstr("status.gen"))
+		parts = append(parts, d(t.thinkingBar()+" "+t.tstr("status.gen")))
 	}
-	return strings.Join(parts, " · ")
+	return strings.Join(parts, d(" · "))
 }
 
 // formatDuration renders a duration compactly: "3.2s" or "1m04s".
@@ -875,20 +802,76 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%dm%02ds", m, s)
 }
 
-func (t *TUI) inputRenderFor(inputBuf string) string {
-	prefix := "❯ "
-	switch t.mode {
+// modeColor returns the ANSI color name for the current mode indicator,
+// matching Claude Code's mode coloring (plan=blue, yolo=red, …).
+func modeColor(m Mode) string {
+	switch m {
 	case ModePlan:
-		prefix = t.paint("blue", "plan") + " ❯ "
+		return "blue"
 	case ModeYOLO:
-		prefix = t.paint("red", "yolo") + " ❯ "
+		return "red"
 	case ModeDefault:
-		prefix = t.paint("dim", "default") + " ❯ "
+		return "dim"
+	default:
+		return "cyan"
 	}
-	if t.streaming {
-		return prefix
+}
+
+// drawInputBox renders the Claude Code-style bordered prompt at the bottom of
+// the screen and positions the cursor on the content line. The box is:
+//
+//	╭────────────────────────────────────╮
+//	│ ❯ <input>                           │
+//	╰────────────────────────────────────╯
+//	  esc to cancel · tab to complete · ↵ to send
+func (t *TUI) drawInputBox(W int, inputBuf string, cursor int, streaming bool) {
+	barLen := W - 2
+	if barLen < 0 {
+		barLen = 0
 	}
-	return prefix + inputBuf
+	bar := repeat("─", barLen)
+	top := "╭" + bar + "╮"
+	bot := "╰" + bar + "╯"
+
+	prefix := t.paint(modeColor(t.mode), "❯") + " "
+	innerW := W - 6 // "│ " + "❯ " + content + " │"
+	if innerW < 4 {
+		innerW = 4
+	}
+	content := inputBuf
+	if visibleWidth(content) > innerW {
+		content = truncVisible(content, innerW)
+	}
+	mid := "│ " + prefix + content + " │"
+	mid = fit(mid, W)
+
+	hint := t.paint("dim", "  esc to cancel · tab to complete · ↵ to send")
+	if streaming {
+		hint = t.paint("dim", "  esc to interrupt")
+	}
+
+	fmt.Fprintln(t.writer, top)
+	fmt.Fprintln(t.writer, mid)
+	fmt.Fprintln(t.writer, bot)
+	fmt.Fprintln(t.writer, hint)
+
+	// Move the cursor up onto the content line (the 2nd of the 4 input lines)
+	// and to the column just after the typed prefix.
+	fmt.Fprintf(t.writer, "\x1b[3A")
+	vw := visibleWidth(inputBuf[:cursor])
+	if vw > innerW {
+		vw = innerW
+	}
+	col := 5 + vw // "│ "(2) + "❯ "(2) → content starts at column 5
+	if col > W {
+		col = W
+	}
+	fmt.Fprintf(t.writer, "\x1b[%dG", col)
+	if streaming {
+		fmt.Fprint(t.writer, "\x1b[?25l")
+	} else {
+		fmt.Fprint(t.writer, "\x1b[?25h")
+	}
 }
 
 // ── Line mode (fallback) ─────────────────────────────────────────

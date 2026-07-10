@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>iCode CLI · Claude Code 风格（单栏）</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #0b0e14; color: #c9d1d9;
+         font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 32px 20px 64px; }
+  h1 { font-size: 22px; font-weight: 700; color: #e6edf3; }
+  p.sub { color: #8b949e; margin-top: 4px; }
+  .term { background: #010409; border: 1px solid #30363d; border-radius: 10px;
+          padding: 16px 18px; margin: 22px 0; box-shadow: 0 8px 30px rgba(0,0,0,.4);
+          font-family: "SFMono-Regular", "Cascadia Code", Consolas, "Liberation Mono", monospace;
+          font-size: 13.5px; line-height: 1.55; white-space: pre; overflow-x: auto; }
+  .mag { color: #d2a8ff; }      /* ✻ iCode */
+  .dim { color: #6e7681; }      /* separators / hints */
+  .cyan { color: #56d4dd; }     /* tool names */
+  .green { color: #3fb950; }    /* model dot */
+  .blue { color: #58a6ff; }     /* plan mode */
+  .yellow { color: #d29922; }   /* perm / warnings */
+  .bar { color: #8b949e; }
+  .hl { background: #161b22; padding: 2px 6px; border-radius: 6px; color: #8b949e; }
+  ul { color: #c9d1d9; line-height: 1.8; }
+  code { background: #161b22; padding: 1px 6px; border-radius: 5px; color: #79c0ff; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>iCode CLI · 严格对标 Claude Code（单栏布局）</h1>
+  <p class="sub">经核实：真实的 Claude Code 主对话区是 <b>单列滚动</b>，左右 <code>│</code> 分栏仅用于外部 agent-team 的 tmux/iTerm 窗格。
+     因此"照搬 Claude Code"即还原其真实形态：单列对话 + 底部状态条 + 边框输入框。</p>
+
+  <div class="term"><span class="mag">✻ iCode</span> v0.2  <span class="dim">·</span>  ponygates/icode  <span class="dim">·</span>  mode: agent
+<span class="dim">──────────────────────────────────────────────────────────────────────────────────────────────────────────</span>
+  <span class="dim">❯</span> 帮我用 Go 写一个快速排序
+
+  <span class="cyan">⏺</span> bash <span class="dim">go build ./...</span>
+      <span class="dim">⎿  # github.com/ponygates/icode</span>
+      <span class="dim">     ok  github.com/ponygates/icode/internal/tui</span>
+
+  <span class="mag">◆</span> 好的，下面是 Go 实现的快速排序：
+
+  <span class="dim">┌</span><span class="dim">──────────────────────────────</span><span class="dim">┐</span>
+  <span class="dim">│</span> <span class="cyan">func</span> quicksort(a []<span class="cyan">int</span>) {
+  <span class="dim">│</span>   <span class="cyan">if</span> len(a) &lt; 2 { <span class="cyan">return</span> }
+  <span class="dim">│</span>   pivot := a[len(a)/2]
+  <span class="dim">│</span>   ...
+  <span class="dim">└</span><span class="dim">──────────────────────────────</span><span class="dim">┘</span>
+
+  <span class="dim">──────────────────────────────────────────────────────────────────────────────────────────────────────────</span>
+<span class="green">●</span> deepseek-v4-flash  <span class="dim">·</span> deepseek  <span class="dim">·</span> ↑12.3k ↓2.1k  <span class="dim">·</span> 11% ctx  <span class="dim">·</span> $0.0123
+<span class="dim">╭</span><span class="dim">────────────────────────────────────────────────────────────────────────────────────────────────────────</span><span class="dim">╮</span>
+<span class="dim">│</span> <span class="blue">❯</span> <span class="dim">_</span>                                                                                  <span class="dim">│</span>
+<span class="dim">╰</span><span class="dim">────────────────────────────────────────────────────────────────────────────────────────────────────────</span><span class="dim">╯</span>
+  <span class="dim">esc to cancel · tab to complete · ↵ to send</span></div>
+
+  <p class="sub" style="margin-top:18px">生成中（思考滑动条 Glimmer 动画）：</p>
+  <div class="term"><span class="green">●</span> deepseek-v4-flash  <span class="dim">·</span> 11% ctx  <span class="dim">·</span> ⏱ 3.2s  <span class="bar">[░░█░░░░░░░░░]</span> <span class="dim">生成中</span>
+<span class="dim">╭</span><span class="dim">────────────────────────────────────────────────────────────────────────────────────────────────────────</span><span class="dim">╮</span>
+<span class="dim">│</span> <span class="blue">❯</span>                                                                                     <span class="dim">│</span>
+<span class="dim">╰</span><span class="dim">────────────────────────────────────────────────────────────────────────────────────────────────────────</span><span class="dim">╯</span>
+  <span class="dim">esc to interrupt</span></div>
+
+  <h1 style="font-size:18px;margin-top:34px">还原的 Claude Code 要素</h1>
+  <ul>
+    <li><b>顶部头栏</b>：<code>✻ iCode</code> 品牌字形 + 当前目录 + 模式（对标 Claude Code 的 <code>✻</code> 标志）。</li>
+    <li><b>单列对话</b>：用户 <code>❯</code>、助手直出 Markdown、工具调用 <code>⏺ Tool</code> + 结果 <code>⎿ …</code>（与 Claude Code 一致）。</li>
+    <li><b>底部状态条</b>：<code>● 模型 · provider · ↑↓ tokens · NN% ctx · 费用 · 缓存率</code>——上下文/文件夹/大模型/费用等必要信息全部在内。</li>
+    <li><b>边框输入框</b>：<code>╭─╮ / │ ❯ _ │ / ╰─╯</code> + 提示行 <code>esc to cancel · tab to complete · ↵ to send</code>。</li>
+    <li><b>思考滑动条</b>：生成期间 <code>[░░█░░░]</code> 左右滑动（Claude Code 的 Glimmer 动效），由 110ms ticker 驱动。</li>
+    <li><b>权限提示 / 命令补全</b>：交互式 <code>[y]/[a]/[n]</code> 审批框 + 斜杠命令面板保持不变。</li>
+  </ul>
+  <p class="sub">构建 / vet / 渲染冒烟测试均已通过。</p>
+</div>
+</body>
+</html>

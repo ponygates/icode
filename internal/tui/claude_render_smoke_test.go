@@ -7,10 +7,10 @@ import (
 	"time"
 )
 
-// TestClaudeStyleRender verifies the new split-pane layout (left explorer │
-// right conversation), the compact header, the bottom status bar, and the
-// sliding thinking bar all render without panicking and contain the expected
-// structural markers.
+// TestClaudeStyleRender verifies the Claude Code-style single-column layout:
+// the compact header (✻ iCode), the bottom status bar (model · ctx · cost),
+// the bordered input box, and the sliding thinking bar all render without
+// panicking and contain the expected structural markers.
 func TestClaudeStyleRender(t *testing.T) {
 	tui := New(Config{Model: "deepseek-v4-flash", Provider: "deepseek", Lang: "zh-CN", Theme: "dark"})
 
@@ -21,8 +21,7 @@ func TestClaudeStyleRender(t *testing.T) {
 	tui.width = 120
 	tui.height = 40
 
-	// Populate explorer + conversation state.
-	tui.dirEntries = []string{"main.go", "tui.go", "go.mod", "README.md"}
+	// Populate conversation + status state.
 	tui.model = "deepseek-v4-flash"
 	tui.provider = "deepseek"
 	tui.cost = "$0.0123"
@@ -34,20 +33,23 @@ func TestClaudeStyleRender(t *testing.T) {
 		{Role: RoleTool, Tool: "bash", ToolArgs: "go build ./..."},
 	}
 
-	// Case 1: idle (not streaming) — should render conversation + panes.
+	// Case 1: idle (not streaming) — should render conversation + status + box.
 	tui.render()
 	out := buf.String()
-	if !strings.Contains(out, "│") {
-		t.Fatalf("expected vertical frame divider '│' in output:\n%s", out)
-	}
-	if !strings.Contains(out, "◆ iCode") {
-		t.Fatalf("expected compact header '◆ iCode' in output:\n%s", out)
+	if !strings.Contains(out, "✻ iCode") {
+		t.Fatalf("expected Claude Code-style header '✻ iCode' in output:\n%s", out)
 	}
 	if !strings.Contains(out, "ctx") {
 		t.Fatalf("expected context %%-meter ('ctx') in status bar:\n%s", out)
 	}
 	if !strings.Contains(out, "$0.0123") {
-		t.Fatalf("expected cost in status/explorer:\n%s", out)
+		t.Fatalf("expected cost in status bar:\n%s", out)
+	}
+	if !strings.Contains(out, "╭") || !strings.Contains(out, "╰") {
+		t.Fatalf("expected bordered input box (╭/╰) in output:\n%s", out)
+	}
+	if !strings.Contains(out, "●") {
+		t.Fatalf("expected model status dot '●' in output:\n%s", out)
 	}
 
 	// Case 2: streaming with no tokens yet — should show the sliding thinking bar.
