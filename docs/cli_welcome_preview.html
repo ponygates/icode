@@ -28,30 +28,39 @@
 <body>
 <div class="wrap">
   <h1>iCode CLI · 启动欢迎屏（仿 Claude Code）</h1>
-  <p class="note">本次更新的三处改进：① 回复时不再整屏清空重绘 → 消除窗口闪动；② 后台轮询终端尺寸，窗口缩放即时自适应；③ 启动时展示 ✻ Logo + 模型/目录/提示信息。</p>
+  <p class="note">本次更新：ASCII 大 Logo 启动屏 + 可关闭 + 完整欢迎文案 + 本地化输入框提示语，并延续「回复不闪动 / 窗口自适应」。</p>
 
   <div class="term">
     <div class="line"><span class="mag">✻</span> <span class="bold">iCode</span> <span class="dim">v0.2  ·  icode  ·  mode: agent</span></div>
     <div class="line hr">──────────────────────────────────────────────────────────────</div>
-    <div class="line">  <span class="mag">✻</span>  <span class="bold">Welcome to iCode</span></div>
+    <div class="line">   <span class="mag">IIII CCCC OOOO DDDD EEEE</span></div>
+    <div class="line">    <span class="mag">I I C    O   O D   D E</span></div>
+    <div class="line">    <span class="mag">I I C    O   O D   D EEE</span></div>
+    <div class="line">    <span class="mag">I I C    O   O D   D E</span></div>
+    <div class="line">   <span class="mag">IIII CCCC OOOO DDDD EEEE</span></div>
     <div class="line"> </div>
-    <div class="line">    <span class="dim">Model:    </span>deepseek-v4-flash<span class="dim">    Provider: </span>deepseek</div>
-    <div class="line">    <span class="dim">cwd:      </span>ponygates/icode</div>
+    <div class="line">   <span class="mag">✻</span>  <span class="bold">Welcome to iCode</span>  <span class="dim">— 你的 AI 编程伙伴</span></div>
     <div class="line"> </div>
-    <div class="line">    <span class="dim">输入你的需求开始对话，或 /help 查看全部命令 · Tab 补全 · ↑↓ 历史</span></div>
+    <div class="line">     <span class="dim">Model:    </span>deepseek-v4-flash<span class="dim">    Provider: </span>deepseek</div>
+    <div class="line">     <span class="dim">cwd:      </span>ponygates/icode</div>
+    <div class="line"> </div>
+    <div class="line">     <span class="dim">输入你的需求开始对话，或 /help 查看全部命令 · Tab 补全 · ↑↓ 历史</span></div>
+    <div class="line">     <span class="dim">按 Esc 或回车关闭欢迎屏 · 输入即开始</span></div>
     <div class="line hr">──────────────────────────────────────────────────────────────</div>
     <div class="line"><span class="cyan">●</span> deepseek-v4-flash <span class="dim">· deepseek · ↑0 ↓0 · 0% ctx · 0% cache</span></div>
     <div class="line box">╭────────────────────────────────────────────────────────────╮</div>
     <div class="line box">│</div> <span class="input-prefix">❯</span> <span class="line">                                             </span><span class="box">│</span></div>
     <div class="line box">╰────────────────────────────────────────────────────────────╯</div>
-    <div class="line hint">  esc to cancel · tab to complete · ↵ to send</div>
+    <div class="line hint">  esc 取消 · tab 补全 · ↵ 发送</div>
   </div>
 
-  <h2>修复说明</h2>
+  <h2>本次更新</h2>
   <ul>
-    <li><b>闪动</b>：渲染从 <code>\x1b[2J\x1b[H</code>（整屏清空）改为「按绝对行号定位 + 逐行 <code>\x1b[K</code> 原地擦写」，旧帧不会闪白，打字与流式回复平滑无闪烁。</li>
-    <li><b>自适应</b>：新增 <code>watchResize()</code> 后台每 150ms 读取终端尺寸，缩放窗口时立即按新宽高重新排版（中文按宽度 2 折行），Windows 也生效（不依赖 SIGWINCH）。</li>
-    <li><b>启动屏</b>：空对话时顶部展示 <span class="mag">✻</span> <b>Welcome to iCode</b> + 当前模型/Provider/工作目录 + 操作提示，发送首条消息后自然上滚消失。</li>
+    <li><b>ASCII 大 Logo</b>：启动屏顶部展示大字 <span class="mag">iCode</span> 字标（纯 ASCII 盒线，任何 UTF-8 终端可读），窄屏（&lt;30 列）自动降级为单行文字。</li>
+    <li><b>可关闭</b>：欢迎屏默认显示，<span class="bold">Esc / 回车</span> 或<b>输入第一个字符</b>即关闭；<code>/welcome</code> 斜杠命令可重新打开（空对话时）。</li>
+    <li><b>欢迎文案</b>：<span class="bold">Welcome to iCode — 你的 AI 编程伙伴</span> + 当前模型 / Provider / 工作目录 + 操作提示。</li>
+    <li><b>输入框提示语本地化</b>：底部提示改为 <code>esc 取消 · tab 补全 · ↵ 发送</code>（生成中显示 <code>esc 中断生成</code>），中/繁/英三语齐全。</li>
+    <li><b>延续此前修复</b>：回复不再闪动（逐行原位擦写）、窗口缩放即时自适应。</li>
   </ul>
 </div>
 </body>

@@ -68,3 +68,43 @@ func TestClaudeStyleRender(t *testing.T) {
 		t.Fatalf("expected '生成中' thinking label:\n%s", out2)
 	}
 }
+
+// TestWelcomeScreen verifies the Claude Code-style startup banner: the big
+// ASCII iCode logo plus the model/dir info, and that dismissWelcome() hides it.
+func TestWelcomeScreen(t *testing.T) {
+	tui := New(Config{Model: "deepseek-v4-flash", Provider: "deepseek", Lang: "zh-CN", Theme: "dark"})
+	var buf bytes.Buffer
+	tui.writer = &buf
+	tui.rawMode = true
+	tui.color = true
+	tui.width = 120
+	tui.height = 40
+	tui.model = "deepseek-v4-flash"
+	tui.provider = "deepseek"
+	tui.welcomeVisible = true
+	tui.messages = nil // fresh session
+
+	// Case 1: banner should be visible on a fresh session.
+	tui.render()
+	out := buf.String()
+	if !strings.Contains(out, "IIII CCCC OOOO DDDD EEEE") {
+		t.Fatalf("expected big ASCII iCode logo in welcome screen:\n%s", out)
+	}
+	if !strings.Contains(out, "Welcome to iCode") {
+		t.Fatalf("expected 'Welcome to iCode' tagline in welcome screen:\n%s", out)
+	}
+	if !strings.Contains(out, "Model:") || !strings.Contains(out, "cwd:") {
+		t.Fatalf("expected model/cwd info in welcome screen:\n%s", out)
+	}
+
+	// Case 2: dismiss should hide the banner.
+	buf.Reset()
+	if !tui.dismissWelcome() {
+		t.Fatalf("dismissWelcome should have returned true when banner was visible")
+	}
+	tui.render()
+	out2 := buf.String()
+	if strings.Contains(out2, "IIII CCCC OOOO DDDD EEEE") {
+		t.Fatalf("expected welcome logo to be hidden after dismiss:\n%s", out2)
+	}
+}

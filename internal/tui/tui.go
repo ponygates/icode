@@ -148,6 +148,11 @@ type TUI struct {
 	// pending permission prompt (agent mode, interactive approval)
 	permPending bool
 	permPrompt  string
+
+	// welcomeVisible controls the Claude Code-style startup banner (big ASCII
+	// logo + model/dir info). Shown on a fresh session until dismissed via
+	// Esc/Enter, the first keystroke, or the /welcome command.
+	welcomeVisible bool
 }
 
 // New creates a TUI instance.
@@ -169,6 +174,8 @@ func New(cfg Config) *TUI {
 		height:     24,
 		histIdx:    -1,
 		dirEntries: listCwd(),
+
+		welcomeVisible: true, // show the startup banner on a fresh session
 	}
 }
 
@@ -249,6 +256,22 @@ func (t *TUI) watchResize() {
 	}
 }
 
+// dismissWelcome hides the startup banner if it is currently showing and the
+// input line is empty (so an in-progress command is never discarded). It
+// returns true when it closed the banner.
+func (t *TUI) dismissWelcome() bool {
+	t.mu.Lock()
+	visible := t.welcomeVisible && t.inputBuf == ""
+	if visible {
+		t.welcomeVisible = false
+	}
+	t.mu.Unlock()
+	if visible {
+		t.render()
+	}
+	return visible
+}
+
 // handleKey processes a single input rune in raw mode.
 // Returns false to signal the loop should exit.
 func (t *TUI) handleKey(r rune) bool {
@@ -304,10 +327,13 @@ func (t *TUI) handleKey(r rune) bool {
 			return true
 		}
 		return true
-	case 0x1b: // Esc — dismiss suggestions
+	case 0x1b: // Esc — dismiss suggestions / welcome screen
 		if t.acOpen {
 			t.acOpen = false
 			t.acItems = nil
+			return true
+		}
+		if t.dismissWelcome() {
 			return true
 		}
 		return true
@@ -316,6 +342,11 @@ func (t *TUI) handleKey(r rune) bool {
 		t.inputBuf = ""
 		t.cursor = 0
 		if text == "" {
+			// Empty submit: if the welcome banner is up, dismiss it so the
+			// user lands on a clean prompt.
+			if t.dismissWelcome() {
+				return true
+			}
 			return true
 		}
 		t.pushHistory(text)
@@ -333,6 +364,11 @@ func (t *TUI) handleKey(r rune) bool {
 	}
 
 	// Printable rune (incl. Chinese) — insert at cursor.
+	// The first keystroke also clears the welcome banner so typing feels
+	// immediate (Claude Code does the same).
+	if t.dismissWelcome() {
+		// banner dismissed; fall through to insert the rune into a clean prompt
+	}
 	runes := []rune(t.inputBuf)
 	if t.cursor >= len(runes) {
 		t.inputBuf += string(r)
@@ -443,6 +479,7 @@ func (t *TUI) render() {
 	status := t.statusLine()
 	permPending := t.permPending
 	permPrompt := t.permPrompt
+	welcomeVisible := t.welcomeVisible
 	W := t.width
 	H := t.height
 	t.mu.Unlock()
@@ -497,10 +534,17 @@ func (t *TUI) render() {
 
 	conv := t.conversationLines(msgs, streaming, streamContent, W)
 	if len(msgs) == 0 && !streaming {
-		conv = append(t.welcomeLines(W), conv...)
+		if welcomeVisible {
+			conv = append(t.welcomeLines(W), conv...)
+		}
 	}
 	if len(conv) > bodyH {
-		conv = conv[len(conv)-bodyH:]
+		if welcomeVisible && len(msgs) == 0 && !streaming {
+			// Keep the top of the banner (the big logo) when it overflows.
+			conv = conv[:bodyH]
+		} else {
+			conv = conv[len(conv)-bodyH:]
+		}
 	}
 
 	// Assemble the full screen (everything except the final input box).
@@ -558,23 +602,42 @@ func (t *TUI) headerLine() string {
 		t.paint("dim", "  ·  mode: ") + modeLabel
 }
 
+// icodeAsciiLogo is the big wordmark shown on the startup screen. Each row is
+// 4-char-per-letter block joined by a single space; it stays legible on any
+// UTF-8 terminal because it uses only ASCII box glyphs.
+var icodeAsciiLogo = []string{
+	"IIII CCCC OOOO DDDD EEEE",
+	" I I C    O   O D   D E",
+	" I I C    O   O D   D EEE",
+	" I I C    O   O D   D E",
+	"IIII CCCC OOOO DDDD EEEE",
+}
+
 // welcomeLines renders the Claude Code-style startup screen shown in the
-// conversation area before the first message: the ✻ logo, the active
-// model/provider, the working directory, and a hint line. Once the user sends
-// a message it scrolls away like any other turn.
+// conversation area before the first message: a big ASCII ✻/iCode logo, a
+// tagline, the active model/provider, the working directory, and a hint line
+// explaining how to dismiss it. It disappears on the first user action.
 func (t *TUI) welcomeLines(width int) []string {
 	var out []string
-	out = append(out, "  "+t.paint("magenta", "✻")+"  "+t.paint("bold", "Welcome to iCode"))
+	if width >= 30 {
+		for _, ln := range icodeAsciiLogo {
+			out = append(out, "   "+t.paint("magenta", ln))
+		}
+		out = append(out, "")
+	}
+	// Tagline with the brand sparkle.
+	out = append(out, "   "+t.paint("magenta", "✻")+"  "+t.paint("bold", "Welcome to iCode")+"  "+t.paint("dim", "— "+t.tstr("welcome.tagline")))
 	out = append(out, "")
 	cwd, _ := os.Getwd()
-	info := "    " + t.paint("dim", "Model:    ") + t.model
+	info := "     " + t.paint("dim", "Model:    ") + t.model
 	if t.provider != "" {
 		info += t.paint("dim", "    Provider: ") + t.provider
 	}
 	out = append(out, info)
-	out = append(out, "    "+t.paint("dim", "cwd:      ")+shortDir(cwd))
+	out = append(out, "     "+t.paint("dim", "cwd:      ")+shortDir(cwd))
 	out = append(out, "")
-	out = append(out, "    "+t.paint("dim", t.tstr("welcome.hint")))
+	out = append(out, "     "+t.paint("dim", t.tstr("welcome.hint")))
+	out = append(out, "     "+t.paint("dim", t.tstr("welcome.close")))
 	return out
 }
 
@@ -927,9 +990,9 @@ func (t *TUI) drawInputBox(W, H int, inputBuf string, cursor int, streaming bool
 	mid := "│ " + prefix + content + " │"
 	mid = fit(mid, W)
 
-	hint := t.paint("dim", "  esc to cancel · tab to complete · ↵ to send")
+	hint := t.paint("dim", "  "+t.tstr("input.hint"))
 	if streaming {
-		hint = t.paint("dim", "  esc to interrupt")
+		hint = t.paint("dim", "  "+t.tstr("input.hint.streaming"))
 	}
 
 	var b strings.Builder
@@ -1381,6 +1444,20 @@ func (t *TUI) handleSlash(text string) {
 			}
 		} else {
 			t.add(RoleSystem, t.tstr("lang.usage"))
+		}
+
+	case "/welcome":
+		t.mu.Lock()
+		empty := len(t.messages) == 0
+		t.welcomeVisible = !t.welcomeVisible
+		vis := t.welcomeVisible
+		t.mu.Unlock()
+		if vis && empty {
+			t.render() // conversation is empty → banner will show
+		} else if vis && !empty {
+			t.add(RoleSystem, t.tstr("welcome.reopen"))
+		} else {
+			t.render() // hidden
 		}
 
 	default:
