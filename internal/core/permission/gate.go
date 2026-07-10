@@ -103,6 +103,39 @@ func (g *Gate) Mode() Mode {
 	return g.mode
 }
 
+// SetAllowedPaths replaces the directory allowlist at runtime. An empty slice
+// clears the restriction (all paths allowed). Called by the desktop settings
+// UI so changes take effect without a restart.
+func (g *Gate) SetAllowedPaths(paths []string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	clean := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if p = strings.TrimSpace(p); p != "" {
+			if abs, err := filepath.Abs(p); err == nil {
+				clean = append(clean, abs)
+			} else {
+				clean = append(clean, p)
+			}
+		}
+	}
+	g.AllowedPaths = clean
+}
+
+// SetDeniedCommands replaces the always-blocked command substrings at runtime.
+// Called by the desktop settings UI so changes take effect without a restart.
+func (g *Gate) SetDeniedCommands(commands []string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	clean := make([]string, 0, len(commands))
+	for _, c := range commands {
+		if c = strings.TrimSpace(c); c != "" {
+			clean = append(clean, c)
+		}
+	}
+	g.DeniedCommands = clean
+}
+
 // SetSessionAllow records that a session has been granted allow-all.
 func (g *Gate) SetSessionAllow(sessionID string, allow bool) {
 	g.mu.Lock()

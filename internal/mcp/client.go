@@ -476,6 +476,25 @@ func (p *Pool) CloseAll() {
 	p.clients = make(map[string]*Client)
 }
 
+// Remove disconnects and removes a single MCP server by name.
+func (p *Pool) Remove(name string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if c, ok := p.clients[name]; ok {
+		c.Close()
+		delete(p.clients, name)
+	}
+}
+
+// Has reports whether a server with the given name is currently connected.
+func (p *Pool) Has(name string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	_, ok := p.clients[name]
+	return ok
+}
+
 // Count returns the number of connected MCP servers.
 func (p *Pool) Count() int {
 	p.mu.RLock()

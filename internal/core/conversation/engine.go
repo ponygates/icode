@@ -40,6 +40,10 @@ type Engine struct {
 	permMu       sync.Mutex
 	permRespChans map[string]chan permission.Decision
 	permSeq      uint64
+
+	// Generation parameters configurable from the desktop settings UI.
+	temperature float64
+	maxTokens   int
 }
 
 // NewEngine creates a conversation engine.
@@ -78,6 +82,26 @@ func (e *Engine) SetPermissionResponse(requestID string, decision permission.Dec
 		default:
 		}
 	}
+}
+
+// SetGenerationParams updates the temperature and max-tokens used for new
+// turns. A maxTokens value of 0 means "use the model's default limit". These
+// are pushed live from the desktop settings UI so changes apply without a
+// restart.
+func (e *Engine) SetGenerationParams(temperature float64, maxTokens int) {
+	e.temperature = temperature
+	e.maxTokens = maxTokens
+}
+
+// RegisterTool adds an external tool (e.g. an MCP-adapted tool) to the engine's
+// tool registry so it becomes available to the model during chat.
+func (e *Engine) RegisterTool(t types.Tool) {
+	e.toolReg.Register(t)
+}
+
+// UnregisterTool removes a tool from the engine's registry by name.
+func (e *Engine) UnregisterTool(name string) {
+	e.toolReg.Unregister(name)
 }
 
 // buildAction constructs a permission.Action from a tool call's JSON arguments,
@@ -199,6 +223,15 @@ func (e *Engine) genPermID() string {
 	return id
 }
 
+// orMaxTokens returns the user-configured max tokens when > 0, otherwise the
+// model's built-in default.
+func orMaxTokens(cfg, modelDefault int) int {
+	if cfg > 0 {
+		return cfg
+	}
+	return modelDefault
+}
+
 // Send starts a conversation turn and returns a stream of events.
 func (e *Engine) Send(ctx context.Context, sessionID, content string) (<-chan types.StreamEvent, error) {
 	sess, err := e.sessionSt.Get(sessionID)
@@ -240,8 +273,8 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string) (<-chan ty
 		ProviderName:  sess.ProviderName,
 		SystemPrompt:  opt.BuildPrefix(),
 		Tools:         e.toolReg.ListDefs(),
-		MaxTokens:     modelInfo.MaxOutputTokens,
-		Temperature:   0.0,
+		MaxTokens:     orMaxTokens(e.maxTokens, modelInfo.MaxOutputTokens),
+		Temperature:   e.temperature,
 	})
 	if err != nil {
 		cancel()
@@ -383,8 +416,8 @@ func (e *Engine) continueAgentLoop(
 		ProviderName: modelInfo.Provider,
 		SystemPrompt: opt.BuildPrefix(),
 		Tools:        e.toolReg.ListDefs(),
-		MaxTokens:    modelInfo.MaxOutputTokens,
-		Temperature:  0.0,
+		MaxTokens:    orMaxTokens(e.maxTokens, modelInfo.MaxOutputTokens),
+		Temperature:  e.temperature,
 	})
 	if err != nil {
 		out <- types.StreamEvent{Type: types.EventError, Content: err.Error()}
@@ -395,12 +428,16 @@ func (e *Engine) continueAgentLoop(
 	assistantMsg.Role = types.RoleAssistant
 	assistantMsg.Timestamp = time.Now()
 	var toolCalls []types.ToolCall
+	acc := &textAccumulator{}
 
 	for event := range eventCh {
 		switch event.Type {
 		case types.EventText:
-			assistantMsg.Content += event.Content
-			out <- event
+			full, delta := acc.feed(event.Content)
+			assistantMsg.Content = full
+			if delta != "" {
+				out <- types.StreamEvent{Type: types.EventText, Content: delta}
+			}
 		case types.EventToolUse:
 			tc := types.ToolCall{
 				ID:        event.ToolCall.ID,
@@ -494,8 +531,9 @@ Instructions:
 - Be concise and direct. Show the user what you found and what you changed.
 - If a command fails, explain why and suggest alternatives.
 - Always explain your reasoning before making changes.
+- 除非用户明确要求使用其他语言，否则请始终使用简体中文进行思考（reasoning）与回复。
 
-Current session ID: %s`, sessionID)
+当前会话 ID: %s`, sessionID)
 
 	projectContext := projectcontext.LoadProjectContext()
 	if strings.TrimSpace(projectContext) == "" {
@@ -516,4 +554,31 @@ func calculateCost(usage types.TokenUsage, model types.ModelInfo) float64 {
 	cacheCost := float64(usage.CacheHitTokens) * plan.CachePrice / 1_000_000
 
 	return inputCost + outputCost + cacheCost
+}
+
+// textAccumulator normalizes streaming text deltas across providers. Some
+// OpenAI-compatible relays emit the *cumulative* full text on every chunk
+// (causing repeated content), while others emit true incremental fragments.
+// feed() detects which mode is in use per-event and returns only the new
+// suffix to emit, while keeping the full accumulated text in sync.
+type textAccumulator struct {
+	prevFull string
+}
+
+// feed ingests one provider chunk and returns (full, delta):
+//   - full  = the complete assistant text up to and including this chunk
+//   - delta = the new content that should be forwarded downstream
+//
+// For incremental streams delta == cur (new fragment). For cumulative streams
+// delta == the trailing suffix of cur not already seen.
+func (a *textAccumulator) feed(cur string) (full, delta string) {
+	if strings.HasPrefix(cur, a.prevFull) {
+		// Cumulative relay: cur already contains everything seen so far.
+		delta = cur[len(a.prevFull):]
+	} else {
+		// Incremental relay: cur is a brand-new fragment.
+		delta = cur
+	}
+	a.prevFull += delta
+	return a.prevFull, delta
 }

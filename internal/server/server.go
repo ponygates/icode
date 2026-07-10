@@ -22,6 +22,8 @@ import (
 	"github.com/ponygates/icode/internal/core/conversation"
 	"github.com/ponygates/icode/internal/core/permission"
 	"github.com/ponygates/icode/internal/db"
+	"github.com/ponygates/icode/internal/llm/provider/openai_compat"
+	"github.com/ponygates/icode/internal/mcp"
 	"github.com/ponygates/icode/internal/types"
 	"github.com/ponygates/icode/pkg/modelupdate"
 )
@@ -35,6 +37,10 @@ type Server struct {
 	engine  *conversation.Engine
 	gate    *permission.Gate
 	updater *modelupdate.Service
+
+	mcpPool      *mcp.Pool
+	mcpToolNames map[string]bool // tool names currently registered into the engine
+	mcpMu        sync.Mutex
 
 	httpSrv  *http.Server
 	listener net.Listener
@@ -92,6 +98,7 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 
 	// Config
 	mux.HandleFunc("/api/config", s.handleConfig)
+	mux.HandleFunc("/api/config/reset", s.handleConfigReset)
 	mux.HandleFunc("/api/config/lang", s.handleSetLanguage)
 	mux.HandleFunc("/api/config/keys", s.handleListKeys)
 	mux.HandleFunc("/api/config/key", s.handleSetKey)
@@ -102,6 +109,12 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 	// Permission
 	mux.HandleFunc("/api/permission/mode", s.handleSetPermissionMode)
 	mux.HandleFunc("/api/permission/respond", s.handlePermissionRespond)
+	mux.HandleFunc("/api/permission/session-allow", s.handleSessionAllow)
+
+	// MCP (Model Context Protocol) server management — Reasonix-style tool integration
+	mux.HandleFunc("/api/mcp", s.handleMCP)
+	mux.HandleFunc("/api/mcp/test", s.handleMCPTest)
+	mux.HandleFunc("/api/mcp/tools", s.handleMCPTools)
 
 	// Static frontend — serve the desktop UI at /
 	mux.HandleFunc("/", s.handleFrontend)
@@ -126,6 +139,27 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 
 	// Write port to a temp file so the Electron app can discover it
 	s.writePortFile(s.port)
+
+	// Register any user-defined (custom) models that were persisted in the
+	// config file so the engine can resolve them at chat time.
+	for _, m := range s.cfg.Models {
+		if m.Custom {
+			s.registerCustomModel(m)
+		}
+	}
+
+	// Initialise the MCP pool: connect every enabled MCP server configured in
+	// the user config and surface its tools to the conversation engine.
+	s.mcpPool = mcp.NewPool()
+	s.mcpToolNames = make(map[string]bool)
+	for _, mc := range s.cfg.MCP {
+		if mc.Enabled {
+			if err := s.mcpPool.Add(context.Background(), toMCPServerConfig(mc)); err != nil {
+				log.Printf("[iCode MCP] failed to connect %q: %v", mc.Name, err)
+			}
+		}
+	}
+	s.refreshMCPTools()
 
 	go func() {
 		log.Printf("[iCode Server] Listening on http://%s", listener.Addr().String())
@@ -191,6 +225,9 @@ func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
 
 	var result []providerInfo
 	for _, name := range s.reg.List() {
+		if s.isProviderDisabled(name) {
+			continue
+		}
 		p, err := s.reg.Get(name)
 		if err != nil {
 			continue
@@ -221,6 +258,9 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	}
 	result := make([]modelDTO, 0, len(models)+len(s.cfg.Models))
 	for _, m := range models {
+		if s.isProviderDisabled(m.Provider) {
+			continue
+		}
 		plan := "Coding Plan"
 		free := false
 		if len(m.Plans) > 0 {
@@ -248,6 +288,9 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	// Append user-defined custom models (new ids not in the registry).
 	for _, cm := range s.cfg.Models {
 		if !cm.Custom {
+			continue
+		}
+		if s.isProviderDisabled(cm.Provider) {
 			continue
 		}
 		result = append(result, modelDTO{
@@ -288,12 +331,18 @@ func (s *Server) handleConfigModel(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "provider and model_id are required"})
 			return
 		}
-		m.Custom = true
+		// Respect an explicit custom flag from the client. New user-added models
+		// send custom:true; editing a built-in model sends custom:false so it is
+		// stored as a display-name/parameter override rather than duplicating
+		// the built-in entry in the model list.
+		m.ID = config.ModelKey(m.Provider, m.ModelID)
 		s.cfg.UpsertModel(m)
 		if err := s.cfg.Save(config.DefaultPath()); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
 		}
+		// Register the custom model so the engine can resolve it at chat time.
+		s.registerCustomModel(m)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": config.ModelKey(m.Provider, m.ModelID)})
 
 	case http.MethodDelete:
@@ -306,6 +355,7 @@ func (s *Server) handleConfigModel(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusNotFound, map[string]any{"error": "model not found"})
 			return
 		}
+		s.reg.RemoveCustomModel(id)
 		if err := s.cfg.Save(config.DefaultPath()); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
@@ -324,9 +374,11 @@ func (s *Server) handleConfigProvider(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPut:
 		var req struct {
-			Name    string `json:"name"`
-			APIBase string `json:"api_base"`
-			APIKey  string `json:"api_key"`
+			Name      string `json:"name"`
+			APIBase   string `json:"api_base"`
+			APIKey    string `json:"api_key"`
+			TimeoutSec int   `json:"timeout_sec"`
+			Disabled  bool   `json:"disabled"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
@@ -343,12 +395,45 @@ func (s *Server) handleConfigProvider(w http.ResponseWriter, r *http.Request) {
 		if req.APIKey != "" {
 			pc.APIKey = req.APIKey
 		}
+		if req.TimeoutSec > 0 {
+			pc.Timeout = req.TimeoutSec
+		}
+		pc.Disabled = req.Disabled
 		s.cfg.Providers[req.Name] = pc
 		if err := s.cfg.Save(config.DefaultPath()); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		// Push the new credentials into the live provider so the change takes
+		// effect immediately. If this is a brand-new (custom) vendor that has
+		// no live provider yet, register a generic OpenAI-compatible provider.
+		if !s.reg.SetCredentials(req.Name, pc.APIKey, pc.APIBase) {
+			if _, gerr := s.reg.Get(req.Name); gerr != nil {
+				np := openai_compat.New(openai_compat.Config{
+					Name:         req.Name,
+					APIKey:       pc.APIKey,
+					APIBase:      pc.APIBase,
+					TimeoutSec:   pc.Timeout,
+					CacheSupport: true,
+				})
+				_ = s.reg.Register(np)
+				// Register any custom models that already belong to this vendor.
+				for _, cm := range s.cfg.Models {
+					if cm.Custom && cm.Provider == req.Name {
+						s.registerCustomModel(cm)
+					}
+				}
+			}
+		}
+		// Apply a per-provider timeout to the live provider client.
+		if req.TimeoutSec > 0 {
+			s.reg.SetTimeout(req.Name, req.TimeoutSec)
+		}
+		// Note: a disabled provider is hidden from the model list (so it cannot
+		// be selected for chat) but is NOT deregistered — that would drop a
+		// built-in provider's own model catalogue. Re-enabling simply removes
+		// the filter, which is safer and reversible.
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "disabled": req.Disabled})
 
 	case http.MethodDelete:
 		name := r.URL.Query().Get("name")
@@ -362,9 +447,12 @@ func (s *Server) handleConfigProvider(w http.ResponseWriter, r *http.Request) {
 		for _, m := range s.cfg.Models {
 			if m.Provider != name {
 				kept = append(kept, m)
+			} else {
+				s.reg.RemoveCustomModel(config.ModelKey(m.Provider, m.ModelID))
 			}
 		}
 		s.cfg.Models = kept
+		s.reg.Deregister(name)
 		if err := s.cfg.Save(config.DefaultPath()); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
@@ -436,6 +524,37 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 		sess, err := s.store.Get(id)
 		if err != nil {
 			writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, sess)
+
+	case http.MethodPut:
+		// Rename / retitle a session (Reasonix-style session management).
+		var body struct {
+			Title    string `json:"title"`
+			ModelID  string `json:"model_id"`
+			Provider string `json:"provider"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		sess, err := s.store.Get(id)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
+			return
+		}
+		if body.Title != "" {
+			sess.Title = body.Title
+		}
+		if body.ModelID != "" {
+			sess.ModelID = body.ModelID
+		}
+		if body.Provider != "" {
+			sess.ProviderName = body.Provider
+		}
+		if err := s.store.Update(sess); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
 		}
 		writeJSON(w, http.StatusOK, sess)
@@ -564,8 +683,26 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		s.cfg.Defaults.Model = cfg.Defaults.Model
 		s.cfg.Defaults.Provider = cfg.Defaults.Provider
 		s.cfg.Defaults.Mode = cfg.Defaults.Mode
+		s.cfg.Defaults.Temperature = cfg.Defaults.Temperature
+		s.cfg.Defaults.MaxTokens = cfg.Defaults.MaxTokens
+		s.cfg.Defaults.Cache = cfg.Defaults.Cache
 		s.cfg.TUI.Theme = cfg.TUI.Theme
 		s.cfg.TUI.DiffMode = cfg.TUI.DiffMode
+		s.cfg.TUI.SyntaxHL = cfg.TUI.SyntaxHL
+		s.cfg.Tools.BashTimeout = cfg.Tools.BashTimeout
+		s.cfg.Tools.AllowedPaths = cfg.Tools.AllowedPaths
+		s.cfg.Tools.DeniedCommands = cfg.Tools.DeniedCommands
+		s.cfg.Update.AutoUpdate = cfg.Update.AutoUpdate
+		s.cfg.Update.Channel = cfg.Update.Channel
+		s.cfg.Update.IntervalH = cfg.Update.IntervalH
+		// Push generation parameters into the live engine.
+		s.engine.SetGenerationParams(s.cfg.Defaults.Temperature, s.cfg.Defaults.MaxTokens)
+		// Push tool sandbox settings into the live permission gate so the
+		// desktop "工具与权限" settings take effect without a restart.
+		if s.gate != nil {
+			s.gate.SetAllowedPaths(cfg.Tools.AllowedPaths)
+			s.gate.SetDeniedCommands(cfg.Tools.DeniedCommands)
+		}
 		// Persist to disk so settings survive restarts.
 		if err := s.cfg.Save(config.DefaultPath()); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
@@ -589,13 +726,17 @@ func (s *Server) handleListKeys(w http.ResponseWriter, r *http.Request) {
 		Name    string `json:"name"`
 		KeySet  bool   `json:"key_set"`
 		APIBase string `json:"api_base,omitempty"`
+		Timeout int    `json:"timeout_sec"`
+		Disabled bool  `json:"disabled"`
 	}
 	seen := map[string]bool{}
 	var result []keyInfo
-	// Built-in providers registered in the engine.
+	// Built-in providers registered in the engine. Disabled providers are kept
+	// in this list (with Disabled=true) so the desktop settings UI can still
+	// show and re-enable them — only handleListModels hides their models.
 	for _, name := range s.reg.List() {
 		pc := s.cfg.Providers[name]
-		result = append(result, keyInfo{Name: name, KeySet: pc.APIKey != "", APIBase: pc.APIBase})
+		result = append(result, keyInfo{Name: name, KeySet: pc.APIKey != "", APIBase: pc.APIBase, Timeout: pc.Timeout, Disabled: pc.Disabled})
 		seen[name] = true
 	}
 	// Custom providers that only exist in the config file.
@@ -603,7 +744,7 @@ func (s *Server) handleListKeys(w http.ResponseWriter, r *http.Request) {
 		if seen[name] {
 			continue
 		}
-		result = append(result, keyInfo{Name: name, KeySet: pc.APIKey != "", APIBase: pc.APIBase})
+		result = append(result, keyInfo{Name: name, KeySet: pc.APIKey != "", APIBase: pc.APIBase, Timeout: pc.Timeout, Disabled: pc.Disabled})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"providers": result})
 }
@@ -640,6 +781,9 @@ func (s *Server) handleSetKey(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	// Push the new credentials into the live provider so the change takes
+	// effect immediately (no server restart required).
+	s.reg.SetCredentials(req.Provider, pc.APIKey, pc.APIBase)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -661,6 +805,39 @@ func (s *Server) handleSetLanguage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "language": req.Language})
 }
 
+// handleConfigReset restores the behaviour/UI settings to their defaults while
+// PRESERVING the user's API credentials (providers) and custom models, which
+// would be dangerous to wipe. It then pushes the reset values into the live
+// engine and permission gate.
+func (s *Server) handleConfigReset(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	def := config.Default()
+	// Keep providers (keys) and models; reset everything else.
+	def.Providers = s.cfg.Providers
+	def.Models = s.cfg.Models
+	s.cfg.Language = def.Language
+	s.cfg.Defaults = def.Defaults
+	s.cfg.TUI = def.TUI
+	s.cfg.Tools = def.Tools
+	s.cfg.Update = def.Update
+	if err := s.cfg.Save(config.DefaultPath()); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	if s.engine != nil {
+		s.engine.SetGenerationParams(s.cfg.Defaults.Temperature, s.cfg.Defaults.MaxTokens)
+	}
+	if s.gate != nil {
+		s.gate.SetMode(permission.Mode(s.cfg.Defaults.Mode))
+		s.gate.SetAllowedPaths(s.cfg.Tools.AllowedPaths)
+		s.gate.SetDeniedCommands(s.cfg.Tools.DeniedCommands)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
 func (s *Server) handleSetPermissionMode(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -679,6 +856,28 @@ func (s *Server) handleSetPermissionMode(w http.ResponseWriter, r *http.Request)
 		s.gate.SetMode(permission.Mode(req.Mode))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mode": req.Mode})
+}
+
+// handleSessionAllow toggles session-scoped auto-approval for a single
+// conversation (the desktop "本会话全部自动放行" button). It calls the live
+// gate so the change takes effect immediately without a restart.
+func (s *Server) handleSessionAllow(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		SessionID string `json:"session_id"`
+		Allow     bool   `json:"allow"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	if s.gate != nil {
+		s.gate.SetSessionAllow(req.SessionID, req.Allow)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "allow": req.Allow})
 }
 
 // handlePermissionRespond delivers the desktop client's answer to an
@@ -739,11 +938,213 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
+// ============================================================================
+// MCP (Model Context Protocol) — server management & tool integration
+// ============================================================================
+
+// mcpToolAdapter wraps a discovered MCP tool definition so it satisfies the
+// types.Tool interface and routes execution through the shared MCP pool.
+type mcpToolAdapter struct {
+	def  types.ToolDef
+	pool *mcp.Pool
+}
+
+func (a *mcpToolAdapter) Def() types.ToolDef { return a.def }
+
+func (a *mcpToolAdapter) Execute(ctx context.Context, args string) (*types.ToolResult, error) {
+	var m map[string]any
+	if err := json.Unmarshal([]byte(args), &m); err != nil {
+		// Fall back to an empty arg map so the MCP server still receives a call.
+		m = map[string]any{}
+	}
+	return a.pool.Execute(ctx, a.def.Name, m)
+}
+
+// toMCPServerConfig converts a persisted config entry to the live mcp.ServerConfig.
+func toMCPServerConfig(c config.MCPServerCfg) mcp.ServerConfig {
+	return mcp.ServerConfig{
+		Name:    c.Name,
+		Type:    mcp.Transport(c.Type),
+		Command: c.Command,
+		Args:    c.Args,
+		Env:     c.Env,
+		URL:     c.URL,
+		Headers: c.Headers,
+		Enabled: c.Enabled,
+	}
+}
+
+// refreshMCPTools re-registers every discovered MCP tool into the conversation
+// engine, replacing any previously-registered MCP tools. Tools from disabled
+// or disconnected servers are dropped.
+func (s *Server) refreshMCPTools() {
+	if s.engine == nil {
+		return
+	}
+	s.mcpMu.Lock()
+	defer s.mcpMu.Unlock()
+
+	// Remove stale MCP tools registered in a previous refresh.
+	for name := range s.mcpToolNames {
+		s.engine.UnregisterTool(name)
+	}
+	s.mcpToolNames = make(map[string]bool)
+
+	for _, def := range s.mcpPool.AllTools() {
+		s.engine.RegisterTool(&mcpToolAdapter{def: def, pool: s.mcpPool})
+		s.mcpToolNames[def.Name] = true
+	}
+}
+
+// handleMCP lists, adds/updates, or removes MCP servers.
+func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		list := make([]map[string]any, 0, len(s.cfg.MCP))
+		for _, mc := range s.cfg.MCP {
+			connected := false
+			toolCount := 0
+			if s.mcpPool != nil {
+				if s.mcpPool.Has(mc.Name) {
+					connected = true
+					for _, t := range s.mcpPool.AllTools() {
+						if strings.HasPrefix(t.Name, "mcp_"+mc.Name+"_") {
+							toolCount++
+						}
+					}
+				}
+			}
+			list = append(list, map[string]any{
+				"name":      mc.Name,
+				"type":      mc.Type,
+				"command":   mc.Command,
+				"args":      mc.Args,
+				"url":       mc.URL,
+				"enabled":   mc.Enabled,
+				"connected": connected,
+				"tools":     toolCount,
+			})
+		}
+		writeJSON(w, http.StatusOK, list)
+
+	case http.MethodPut:
+		var req config.MCPServerCfg
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		if req.Name == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "name is required"})
+			return
+		}
+		if req.Type == "" {
+			req.Type = "stdio"
+		}
+		// Upsert into config.
+		s.cfg.UpsertMCP(req)
+		if err := s.cfg.Save(config.DefaultPath()); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		// Apply connection changes to the live pool.
+		if s.mcpPool != nil {
+			s.mcpPool.Remove(req.Name)
+			if req.Enabled {
+				if err := s.mcpPool.Add(context.Background(), toMCPServerConfig(req)); err != nil {
+					writeJSON(w, http.StatusOK, map[string]any{"ok": true, "warning": "saved but connect failed: " + err.Error()})
+					return
+				}
+			}
+			s.refreshMCPTools()
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+
+	case http.MethodDelete:
+		var req struct {
+			Name string `json:"name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "name is required"})
+			return
+		}
+		s.cfg.RemoveMCP(req.Name)
+		if err := s.cfg.Save(config.DefaultPath()); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		if s.mcpPool != nil {
+			s.mcpPool.Remove(req.Name)
+			s.refreshMCPTools()
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleMCPTest connects to a server definition (without persisting it) and
+// returns the discovered tool list, so the UI can validate a configuration.
+func (s *Server) handleMCPTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req config.MCPServerCfg
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	if req.Name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "name is required"})
+		return
+	}
+	if req.Type == "" {
+		req.Type = "stdio"
+	}
+	client := mcp.NewClient(toMCPServerConfig(req))
+	if err := client.Connect(r.Context()); err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	defer client.Close()
+	tools, err := client.DiscoverTools(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	names := make([]string, 0, len(tools))
+	for _, t := range tools {
+		names = append(names, t.Name)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "tools": names})
+}
+
+// handleMCPTools returns all tools currently discovered across connected MCP
+// servers (used by the UI to show the effective tool set).
+func (s *Server) handleMCPTools(w http.ResponseWriter, r *http.Request) {
+	if s.mcpPool == nil {
+		writeJSON(w, http.StatusOK, []types.ToolDef{})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.mcpPool.AllTools())
+}
+
 func orDefault(v, def string) string {
 	if v == "" {
 		return def
 	}
 	return v
+}
+
+// isProviderDisabled reports whether a provider has been turned off in the
+// config. Disabled providers are hidden from the model/key lists and
+// deregistered from the live registry so they cannot be used for chat.
+func (s *Server) isProviderDisabled(name string) bool {
+	if pc, ok := s.cfg.Providers[name]; ok {
+		return pc.Disabled
+	}
+	return false
 }
 
 // firstLine returns the first non-empty line of s, truncated to max runes.
@@ -759,6 +1160,24 @@ func firstLine(s string, max int) string {
 		}
 	}
 	return ""
+}
+
+// registerCustomModel registers a user-defined model in the live registry so
+// the engine can resolve it at chat time. It is registered under its canonical
+// id (provider/model_id) and also under its raw provider model id, because the
+// desktop UI sometimes sends one and sometimes the other.
+func (s *Server) registerCustomModel(m config.ModelCfg) {
+	if m.ID == "" {
+		m.ID = config.ModelKey(m.Provider, m.ModelID)
+	}
+	info := types.ModelInfo{
+		ID:              m.ID,
+		Name:            m.Name,
+		Provider:        m.Provider,
+		ContextWindow:   m.ContextWindow,
+		MaxOutputTokens: m.MaxOutput,
+	}
+	s.reg.RegisterCustomModel(info, m.ModelID)
 }
 
 // handleFrontend serves the desktop UI.

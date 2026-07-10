@@ -201,6 +201,23 @@ type Provider interface {
 	SupportsCache() bool
 }
 
+// CredentialedProvider is an OPTIONAL capability implemented by providers whose
+// API credentials (key / base URL) can be updated at runtime. The server uses
+// it to push keys configured via the desktop UI into the live provider without
+// requiring a restart.
+type CredentialedProvider interface {
+	// SetCredentials updates the API key and base URL. Empty values are ignored
+	// so callers can update only one field.
+	SetCredentials(apiKey, apiBase string)
+}
+
+// TimeoutSetter is an OPTIONAL capability implemented by providers whose HTTP
+// client timeout can be updated at runtime. The server uses it to apply a
+// per-provider timeout configured via the desktop UI without a restart.
+type TimeoutSetter interface {
+	SetTimeout(sec int)
+}
+
 // ============================================================================
 // Model Info
 // ============================================================================
@@ -256,6 +273,27 @@ type ProviderRegistry interface {
 
 	// ResolveModel finds the provider that owns a given model ID.
 	ResolveModel(modelID string) (Provider, ModelInfo, error)
+
+	// SetCredentials pushes updated API credentials into a registered provider
+	// if it supports runtime updates. Returns true if a matching provider was
+	// found and updated.
+	SetCredentials(name, apiKey, apiBase string) bool
+
+	// SetTimeout updates a provider's HTTP client timeout at runtime if it
+	// supports runtime updates. Returns true if a matching provider was found
+	// and updated.
+	SetTimeout(name string, sec int) bool
+
+	// RegisterCustomModel adds or updates a user-defined model mapping so it can
+	// be resolved by ResolveModel. alias is an optional alternate ID (e.g. the
+	// canonical "provider/model" id) that should also resolve to the same model.
+	RegisterCustomModel(m ModelInfo, alias string)
+
+	// RemoveCustomModel removes a user-defined model by its canonical id.
+	RemoveCustomModel(canonicalID string)
+
+	// Deregister removes a provider by name (used when a custom vendor is deleted).
+	Deregister(name string)
 }
 
 // ============================================================================

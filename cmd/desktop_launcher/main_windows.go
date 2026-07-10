@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 	"unsafe"
 
 	"github.com/jchv/go-webview2"
@@ -57,18 +58,23 @@ func main() {
 		_, _ = cmd.Process.Wait()
 	}()
 
-	// Wait for server to be ready
+	// Wait for server to be ready. Poll the health endpoint with a short
+	// delay between attempts; the backend needs time to bind the port, open
+	// the SQLite store, and build the provider registry before it answers.
 	healthURL := fmt.Sprintf("http://127.0.0.1:%d/api/health", port)
+	client := &http.Client{Timeout: 2 * time.Second}
 	ready := false
-	for i := 0; i < 60; i++ {
-		resp, err := http.Get(healthURL)
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := client.Get(healthURL)
 		if err == nil {
 			resp.Body.Close()
-			if resp.StatusCode == 200 {
+			if resp.StatusCode == http.StatusOK {
 				ready = true
 				break
 			}
 		}
+		time.Sleep(300 * time.Millisecond)
 	}
 
 	if !ready {

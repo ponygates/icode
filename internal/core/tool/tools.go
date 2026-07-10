@@ -52,6 +52,11 @@ func (r *Registry) Get(name string) (types.Tool, bool) {
 	return t, ok
 }
 
+// Unregister removes a tool from the registry by name.
+func (r *Registry) Unregister(name string) {
+	delete(r.tools, name)
+}
+
 // ListDefs returns tool definitions for all registered tools.
 func (r *Registry) ListDefs() []types.ToolDef {
 	defs := make([]types.ToolDef, 0, len(r.tools))

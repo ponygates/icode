@@ -22,14 +22,31 @@ type Config struct {
 	Tools     ToolsCfg            `yaml:"tools" json:"tools"`
 	Server    ServerCfg           `yaml:"server" json:"server"`
 	Update    UpdateCfg           `yaml:"update" json:"update"`
+	MCP       []MCPServerCfg      `yaml:"mcp" json:"mcp"`
+}
+
+// MCPServerCfg describes a single Model Context Protocol server connection.
+// It mirrors mcp.ServerConfig so the desktop settings UI can fully manage it.
+type MCPServerCfg struct {
+	Name    string            `yaml:"name" json:"name"`
+	Type    string            `yaml:"type" json:"type"` // stdio | sse
+	Command string            `yaml:"command,omitempty" json:"command,omitempty"`
+	Args    []string          `yaml:"args,omitempty" json:"args,omitempty"`
+	Env     []string          `yaml:"env,omitempty" json:"env,omitempty"`
+	URL     string            `yaml:"url,omitempty" json:"url,omitempty"`
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+	Enabled bool              `yaml:"enabled" json:"enabled"`
 }
 
 // DefaultCfg holds the user's preferred model / provider / permission mode,
 // persisted by the settings interface and applied on chat startup.
 type DefaultCfg struct {
-	Model    string `yaml:"model" json:"model"`
-	Provider string `yaml:"provider" json:"provider"`
-	Mode     string `yaml:"mode" json:"mode"`
+	Model       string  `yaml:"model" json:"model"`
+	Provider    string  `yaml:"provider" json:"provider"`
+	Mode        string  `yaml:"mode" json:"mode"`
+	Temperature float64 `yaml:"temperature" json:"temperature"`
+	MaxTokens   int     `yaml:"max_tokens" json:"max_tokens"`
+	Cache       bool    `yaml:"cache" json:"cache"`
 }
 
 type ProviderCfg struct {
@@ -88,15 +105,19 @@ func Default() *Config {
 	return &Config{
 		Language: "zh-CN",
 		Defaults: DefaultCfg{
-			Model:    "deepseek-v4-flash",
-			Provider: "deepseek",
-			Mode:     "agent",
+			Model:       "deepseek-v4-flash",
+			Provider:    "deepseek",
+			Mode:        "agent",
+			Temperature: 0.7,
+			MaxTokens:   0,
+			Cache:       true,
 		},
 		Providers: map[string]ProviderCfg{
 			"deepseek":   {APIBase: "https://api.deepseek.com/v1", Timeout: 120},
 			"openrouter": {APIBase: "https://openrouter.ai/api/v1", Timeout: 120},
 			"zhipu":      {APIBase: "https://open.bigmodel.cn/api/paas/v4", Timeout: 120},
 			"kimi":       {APIBase: "https://api.moonshot.cn/v1", Timeout: 120},
+			"nvidia":     {APIBase: "https://integrate.api.nvidia.com/v1", Timeout: 120},
 		},
 		TUI: TUICfg{
 			Theme:    "auto",
@@ -227,6 +248,39 @@ func (c *Config) Save(path string) error {
 	}
 
 	return os.WriteFile(path, data, 0644)
+}
+
+// Lock acquires the config mutex for direct concurrent access to the Config
+// fields (e.g. the server mutating the MCP list while persisting).
+func (c *Config) Lock() { c.mu.Lock() }
+
+// Unlock releases the config mutex acquired by Lock.
+func (c *Config) Unlock() { c.mu.Unlock() }
+
+// UpsertMCP adds or replaces an MCP server configuration entry.
+func (c *Config) UpsertMCP(m MCPServerCfg) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := range c.MCP {
+		if c.MCP[i].Name == m.Name {
+			c.MCP[i] = m
+			return
+		}
+	}
+	c.MCP = append(c.MCP, m)
+}
+
+// RemoveMCP deletes an MCP server configuration entry by name.
+func (c *Config) RemoveMCP(name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	filtered := c.MCP[:0]
+	for _, mc := range c.MCP {
+		if mc.Name != name {
+			filtered = append(filtered, mc)
+		}
+	}
+	c.MCP = filtered
 }
 
 // APIKey returns the API key for a provider (config → env fallback).

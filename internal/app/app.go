@@ -19,6 +19,7 @@ import (
 	"github.com/ponygates/icode/internal/llm/provider/deepseek"
 	"github.com/ponygates/icode/internal/llm/provider/huawei"
 	"github.com/ponygates/icode/internal/llm/provider/kimi"
+	"github.com/ponygates/icode/internal/llm/provider/nvidia"
 	"github.com/ponygates/icode/internal/llm/provider/openrouter"
 	"github.com/ponygates/icode/internal/llm/provider/scnet"
 	"github.com/ponygates/icode/internal/llm/provider/tencent"
@@ -70,6 +71,7 @@ func Bootstrap() (*App, error) {
 
 	// 5. Initialize conversation engine (with permission gate wired in)
 	app.Engine = conversation.NewEngine(app.Reg, app.SessStore, app.Gate)
+	app.Engine.SetGenerationParams(cfg.Defaults.Temperature, cfg.Defaults.MaxTokens)
 
 	// 6. Initialize model update service
 	home, _ := os.UserHomeDir()
@@ -97,6 +99,7 @@ func (app *App) registerProviders(cfg *config.Config) {
 		{"tencent", func(k, b string) types.Provider { return tencent.New(k, b) }},
 		{"huawei", func(k, b string) types.Provider { return huawei.New(k, b) }},
 		{"scnet", func(k, b string) types.Provider { return scnet.New(k, b) }},
+		{"nvidia", func(k, b string) types.Provider { return nvidia.New(k, b) }},
 	}
 
 	for _, entry := range providers {

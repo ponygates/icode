@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>iCode CLI — ClaudeCode 风格界面预览</title>
+<style>
+  :root{
+    --bg:#0b0e14; --panel:#11151f; --dim:#3a4252; --fg:#c8d3e0;
+    --accent:#7aa2f7; --green:#7ee787; --cyan:#56d4dd; --amber:#ffcc66; --magenta:#c792ea;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:#05070b;color:var(--fg);
+    font-family:"Cascadia Code","JetBrains Mono",Menlo,Consolas,monospace;
+    display:flex;flex-direction:column;align-items:center;padding:28px 16px;}
+  h1{font-size:15px;font-weight:600;color:var(--accent);margin:0 0 4px;}
+  p.sub{margin:0 0 18px;color:var(--dim);font-size:12px;}
+  .term{width:min(960px,96vw);background:var(--bg);border:1px solid #1d2533;
+    border-radius:8px;box-shadow:0 18px 60px rgba(0,0,0,.55);overflow:hidden;}
+  .topbar{display:flex;gap:7px;padding:10px 12px;background:#0d1119;border-bottom:1px solid #1d2533;}
+  .dot{width:11px;height:11px;border-radius:50%;}
+  .r{background:#ff5f56;} .y{background:#ffbd2e;} .g{background:#27c93f;}
+  .title{margin-left:8px;font-size:12px;color:var(--dim);align-self:center;}
+  pre{margin:0;padding:14px 14px 16px;font-size:12.5px;line-height:1.55;white-space:pre;overflow-x:auto;}
+  .hl{color:var(--accent);}     /* ◆ iCode header */
+  .dim{color:var(--dim);}       /* ─ hrule / borders */
+  .cyan{color:var(--cyan);}
+  .green{color:var(--green);}
+  .amber{color:var(--amber);}
+  .mag{color:var(--magenta);}
+  .fg{color:var(--fg);}
+  .bar{color:var(--amber);}     /* thinking slider + context meter */
+  .pane-title{color:var(--accent);}
+  .legend{width:min(960px,96vw);margin-top:14px;font-size:12px;color:var(--dim);line-height:1.7;}
+  .legend b{color:var(--fg);}
+  code{color:var(--cyan);background:#0d1119;padding:1px 5px;border-radius:4px;}
+</style>
+</head>
+<body>
+  <h1>iCode CLI — ClaudeCode 风格界面</h1>
+  <p class="sub">左右分栏 · 底部状态栏 · 思考滑动条 · 上下文/文件夹/模型/费用</p>
+
+  <div class="term">
+    <div class="topbar">
+      <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+      <span class="title">icode — bash — 96×28</span>
+    </div>
+<pre><span class="hl">◆ iCode v0.2</span>  <span class="dim">·</span>  <span class="cyan">icode</span>  <span class="dim">·</span>  mode: default
+<span class="dim">────────────────────────────────────────────────────────────────────────────────────────────────────────</span>
+<span class="pane-title">┌─ 模型 ──────────────┐</span> <span class="dim">│</span> <span class="fg">你:</span> 帮我用 Go 写一个并发 HTTP 文件服务器
+<span class="fg">  deepseek-v4-flash   </span> <span class="dim">│</span>
+<span class="pane-title">┌─ 上下文 ────────────┐</span> <span class="dim">│</span> <span class="mag">◆ 生成中…</span>  <span class="bar">[░░█░░░░░░░░░]</span>
+<span class="fg">  12% ▓▓▓▓░░░░░░░░░░░░</span> <span class="dim">│</span>
+<span class="pane-title">┌─ 费用 ──────────────┐</span> <span class="dim">│</span> <span class="green">助手:</span> 好的，下面是一个支持并发的简易文件服务器：
+<span class="fg">  $0.0123             </span> <span class="dim">│</span> <span class="fg">```go</span>
+<span class="pane-title">┌─ 目录 ──────────────┐</span> <span class="dim">│</span> <span class="fg">package main</span>
+<span class="fg">  /e/icode            </span> <span class="dim">│</span> <span class="fg">func main() {</span>
+<span class="pane-title">┌─ 文件 ──────────────┐</span> <span class="dim">│</span> <span class="fg">  http.Handle("/",</span>
+<span class="fg">  ▸ cmd/              </span> <span class="dim">│</span> <span class="fg">    http.FileServer(Dir(".")))</span>
+<span class="fg">  ▸ internal/         </span> <span class="dim">│</span> <span class="fg">  log.Fatal(http.ListenAndServe(</span>
+<span class="fg">  ▸ desktop/          </span> <span class="dim">│</span> <span class="fg">    ":8080", nil))</span>
+<span class="fg">  ▸ docs/             </span> <span class="dim">│</span> <span class="fg">}</span>
+<span class="fg">  ▸ go.mod            </span> <span class="dim">│</span> <span class="fg">```</span>
+<span class="fg">  ▸ main.go           </span> <span class="dim">│</span>
+<span class="fg">  ▸ README.md         </span> <span class="dim">│</span> <span class="dim">— 已用 1 工具调用 · 3 条消息 —</span>
+<span class="fg">  …                   </span> <span class="dim">│</span>
+<span class="dim">────────────────────────────────────────────────────────────────────────────────────────────────────────</span>
+<span class="bar">12% ctx</span>  <span class="dim">·</span>  <span class="cyan">deepseek-v4-flash</span>  <span class="dim">·</span>  <span class="amber">$0.0123</span>  <span class="dim">·</span>  <span class="fg">mode: default</span></pre>
+  </div>
+
+  <div class="legend">
+    <b>布局要点（已落地到 <code>internal/tui/tui.go</code>）</b><br>
+    • <b>左右分栏</b>：以 <code>│</code> 竖向框线分隔，左栏为 Explorer（模型 / 上下文 / 费用 / 目录 / 文件），右栏为对话区。<br>
+    • <b>自适应宽度</b>：终端宽 ≥110 左栏 36 列；≥92→30；≥76→24；≥64→20；更窄则隐藏左栏。<br>
+    • <b>底部状态栏</b>：显示 <code>上下文百分比 · 当前模型 · 累计费用 · 模式</code>，刷新于每次完成（EventDone）。<br>
+    • <b>思考滑动条</b>：生成期间右侧显示 <code>◆ 生成中…  [░░█░░░░░░░░░]</code>，由 110ms ticker goroutine 驱动三角波滑动；无内容时替代空白助手消息。<br>
+    • <b>上下文容量条</b>：左栏 <code>NN% ▓▓░░</code>，由 <code>SetContext(tokens,window)</code> 提供数据。<br>
+    • <b>费用计算</b>：<code>cmd/commands.go</code> 在对话结束时经 <code>ResolveModel</code> + <code>estimateCost</code> 估算（复用引擎计费逻辑），即时显示到状态栏。<br>
+    • <b>NVIDIA 免费模型</b>：<code>internal/llm/provider/nvidia/nvidia.go</code> 已注册 <b>61</b> 个 free endpoint 模型，CLI / 桌面 / Provider 注册表三端同步可用。
+  </div>
+</body>
+</html>

@@ -19,6 +19,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -109,10 +110,23 @@ type TUI struct {
 	streamBuf  strings.Builder
 	streamDone chan struct{}
 
+	// renderPending / renderTimer coalesce full-screen redraws so a burst of
+	// streamed tokens doesn't trigger one expensive redraw per chunk.
+	renderPending bool
+	renderTimer   *time.Timer
+
+	// turnStart timestamps when a generation begins (for the status bar clock).
+	turnStart time.Time
+
 	promptTokens     int
 	completionTokens int
 	cacheHitRate     float64
 	cost             string
+
+	contextTokens int // prompt tokens of the latest request (context-window usage estimate)
+	contextWindow int // model context window (in tokens)
+	animRunning   bool
+	dirEntries    []string // cached top-level cwd listing for the explorer pane
 
 	running bool
 	reader  io.Reader
@@ -154,6 +168,7 @@ func New(cfg Config) *TUI {
 		width:      80,
 		height:     24,
 		histIdx:    -1,
+		dirEntries: listCwd(),
 	}
 }
 
@@ -365,9 +380,13 @@ func (t *TUI) submit(text string) {
 	t.mu.Unlock()
 
 	if t.callback != nil {
+		t.mu.Lock()
 		t.streaming = true
 		t.streamBuf.Reset()
+		t.turnStart = time.Now()
+		t.mu.Unlock()
 		go t.callback.OnSend(text)
+		t.ensureAnim()
 		t.drainStream()
 	}
 }
@@ -392,7 +411,6 @@ func (t *TUI) render() {
 	cursor := t.cursor
 	rawMode := t.rawMode
 	status := t.statusLine()
-	banner := t.bannerLines()
 	permPending := t.permPending
 	permPrompt := t.permPrompt
 	t.mu.Unlock()
@@ -401,101 +419,151 @@ func (t *TUI) render() {
 		return // line mode renders incrementally, not full-screen
 	}
 
-	width := t.width
-	height := t.height
-
-	// Build display lines for all messages (+ the in-flight stream).
-	var lines []string
-	lines = append(lines, banner...)
-	lines = append(lines, "")
-
-	all := append([]Message{}, msgs...)
-	if streaming {
-		all = append(all, Message{Role: RoleAssistant, Content: streamContent})
+	W := t.width
+	H := t.height
+	if W < 20 {
+		W = 20
 	}
-	for _, m := range all {
-		lines = append(lines, t.messageLines(m)...)
+	if H < 10 {
+		H = 10
 	}
 
-	statusLines := wrapText(status, width)
-	if len(statusLines) == 0 {
-		statusLines = []string{""}
+	statusW := wrapText(status, W)
+	if len(statusW) == 0 {
+		statusW = []string{""}
 	}
 
-	// Input line + optional permission prompt.
-	inputLine := t.inputRenderFor(inputBuf)
+	// Overlays drawn above the input line.
+	acLines := t.autocompleteLines()
 	permLines := []string{}
 	if permPending {
 		permLines = append(permLines,
-			t.paint("yellow", "  ⏸ "+t.tstr("perm.title")+": "+truncate(permPrompt, width-14)),
+			t.paint("yellow", "  ⏸ "+t.tstr("perm.title")+": "+truncate(permPrompt, W-14)),
 			t.paint("dim", "     [y] "+t.tstr("perm.allow")+"   [a] "+t.tstr("perm.all")+"   [n/^C] "+t.tstr("perm.deny")),
 		)
 	}
-	// Autocomplete panel (above the input line).
-	acLines := t.autocompleteLines()
 
-	// Available rows for the message area.
-	reserved := len(statusLines) + 1 + len(permLines) + len(acLines)
-	avail := height - reserved
-	if avail < 3 {
-		avail = 3
+	// Body height = rows between the top header/hrule and the bottom
+	// (status + input + overlays).
+	bodyH := H - 1 /*header*/ - 1 /*hrule*/ - len(statusW) - 1 /*input*/ - len(permLines) - len(acLines)
+	if bodyH < 3 {
+		bodyH = 3
 	}
 
-	if len(lines) > avail {
-		lines = lines[len(lines)-avail:]
+	// Pane widths. The left explorer pane is hidden on narrow terminals so the
+	// conversation never gets squeezed.
+	paneW := 0
+	switch {
+	case W >= 110:
+		paneW = 36
+	case W >= 92:
+		paneW = 30
+	case W >= 76:
+		paneW = 24
+	case W >= 64:
+		paneW = 20
+	}
+	rightW := W - paneW
+	if paneW > 0 {
+		rightW -= 3 // " │ "
+	}
+	if rightW < 20 {
+		rightW = 20
+	}
+
+	leftLines := t.leftPaneLines(paneW)
+	rightAll := t.conversationLines(msgs, streaming, streamContent, rightW)
+	if len(rightAll) > bodyH {
+		rightAll = rightAll[len(rightAll)-bodyH:]
+	}
+
+	// Compose the split body row-by-row so the vertical frame line stays
+	// continuous down the whole height.
+	var body []string
+	for i := 0; i < bodyH; i++ {
+		var left, right string
+		if i < len(leftLines) {
+			left = leftLines[i]
+		}
+		if i < len(rightAll) {
+			right = rightAll[i]
+		}
+		if paneW > 0 {
+			body = append(body, fit(left, paneW)+t.paint("dim", " │ ")+fit(right, rightW))
+		} else {
+			body = append(body, fit(right, rightW))
+		}
+	}
+
+	// Assemble the full screen (everything except the final input line).
+	var out []string
+	out = append(out, t.headerLine())
+	out = append(out, t.hrule(W))
+	out = append(out, body...)
+	for _, sl := range statusW {
+		out = append(out, t.paint("dim", sl))
+	}
+	for _, pl := range permLines {
+		out = append(out, pl)
+	}
+	for _, al := range acLines {
+		out = append(out, al)
+	}
+	maxLines := H - 1
+	if len(out) > maxLines {
+		out = out[len(out)-maxLines:]
 	}
 
 	t.renderMu.Lock()
 	defer t.renderMu.Unlock()
 	fmt.Fprint(t.writer, "\x1b[2J\x1b[H")
-	for _, ln := range lines {
+	for _, ln := range out {
 		fmt.Fprintln(t.writer, ln)
 	}
-	for i := len(lines); i < avail; i++ {
+	for i := len(out); i < maxLines; i++ {
 		fmt.Fprintln(t.writer)
 	}
-	for _, sl := range statusLines {
-		fmt.Fprintln(t.writer, t.paint("dim", sl))
-	}
-	for _, pl := range permLines {
-		fmt.Fprintln(t.writer, pl)
-	}
-	for _, al := range acLines {
-		fmt.Fprintln(t.writer, al)
-	}
+	// Input line (no trailing newline).
+	inputLine := t.inputRenderFor(inputBuf)
 	fmt.Fprint(t.writer, inputLine)
 	runes := []rune(inputBuf)
-	if cursor < len(runes) {
+	if !streaming && cursor < len(runes) {
 		fmt.Fprintf(t.writer, "\x1b[%dD", len(runes)-cursor)
 	}
 	fmt.Fprint(t.writer, "\x1b[?25h") // show cursor at prompt
 }
 
-func (t *TUI) bannerLines() []string {
+// headerLine renders the compact top bar: app name, working directory, mode.
+func (t *TUI) headerLine() string {
 	cwd, _ := os.Getwd()
 	short := shortDir(cwd)
-	lines := t.logoLines()
-	lines = append(lines, "")
-	lines = append(lines,
-		t.paint("cyan", "◆ iCode")+" "+appVersionStr()+"  "+t.paint("dim", short),
-		t.paint("dim", "  Model: ")+t.model+t.paint("dim", "   Mode: ")+t.mode,
-		t.paint("dim", "  "+t.tstr("banner.hint")),
-	)
-	return lines
+	modeLabel := t.mode
+	if modeLabel == "" {
+		modeLabel = ModeAgent
+	}
+	return t.paint("cyan", "◆ iCode") + " " + appVersionStr() +
+		t.paint("dim", "  ·  ") + short +
+		t.paint("dim", "  ·  mode: ") + modeLabel
 }
 
-func (t *TUI) messageLines(m Message) []string {
+func (t *TUI) messageLinesW(m Message, width int) []string {
 	switch m.Role {
 	case RoleThinking:
-		return thinkingLines(m.Content, t.width)
+		return thinkingLines(m.Content, width)
 	case RoleUser:
-		return wrapPrefixed("  ▸ ", "    ", m.Content, t.width)
+		return wrapPrefixed("  ▸ ", "    ", m.Content, width)
 	case RoleAssistant:
-		return wrapPrefixed("  ◆ ", "    ", m.Content, t.width)
+		if t.rawMode {
+			return t.renderMarkdown(m.Content, "  ◆ ", "    ", width)
+		}
+		return wrapPrefixed("  ◆ ", "    ", m.Content, width)
 	case RoleSystem:
-		return wrapPrefixed("  ", "  ", m.Content, t.width)
+		if t.rawMode {
+			return t.renderMarkdown(m.Content, "  ", "  ", width)
+		}
+		return wrapPrefixed("  ", "  ", m.Content, width)
 	case RoleError:
-		return wrapPrefixed("  × ", "    ", m.Content, t.width)
+		return wrapPrefixed("  × ", "    ", m.Content, width)
 	case RoleTool:
 		var out []string
 		head := "  » " + m.Tool
@@ -504,33 +572,247 @@ func (t *TUI) messageLines(m Message) []string {
 		}
 		out = append(out, t.paint("yellow", head))
 		if m.Content != "" {
-			for _, l := range wrapPrefixed("    ", "    ", m.Content, t.width) {
+			for _, l := range wrapPrefixed("    ", "    ", m.Content, width) {
 				out = append(out, t.paint("dim", l))
 			}
 		}
 		return out
 	}
-	return wrapPrefixed("  ", "  ", m.Content, t.width)
+	return wrapPrefixed("  ", "  ", m.Content, width)
+}
+
+// conversationLines builds the right pane: every message (+ the in-flight
+// stream), wrapped to the right-pane width. While the model is "thinking"
+// (stream started but no tokens yet) a sliding-bar indicator is shown.
+func (t *TUI) conversationLines(msgs []Message, streaming bool, streamContent string, width int) []string {
+	var lines []string
+	all := append([]Message{}, msgs...)
+	if streaming {
+		all = append(all, Message{Role: RoleAssistant, Content: streamContent})
+	}
+	for i, m := range all {
+		// Replace the empty in-flight assistant message with the thinking bar.
+		if streaming && i == len(all)-1 && strings.TrimSpace(m.Content) == "" {
+			continue
+		}
+		if i > 0 {
+			lines = append(lines, "") // blank separator between turns
+		}
+		lines = append(lines, t.messageLinesW(m, width)...)
+	}
+	if streaming && strings.TrimSpace(streamContent) == "" {
+		lines = append(lines, t.paint("dim", "  ◆ "+t.tstr("status.gen"))+"  "+t.thinkingBar())
+	}
+	return lines
+}
+
+// leftPaneLines builds the explorer pane (model, context, cost, folder, files).
+func (t *TUI) leftPaneLines(paneW int) []string {
+	inner := paneW - 2
+	if inner < 4 {
+		inner = 4
+	}
+	var L []string
+	title := func(s string) { L = append(L, t.paint("cyan", "◆ "+s)) }
+	title("模型")
+	L = append(L, "  "+truncate(t.model, inner))
+	title("上下文")
+	L = append(L, "  "+t.contextBar(inner))
+	title("费用")
+	cost := t.cost
+	if cost == "" {
+		cost = "$0.0000"
+	}
+	L = append(L, "  "+truncate(cost, inner))
+	title("目录")
+	if cwd, err := os.Getwd(); err == nil {
+		L = append(L, "  "+truncate(shortDir(cwd), inner))
+	}
+	title("文件")
+	for i, f := range t.dirEntries {
+		if i >= 14 {
+			break
+		}
+		L = append(L, "  "+truncate(f, inner))
+	}
+	return L
+}
+
+// contextBar renders a "NN% ▓▓░░" usage meter of width w (display columns).
+func (t *TUI) contextBar(w int) string {
+	if w < 6 {
+		return strings.Repeat("░", w)
+	}
+	pct := 0
+	if t.contextWindow > 0 && t.contextTokens > 0 {
+		pct = t.contextTokens * 100 / t.contextWindow
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	if pct < 0 {
+		pct = 0
+	}
+	barW := w - 4
+	if barW < 1 {
+		barW = 1
+	}
+	filled := barW * pct / 100
+	return fmt.Sprintf("%2d%% ", pct) + strings.Repeat("▓", filled) + strings.Repeat("░", barW-filled)
+}
+
+// thinkingBar is a left↔right sliding block that animates while the model
+// generates, giving Claude Code's signature "thinking" motion.
+func (t *TUI) thinkingBar() string {
+	const n = 12
+	elapsed := time.Since(t.turnStart)
+	frame := int(elapsed.Milliseconds() / 120)
+	if frame < 0 {
+		frame = 0
+	}
+	frame %= (2*n - 2)
+	pos := frame
+	if pos >= n {
+		pos = 2*n - 2 - pos
+	}
+	var b strings.Builder
+	b.WriteString("[")
+	for i := 0; i < n; i++ {
+		if i == pos {
+			b.WriteString("█")
+		} else {
+			b.WriteString("░")
+		}
+	}
+	b.WriteString("]")
+	return b.String()
+}
+
+// fit returns s padded (or truncated with an ellipsis) to exactly w display
+// columns, so split panes line up under the vertical frame line.
+func fit(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	if runeWidthStr(s) > w {
+		var b strings.Builder
+		cw := 0
+		for _, ch := range s {
+			if cw+runeWidth(ch) > w-1 {
+				break
+			}
+			b.WriteRune(ch)
+			cw += runeWidth(ch)
+		}
+		s = b.String() + "…"
+	}
+	return padEnd(s, w)
+}
+
+// ensureAnim starts a lightweight ticker that repaints the screen while a
+// generation is in flight, so the thinking bar keeps sliding even between
+// token bursts. It is idempotent.
+func (t *TUI) ensureAnim() {
+	t.mu.Lock()
+	if t.animRunning {
+		t.mu.Unlock()
+		return
+	}
+	t.animRunning = true
+	t.mu.Unlock()
+	go func() {
+		for {
+			t.mu.Lock()
+			if !t.streaming {
+				t.animRunning = false
+				t.mu.Unlock()
+				return
+			}
+			t.mu.Unlock()
+			t.scheduleRender()
+			time.Sleep(110 * time.Millisecond)
+		}
+	}()
+}
+
+// SetContext records the latest request's prompt-token count and the model's
+// context window so the status bar / explorer can show live context usage.
+func (t *TUI) SetContext(tokens, window int) {
+	t.contextTokens = tokens
+	t.contextWindow = window
+}
+
+// listCwd returns the top-level entries of the current working directory
+// (dotfiles and hidden entries skipped), used by the explorer pane.
+func listCwd() []string {
+	dir, err := os.Getwd()
+	if err != nil {
+		return nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		if e.IsDir() {
+			name += "/"
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if len(names) > 14 {
+		names = names[:14]
+	}
+	return names
 }
 
 func (t *TUI) statusLine() string {
-	total := t.promptTokens + t.completionTokens
 	var parts []string
 	parts = append(parts, t.mode)
-	parts = append(parts, t.model)
-	if total > 0 {
-		parts = append(parts, formatTokens(total)+" tok")
+	if t.provider != "" {
+		parts = append(parts, t.provider)
 	}
-	if t.cost != "" {
-		parts = append(parts, t.cost)
+	parts = append(parts, t.model)
+	if t.promptTokens > 0 || t.completionTokens > 0 {
+		parts = append(parts,
+			"↑"+formatTokens(t.promptTokens)+" ↓"+formatTokens(t.completionTokens))
+	}
+	if t.contextWindow > 0 && t.contextTokens > 0 {
+		pct := t.contextTokens * 100 / t.contextWindow
+		if pct > 100 {
+			pct = 100
+		}
+		parts = append(parts, fmt.Sprintf("%d%% ctx", pct))
 	}
 	if t.cacheHitRate > 0 {
 		parts = append(parts, fmt.Sprintf("%.0f%% cache", t.cacheHitRate*100))
 	}
+	if t.cost != "" {
+		parts = append(parts, t.cost)
+	}
 	if t.streaming {
-		parts = append(parts, "· "+t.tstr("status.gen"))
+		if !t.turnStart.IsZero() {
+			parts = append(parts, "⏱ "+formatDuration(time.Since(t.turnStart)))
+		}
+		parts = append(parts, t.thinkingBar()+" "+t.tstr("status.gen"))
 	}
 	return strings.Join(parts, " · ")
+}
+
+// formatDuration renders a duration compactly: "3.2s" or "1m04s".
+func formatDuration(d time.Duration) string {
+	d = d.Round(time.Millisecond)
+	if d < time.Minute {
+		return fmt.Sprintf("%.1fs", d.Seconds())
+	}
+	m := int(d / time.Minute)
+	s := int((d % time.Minute) / time.Second)
+	return fmt.Sprintf("%dm%02ds", m, s)
 }
 
 func (t *TUI) inputRenderFor(inputBuf string) string {
@@ -579,8 +861,11 @@ func (t *TUI) runLine() error {
 		}
 		t.printUser(text)
 		if t.callback != nil {
+			t.mu.Lock()
 			t.streaming = true
 			t.streamBuf.Reset()
+			t.turnStart = time.Now()
+			t.mu.Unlock()
 			go t.callback.OnSend(text)
 			t.drainStream()
 		}
@@ -722,10 +1007,34 @@ func (t *TUI) AppendStream(text string) {
 	t.streamBuf.WriteString(text)
 	t.mu.Unlock()
 	if t.rawMode {
-		t.render()
+		t.ensureAnim()
+		t.scheduleRender()
 	} else {
 		fmt.Fprint(t.writer, text)
 	}
+}
+
+// scheduleRender coalesces full-screen redraws: rapid token bursts collapse
+// into at most one repaint per ~25ms window instead of one per chunk. A direct
+// t.render() call (e.g. at end-of-stream) bypasses the throttle.
+func (t *TUI) scheduleRender() {
+	if !t.rawMode {
+		return
+	}
+	t.mu.Lock()
+	if t.renderPending {
+		t.mu.Unlock()
+		return
+	}
+	t.renderPending = true
+	t.mu.Unlock()
+
+	t.renderTimer = time.AfterFunc(25*time.Millisecond, func() {
+		t.mu.Lock()
+		t.renderPending = false
+		t.mu.Unlock()
+		t.render()
+	})
 }
 
 // EndStream finalizes the streaming turn.
@@ -1281,9 +1590,14 @@ func thinkingLines(text string, width int) []string {
 	if inner < 10 {
 		inner = 10
 	}
-	box := "┌" + repeat("─", inner) + "┐"
+	label := " 思考 "
+	pad := inner - runeWidthStr(label)
+	if pad < 0 {
+		pad = 0
+	}
+	top := "┌" + label + repeat("─", pad) + "┐"
 	var out []string
-	out = append(out, "  "+box)
+	out = append(out, "  "+top)
 	for _, l := range wrapText(text, inner) {
 		out = append(out, "  │ "+padEnd(l, inner)+"│")
 	}
@@ -1304,6 +1618,15 @@ func padEnd(s string, n int) string {
 		return s
 	}
 	return s + strings.Repeat(" ", n-w)
+}
+
+// hrule returns a full-width horizontal separator line (dim), used to divide
+// the banner, messages, and footer regions of the TUI.
+func (t *TUI) hrule(width int) string {
+	if width < 2 {
+		width = 2
+	}
+	return t.paint("dim", repeat("─", width))
 }
 
 // appVersionStr returns the human-readable version shown in the banner.

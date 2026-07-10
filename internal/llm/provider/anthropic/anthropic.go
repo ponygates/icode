@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ponygates/icode/internal/types"
@@ -25,6 +26,7 @@ const (
 
 // Provider implements types.Provider for Anthropic Claude.
 type Provider struct {
+	mu         sync.RWMutex
 	apiBase    string
 	apiKey     string
 	httpClient *http.Client
@@ -51,8 +53,35 @@ func (p *Provider) Name() string                             { return ProviderNa
 func (p *Provider) ListModels() []types.ModelInfo            { return p.models }
 func (p *Provider) SupportsCache() bool                      { return true }
 
+// SetCredentials updates the API key and base URL at runtime. Empty values are
+// left unchanged. See openai_compat.BaseProvider for rationale.
+func (p *Provider) SetCredentials(apiKey, apiBase string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if apiKey != "" {
+		p.apiKey = apiKey
+	}
+	if apiBase != "" {
+		p.apiBase = apiBase
+	}
+}
+
+// SetTimeout updates the HTTP client timeout at runtime (used when the desktop
+// UI changes a provider's per-provider timeout). Values <= 0 reset to 120s.
+func (p *Provider) SetTimeout(sec int) {
+	if sec <= 0 {
+		sec = 120
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.httpClient.Timeout = time.Duration(sec) * time.Second
+}
+
 func (p *Provider) Health(ctx context.Context) error {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, p.apiBase+"/models", nil)
+	p.mu.RLock()
+	base := p.apiBase
+	p.mu.RUnlock()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, base+"/models", nil)
 	p.setHeaders(req)
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
@@ -76,7 +105,10 @@ func (p *Provider) Chat(ctx context.Context, req types.ChatRequest) (*types.Mess
 		return nil, err
 	}
 
-	httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, p.apiBase+"/messages", body)
+	p.mu.RLock()
+	base := p.apiBase
+	p.mu.RUnlock()
+	httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, base+"/messages", body)
 	p.setHeaders(httpReq)
 
 	resp, err := p.httpClient.Do(httpReq)
@@ -103,7 +135,10 @@ func (p *Provider) ChatStream(ctx context.Context, req types.ChatRequest) (<-cha
 		return nil, err
 	}
 
-	httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, p.apiBase+"/messages", body)
+	p.mu.RLock()
+	base := p.apiBase
+	p.mu.RUnlock()
+	httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, base+"/messages", body)
 	p.setHeaders(httpReq)
 
 	resp, err := p.httpClient.Do(httpReq)
@@ -390,8 +425,11 @@ func (p *Provider) buildMessagesBody(req types.ChatRequest, stream bool) (io.Rea
 }
 
 func (p *Provider) setHeaders(req *http.Request) {
+	p.mu.RLock()
+	k := p.apiKey
+	p.mu.RUnlock()
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", p.apiKey)
+	req.Header.Set("x-api-key", k)
 	req.Header.Set("anthropic-version", AnthropicVersion)
 	req.Header.Set("User-Agent", "iCode/0.1.0")
 }

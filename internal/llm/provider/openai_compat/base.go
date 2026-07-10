@@ -82,6 +82,32 @@ func (p *BaseProvider) SupportsCache() bool {
 	return p.cacheSupport
 }
 
+// SetCredentials updates the API key and base URL at runtime. Empty values are
+// left unchanged so callers can update only one field. This lets the server
+// push keys configured via the desktop UI into the live provider without a
+// restart.
+func (p *BaseProvider) SetCredentials(apiKey, apiBase string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if apiKey != "" {
+		p.apiKey = apiKey
+	}
+	if apiBase != "" {
+		p.apiBase = strings.TrimRight(apiBase, "/")
+	}
+}
+
+// SetTimeout updates the HTTP client timeout at runtime (used when the desktop
+// UI changes a provider's per-provider timeout). Values <= 0 reset to 120s.
+func (p *BaseProvider) SetTimeout(sec int) {
+	if sec <= 0 {
+		sec = 120
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.httpClient.Timeout = time.Duration(sec) * time.Second
+}
+
 // Health performs a connectivity check.
 func (p *BaseProvider) Health(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.apiBase+"/models", nil)
@@ -342,12 +368,17 @@ func (p *BaseProvider) buildRequestBody(req types.ChatRequest, stream bool) (io.
 }
 
 func (p *BaseProvider) chatEndpoint() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	return p.apiBase + "/chat/completions"
 }
 
 func (p *BaseProvider) setAuth(req *http.Request) {
-	if p.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+p.apiKey)
+	p.mu.RLock()
+	k := p.apiKey
+	p.mu.RUnlock()
+	if k != "" {
+		req.Header.Set("Authorization", "Bearer "+k)
 	}
 }
 

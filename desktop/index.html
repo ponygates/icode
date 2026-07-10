@@ -425,9 +425,16 @@ body {
     <div class="settings-body">
       <nav class="settings-nav" id="settingsNav">
         <div class="nav-item active" data-nav="general">⚙ 通用</div>
+        <div class="nav-item" data-nav="appearance">🎨 外观</div>
         <div class="nav-h">厂商 / 模型</div>
         <div id="providerNavList"></div>
         <button class="btn ghost nav-add" id="addProviderBtn">＋ 新增厂商</button>
+        <div class="nav-item" data-nav="tools">🛡 工具与权限</div>
+        <div class="nav-item" data-nav="mcp">🔌 MCP 服务器</div>
+        <div class="nav-item" data-nav="sessions">📋 会话</div>
+        <div class="nav-item" data-nav="update">🔄 更新</div>
+        <div class="nav-h">其他</div>
+        <div class="nav-item" data-nav="about">ℹ 关于</div>
       </nav>
       <div class="settings-detail" id="settingsDetail"></div>
     </div>
@@ -470,13 +477,24 @@ const SLASH = [
   { k: '/exit', d: '退出' },
 ];
 // Slash commands that should trigger a UI action instead of being sent to the model.
-const UI_SLASH = { '/config':'openSettings', '/keys':'openKeys', '/model':'openModel', '/provider':'openProvider' };
+const UI_SLASH = { '/config':'openSettings', '/keys':'openKeys', '/model':'openModel', '/provider':'openProvider', '/sessions':'openSessions' };
 
 const state = {
   provider: 'deepseek',
   model: 'deepseek-v4-flash',
   mode: 'agent',
   theme: 'dark',
+  temperature: 0.7,
+  maxTokens: 0,
+  cache: true,
+  syntaxHL: true,
+  diffMode: 'unified',
+  bashTimeout: 120,
+  allowedPaths: '',
+  deniedCommands: '',
+  autoUpdate: true,
+  channel: 'github',
+  intervalH: 24,
   sessionId: null,
   sessions: [],          // open tabs: [{id, title, active}]
   tokens: { prompt: 0, completion: 0, cache: 0, cost: 0, total: 0 },
@@ -682,12 +700,14 @@ function send(){
 function openProvider(){ openSettings('provider'); }
 function openModel(){ openSettings(); setTimeout(() => { const e = $('setModel'); if (e) e.focus(); }, 60); }
 function openKeys(){ openSettings('provider'); }
+function openSessions(){ openSettings('sessions'); }
 function runUISlash(tok){
   const fn = UI_SLASH[tok];
   if (fn === 'openSettings'){ openSettings(); }
   else if (fn === 'openKeys'){ openProvider(); }
   else if (fn === 'openModel'){ openModel(); }
   else if (fn === 'openProvider'){ openProvider(); }
+  else if (fn === 'openSessions'){ openSessions(); }
 }
 function setBtnStop(stop){
   const b = $('sendBtn'); b.textContent = stop ? '停止' : '发送'; b.classList.toggle('stop', stop);
@@ -719,19 +739,43 @@ document.addEventListener('keydown', e => {
 // ── Settings modal (provider → model) ──
 let providerKeys = [];   // [{name, key_set, api_base}]
 let customModels = [];   // [{id, provider, model_id, name, custom}]
+let mcpServers = [];     // [{name, type, command, args, url, enabled, connected, tools}]
+let storedSessions = []; // persisted sessions from /api/sessions
+let mcpEditing = null;   // name of MCP server being edited (null = new)
+let editingSessionId = null;
 
-const PROVIDER_LABELS = { deepseek:'DeepSeek', zhipu:'Zhipu GLM', kimi:'Kimi K2', volcengine:'Doubao', tencent:'Hunyuan', huawei:'Pangu', scnet:'SCNET', openrouter:'OpenRouter', anthropic:'Anthropic' };
+const PROVIDER_LABELS = { deepseek:'DeepSeek', zhipu:'Zhipu GLM', kimi:'Kimi K2', volcengine:'Doubao', tencent:'Hunyuan', huawei:'Pangu', scnet:'SCNET', openrouter:'OpenRouter', anthropic:'Anthropic', nvidia:'NVIDIA' };
 
 function openSettings(nav){
   // Load provider + model data, then render the appropriate pane. The general
   // pane builds its own controls (setModel/setTheme/setLang/setModes) inside
   // renderGeneral, so we must not touch them before that.
-  Promise.all([loadKeysData(), loadCustomModelsData()]).then(() => {
+  Promise.all([loadKeysData(), loadCustomModelsData(), loadMCPData(), loadStoredSessions()]).then(() => {
     renderProviderNav();
+    bindSettingsNav();
     if (nav === 'provider') selectProvider(state.provider);
     else if (nav === 'new') selectProvider('__new__');
+    else if (nav === 'about') renderAbout();
+    else if (nav === 'mcp') renderMCP();
+    else if (nav === 'sessions') renderSessions();
     else renderGeneral();
     $('settingsModal').classList.add('show');
+  });
+}
+// Wire click handlers for the static nav items (通用 / 关于). Provider nav
+// items are wired in renderProviderNav; the general/about items are static.
+function bindSettingsNav(){
+  document.querySelectorAll('#settingsNav .nav-item[data-nav]').forEach(el => {
+    el.onclick = () => {
+      const nav = el.dataset.nav;
+      if (nav === 'general') renderGeneral();
+      else if (nav === 'appearance') renderAppearance();
+      else if (nav === 'tools') renderTools();
+      else if (nav === 'mcp') renderMCP();
+      else if (nav === 'sessions') renderSessions();
+      else if (nav === 'update') renderUpdate();
+      else if (nav === 'about') renderAbout();
+    };
   });
 }
 function loadKeysData(){
@@ -747,15 +791,19 @@ function allProviders(){
   (providerKeys||[]).forEach(k => { set[k.name] = true; });
   return Object.keys(set).map(name => {
     const k = (providerKeys||[]).find(x => x.name === name);
-    return { name, label: PROVIDER_LABELS[name]||name, key_set: k ? !!k.key_set : false, custom: k ? !MODELS.some(m=>m.provider===name) : false };
+    // A provider is "custom" only if it is not one of the built-in providers
+    // known to the app (PROVIDER_LABELS). This stays correct even after a
+    // built-in provider is disabled (and thus dropped from the model list).
+    return { name, label: PROVIDER_LABELS[name]||name, key_set: k ? !!k.key_set : false, disabled: k ? !!k.disabled : false, custom: !PROVIDER_LABELS[name] };
   });
 }
 function renderProviderNav(){
   const list = $('providerNavList'); list.innerHTML = '';
   allProviders().forEach(p => {
     const it = document.createElement('div'); it.className = 'nav-item'; it.dataset.provider = p.name;
-    const badge = p.key_set ? '<span class="nbadge set">已配置</span>'
-      : (p.custom ? '<span class="nbadge custom">自定义</span>' : '<span class="nbadge unset">未配置</span>');
+    const badge = p.disabled ? '<span class="nbadge unset">已禁用</span>'
+      : (p.key_set ? '<span class="nbadge set">已配置</span>'
+      : (p.custom ? '<span class="nbadge custom">自定义</span>' : '<span class="nbadge unset">未配置</span>'));
     it.innerHTML = `<span>${esc(p.label)}</span>${badge}`;
     it.onclick = () => selectProvider(p.name);
     list.appendChild(it);
@@ -792,6 +840,26 @@ function renderGeneral(){
       </select>
     </div>
     <div class="key-hint">模型与厂商密钥在左侧「厂商 / 模型」中管理。点击厂商可为其增加、修改、删除模型。</div>`;
+  // temperature
+  const temp = (typeof state.temperature === 'number') ? state.temperature : 0.7;
+  const maxTok = (typeof state.maxTokens === 'number' && state.maxTokens > 0) ? state.maxTokens : '';
+  const cacheOn = state.cache !== false;
+  const genWrap = document.createElement('div');
+  genWrap.innerHTML = `
+    <div class="sub-h" style="margin-top:18px">生成参数</div>
+    <div class="field"><label>温度 (Temperature)：<span id="tempVal">${temp.toFixed(2)}</span></label>
+      <input id="setTemp" type="range" min="0" max="2" step="0.05" value="${temp}" style="width:100%" />
+      <div class="key-hint">越低越确定，越高越发散。推荐代码任务 0.2–0.7。</div>
+    </div>
+    <div class="field"><label>单次最大输出 Tokens（0 = 模型默认）</label>
+      <input id="setMaxTokens" type="number" min="0" step="256" placeholder="模型默认" value="${maxTok}" />
+    </div>
+    <div class="field"><label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+      <input id="setCache" type="checkbox" ${cacheOn ? 'checked' : ''} /> 启用前缀缓存（Prefix Cache，节省 Token）
+    </label></div>`;
+  $('settingsDetail').appendChild(genWrap);
+  const tempInput = $('setTemp');
+  tempInput.addEventListener('input', () => { $('tempVal').textContent = parseFloat(tempInput.value).toFixed(2); });
   $('setModel').innerHTML = MODELS.map(m => `<option value="${m.id}">${esc(m.name)} (${m.provider})${m.custom?' ★':''}</option>`).join('');
   $('setModel').value = state.model;
   $('setTheme').value = state.theme;
@@ -801,6 +869,399 @@ function renderGeneral(){
     document.querySelectorAll('#setModes .mode-opt').forEach(x => x.classList.remove('sel')); o.classList.add('sel');
   });
 }
+
+// ── Appearance pane ──
+function renderAppearance(){
+  setActiveNav(document.querySelector('#settingsNav .nav-item[data-nav="appearance"]'));
+  const sh = state.syntaxHL !== false;
+  const dm = state.diffMode || 'unified';
+  $('settingsDetail').innerHTML = `
+    <div class="detail-h">🎨 外观</div>
+    <div class="detail-sub">界面主题与代码显示样式（桌面端即时生效，CLI 端下次启动生效）</div>
+    <div class="field"><label>主题</label>
+      <select id="setTheme">
+        <option value="auto">auto（跟随系统）</option>
+        <option value="dark">dark（深色）</option>
+        <option value="light">light（浅色）</option>
+      </select>
+    </div>
+    <div class="field"><label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+      <input id="setSyntax" type="checkbox" ${sh ? 'checked' : ''} /> 启用语法高亮（CLI 代码块）
+    </label></div>
+    <div class="field"><label>Diff 显示模式</label>
+      <select id="setDiff">
+        <option value="unified" ${dm==='unified'?'selected':''}>unified（统一差异）</option>
+        <option value="split" ${dm==='split'?'selected':''}>split（并排对比）</option>
+      </select>
+    </div>
+    <div class="key-hint">主题与语言同时作用于桌面与 CLI；语法高亮与 Diff 模式主要影响 CLI 端输出。</div>`;
+  $('setTheme').value = state.theme;
+}
+
+// ── Tools & permissions pane ──
+function renderTools(){
+  setActiveNav(document.querySelector('#settingsNav .nav-item[data-nav="tools"]'));
+  const bt = (typeof state.bashTimeout === 'number' && state.bashTimeout > 0) ? state.bashTimeout : 120;
+  $('settingsDetail').innerHTML = `
+    <div class="detail-h">🛡 工具与权限</div>
+    <div class="detail-sub">控制 agent 执行命令与文件操作的安全边界</div>
+    <div class="field"><label>默认权限模式</label>
+      <div class="modes" id="setModes2">
+        <div class="mode-opt" data-mode="plan">plan<small>仅规划，不改动</small></div>
+        <div class="mode-opt" data-mode="agent">agent<small>需授权</small></div>
+        <div class="mode-opt" data-mode="yolo">yolo<small>全部放行</small></div>
+      </div>
+    </div>
+    <div class="field"><label>命令超时（秒）</label>
+      <input id="setBashTimeout" type="number" min="1" step="1" value="${bt}" />
+    </div>
+    <div class="field"><label>允许路径（每行一个，留空 = 不限制）</label>
+      <textarea id="setAllowed" rows="4" placeholder="/path/to/project&#10;/another/allowed">${esc(state.allowedPaths)}</textarea>
+    </div>
+    <div class="field"><label>禁止命令（每行一个子串，命中即拦截）</label>
+      <textarea id="setDenied" rows="4" placeholder="rm -rf&#10;sudo&#10;dd if=">${esc(state.deniedCommands)}</textarea>
+    </div>
+    <div class="key-hint">允许路径：bash / 文件操作仅可在这些目录内进行。禁止命令：任何包含这些子串的 shell 命令都会被拦截（yolo 模式同样生效）。</div>
+    <div class="sub-h">当前会话</div>
+    <button class="btn ghost" id="toolsAutoApprove">本会话全部自动放行</button>
+    <div class="key-hint">点击后，当前会话内的所有工具调用将自动允许，直到会话结束或切换模式。</div>`;
+  document.querySelectorAll('#setModes2 .mode-opt').forEach(o => o.classList.toggle('sel', o.dataset.mode === state.mode));
+  document.querySelectorAll('#setModes2 .mode-opt').forEach(o => o.onclick = () => {
+    document.querySelectorAll('#setModes2 .mode-opt').forEach(x => x.classList.remove('sel'));
+    o.classList.add('sel');
+    state.mode = o.dataset.mode;
+    fetch('/api/permission/mode', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ mode: state.mode }) }).catch(()=>{});
+  });
+  $('toolsAutoApprove').onclick = () => {
+    if (state.sessionId) {
+      fetch('/api/permission/session-allow', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ session_id: state.sessionId, allow: true }) }).catch(()=>{});
+    }
+    toast('本会话已设为自动放行');
+  };
+}
+
+// ── Update pane ──
+function renderUpdate(){
+  setActiveNav(document.querySelector('#settingsNav .nav-item[data-nav="update"]'));
+  const au = state.autoUpdate !== false;
+  const ch = state.channel || 'github';
+  const iv = (typeof state.intervalH === 'number' && state.intervalH > 0) ? state.intervalH : 24;
+  $('settingsDetail').innerHTML = `
+    <div class="detail-h">🔄 更新</div>
+    <div class="detail-sub">检查并安装 iCode 的新版本</div>
+    <div class="field"><label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+      <input id="setAutoUpdate" type="checkbox" ${au ? 'checked' : ''} /> 自动检查更新
+    </label></div>
+    <div class="field"><label>更新渠道</label>
+      <select id="setChannel">
+        <option value="github" ${ch==='github'?'selected':''}>github（稳定版）</option>
+        <option value="beta" ${ch==='beta'?'selected':''}>beta（测试版）</option>
+      </select>
+    </div>
+    <div class="field"><label>检查间隔（小时）</label>
+      <input id="setInterval" type="number" min="1" step="1" value="${iv}" />
+    </div>
+    <div class="sub-h">维护</div>
+    <button class="btn ghost" id="updCheck">立即检查更新</button>
+    <div class="key-hint">点击「立即检查更新」会触发一次厂商 / 模型列表刷新，并报告可用更新。</div>`;
+  $('updCheck').onclick = () => {
+    fetch('/api/models/refresh', { method:'POST' }).then(r => r.ok ? r.json() : null).then(d => {
+      if (d && d.updated) toast('已更新 ' + d.updated + ' 项'); else toast('已是最新');
+    }).catch(() => toast('检查失败'));
+  };
+}
+
+function renderAbout(){
+  setActiveNav(document.querySelector('#settingsNav .nav-item[data-nav="about"]'));
+  $('settingsDetail').innerHTML = `
+    <div class="detail-h">ℹ 关于 iCode</div>
+    <div class="key-hint" style="margin-bottom:14px">多模型 AI Coding Agent · 桌面端</div>
+    <div id="aboutBody">
+      <div class="kv" style="font-size:13px"><span class="k">版本</span><span class="v" id="aboutVer">…</span></div>
+      <div class="kv" style="font-size:13px"><span class="k">工作目录</span><span class="v" id="aboutCwd">${esc(state.cwd)}</span></div>
+    </div>
+    <div class="sub-h">链接</div>
+    <div class="key-hint">
+      • 项目仓库：<a href="https://github.com/ponygates/icode" target="_blank" style="color:var(--accent)">github.com/ponygates/icode</a><br/>
+      • 说明：详见仓库 README 与文档
+    </div>
+    <div class="sub-h">数据</div>
+    <div class="inline-btns">
+      <button class="btn ghost danger" id="aboutClear">清空当前会话</button>
+      <button class="btn ghost" id="aboutReset">恢复默认设置</button>
+    </div>
+    <div class="key-hint">清空仅移除当前会话的消息，不影响配置与 API 密钥。「恢复默认设置」会重置界面与行为偏好，但保留你的 API 密钥与自定义模型。</div>`;
+  fetch('/api/health').then(r=>r.ok?r.json():null).then(d=>{ if(d && d.version) $('aboutVer').textContent = d.version; }).catch(()=>{ $('aboutVer').textContent = '0.1.0'; });
+  $('aboutClear').onclick = () => {
+    if (state.sessionId) {
+      fetch('/api/sessions/' + encodeURIComponent(state.sessionId), { method:'DELETE' }).catch(()=>{});
+      $('messages').innerHTML = ''; addSystem('当前会话已清空');
+    }
+    $('settingsModal').classList.remove('show');
+  };
+  $('aboutReset').onclick = () => {
+    fetch('/api/config/reset', { method:'POST' }).then(r => r.ok ? r.json() : null).then(() => {
+      toast('已恢复默认设置');
+      $('settingsModal').classList.remove('show');
+    }).catch(() => toast('恢复失败'));
+  };
+}
+// ── MCP server management (mirrors Reasonix's MCP tool settings) ──
+function loadMCPData(){
+  return fetch('/api/mcp').then(r => r.ok ? r.json() : []).then(d => { mcpServers = Array.isArray(d) ? d : []; }).catch(() => { mcpServers = []; });
+}
+function loadStoredSessions(){
+  return fetch('/api/sessions').then(r => r.ok ? r.json() : []).then(d => { storedSessions = Array.isArray(d) ? d : []; }).catch(() => { storedSessions = []; });
+}
+function renderMCP(){
+  setActiveNav(document.querySelector('#settingsNav .nav-item[data-nav="mcp"]'));
+  $('settingsDetail').innerHTML = `
+    <div class="detail-h">🔌 MCP 服务器</div>
+    <div class="detail-sub">连接 Model Context Protocol 服务器，扩展 agent 可用工具（对标 Reasonix 的 MCP 工具管理）</div>
+    <div class="sub-h">已配置的服务器</div>
+    <div id="mcpList" class="key-list"></div>
+    <button class="btn ghost" id="mcpNewBtn" style="margin-top:10px">＋ 新增服务器</button>
+    <div class="sub-h" id="mcpEditorTitle" style="margin-top:18px">新增服务器</div>
+    <div class="mrow" id="mcpEditor">
+      <div class="minputs" style="flex-wrap:wrap; margin-bottom:8px">
+        <input id="mcpName" placeholder="名称，如 filesystem" style="flex:1 1 100%" />
+        <select id="mcpType" style="flex:1 1 45%">
+          <option value="stdio">stdio（本地进程）</option>
+          <option value="sse">sse（远程 HTTP）</option>
+        </select>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12px;white-space:nowrap;cursor:pointer">
+          <input type="checkbox" id="mcpEnabled" checked /> 启用
+        </label>
+      </div>
+      <div id="mcpStdioFields">
+        <div class="minputs" style="flex-wrap:wrap; margin-bottom:8px">
+          <input id="mcpCommand" placeholder="命令，如 npx" style="flex:1 1 45%" />
+          <input id="mcpArgs" placeholder="参数，空格分隔" style="flex:1 1 100%" />
+        </div>
+        <div class="field" style="margin-bottom:8px"><label>环境变量（每行 NAME=VALUE，可选）</label>
+          <textarea id="mcpEnv" rows="2" placeholder="API_KEY=xxx"></textarea>
+        </div>
+      </div>
+      <div id="mcpSseFields" style="display:none">
+        <div class="field" style="margin-bottom:8px"><label>URL</label><input id="mcpUrl" placeholder="https://host/mcp/sse" /></div>
+        <div class="field" style="margin-bottom:8px"><label>请求头（每行 NAME=VALUE 或 NAME: VALUE，可选）</label>
+          <textarea id="mcpHeaders" rows="2" placeholder="Authorization: Bearer xxx"></textarea>
+        </div>
+      </div>
+      <div class="inline-btns" style="margin-top:10px">
+        <button class="btn primary" id="mcpSaveBtn">保存</button>
+        <button class="btn ghost" id="mcpTestBtn">测试连接</button>
+        <button class="btn ghost" id="mcpCancelBtn" style="display:none">取消</button>
+      </div>
+      <div class="key-hint" id="mcpMsg"></div>
+    </div>`;
+  $('mcpType').onchange = toggleMCPFields;
+  $('mcpNewBtn').onclick = () => { mcpEditing = null; resetMCPEditor(); };
+  $('mcpSaveBtn').onclick = saveMCPServer;
+  $('mcpTestBtn').onclick = testMCPServer;
+  $('mcpCancelBtn').onclick = () => { mcpEditing = null; resetMCPEditor(); };
+  renderMCPList();
+}
+function toggleMCPFields(){
+  const t = $('mcpType').value;
+  if ($('mcpStdioFields')) $('mcpStdioFields').style.display = (t === 'stdio') ? '' : 'none';
+  if ($('mcpSseFields')) $('mcpSseFields').style.display = (t === 'sse') ? '' : 'none';
+}
+function resetMCPEditor(){
+  mcpEditing = null;
+  $('mcpEditorTitle').textContent = '新增服务器';
+  $('mcpName').value = ''; $('mcpName').disabled = false;
+  $('mcpType').value = 'stdio'; $('mcpEnabled').checked = true;
+  $('mcpCommand').value = ''; $('mcpArgs').value = ''; $('mcpEnv').value = '';
+  $('mcpUrl').value = ''; $('mcpHeaders').value = '';
+  $('mcpCancelBtn').style.display = 'none';
+  $('mcpMsg').textContent = '';
+  toggleMCPFields();
+}
+function renderMCPList(){
+  const el = $('mcpList'); if (!el) return;
+  if (!mcpServers.length){ el.innerHTML = '<div class="key-hint">尚未配置任何 MCP 服务器。点击「＋ 新增服务器」开始。</div>'; return; }
+  el.innerHTML = mcpServers.map(s => {
+    const conn = s.connected ? '<span class="key-badge set">已连接</span>' : '<span class="key-badge unset">未连接</span>';
+    const en = s.enabled ? '<span class="key-badge set">启用</span>' : '<span class="key-badge unset">禁用</span>';
+    const tools = s.tools > 0 ? ' · ' + s.tools + ' 个工具' : '';
+    return `<div class="key-row">
+      <div class="key-head"><span class="key-name">${esc(s.name)}</span><span>${conn}${en}</span></div>
+      <div class="key-hint">类型 ${esc(s.type || 'stdio')}${tools}</div>
+      <div class="inline-btns" style="margin-top:6px">
+        <button class="btn mini" data-act="edit">编辑</button>
+        <button class="btn ghost mini danger" data-act="del">删除</button>
+      </div>
+    </div>`;
+  }).join('');
+  el.querySelectorAll('.key-row').forEach((row, i) => {
+    const s = mcpServers[i];
+    if (!s) return;
+    row.querySelector('[data-act="edit"]').onclick = () => editMCPServer(s.name);
+    row.querySelector('[data-act="del"]').onclick = () => deleteMCPServer(s.name);
+  });
+}
+function editMCPServer(name){
+  const s = mcpServers.find(x => x.name === name); if (!s) return;
+  mcpEditing = name;
+  $('mcpEditorTitle').textContent = '编辑服务器：' + name;
+  $('mcpName').value = s.name; $('mcpName').disabled = true;
+  $('mcpType').value = s.type || 'stdio'; $('mcpEnabled').checked = !!s.enabled;
+  $('mcpCommand').value = s.command || ''; $('mcpArgs').value = (s.args || []).join(' ');
+  $('mcpEnv').value = (s.env || []).join('\n');
+  $('mcpUrl').value = s.url || '';
+  $('mcpHeaders').value = Object.entries(s.headers || {}).map(([k, v]) => k + '=' + v).join('\n');
+  $('mcpCancelBtn').style.display = '';
+  $('mcpMsg').textContent = '';
+  toggleMCPFields();
+}
+function collectMCPServer(){
+  const type = $('mcpType').value;
+  const cfg = { name: $('mcpName').value.trim(), type, enabled: $('mcpEnabled').checked };
+  if (type === 'stdio'){
+    cfg.command = $('mcpCommand').value.trim();
+    cfg.args = $('mcpArgs').value.trim().split(/\s+/).filter(Boolean);
+    cfg.env = splitLines($('mcpEnv').value);
+  } else {
+    cfg.url = $('mcpUrl').value.trim();
+    const headers = {};
+    splitLines($('mcpHeaders').value).forEach(l => {
+      const i = l.indexOf('='), j = l.indexOf(':');
+      let k, v;
+      if (i >= 0 && (j < 0 || i < j)) { k = l.slice(0, i).trim(); v = l.slice(i + 1).trim(); }
+      else if (j >= 0) { k = l.slice(0, j).trim(); v = l.slice(j + 1).trim(); }
+      if (k) headers[k] = v;
+    });
+    cfg.headers = headers;
+  }
+  return cfg;
+}
+function saveMCPServer(){
+  const cfg = collectMCPServer();
+  if (!cfg.name){ toast('请填写服务器名称'); return; }
+  $('mcpMsg').textContent = '保存中…';
+  fetch('/api/mcp', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(cfg) })
+    .then(r => r.ok ? r.json() : Promise.reject(new Error('save failed')))
+    .then(d => {
+      $('mcpMsg').textContent = (d && d.warning) ? '⚠ ' + d.warning : '✓ 已保存';
+      loadMCPData().then(() => { renderMCPList(); resetMCPEditor(); });
+      toast('已保存 MCP 服务器 ' + cfg.name);
+    })
+    .catch(() => { $('mcpMsg').textContent = '✗ 保存失败'; toast('保存失败'); });
+}
+function testMCPServer(){
+  const cfg = collectMCPServer();
+  if (!cfg.name){ toast('请先填写服务器名称'); return; }
+  $('mcpMsg').textContent = '连接测试中…';
+  fetch('/api/mcp/test', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(cfg) })
+    .then(r => r.ok ? r.json() : Promise.reject(new Error('test failed')))
+    .then(d => {
+      if (d && d.ok){
+        const tools = (d.tools || []);
+        $('mcpMsg').textContent = '✓ 连接成功，发现 ' + tools.length + ' 个工具：' + tools.slice(0, 8).join(', ');
+      } else {
+        $('mcpMsg').textContent = '✗ 连接失败：' + (d && d.error ? d.error : '未知错误');
+      }
+    })
+    .catch(() => { $('mcpMsg').textContent = '✗ 测试请求失败'; });
+}
+function deleteMCPServer(name){
+  if (!confirm('确定删除 MCP 服务器「' + name + '」？')) return;
+  fetch('/api/mcp', { method:'DELETE', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name }) })
+    .then(r => r.ok ? r.json() : Promise.reject(new Error('del failed')))
+    .then(() => {
+      loadMCPData().then(() => { renderMCPList(); if (mcpEditing === name) resetMCPEditor(); });
+      toast('已删除 ' + name);
+    })
+    .catch(() => toast('删除失败'));
+}
+
+// ── Sessions management (mirrors Reasonix's Dashboard / Sessions) ──
+function renderSessions(){
+  setActiveNav(document.querySelector('#settingsNav .nav-item[data-nav="sessions"]'));
+  $('settingsDetail').innerHTML = `
+    <div class="detail-h">📋 会话</div>
+    <div class="detail-sub">管理已保存的会话（对标 Reasonix 的 Dashboard / Sessions）</div>
+    <div class="inline-btns" style="margin-bottom:10px">
+      <button class="btn ghost" id="sessRefresh">刷新</button>
+      <button class="btn ghost" id="sessNew">＋ 新建会话</button>
+    </div>
+    <div id="sessList" class="key-list"></div>`;
+  $('sessRefresh').onclick = () => loadStoredSessions().then(renderSessionList);
+  $('sessNew').onclick = () => newSession();
+  renderSessionList();
+}
+function renderSessionList(){
+  const el = $('sessList'); if (!el) return;
+  if (!storedSessions.length){ el.innerHTML = '<div class="key-hint">暂无已保存的会话。发送消息后会自动创建会话。</div>'; return; }
+  el.innerHTML = storedSessions.map(s => {
+    const editing = (editingSessionId === s.id);
+    const titleHtml = editing
+      ? `<input id="sessRename" value="${esc(s.title || '')}" style="flex:1" />`
+      : `<span class="key-name">${esc(s.title || '未命名会话')}</span>`;
+    const btns = editing
+      ? `<button class="btn mini" data-act="save">保存</button><button class="btn ghost mini" data-act="cancel">取消</button>`
+      : `<button class="btn mini" data-act="open">打开</button><button class="btn ghost mini" data-act="rename">重命名</button><button class="btn ghost mini danger" data-act="del">删除</button>`;
+    const meta = (s.model_id ? esc(s.model_id) : '') + (s.provider ? ' · ' + esc(s.provider) : '');
+    const time = s.updated_at ? ' · ' + new Date(s.updated_at).toLocaleString() : '';
+    return `<div class="key-row" data-id="${esc(s.id)}">
+      <div class="key-head">${titleHtml}<span class="key-badge set">${esc((s.id || '').slice(0, 12))}</span></div>
+      <div class="key-hint">${meta}${time}</div>
+      <div class="inline-btns" style="margin-top:6px">${btns}</div>
+    </div>`;
+  }).join('');
+  el.querySelectorAll('.key-row').forEach(row => {
+    const id = row.dataset.id;
+    const open = row.querySelector('[data-act="open"]'); if (open) open.onclick = () => openStoredSession(id);
+    const rn = row.querySelector('[data-act="rename"]'); if (rn) rn.onclick = () => { editingSessionId = id; renderSessionList(); };
+    const sv = row.querySelector('[data-act="save"]'); if (sv) sv.onclick = () => saveRenameSession(id);
+    const cx = row.querySelector('[data-act="cancel"]'); if (cx) cx.onclick = () => { editingSessionId = null; renderSessionList(); };
+    const del = row.querySelector('[data-act="del"]'); if (del) del.onclick = () => deleteStoredSession(id);
+  });
+}
+function openStoredSession(id){
+  const sess = storedSessions.find(x => x.id === id); if (!sess) return;
+  const existing = state.sessions.find(s => s.id === id);
+  if (existing){ switchTab(id); $('settingsModal').classList.remove('show'); return; }
+  state.sessions.forEach(x => x.active = false);
+  const s = { id, title: sess.title || '会话', active: true };
+  state.sessions.push(s); state.sessionId = id;
+  renderTabs(); renderSidebarSessions();
+  $('settingsModal').classList.remove('show');
+  loadSession(id);
+}
+function saveRenameSession(id){
+  const inp = $('sessRename'); if (!inp) return;
+  const title = inp.value.trim();
+  if (!title){ toast('标题不能为空'); return; }
+  fetch('/api/sessions/' + encodeURIComponent(id), { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ title }) })
+    .then(r => r.ok ? r.json() : Promise.reject(new Error('rename failed')))
+    .then(() => {
+      editingSessionId = null;
+      loadStoredSessions().then(() => {
+        renderSessionList();
+        const tab = state.sessions.find(s => s.id === id);
+        if (tab){ tab.title = title; renderTabs(); renderSidebarSessions(); }
+        toast('已重命名');
+      });
+    })
+    .catch(() => toast('重命名失败'));
+}
+function deleteStoredSession(id){
+  if (!confirm('确定删除会话？此操作不可撤销。')) return;
+  fetch('/api/sessions/' + encodeURIComponent(id), { method:'DELETE' })
+    .then(r => r.ok ? r.json() : Promise.reject(new Error('del failed')))
+    .then(() => {
+      const idx = state.sessions.findIndex(s => s.id === id);
+      if (idx >= 0) state.sessions.splice(idx, 1);
+      if (!state.sessions.length) newSession();
+      else { const next = state.sessions[Math.max(0, idx - 1)]; switchTab(next.id); }
+      loadStoredSessions().then(renderSessionList);
+      toast('已删除会话');
+    })
+    .catch(() => toast('删除失败'));
+}
+
 function cssEsc(s){ return (s||'').replace(/"/g,'\\"'); }
 function selectProvider(name){
   if (name === '__new__'){ renderAddProvider(); return; }
@@ -813,7 +1274,10 @@ function renderProviderDetail(p){
   const models = providerModels(p.name);
   const builtinCount = models.filter(m => !m.custom).length;
   const customCount = models.filter(m => m.custom).length;
-  const baseVal = esc((providerKeys.find(k=>k.name===p.name)||{}).api_base||'');
+  const pk = providerKeys.find(k=>k.name===p.name) || {};
+  const baseVal = esc(pk.api_base||'');
+  const timeoutVal = pk.timeout_sec ? pk.timeout_sec : '';
+  const disabledOn = !!pk.disabled;
   $('settingsDetail').innerHTML = `
     <div class="detail-h">◆ ${esc(p.label)}</div>
     <div class="detail-sub">共 ${models.length} 个模型（内置 ${builtinCount} · 自定义 ${customCount}）${p.custom?' · 自定义厂商':''}</div>
@@ -824,6 +1288,14 @@ function renderProviderDetail(p){
       <button class="btn" id="pvSaveKey">保存</button>
     </div>
     <div class="key-hint">粘贴该厂商的 API Key 后保存；已保存的密钥不会回显。</div>
+    <div class="sub-h">高级</div>
+    <div class="key-inputs" style="margin-bottom:6px">
+      <input id="pvTimeout" type="number" min="1" step="1" placeholder="超时(秒)" value="${timeoutVal}" />
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px;white-space:nowrap;cursor:pointer">
+        <input id="pvDisabled" type="checkbox" ${disabledOn?'checked':''} /> 禁用该厂商
+      </label>
+    </div>
+    <div class="key-hint">禁用后该厂商及其模型将从模型列表中隐藏，无法用于对话。</div>
     <div class="sub-h">模型 <button class="btn mini" id="pvAddModelBtn" style="float:right">＋ 新增模型</button></div>
     <div id="pvModels" class="model-list"></div>
     <div class="row2" id="pvAddRow" style="display:none">
@@ -840,8 +1312,8 @@ function renderProviderDetail(p){
   renderProviderModels(p);
 }
 function providerModels(provider){
-  const builtin = MODELS.filter(m => m.provider === provider).map(m => ({ id:m.id, provider, model_id:m.model_id||m.id, name:m.name||m.id, custom:false }));
-  const custom = customModels.filter(m => m.provider === provider).map(m => ({ id:m.id, provider, model_id:m.model_id, name:m.name||m.model_id, custom:true }));
+  const builtin = MODELS.filter(m => m.provider === provider).map(m => ({ id:m.id, provider, model_id:m.model_id||m.id, name:m.name||m.id, custom:false, context_window:m.context_window||0, max_output:m.max_output||0, base_url:'', free_tier:!!m.free_tier }));
+  const custom = customModels.filter(m => m.provider === provider).map(m => ({ id:m.id, provider, model_id:m.model_id, name:m.name||m.model_id, custom:true, context_window:m.context_window||0, max_output:m.max_output||0, base_url:m.base_url||'', free_tier:!!m.free_tier }));
   return builtin.concat(custom);
 }
 function renderProviderModels(p){
@@ -849,15 +1321,23 @@ function renderProviderModels(p){
   const el = $('pvModels');
   if (!models.length){ el.innerHTML = '<div class="key-hint">该厂商下暂无模型，点击「＋ 新增模型」添加。</div>'; return; }
   el.innerHTML = models.map(m => `
-    <div class="mrow" data-id="${esc(m.id)}">
+    <div class="mrow" data-id="${esc(m.id)}" data-custom="${m.custom?1:0}">
       <div class="mhead">
         <span class="mname">${esc(m.name)}</span>
         <span class="mbadge ${m.custom?'custom':'builtin'}">${m.custom?'自定义':'内置'}</span>
       </div>
       <div class="mid">${esc(m.model_id)}</div>
-      <div class="minputs" style="margin-top:8px">
-        <input class="mvname" value="${esc(m.name)}" placeholder="显示名称" />
-        <button class="btn mini" data-act="mvsave">${m.custom?'保存':'改名'}</button>
+      <div class="minputs" style="margin-top:8px; flex-wrap:wrap">
+        <input class="mvname" value="${esc(m.name)}" placeholder="显示名称" style="flex:1 1 100%" />
+        <input class="mvctx" type="number" min="0" step="1024" placeholder="上下文(tokens)" value="${m.context_window||''}" style="flex:1 1 45%" />
+        <input class="mvmax" type="number" min="0" step="256" placeholder="最大输出" value="${m.max_output||''}" style="flex:1 1 45%" />
+      </div>
+      <div class="minputs" style="margin-top:6px; flex-wrap:wrap; align-items:center">
+        <input class="mvbase" placeholder="Base URL（可选）" value="${esc(m.base_url||'')}" style="flex:1 1 60%" />
+        <label class="mvfree" style="display:flex;align-items:center;gap:6px;font-size:12px;white-space:nowrap;cursor:pointer">
+          <input type="checkbox" ${m.free_tier?'checked':''} /> 免费额度
+        </label>
+        <button class="btn mini" data-act="mvsave">${m.custom?'保存':'应用'}</button>
         ${m.custom?'<button class="btn ghost mini" data-act="mvdel">删除</button>':''}
       </div>
     </div>`).join('');
@@ -870,13 +1350,19 @@ function renderProviderModels(p){
 function saveProviderKey(name){
   const key = $('pvKey').value;
   const base = $('pvBase').value.trim();
-  if (!key && !base){ toast('请输入 Key 或 Base URL'); return; }
+  const timeoutEl = $('pvTimeout');
+  const disabledEl = $('pvDisabled');
+  if (!key && !base && !(timeoutEl && timeoutEl.value) && !(disabledEl && disabledEl.checked)){ toast('请输入 Key / Base URL，或修改超时与禁用'); return; }
+  const payload = { name, api_key:key, api_base:base };
+  if (timeoutEl && timeoutEl.value) payload.timeout_sec = parseInt(timeoutEl.value, 10) || 0;
+  if (disabledEl) payload.disabled = disabledEl.checked;
   fetch('/api/config/provider', { method:'PUT', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ name, api_key:key, api_base:base }) })
+    body: JSON.stringify(payload) })
     .then(r => r.ok ? r.json() : Promise.reject(new Error('save failed')))
     .then(() => {
       const k = providerKeys.find(x=>x.name===name);
-      if(k){ k.key_set=true; if(base) k.api_base=base; } else providerKeys.push({ name, key_set:true, api_base:base });
+      if(k){ k.key_set = k.key_set || !!key; if(base) k.api_base=base; if(payload.timeout_sec) k.timeout_sec=payload.timeout_sec; k.disabled=!!payload.disabled; }
+      else providerKeys.push({ name, key_set:!!key, api_base:base, timeout_sec:payload.timeout_sec||0, disabled:!!payload.disabled });
       $('pvKey').value=''; renderProviderNav(); toast('已保存 '+name);
     })
     .catch(() => toast('保存失败'));
@@ -893,9 +1379,18 @@ function addModelForProvider(provider){
 }
 function saveModelForProvider(provider, row){
   const id = row.dataset.id;
+  const isCustom = row.dataset.custom === '1';
   const name = row.querySelector('.mvname').value.trim();
-  const m = customModels.find(x => x.id === id);
-  const payload = m ? Object.assign({}, m, { name }) : { id, provider, model_id: id.split('/').slice(1).join('/')||id, name, custom:true };
+  const ctx = parseInt(row.querySelector('.mvctx').value, 10) || 0;
+  const max = parseInt(row.querySelector('.mvmax').value, 10) || 0;
+  const base = row.querySelector('.mvbase').value.trim();
+  const free = row.querySelector('.mvfree input').checked;
+  const payload = {
+    id, provider,
+    model_id: id.split('/').slice(1).join('/') || id,
+    name, custom: isCustom,
+    context_window: ctx, max_output_tokens: max, base_url: base, free_tier: free
+  };
   fetch('/api/config/model', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) })
     .then(r => r.ok ? r.json() : Promise.reject(new Error('save failed')))
     .then(() => { reloadModelsThen(() => selectProvider(provider)); toast('已保存 '+name); })
@@ -945,24 +1440,45 @@ async function reloadModelsThen(cb){
   if (cb) cb();
   refreshModels();
 }
+// Split a textarea value into a trimmed, non-empty string array.
+function splitLines(s){ return (s||'').split('\n').map(x => x.trim()).filter(x => x !== ''); }
+
 function saveSettings(){
-  // Persist general settings only when the general pane is active.
+  // Pull values from whatever panes are currently rendered (guarded by id presence).
   const sm = $('setModel');
   if (sm){
     const mm = MODELS.find(m => m.id === sm.value);
     if (mm && mm.provider) state.provider = mm.provider;
     state.model = sm.value;
-    state.theme = $('setTheme').value;
-    document.querySelectorAll('#setModes .mode-opt').forEach(o => { if (o.classList.contains('sel')) state.mode = o.dataset.mode; });
-    applyTheme(state.theme);
-    fetch('/api/permission/mode', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ mode: state.mode }) }).catch(()=>{});
-    fetch('/api/config', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
-      language: $('setLang').value,
-      defaults: { model: state.model, provider: state.provider, mode: state.mode },
-      tui: { theme: state.theme }
-    })}).then(() => currentLang = $('setLang').value).catch(()=>{});
-    updateContext();
   }
+  const themeEl = $('setTheme'); if (themeEl) state.theme = themeEl.value;
+  document.querySelectorAll('#setModes .mode-opt').forEach(o => { if (o.classList.contains('sel')) state.mode = o.dataset.mode; });
+  const tEl = $('setTemp'); if (tEl) state.temperature = parseFloat(tEl.value) || 0.7;
+  const mtEl = $('setMaxTokens'); if (mtEl) state.maxTokens = parseInt(mtEl.value, 10) || 0;
+  const cEl = $('setCache'); if (cEl) state.cache = cEl.checked;
+  const shEl = $('setSyntax'); if (shEl) state.syntaxHL = shEl.checked;
+  const dmEl = $('setDiff'); if (dmEl) state.diffMode = dmEl.value;
+
+  const btEl = $('setBashTimeout'); if (btEl) state.bashTimeout = parseInt(btEl.value, 10) || 120;
+  const apEl = $('setAllowed'); if (apEl) state.allowedPaths = apEl.value;
+  const dcEl = $('setDenied'); if (dcEl) state.deniedCommands = dcEl.value;
+
+  const auEl = $('setAutoUpdate'); if (auEl) state.autoUpdate = auEl.checked;
+  const chEl = $('setChannel'); if (chEl) state.channel = chEl.value;
+  const ivEl = $('setInterval'); if (ivEl) state.intervalH = parseInt(ivEl.value, 10) || 24;
+
+  const langEl = $('setLang'); const lang = langEl ? langEl.value : (currentLang || 'zh-CN');
+  state.language = lang;
+  applyTheme(state.theme);
+  fetch('/api/permission/mode', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ mode: state.mode }) }).catch(()=>{});
+  fetch('/api/config', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+    language: lang,
+    defaults: { model: state.model, provider: state.provider, mode: state.mode, temperature: state.temperature, max_tokens: state.maxTokens, cache: state.cache },
+    tui: { theme: state.theme, syntax_highlight: state.syntaxHL, diff_mode: state.diffMode },
+    tools: { bash_timeout_sec: state.bashTimeout, allowed_paths: splitLines(state.allowedPaths), denied_commands: splitLines(state.deniedCommands) },
+    update: { auto_update: state.autoUpdate, channel: state.channel, interval_hours: state.intervalH }
+  })}).then(() => currentLang = lang).catch(()=>{});
+  updateContext();
   $('settingsModal').classList.remove('show');
 }
 // Refresh the global MODELS list after a model change.
@@ -971,6 +1487,7 @@ async function refreshModels(){
     const d = await (await fetch('/api/models')).json();
     if (Array.isArray(d)){ MODELS = d; }
     else if (Array.isArray(d.models)){ MODELS = d.models; }
+    MODELS = MODELS.map(m => ({ id:m.id, provider:m.provider, name:m.name||m.id, plan:m.plan||'', model_id: m.model_id || m.id, custom: !!m.custom, context_window: m.context_window||0, max_output: m.max_output_tokens||0, free_tier: !!m.free_tier }));
     if (!MODELS.find(m => m.id === state.model) && MODELS[0]) state.model = MODELS[0].id;
     const provSet = {}; MODELS.forEach(m => provSet[m.provider] = true);
     PROVIDERS = Object.keys(provSet).map(p => ({ name:p, label: PROVIDER_LABELS[p]||p }));
@@ -1046,7 +1563,8 @@ $('segTheme').onclick = () => {
   state.theme = state.theme === 'dark' ? 'light' : 'dark';
   applyTheme(state.theme);
   const tt = $('segTheme'); if (tt) tt.textContent = state.theme === 'dark' ? '◐' : '◑';
-  fetch('/api/config', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ tui: { theme: state.theme } }) }).catch(()=>{});
+  // Send the full tui block so we don't clobber syntax_highlight / diff_mode.
+  fetch('/api/config', { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ tui: { theme: state.theme, syntax_highlight: state.syntaxHL, diff_mode: state.diffMode } }) }).catch(()=>{});
 };
 $('settingsModal').addEventListener('click', e => { if (e.target === $('settingsModal')) $('settingsModal').classList.remove('show'); });
 $('permModal').addEventListener('click', e => { if (e.target === $('permModal')) $('permModal').classList.remove('show'); });
@@ -1061,16 +1579,31 @@ async function boot(){
     if (cfg.defaults && cfg.defaults.model) state.model = cfg.defaults.model;
     if (cfg.defaults && cfg.defaults.provider) state.provider = cfg.defaults.provider;
     if (cfg.defaults && cfg.defaults.mode) state.mode = cfg.defaults.mode;
+    if (cfg.defaults && typeof cfg.defaults.temperature === 'number') state.temperature = cfg.defaults.temperature;
+    if (cfg.defaults && typeof cfg.defaults.max_tokens === 'number') state.maxTokens = cfg.defaults.max_tokens;
+    if (cfg.defaults && typeof cfg.defaults.cache === 'boolean') state.cache = cfg.defaults.cache;
     if (cfg.tui && cfg.tui.theme) state.theme = cfg.tui.theme;
+    if (cfg.tui && typeof cfg.tui.syntax_highlight === 'boolean') state.syntaxHL = cfg.tui.syntax_highlight;
+    if (cfg.tui && cfg.tui.diff_mode) state.diffMode = cfg.tui.diff_mode;
+    if (cfg.tools){
+      if (typeof cfg.tools.bash_timeout_sec === 'number') state.bashTimeout = cfg.tools.bash_timeout_sec;
+      if (Array.isArray(cfg.tools.allowed_paths)) state.allowedPaths = cfg.tools.allowed_paths.join('\n');
+      if (Array.isArray(cfg.tools.denied_commands)) state.deniedCommands = cfg.tools.denied_commands.join('\n');
+    }
+    if (cfg.update){
+      if (typeof cfg.update.auto_update === 'boolean') state.autoUpdate = cfg.update.auto_update;
+      if (cfg.update.channel) state.channel = cfg.update.channel;
+      if (typeof cfg.update.interval_hours === 'number') state.intervalH = cfg.update.interval_hours;
+    }
     if (cfg.language) currentLang = cfg.language;
   } catch {}
   // models + providers
   try {
     const data = await (await fetch('/api/models')).json();
-    MODELS = (data.models || data || []).map(m => ({ id:m.id, provider:m.provider, name:m.name||m.id, plan:m.plan||'', model_id: m.model_id || m.id, custom: !!m.custom }));
+    MODELS = (data.models || data || []).map(m => ({ id:m.id, provider:m.provider, name:m.name||m.id, plan:m.plan||'', model_id: m.model_id || m.id, custom: !!m.custom, context_window: m.context_window||0, max_output: m.max_output_tokens||0, free_tier: !!m.free_tier }));
     if (!MODELS.find(m => m.id === state.model) && MODELS.length) state.model = MODELS[0].id;
     const provSet = {}; MODELS.forEach(m => provSet[m.provider] = true);
-    const labels = { deepseek:'DeepSeek', zhipu:'Zhipu GLM', kimi:'Kimi K2', volcengine:'Doubao', tencent:'Hunyuan', huawei:'Pangu', scnet:'SCNET', openrouter:'OpenRouter', anthropic:'Anthropic' };
+    const labels = { deepseek:'DeepSeek', zhipu:'Zhipu GLM', kimi:'Kimi K2', volcengine:'Doubao', tencent:'Hunyuan', huawei:'Pangu', scnet:'SCNET', openrouter:'OpenRouter', anthropic:'Anthropic', nvidia:'NVIDIA' };
     PROVIDERS = Object.keys(provSet).map(p => ({ name:p, label: labels[p]||p }));
   } catch {}
   // connection

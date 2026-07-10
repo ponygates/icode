@@ -604,8 +604,11 @@ func printDefaultModels() {
 		{"tencent", "hunyuan-t1", "Reasoning Plan"},
 		{"huawei", "pangu-5.0-pro", "Coding Plan"},
 		{"huawei", "pangu-5.0-code", "Code Plan"},
-		{"scnet", "scnet-chat", "Coding Plan"},
-		{"scnet", "scnet-code", "Code Plan"},
+		{"scnet", "scnet-chat", "codingplan"},
+		{"scnet", "MiniMax-m2.5", "codingplan"},
+		{"scnet", "scnet-code", "tokenplan"},
+		{"scnet", "deepseek-v4-flash", "tokenplan"},
+		{"scnet", "deepseek-v4-pro", "tokenplan"},
 		{"openrouter", "auto", "Auto Router"},
 		{"openrouter", "free", "Free Tier"},
 		{"openrouter", "openai/gpt-4o", "Token Plan"},
@@ -720,7 +723,16 @@ func (c *chatCallback) OnSend(text string) {
 			if total := u.PromptTokens + u.CompletionTokens; total > 0 {
 				cacheRate = float64(u.CacheHitTokens) / float64(total)
 			}
-			c.tui.SetStatus(u.PromptTokens, u.CompletionTokens, cacheRate, "")
+			// Resolve the model to compute cost + context-window usage for the
+			// Claude Code-style status bar.
+			costStr := ""
+			ctxWin := 0
+			if _, mi, rerr := c.app.Reg.ResolveModel(model); rerr == nil {
+				costStr = formatCost(estimateCost(u, mi), primaryCurrency(mi))
+				ctxWin = mi.ContextWindow
+			}
+			c.tui.SetStatus(u.PromptTokens, u.CompletionTokens, cacheRate, costStr)
+			c.tui.SetContext(u.PromptTokens, ctxWin)
 			c.tui.EndStream()
 			return
 		case types.EventError:
@@ -814,6 +826,40 @@ func (c *chatCallback) OnSlashCommand(cmd string, args []string) {
 
 func (c *chatCallback) OnPermissionResponse(decision string) {
 	c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("Permission: %s", decision))
+}
+
+// estimateCost mirrors core/conversation.calculateCost for the CLI status bar.
+func estimateCost(u types.TokenUsage, mi types.ModelInfo) float64 {
+	if len(mi.Plans) == 0 {
+		return 0
+	}
+	plan := mi.Plans[0]
+	cacheHit := u.CacheHitTokens
+	if cacheHit > u.PromptTokens {
+		cacheHit = u.PromptTokens
+	}
+	inputCost := float64(u.PromptTokens-cacheHit) * plan.InputPrice / 1e6
+	outputCost := float64(u.CompletionTokens) * plan.OutputPrice / 1e6
+	cacheCost := float64(cacheHit) * plan.CachePrice / 1e6
+	return inputCost + outputCost + cacheCost
+}
+
+func primaryCurrency(mi types.ModelInfo) string {
+	if len(mi.Plans) > 0 && mi.Plans[0].Currency != "" {
+		return mi.Plans[0].Currency
+	}
+	return "USD"
+}
+
+func formatCost(v float64, cur string) string {
+	sym := "$"
+	if cur == "CNY" {
+		sym = "¥"
+	}
+	if v <= 0 {
+		return sym + "0.0000"
+	}
+	return fmt.Sprintf("%s%.4f", sym, v)
 }
 
 var serverCmd = &cobra.Command{

@@ -42,8 +42,31 @@ func DefaultModels() []types.ModelInfo {
 			MaxOutputTokens: 16384,
 			Plans: []types.TokenPlan{
 				{
-					Name:        "coding-plan",
-					Description: "标准编程计划（国有算力补贴低价）",
+					Name:        "codingplan",
+					Description: "编程计划（codingplan，国有算力补贴低价）",
+					InputPrice:  0.08,
+					OutputPrice: 0.15,
+					Currency:    "CNY",
+				},
+			},
+			Capabilities: types.ModelCap{
+				Tools:     true,
+				Streaming: true,
+				JSONMode:  true,
+			},
+			UpdatedAt: time.Now(),
+		},
+		{
+			ID:              "MiniMax-m2.5",
+			Name:            "MiniMax M2.5",
+			Description:     "MiniMax M2.5 大模型，经国家超算中心 SCNET 提供，通用编程与对话，国产超算算力支撑",
+			Provider:        ProviderName,
+			ContextWindow:   200000,
+			MaxOutputTokens: 8192,
+			Plans: []types.TokenPlan{
+				{
+					Name:        "codingplan",
+					Description: "编程计划（codingplan，国有算力补贴低价）",
 					InputPrice:  0.08,
 					OutputPrice: 0.15,
 					Currency:    "CNY",
@@ -59,14 +82,61 @@ func DefaultModels() []types.ModelInfo {
 		{
 			ID:              "scnet-code",
 			Name:            "SCNET Code Pro",
-			Description:     "国家超算中心代码专用模型，针对大型工程编程任务深度优化，256K 上下文",
+			Description:     "国家超算中心代码专用模型，针对大型工程编程任务深度优化，256K 上下文，支持推理",
 			Provider:        ProviderName,
 			ContextWindow:   262144,
 			MaxOutputTokens: 32768,
 			Plans: []types.TokenPlan{
 				{
-					Name:        "code-plan",
-					Description: "代码专用计划（国有算力补贴）",
+					Name:        "tokenplan",
+					Description: "令牌计划（tokenplan，国有算力补贴）",
+					InputPrice:  0.12,
+					OutputPrice: 0.25,
+					Currency:    "CNY",
+				},
+			},
+			Capabilities: types.ModelCap{
+				Tools:     true,
+				Streaming: true,
+				JSONMode:  true,
+				Reasoning: true,
+			},
+			UpdatedAt: time.Now(),
+		},
+		{
+			ID:              "deepseek-v4-flash",
+			Name:            "DeepSeek V4 Flash",
+			Description:     "DeepSeek V4 Flash，经国家超算中心 SCNET 提供，高性价比编程与对话模型",
+			Provider:        ProviderName,
+			ContextWindow:   128000,
+			MaxOutputTokens: 8192,
+			Plans: []types.TokenPlan{
+				{
+					Name:        "tokenplan",
+					Description: "令牌计划（tokenplan，国有算力补贴）",
+					InputPrice:  0.12,
+					OutputPrice: 0.25,
+					Currency:    "CNY",
+				},
+			},
+			Capabilities: types.ModelCap{
+				Tools:     true,
+				Streaming: true,
+				JSONMode:  true,
+			},
+			UpdatedAt: time.Now(),
+		},
+		{
+			ID:              "deepseek-v4-pro",
+			Name:            "DeepSeek V4 Pro",
+			Description:     "DeepSeek V4 Pro，经国家超算中心 SCNET 提供，旗舰推理模型，适合复杂工程任务",
+			Provider:        ProviderName,
+			ContextWindow:   128000,
+			MaxOutputTokens: 16384,
+			Plans: []types.TokenPlan{
+				{
+					Name:        "tokenplan",
+					Description: "令牌计划（tokenplan，国有算力补贴）",
 					InputPrice:  0.12,
 					OutputPrice: 0.25,
 					Currency:    "CNY",

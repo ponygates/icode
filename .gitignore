@@ -28,3 +28,6 @@ Thumbs.db
 # Config (local)
 .icoderc.yaml
 .icoderc.yml
+
+# Local working memory (project data, not source)
+.workbuddy/
