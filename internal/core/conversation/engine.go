@@ -3,40 +3,200 @@ package conversation
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
 	projectcontext "github.com/ponygates/icode/internal/core/context"
+	"github.com/ponygates/icode/internal/core/permission"
 	"github.com/ponygates/icode/internal/core/tool"
 	"github.com/ponygates/icode/internal/llm/tokenopt"
 	"github.com/ponygates/icode/internal/types"
 )
+
+// PermissionHandler resolves an interactive "ask" decision (agent mode) and
+// returns the user's final choice. The CLI wires this to the TUI prompt; the
+// server leaves it nil and instead streams a permission_request event for the
+// desktop client to answer via /api/permission/respond.
+type PermissionHandler func(sessionID string, req *types.PermissionReq, res permission.CheckResult) permission.Decision
 
 // Engine drives the agentic conversation loop.
 type Engine struct {
 	providerReg types.ProviderRegistry
 	toolReg     *tool.Registry
 	sessionSt   types.SessionStore
+	gate        *permission.Gate
+
+	// permHandler is invoked for interactive "ask" decisions (CLI path).
+	permHandler PermissionHandler
 
 	mu          sync.Mutex
 	optimizers  map[string]*tokenopt.Optimizer // sessionID → optimizer
 	stopFns     map[string]context.CancelFunc
+
+	// permMu / permRespChans handle the server (SSE) permission flow.
+	permMu       sync.Mutex
+	permRespChans map[string]chan permission.Decision
+	permSeq      uint64
 }
 
 // NewEngine creates a conversation engine.
 func NewEngine(
 	providerReg types.ProviderRegistry,
 	sessionSt types.SessionStore,
+	gate *permission.Gate,
 ) *Engine {
 	return &Engine{
-		providerReg: providerReg,
-		toolReg:     tool.NewRegistry(),
-		sessionSt:   sessionSt,
-		optimizers:  make(map[string]*tokenopt.Optimizer),
-		stopFns:     make(map[string]context.CancelFunc),
+		providerReg:   providerReg,
+		toolReg:       tool.NewRegistry(),
+		sessionSt:     sessionSt,
+		gate:          gate,
+		optimizers:    make(map[string]*tokenopt.Optimizer),
+		stopFns:       make(map[string]context.CancelFunc),
+		permRespChans: make(map[string]chan permission.Decision),
 	}
+}
+
+// SetPermissionHandler wires an interactive permission resolver (CLI/TUI).
+func (e *Engine) SetPermissionHandler(fn PermissionHandler) {
+	e.permHandler = fn
+}
+
+// SetPermissionResponse delivers the user's decision for a permission request
+// raised via the SSE flow (desktop client). It is called by the server's
+// /api/permission/respond endpoint.
+func (e *Engine) SetPermissionResponse(requestID string, decision permission.Decision) {
+	e.permMu.Lock()
+	ch, ok := e.permRespChans[requestID]
+	delete(e.permRespChans, requestID)
+	e.permMu.Unlock()
+	if ok {
+		select {
+		case ch <- decision:
+		default:
+		}
+	}
+}
+
+// buildAction constructs a permission.Action from a tool call's JSON arguments,
+// extracting the relevant fields (command/path/pattern/url) the gate uses.
+func buildAction(toolName, arguments string) permission.Action {
+	a := permission.Action{Tool: toolName, Arguments: arguments}
+	var m map[string]interface{}
+	if err := json.Unmarshal([]byte(arguments), &m); err != nil {
+		return a
+	}
+	getStr := func(key string) string {
+		if v, ok := m[key]; ok {
+			if s, ok := v.(string); ok {
+				return s
+			}
+		}
+		return ""
+	}
+	switch toolName {
+	case "bash":
+		a.Command = getStr("command")
+	case "read_file", "write_file":
+		a.Path = getStr("path")
+	case "edit":
+		a.Path = getStr("file_path")
+	case "grep":
+		a.Pattern = getStr("pattern")
+		a.Path = getStr("path")
+	case "glob":
+		a.Pattern = getStr("pattern")
+	case "git_commit":
+		a.Command = getStr("message")
+	case "fetch":
+		a.URL = getStr("url")
+	}
+	return a
+}
+
+// executeTool runs a tool after consulting the permission gate. The resulting
+// ToolResult (which carries a denial message when blocked) is always returned
+// so the conversation loop can feed it back to the model.
+func (e *Engine) executeTool(
+	ctx context.Context,
+	sessionID string,
+	tc types.ToolCall,
+	out chan types.StreamEvent,
+) *types.ToolResult {
+	action := buildAction(tc.Name, tc.Arguments)
+
+	// No gate configured → execute freely.
+	if e.gate == nil {
+		return e.runTool(ctx, tc)
+	}
+
+	res := e.gate.Check(sessionID, action)
+	switch res.Decision {
+	case permission.DecisionAllow:
+		return e.runTool(ctx, tc)
+
+	case permission.DecisionDeny:
+		return &types.ToolResult{
+			Success: false,
+			Error:   "Permission denied: " + res.Reason,
+		}
+
+	case permission.DecisionAsk:
+		if e.permHandler != nil {
+			// CLI path: resolve in-process via the TUI prompt.
+			req := &types.PermissionReq{Tool: tc.Name, Prompt: res.Prompt}
+			return e.applyDecision(ctx, sessionID, tc, e.permHandler(sessionID, req, res))
+		}
+		// Server path: announce via the stream and wait for the SSE response.
+		reqID := e.genPermID()
+		req := &types.PermissionReq{RequestID: reqID, Tool: tc.Name, Prompt: res.Prompt}
+		out <- types.StreamEvent{Type: types.EventPermission, Permission: req}
+		ch := make(chan permission.Decision, 1)
+		e.permMu.Lock()
+		e.permRespChans[reqID] = ch
+		e.permMu.Unlock()
+		select {
+		case decision := <-ch:
+			return e.applyDecision(ctx, sessionID, tc, decision)
+		case <-ctx.Done():
+			return &types.ToolResult{Success: false, Error: "Permission request cancelled"}
+		}
+
+	default:
+		return e.runTool(ctx, tc)
+	}
+}
+
+func (e *Engine) applyDecision(ctx context.Context, sessionID string, tc types.ToolCall, decision permission.Decision) *types.ToolResult {
+	switch decision {
+	case permission.DecisionAllow:
+		return e.runTool(ctx, tc)
+	case permission.DecisionAllowAll:
+		if e.gate != nil {
+			e.gate.SetSessionAllow(sessionID, true)
+		}
+		return e.runTool(ctx, tc)
+	default:
+		return &types.ToolResult{Success: false, Error: "Permission denied by user"}
+	}
+}
+
+func (e *Engine) runTool(ctx context.Context, tc types.ToolCall) *types.ToolResult {
+	res, err := e.toolReg.Execute(ctx, tc.Name, tc.Arguments)
+	if err != nil {
+		return &types.ToolResult{Success: false, Error: err.Error()}
+	}
+	return res
+}
+
+func (e *Engine) genPermID() string {
+	e.permMu.Lock()
+	e.permSeq++
+	id := fmt.Sprintf("perm-%d", e.permSeq)
+	e.permMu.Unlock()
+	return id
 }
 
 // Send starts a conversation turn and returns a stream of events.
@@ -115,22 +275,22 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string) (<-chan ty
 				toolCalls = append(toolCalls, tc)
 				out <- event
 
-				// Execute the tool immediately
-				result, execErr := e.toolReg.Execute(ctx, tc.Name, tc.Arguments)
-				if execErr != nil {
-					out <- types.StreamEvent{
-						Type:    types.EventError,
-						Content: execErr.Error(),
-					}
-					return
-				}
+			// Execute the tool (after consulting the permission gate).
+			result := e.executeTool(ctx, sessionID, tc, out)
+			if result == nil {
+				result = &types.ToolResult{Success: false, Error: "tool produced no result"}
+			}
 
-				// Store tool call + result
-				tc.Result = result
-				out <- types.StreamEvent{
-					Type:    types.EventText,
-					Content: fmt.Sprintf("\n[Tool: %s] %s\n", tc.Name, result.Content),
-				}
+			// Store tool call + result
+			tc.Result = result
+			toolContent := result.Content
+			if toolContent == "" && result.Error != "" {
+				toolContent = result.Error
+			}
+			out <- types.StreamEvent{
+				Type:    types.EventText,
+				Content: fmt.Sprintf("\n[Tool: %s] %s\n", tc.Name, toolContent),
+			}
 
 			case types.EventDone:
 				if len(toolCalls) > 0 {
@@ -250,16 +410,19 @@ func (e *Engine) continueAgentLoop(
 			toolCalls = append(toolCalls, tc)
 			out <- event
 
-			result, execErr := e.toolReg.Execute(ctx, tc.Name, tc.Arguments)
-			if execErr != nil {
-				out <- types.StreamEvent{Type: types.EventError, Content: execErr.Error()}
-				return
-			}
-			tc.Result = result
-			out <- types.StreamEvent{
-				Type:    types.EventText,
-				Content: fmt.Sprintf("\n[Tool: %s] %s\n", tc.Name, result.Content),
-			}
+		result := e.executeTool(ctx, sessionID, tc, out)
+		if result == nil {
+			result = &types.ToolResult{Success: false, Error: "tool produced no result"}
+		}
+		tc.Result = result
+		toolContent := result.Content
+		if toolContent == "" && result.Error != "" {
+			toolContent = result.Error
+		}
+		out <- types.StreamEvent{
+			Type:    types.EventText,
+			Content: fmt.Sprintf("\n[Tool: %s] %s\n", tc.Name, toolContent),
+		}
 
 		case types.EventDone:
 			if len(toolCalls) > 0 {

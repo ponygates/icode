@@ -754,26 +754,43 @@ func (t *FetchTool) Execute(ctx context.Context, args string) (*types.ToolResult
 // ============================================================================
 
 func parseArg(rawJSON, key string) (string, error) {
-	// Simple argument parsing — Full JSON parser in Phase 2.
-	// Expects: {"key": "value"}
+	// Primary: strict JSON parsing (handles escaped quotes, nested content).
+	if m, err := parseJSONArgs(rawJSON); err == nil {
+		v, ok := m[key]
+		if !ok {
+			return "", fmt.Errorf("missing required argument: %s", key)
+		}
+		switch val := v.(type) {
+		case string:
+			return val, nil
+		case bool:
+			return fmt.Sprintf("%t", val), nil
+		case float64:
+			// Preserve integer-looking numbers without trailing .0
+			if val == float64(int64(val)) {
+				return fmt.Sprintf("%d", int64(val)), nil
+			}
+			return fmt.Sprintf("%v", val), nil
+		default:
+			return fmt.Sprintf("%v", val), nil
+		}
+	}
+
+	// Fallback: lenient substring search for loosely-formatted arguments.
 	raw := strings.TrimSpace(rawJSON)
 	search := fmt.Sprintf(`"%s":`, key)
-
 	idx := strings.Index(raw, search)
 	if idx < 0 {
 		return "", fmt.Errorf("missing required argument: %s", key)
 	}
-
 	start := idx + len(search)
 	rest := strings.TrimSpace(raw[start:])
 	if !strings.HasPrefix(rest, `"`) {
 		return "", fmt.Errorf("argument %s must be a string", key)
 	}
-
 	end := strings.IndexByte(rest[1:], '"')
 	if end < 0 {
 		return rest[1:], nil
 	}
-
 	return rest[1 : end+1], nil
 }

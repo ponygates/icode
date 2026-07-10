@@ -2,6 +2,7 @@
 icode.exe
 icode
 *.exe
+*.exe~
 
 # Go
 vendor/

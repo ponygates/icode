@@ -109,20 +109,31 @@ type ChatRequest struct {
 
 // StreamEvent is pushed to the caller as the LLM responds.
 type StreamEvent struct {
-	Type    StreamEventType `json:"type"`
-	Content string          `json:"content"`
-	ToolCall *LiveToolCall  `json:"tool_call,omitempty"`
-	Meta    StreamMeta      `json:"meta,omitempty"`
+	Type      StreamEventType `json:"type"`
+	Content   string          `json:"content"`
+	ToolCall  *LiveToolCall   `json:"tool_call,omitempty"`
+	Meta      StreamMeta      `json:"meta,omitempty"`
+	Permission *PermissionReq `json:"permission,omitempty"`
 }
 
 type StreamEventType string
 
 const (
-	EventText    StreamEventType = "text"
-	EventToolUse StreamEventType = "tool_use"
-	EventDone    StreamEventType = "done"
-	EventError   StreamEventType = "error"
+	EventText       StreamEventType = "text"
+	EventToolUse    StreamEventType = "tool_use"
+	EventDone       StreamEventType = "done"
+	EventError      StreamEventType = "error"
+	EventPermission StreamEventType = "permission"
 )
+
+// PermissionReq is emitted when the engine needs interactive approval for a
+// tool call (agent mode). The desktop client renders a dialog and POSTs the
+// decision back via /api/permission/respond; the CLI resolves it in-process.
+type PermissionReq struct {
+	RequestID string `json:"request_id,omitempty"`
+	Tool      string `json:"tool"`
+	Prompt    string `json:"prompt"`
+}
 
 type LiveToolCall struct {
 	Index     int    `json:"index"`

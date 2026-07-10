@@ -68,8 +68,8 @@ func Bootstrap() (*App, error) {
 	// 4. Initialize permission gate
 	app.Gate = permission.NewGate(permission.ModeAgent)
 
-	// 5. Initialize conversation engine
-	app.Engine = conversation.NewEngine(app.Reg, app.SessStore)
+	// 5. Initialize conversation engine (with permission gate wired in)
+	app.Engine = conversation.NewEngine(app.Reg, app.SessStore, app.Gate)
 
 	// 6. Initialize model update service
 	home, _ := os.UserHomeDir()

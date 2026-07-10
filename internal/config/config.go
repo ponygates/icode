@@ -17,10 +17,19 @@ type Config struct {
 	Language  string              `yaml:"language" json:"language"`
 	Providers map[string]ProviderCfg `yaml:"providers" json:"providers"`
 	Models    []ModelCfg          `yaml:"models" json:"models"`
+	Defaults  DefaultCfg          `yaml:"defaults" json:"defaults"`
 	TUI       TUICfg              `yaml:"tui" json:"tui"`
 	Tools     ToolsCfg            `yaml:"tools" json:"tools"`
 	Server    ServerCfg           `yaml:"server" json:"server"`
 	Update    UpdateCfg           `yaml:"update" json:"update"`
+}
+
+// DefaultCfg holds the user's preferred model / provider / permission mode,
+// persisted by the settings interface and applied on chat startup.
+type DefaultCfg struct {
+	Model    string `yaml:"model" json:"model"`
+	Provider string `yaml:"provider" json:"provider"`
+	Mode     string `yaml:"mode" json:"mode"`
 }
 
 type ProviderCfg struct {
@@ -30,10 +39,24 @@ type ProviderCfg struct {
 	Disabled  bool   `yaml:"disabled" json:"disabled,omitempty"`
 }
 
+// ModelCfg describes a (possibly user-defined) model entry. Built-in models
+// come from the provider registry; users can add custom models or override the
+// display name of a built-in one. `ID` is the stable key "provider/model_id".
 type ModelCfg struct {
-	Provider string `yaml:"provider" json:"provider"`
-	ModelID  string `yaml:"model_id" json:"model_id"`
-	Plan     string `yaml:"plan,omitempty" json:"plan,omitempty"`
+	ID            string `yaml:"id" json:"id"`                                     // stable key: provider/model_id
+	Provider      string `yaml:"provider" json:"provider"`
+	ModelID       string `yaml:"model_id" json:"model_id"`
+	Name          string `yaml:"name" json:"name"`                                 // editable display name
+	BaseURL       string `yaml:"base_url,omitempty" json:"base_url,omitempty"`
+	ContextWindow int    `yaml:"context_window,omitempty" json:"context_window,omitempty"`
+	MaxOutput     int    `yaml:"max_output_tokens,omitempty" json:"max_output_tokens,omitempty"`
+	FreeTier      bool   `yaml:"free_tier,omitempty" json:"free_tier,omitempty"`
+	Custom        bool   `yaml:"custom,omitempty" json:"custom,omitempty"` // true for user-added models
+}
+
+// ModelKey builds the stable model key "provider/model_id".
+func ModelKey(provider, modelID string) string {
+	return provider + "/" + modelID
 }
 
 type TUICfg struct {
@@ -64,6 +87,11 @@ type UpdateCfg struct {
 func Default() *Config {
 	return &Config{
 		Language: "zh-CN",
+		Defaults: DefaultCfg{
+			Model:    "deepseek-v4-flash",
+			Provider: "deepseek",
+			Mode:     "agent",
+		},
 		Providers: map[string]ProviderCfg{
 			"deepseek":   {APIBase: "https://api.deepseek.com/v1", Timeout: 120},
 			"openrouter": {APIBase: "https://openrouter.ai/api/v1", Timeout: 120},
@@ -88,6 +116,26 @@ func Default() *Config {
 			IntervalH:  24,
 		},
 	}
+}
+
+// DefaultPath returns the canonical location for the user config file
+// (~/.icode/config.yaml), used by the settings interface to persist changes.
+func DefaultPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".icode/config.yaml"
+	}
+	return filepath.Join(home, ".icode", "config.yaml")
+}
+
+// LoadOrCreate reads config from disk, returning defaults (and NOT writing)
+// when no file exists yet.
+func LoadOrCreate() (*Config, error) {
+	cfg, err := Load()
+	if err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }
 
 // Load reads config from the standard locations.
@@ -188,6 +236,67 @@ func (c *Config) APIKey(provider string) string {
 
 	if p, ok := c.Providers[provider]; ok && p.APIKey != "" {
 		return p.APIKey
+	}
+	return ""
+}
+
+// UpsertModel adds or updates a model entry, persisting the change.
+// The ID is derived from Provider+ModelID; a matching entry is replaced.
+func (c *Config) UpsertModel(m ModelCfg) {
+	if m.Provider == "" || m.ModelID == "" {
+		return
+	}
+	if m.ID == "" {
+		m.ID = ModelKey(m.Provider, m.ModelID)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := range c.Models {
+		if c.Models[i].ID == m.ID {
+			c.Models[i] = m
+			return
+		}
+	}
+	c.Models = append(c.Models, m)
+}
+
+// DeleteModel removes a model entry by its stable ID.
+func (c *Config) DeleteModel(id string) bool {
+	if id == "" {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := range c.Models {
+		if c.Models[i].ID == id {
+			c.Models = append(c.Models[:i], c.Models[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// FindModel returns a model entry by stable ID.
+func (c *Config) FindModel(id string) (ModelCfg, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, m := range c.Models {
+		if m.ID == id {
+			return m, true
+		}
+	}
+	return ModelCfg{}, false
+}
+
+// ModelDisplayName returns the user-overridden display name for a
+// provider/model_id pair, or "" when no override exists.
+func (c *Config) ModelDisplayName(provider, modelID string) string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, m := range c.Models {
+		if m.Provider == provider && m.ModelID == modelID && m.Name != "" {
+			return m.Name
+		}
 	}
 	return ""
 }

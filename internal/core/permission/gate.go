@@ -188,10 +188,12 @@ func (g *Gate) Check(sessionID string, action Action) CheckResult {
 
 func (g *Gate) isReadOnly(action Action) bool {
 	readOnlyTools := map[string]bool{
-		"read_file": true,
-		"ls":        true,
-		"grep":      true,
-		"glob":      true,
+		"read_file":  true,
+		"ls":         true,
+		"grep":       true,
+		"glob":       true,
+		"git_diff":   true,
+		"git_status": true,
 	}
 	return readOnlyTools[action.Tool]
 }
@@ -280,12 +282,20 @@ func (g *Gate) buildPrompt(action Action) string {
 		return fmt.Sprintf("执行命令: %s", action.Command)
 	case "write_file":
 		return fmt.Sprintf("写入文件: %s (%d 字节)", action.Path, len(action.Arguments))
+	case "edit":
+		return fmt.Sprintf("编辑文件: %s", action.Path)
 	case "read_file":
 		return fmt.Sprintf("读取文件: %s", action.Path)
 	case "grep":
 		return fmt.Sprintf("搜索: \"%s\" 在 %s", action.Pattern, action.Path)
 	case "glob":
 		return fmt.Sprintf("查找文件: %s", action.Pattern)
+	case "git_diff":
+		return fmt.Sprintf("查看 git 差异 (staged=%t)", action.Path != "")
+	case "git_status":
+		return "查看 git 状态"
+	case "git_commit":
+		return fmt.Sprintf("提交 git: %s", truncate(action.Command, 50))
 	default:
 		return fmt.Sprintf("%s: %s", action.Tool, truncate(action.Arguments, 60))
 	}

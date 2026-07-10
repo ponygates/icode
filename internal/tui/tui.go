@@ -1,6 +1,15 @@
 // Package tui provides a Claude Code-style terminal UI for iCode.
-// Uses pure line-mode rendering — no raw mode, no alternate screen.
-// Works in PowerShell, cmd, bash, Windows Terminal, SSH.
+//
+// Two rendering paths:
+//   - Raw mode (full screen): used when stdin is a real TTY and the console
+//     supports virtual-terminal processing. Provides a fixed bottom status
+//     bar, in-place streaming, tool-call rendering, and a thinking box — the
+//     signature Claude Code look.
+//   - Line mode (fallback): used when stdin is not a TTY (piped input, logged
+//     output) or raw mode is unavailable. Plain text, no ANSI, no garble.
+//
+// The Windows console code page is forced to UTF-8 and VT is enabled by
+// cmd.fixConsoleCodepage, so glyphs and colors render correctly.
 package tui
 
 import (
@@ -10,11 +19,12 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/ponygates/icode/internal/config"
+	"github.com/ponygates/icode/internal/core/permission"
 	"golang.org/x/term"
 )
 
@@ -46,23 +56,34 @@ type Message struct {
 	ToolArgs string
 }
 
+// Callback bridges user input / slash commands back to the backend.
 type Callback interface {
 	OnSend(text string)
 	OnSlashCommand(cmd string, args []string)
 	OnPermissionResponse(decision string)
+	// OnListSessions returns a formatted list of past sessions.
+	OnListSessions() string
+	// OnResume loads a past session's messages; returns a status line.
+	OnResume(id string) string
 }
 
+// StreamWriter is the surface the backend uses to push data into the UI.
 type StreamWriter interface {
 	AddMessage(role Role, content string)
+	AddToolMessage(tool, toolArgs, content string)
+	AppendToolResult(content string)
 	AppendStream(text string)
 	EndStream()
 	SetStatus(input, output int, cacheHit float64, cost string)
 }
 
+// Config configures a new TUI.
 type Config struct {
 	Mode     Mode
 	Model    string
 	Provider string
+	Lang     string // UI language: zh-CN | zh-TW | en
+	Theme    string // UI theme: auto | dark | light
 	Callback Callback
 }
 
@@ -72,7 +93,14 @@ type TUI struct {
 	mode     Mode
 	model    string
 	provider string
+	lang     string
+	theme    string
 	callback Callback
+
+	// input autocomplete state (raw mode)
+	acOpen  bool
+	acItems []acItem
+	acIdx   int
 
 	mu       sync.Mutex
 	messages []Message
@@ -89,161 +117,407 @@ type TUI struct {
 	running bool
 	reader  io.Reader
 	writer  io.Writer
+
+	// raw-mode state
+	rawMode  bool
+	color    bool
+	width    int
+	height   int
+	inputBuf string
+	cursor   int
+	history  []string
+	histIdx  int
+
+	// renderMu serializes terminal writes (the streaming goroutine also renders).
+	renderMu sync.Mutex
+
+	// pending permission prompt (agent mode, interactive approval)
+	permPending bool
+	permPrompt  string
 }
 
+// New creates a TUI instance.
 func New(cfg Config) *TUI {
+	if cfg.Mode == "" {
+		cfg.Mode = ModeAgent
+	}
 	return &TUI{
 		mode:       cfg.Mode,
 		model:      cfg.Model,
 		provider:   cfg.Provider,
+		lang:       cfg.Lang,
+		theme:      cfg.Theme,
 		callback:   cfg.Callback,
 		reader:     os.Stdin,
 		writer:     os.Stdout,
 		streamDone: make(chan struct{}, 1),
+		width:      80,
+		height:     24,
+		histIdx:    -1,
 	}
 }
 
 // ── Lifecycle ────────────────────────────────────────────────────
 
+// Run selects the best available rendering mode and starts the loop.
 func (t *TUI) Run() error {
 	t.running = true
 
-	// Welcome banner (Claude Code style)
-	t.printBanner()
+	fd := int(os.Stdin.Fd())
+	if term.IsTerminal(fd) {
+		if state, err := term.MakeRaw(fd); err == nil {
+			defer term.Restore(fd, state)
+			t.rawMode = true
+			t.color = true
+			if w, h, err := term.GetSize(fd); err == nil && w > 0 && h > 0 {
+				t.width, t.height = w, h
+			}
+			return t.runRaw()
+		}
+	}
+	return t.runLine()
+}
 
+// ── Raw mode (full screen) ───────────────────────────────────────
+
+func (t *TUI) runRaw() error {
+	t.writer = os.Stdout
+	// Hide cursor while rendering; re-show at the input prompt.
+	fmt.Fprint(t.writer, "\x1b[?25l")
+	defer fmt.Fprint(t.writer, "\x1b[?25h")
+
+	t.render()
 	reader := bufio.NewReader(t.reader)
 
 	for t.running {
-		// Print prompt
-		fmt.Fprint(t.writer, t.promptStr())
-
-		line, err := reader.ReadString('\n')
+		t.render()
+		r, _, err := reader.ReadRune()
 		if err != nil {
 			if err == io.EOF {
 				return nil
 			}
 			continue
 		}
-
-		text := strings.TrimSpace(line)
-		if text == "" {
-			continue
+		if !t.handleKey(r) {
+			break
 		}
-
-		// Shell mode (! prefix)
-		if strings.HasPrefix(text, "!") {
-			t.execShell(text[1:])
-			continue
-		}
-
-		// Slash command
-		if strings.HasPrefix(text, "/") {
-			t.handleSlash(text)
-			continue
-		}
-
-		// User message
-		t.printUser(text)
-		if t.callback != nil {
-			t.streaming = true
-			t.streamBuf.Reset()
-			go t.callback.OnSend(text)
-		}
-		t.drainStream()
 	}
-
 	return nil
 }
 
-func (t *TUI) drainStream() {
-	for t.streaming {
-		select {
-		case <-t.streamDone:
-			t.streaming = false
-		case <-time.After(120 * time.Second):
-			t.streaming = false
+// handleKey processes a single input rune in raw mode.
+// Returns false to signal the loop should exit.
+func (t *TUI) handleKey(r rune) bool {
+	switch r {
+	case 0x03: // Ctrl+C
+		if t.streaming {
+			return true // streaming cancelled via engine Stop (best effort)
 		}
-	}
-}
-
-// ── Banner (Claude Code style) ───────────────────────────────────
-
-func (t *TUI) printBanner() {
-	cwd, _ := os.Getwd()
-	shortCwd := shortDir(cwd)
-
-	// Separator
-	sep := strings.Repeat("─", 60)
-	fmt.Fprintln(t.writer)
-	fmt.Fprintln(t.writer, sep)
-
-	// Title line
-	fmt.Fprintf(t.writer, "✻ iCode v0.2  %s\n", shortCwd)
-
-	// Info line
-	fmt.Fprintf(t.writer, "  Model: %s  Mode: %s\n", t.model, t.mode)
-
-	fmt.Fprintln(t.writer, sep)
-	fmt.Fprintln(t.writer, "  /help for commands, ! for shell, Ctrl+C to exit")
-	fmt.Fprintln(t.writer)
-}
-
-func (t *TUI) promptStr() string {
-	switch t.mode {
-	case "plan":
-		return "plan ❯ "
-	case "yolo":
-		return "yolo ❯ "
-	default:
-		return "❯ "
-	}
-}
-
-// ── Message Printing ─────────────────────────────────────────────
-
-func (t *TUI) printUser(text string) {
-	fmt.Fprintf(t.writer, "  > %s\n\n", text)
-}
-
-func (t *TUI) printAssistant(text string) {
-	// Claude Code style: ✻ prefix for assistant
-	lines := strings.Split(text, "\n")
-	for i, line := range lines {
-		if i == 0 {
-			fmt.Fprintf(t.writer, "✻ %s\n", line)
-		} else {
-			fmt.Fprintf(t.writer, "  %s\n", line)
+		if t.inputBuf == "" {
+			fmt.Fprint(t.writer, "\r\n")
+			t.running = false
+			return false
 		}
+		t.inputBuf = ""
+		t.cursor = 0
+		return true
+	case 0x04: // Ctrl+D
+		if t.inputBuf == "" && !t.streaming {
+			t.running = false
+			return false
+		}
+		return true
+	case 0x0c: // Ctrl+L — clear & redraw
+		fmt.Fprint(t.writer, "\x1b[2J\x1b[H")
+		return true
+	case 0x01: // Ctrl+A — home
+		t.cursor = 0
+		return true
+	case 0x05: // Ctrl+E — end
+		t.cursor = len([]rune(t.inputBuf))
+		return true
+	case 0x10: // Ctrl+P — history prev OR move suggestion cursor up
+		if t.acOpen && len(t.acItems) > 0 {
+			if t.acIdx > 0 {
+				t.acIdx--
+			}
+			return true
+		}
+		t.historyPrev()
+		return true
+	case 0x0e: // Ctrl+N — history next OR move suggestion cursor down
+		if t.acOpen && len(t.acItems) > 0 {
+			if t.acIdx < len(t.acItems)-1 {
+				t.acIdx++
+			}
+			return true
+		}
+		t.historyNext()
+		return true
+	case 0x09: // Tab — accept highlighted suggestion
+		if t.acOpen && len(t.acItems) > 0 {
+			t.acceptSuggestion()
+			return true
+		}
+		return true
+	case 0x1b: // Esc — dismiss suggestions
+		if t.acOpen {
+			t.acOpen = false
+			t.acItems = nil
+			return true
+		}
+		return true
+	case '\r', '\n':
+		text := strings.TrimSpace(t.inputBuf)
+		t.inputBuf = ""
+		t.cursor = 0
+		if text == "" {
+			return true
+		}
+		t.pushHistory(text)
+		t.submit(text)
+		return true
+	case 0x7f, 0x08: // Backspace / DEL
+		t.deleteAtCursor()
+		t.updateSuggestions()
+		return true
 	}
-	fmt.Fprintln(t.writer)
-}
 
-func (t *TUI) printSystem(text string) {
-	fmt.Fprintf(t.writer, "  %s\n\n", text)
-}
+	if r < 0x20 {
+		// Ignore other control characters.
+		return true
+	}
 
-func (t *TUI) printError(text string) {
-	fmt.Fprintf(t.writer, "✖ %s\n\n", text)
-}
-
-func (t *TUI) printTool(tool, args, output string) {
-	// Compact tool call display
-	if args != "" {
-		fmt.Fprintf(t.writer, "⚡ %s %s\n", tool, args)
+	// Printable rune (incl. Chinese) — insert at cursor.
+	runes := []rune(t.inputBuf)
+	if t.cursor >= len(runes) {
+		t.inputBuf += string(r)
 	} else {
-		fmt.Fprintf(t.writer, "⚡ %s\n", tool)
+		runes = append(runes, 0)
+		copy(runes[t.cursor+1:], runes[t.cursor:])
+		runes[t.cursor] = r
+		t.inputBuf = string(runes)
 	}
-	if output != "" {
-		for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
-			fmt.Fprintf(t.writer, "  %s\n", line)
-		}
-	}
-	fmt.Fprintln(t.writer)
+	t.cursor++
+	t.updateSuggestions()
+	return true
 }
 
-func (t *TUI) printStatusBar() {
+func (t *TUI) deleteAtCursor() {
+	runes := []rune(t.inputBuf)
+	if t.cursor == 0 || len(runes) == 0 {
+		return
+	}
+	runes = append(runes[:t.cursor-1], runes[t.cursor:]...)
+	t.inputBuf = string(runes)
+	t.cursor--
+}
+
+func (t *TUI) historyPrev() {
+	if len(t.history) == 0 {
+		return
+	}
+	if t.histIdx == -1 {
+		t.histIdx = len(t.history) - 1
+	} else if t.histIdx > 0 {
+		t.histIdx--
+	}
+	t.inputBuf = t.history[t.histIdx]
+	t.cursor = len([]rune(t.inputBuf))
+}
+
+func (t *TUI) historyNext() {
+	if len(t.history) == 0 || t.histIdx == -1 {
+		return
+	}
+	if t.histIdx < len(t.history)-1 {
+		t.histIdx++
+		t.inputBuf = t.history[t.histIdx]
+	} else {
+		t.histIdx = -1
+		t.inputBuf = ""
+	}
+	t.cursor = len([]rune(t.inputBuf))
+}
+
+func (t *TUI) pushHistory(s string) {
+	if len(t.history) == 0 || t.history[len(t.history)-1] != s {
+		t.history = append(t.history, s)
+	}
+	t.histIdx = -1
+}
+
+func (t *TUI) submit(text string) {
+	// Shell mode (! prefix)
+	if strings.HasPrefix(text, "!") {
+		t.execShell(text[1:])
+		return
+	}
+	// Slash command
+	if strings.HasPrefix(text, "/") {
+		t.handleSlash(text)
+		return
+	}
+
+	// User message
+	t.mu.Lock()
+	t.messages = append(t.messages, Message{Role: RoleUser, Content: text})
+	t.mu.Unlock()
+
+	if t.callback != nil {
+		t.streaming = true
+		t.streamBuf.Reset()
+		go t.callback.OnSend(text)
+		t.drainStream()
+	}
+}
+
+func (t *TUI) drainStream() {
+	<-t.streamDone
+	t.streaming = false
+}
+
+// ── Rendering (raw mode) ─────────────────────────────────────────
+
+func (t *TUI) render() {
+	// Snapshot all state under the data mutex, then write under the render
+	// mutex. This keeps render() safe to call from the streaming goroutine
+	// (which also appends streamed text and triggers renders) without
+	// re-locking t.mu.
+	t.mu.Lock()
+	msgs := append([]Message{}, t.messages...)
+	streaming := t.streaming
+	streamContent := t.streamBuf.String()
+	inputBuf := t.inputBuf
+	cursor := t.cursor
+	rawMode := t.rawMode
+	status := t.statusLine()
+	banner := t.bannerLines()
+	permPending := t.permPending
+	permPrompt := t.permPrompt
+	t.mu.Unlock()
+
+	if !rawMode {
+		return // line mode renders incrementally, not full-screen
+	}
+
+	width := t.width
+	height := t.height
+
+	// Build display lines for all messages (+ the in-flight stream).
+	var lines []string
+	lines = append(lines, banner...)
+	lines = append(lines, "")
+
+	all := append([]Message{}, msgs...)
+	if streaming {
+		all = append(all, Message{Role: RoleAssistant, Content: streamContent})
+	}
+	for _, m := range all {
+		lines = append(lines, t.messageLines(m)...)
+	}
+
+	statusLines := wrapText(status, width)
+	if len(statusLines) == 0 {
+		statusLines = []string{""}
+	}
+
+	// Input line + optional permission prompt.
+	inputLine := t.inputRenderFor(inputBuf)
+	permLines := []string{}
+	if permPending {
+		permLines = append(permLines,
+			t.paint("yellow", "  ⏸ "+t.tstr("perm.title")+": "+truncate(permPrompt, width-14)),
+			t.paint("dim", "     [y] "+t.tstr("perm.allow")+"   [a] "+t.tstr("perm.all")+"   [n/^C] "+t.tstr("perm.deny")),
+		)
+	}
+	// Autocomplete panel (above the input line).
+	acLines := t.autocompleteLines()
+
+	// Available rows for the message area.
+	reserved := len(statusLines) + 1 + len(permLines) + len(acLines)
+	avail := height - reserved
+	if avail < 3 {
+		avail = 3
+	}
+
+	if len(lines) > avail {
+		lines = lines[len(lines)-avail:]
+	}
+
+	t.renderMu.Lock()
+	defer t.renderMu.Unlock()
+	fmt.Fprint(t.writer, "\x1b[2J\x1b[H")
+	for _, ln := range lines {
+		fmt.Fprintln(t.writer, ln)
+	}
+	for i := len(lines); i < avail; i++ {
+		fmt.Fprintln(t.writer)
+	}
+	for _, sl := range statusLines {
+		fmt.Fprintln(t.writer, t.paint("dim", sl))
+	}
+	for _, pl := range permLines {
+		fmt.Fprintln(t.writer, pl)
+	}
+	for _, al := range acLines {
+		fmt.Fprintln(t.writer, al)
+	}
+	fmt.Fprint(t.writer, inputLine)
+	runes := []rune(inputBuf)
+	if cursor < len(runes) {
+		fmt.Fprintf(t.writer, "\x1b[%dD", len(runes)-cursor)
+	}
+	fmt.Fprint(t.writer, "\x1b[?25h") // show cursor at prompt
+}
+
+func (t *TUI) bannerLines() []string {
+	cwd, _ := os.Getwd()
+	short := shortDir(cwd)
+	lines := t.logoLines()
+	lines = append(lines, "")
+	lines = append(lines,
+		t.paint("cyan", "◆ iCode")+" "+appVersionStr()+"  "+t.paint("dim", short),
+		t.paint("dim", "  Model: ")+t.model+t.paint("dim", "   Mode: ")+t.mode,
+		t.paint("dim", "  "+t.tstr("banner.hint")),
+	)
+	return lines
+}
+
+func (t *TUI) messageLines(m Message) []string {
+	switch m.Role {
+	case RoleThinking:
+		return thinkingLines(m.Content, t.width)
+	case RoleUser:
+		return wrapPrefixed("  ▸ ", "    ", m.Content, t.width)
+	case RoleAssistant:
+		return wrapPrefixed("  ◆ ", "    ", m.Content, t.width)
+	case RoleSystem:
+		return wrapPrefixed("  ", "  ", m.Content, t.width)
+	case RoleError:
+		return wrapPrefixed("  × ", "    ", m.Content, t.width)
+	case RoleTool:
+		var out []string
+		head := "  » " + m.Tool
+		if m.ToolArgs != "" {
+			head += " " + truncate(m.ToolArgs, 60)
+		}
+		out = append(out, t.paint("yellow", head))
+		if m.Content != "" {
+			for _, l := range wrapPrefixed("    ", "    ", m.Content, t.width) {
+				out = append(out, t.paint("dim", l))
+			}
+		}
+		return out
+	}
+	return wrapPrefixed("  ", "  ", m.Content, t.width)
+}
+
+func (t *TUI) statusLine() string {
 	total := t.promptTokens + t.completionTokens
-	parts := []string{t.mode, t.model}
+	var parts []string
+	parts = append(parts, t.mode)
+	parts = append(parts, t.model)
 	if total > 0 {
 		parts = append(parts, formatTokens(total)+" tok")
 	}
@@ -253,48 +527,226 @@ func (t *TUI) printStatusBar() {
 	if t.cacheHitRate > 0 {
 		parts = append(parts, fmt.Sprintf("%.0f%% cache", t.cacheHitRate*100))
 	}
-	fmt.Fprintf(t.writer, "%s\n\n", strings.Join(parts, " · "))
+	if t.streaming {
+		parts = append(parts, "· "+t.tstr("status.gen"))
+	}
+	return strings.Join(parts, " · ")
+}
+
+func (t *TUI) inputRenderFor(inputBuf string) string {
+	prefix := "❯ "
+	switch t.mode {
+	case ModePlan:
+		prefix = t.paint("blue", "plan") + " ❯ "
+	case ModeYOLO:
+		prefix = t.paint("red", "yolo") + " ❯ "
+	case ModeDefault:
+		prefix = t.paint("dim", "default") + " ❯ "
+	}
+	if t.streaming {
+		return prefix
+	}
+	return prefix + inputBuf
+}
+
+// ── Line mode (fallback) ─────────────────────────────────────────
+
+func (t *TUI) runLine() error {
+	t.writer = os.Stdout
+	t.printBanner()
+	reader := bufio.NewReader(t.reader)
+
+	for t.running {
+		fmt.Fprint(t.writer, t.linePrompt())
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			continue
+		}
+		text := strings.TrimSpace(line)
+		if text == "" {
+			continue
+		}
+		if strings.HasPrefix(text, "!") {
+			t.execShell(text[1:])
+			continue
+		}
+		if strings.HasPrefix(text, "/") {
+			t.handleSlash(text)
+			continue
+		}
+		t.printUser(text)
+		if t.callback != nil {
+			t.streaming = true
+			t.streamBuf.Reset()
+			go t.callback.OnSend(text)
+			t.drainStream()
+		}
+	}
+	return nil
+}
+
+func (t *TUI) linePrompt() string {
+	switch t.mode {
+	case ModePlan:
+		return "plan ❯ "
+	case ModeYOLO:
+		return "yolo ❯ "
+	default:
+		return "❯ "
+	}
+}
+
+func (t *TUI) printBanner() {
+	cwd, _ := os.Getwd()
+	fmt.Fprintln(t.writer)
+	fmt.Fprintln(t.writer, strings.Repeat("─", 60))
+	fmt.Fprintf(t.writer, "◆ iCode %s  %s\n", appVersionStr(), shortDir(cwd))
+	fmt.Fprintf(t.writer, "  Model: %s  Mode: %s\n", t.model, t.mode)
+	fmt.Fprintln(t.writer, strings.Repeat("─", 60))
+	fmt.Fprintln(t.writer, "  "+t.tstr("banner.hint"))
+	fmt.Fprintln(t.writer)
+}
+
+func (t *TUI) printUser(text string) {
+	fmt.Fprintf(t.writer, "  ▸ %s\n\n", text)
 }
 
 // ── StreamWriter ─────────────────────────────────────────────────
 
+// AddMessage renders a complete message (user/system/error/assistant).
 func (t *TUI) AddMessage(role Role, content string) {
+	t.mu.Lock()
 	switch role {
 	case RoleUser:
-		t.printUser(content)
+		t.messages = append(t.messages, Message{Role: RoleUser, Content: content})
 	case RoleAssistant:
-		t.printAssistant(content)
+		t.messages = append(t.messages, Message{Role: RoleAssistant, Content: content})
 	case RoleSystem:
-		t.printSystem(content)
+		t.messages = append(t.messages, Message{Role: RoleSystem, Content: content})
 	case RoleError:
-		t.printError(content)
+		t.messages = append(t.messages, Message{Role: RoleError, Content: content})
+	case RoleThinking:
+		t.messages = append(t.messages, Message{Role: RoleThinking, Content: content})
 	default:
-		t.printSystem(content)
+		t.messages = append(t.messages, Message{Role: RoleSystem, Content: content})
+	}
+	t.mu.Unlock()
+	if t.rawMode {
+		t.render()
+	} else {
+		t.printMessage(t.messages[len(t.messages)-1])
 	}
 }
 
+// AddToolMessage records a tool invocation.
 func (t *TUI) AddToolMessage(tool, toolArgs, content string) {
-	t.printTool(tool, toolArgs, content)
-}
-
-func (t *TUI) AppendStream(text string) {
-	t.streamBuf.WriteString(text)
-	// Print streaming text directly (no re-render)
-	fmt.Fprint(t.writer, text)
-}
-
-func (t *TUI) EndStream() {
-	final := t.streamBuf.String()
-	if strings.TrimSpace(final) != "" {
-		fmt.Fprintln(t.writer)
+	t.mu.Lock()
+	t.messages = append(t.messages, Message{Role: RoleTool, Tool: tool, ToolArgs: toolArgs, Content: content})
+	idx := len(t.messages) - 1
+	t.mu.Unlock()
+	if t.rawMode {
+		t.render()
+	} else {
+		t.printMessage(t.messages[idx])
 	}
-	t.streaming = false
+}
+
+// AppendToolResult appends result text to the most recent tool message.
+func (t *TUI) AppendToolResult(content string) {
+	t.mu.Lock()
+	for i := len(t.messages) - 1; i >= 0; i-- {
+		if t.messages[i].Role == RoleTool {
+			if t.messages[i].Content != "" {
+				t.messages[i].Content += "\n"
+			}
+			t.messages[i].Content += content
+			idx := i
+			t.mu.Unlock()
+			if t.rawMode {
+				t.render()
+			} else {
+				t.printMessage(t.messages[idx])
+			}
+			return
+		}
+	}
+	t.mu.Unlock()
+	if t.rawMode {
+		t.render()
+	}
+}
+
+// printMessage writes a single message to the line-mode writer.
+func (t *TUI) printMessage(m Message) {
+	switch m.Role {
+	case RoleUser:
+		fmt.Fprintf(t.writer, "  ▸ %s\n\n", m.Content)
+	case RoleAssistant:
+		t.printAssistant(m.Content)
+	case RoleSystem:
+		fmt.Fprintf(t.writer, "  %s\n\n", m.Content)
+	case RoleError:
+		fmt.Fprintf(t.writer, "  × %s\n\n", m.Content)
+	case RoleTool:
+		fmt.Fprintf(t.writer, "  » %s %s\n", m.Tool, truncate(m.ToolArgs, 60))
+		if m.Content != "" {
+			for _, l := range strings.Split(m.Content, "\n") {
+				fmt.Fprintf(t.writer, "    %s\n", l)
+			}
+		}
+		fmt.Fprintln(t.writer)
+	case RoleThinking:
+		fmt.Fprintf(t.writer, "  ┌─ thinking ─┐\n  │ %s\n  └──────────┘\n\n", truncate(m.Content, 200))
+	}
+}
+
+// printAssistant renders assistant text in line mode (◆ prefix).
+func (t *TUI) printAssistant(text string) {
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		if i == 0 {
+			fmt.Fprintf(t.writer, "  ◆ %s\n", line)
+		} else {
+			fmt.Fprintf(t.writer, "    %s\n", line)
+		}
+	}
+	fmt.Fprintln(t.writer)
+}
+
+// AppendStream appends assistant text as it streams in.
+func (t *TUI) AppendStream(text string) {
+	t.mu.Lock()
+	t.streamBuf.WriteString(text)
+	t.mu.Unlock()
+	if t.rawMode {
+		t.render()
+	} else {
+		fmt.Fprint(t.writer, text)
+	}
+}
+
+// EndStream finalizes the streaming turn.
+func (t *TUI) EndStream() {
+	final := strings.TrimSpace(t.streamBuf.String())
+	if final != "" {
+		t.mu.Lock()
+		t.messages = append(t.messages, Message{Role: RoleAssistant, Content: final})
+		t.mu.Unlock()
+	}
+	t.streamBuf.Reset()
 	select {
 	case t.streamDone <- struct{}{}:
 	default:
 	}
+	if t.rawMode {
+		t.render()
+	}
 }
 
+// SetStatus records token usage and cost for the status bar.
 func (t *TUI) SetStatus(input, output int, cacheHit float64, cost string) {
 	t.promptTokens = input
 	t.completionTokens = output
@@ -302,7 +754,7 @@ func (t *TUI) SetStatus(input, output int, cacheHit float64, cost string) {
 	t.cost = cost
 }
 
-// ── Slash Commands ───────────────────────────────────────────────
+// ── Slash commands ───────────────────────────────────────────────
 
 func (t *TUI) handleSlash(text string) {
 	parts := strings.Fields(text)
@@ -314,64 +766,65 @@ func (t *TUI) handleSlash(text string) {
 
 	switch cmd {
 	case "/help":
-		t.printSystem(`Commands:
-  /help            Show this help
-  /model <id>      Switch model
-  /mode <name>     Switch mode (default/plan/agent/yolo)
-  /compact         Compact conversation context
-  /clear           Clear conversation
-  /session         Show session info
-  /resume <id>     Resume a session
-  /export [file]   Export to markdown
-  /diff            Show git diff
-  /cost            Show cost breakdown
-  /exit            Exit iCode
-
-Shortcuts:
-  !<command>       Run shell command
-  Ctrl+C           Exit`)
+		var b strings.Builder
+		b.WriteString(t.tstr("cmd.help") + ":\n")
+		for _, d := range slashDefs {
+			b.WriteString(fmt.Sprintf("  %-14s %s\n", d.Name, t.tstr(d.Key)))
+		}
+		b.WriteString("\n" + t.tstr("sc.title") + ":\n")
+		b.WriteString("  !<command>       " + t.tstr("sc.shell") + "\n")
+		b.WriteString("  Ctrl+C           " + t.tstr("sc.ctrlc") + "\n")
+		b.WriteString("  Ctrl+L           " + t.tstr("sc.ctrll") + "\n")
+		b.WriteString("  Ctrl+P / Ctrl+N  " + t.tstr("sc.history") + "\n")
+		b.WriteString("  " + t.tstr("cmd.ac"))
+		t.add(RoleSystem, b.String())
 
 	case "/exit", "/quit":
-		fmt.Fprintln(t.writer, "Goodbye!")
+		t.add(RoleSystem, "Goodbye!")
 		t.running = false
 
 	case "/model":
 		if len(args) > 0 {
 			t.model = args[0]
-			t.printSystem(fmt.Sprintf("Model → %s", args[0]))
+			t.add(RoleSystem, "Model → "+args[0])
 		}
 
 	case "/mode":
 		if len(args) > 0 {
 			t.mode = args[0]
-			t.printSystem(fmt.Sprintf("Mode → %s", args[0]))
+			t.add(RoleSystem, "Mode → "+args[0])
 		}
 
-	case "/session":
-		t.printSystem(fmt.Sprintf("%d messages · %d↑ %d↓ tokens",
-			len(t.messages), t.promptTokens, t.completionTokens))
+	case "/session", "/sessions":
+		if t.callback != nil {
+			t.add(RoleSystem, t.callback.OnListSessions())
+		}
+
+	case "/resume":
+		if len(args) > 0 && t.callback != nil {
+			t.add(RoleSystem, t.callback.OnResume(args[0]))
+		} else {
+			t.add(RoleSystem, "Usage: /resume <session-id>")
+		}
+
+	case "/clear":
+		t.mu.Lock()
+		t.messages = nil
+		t.promptTokens = 0
+		t.completionTokens = 0
+		t.cost = ""
+		t.cacheHitRate = 0
+		t.mu.Unlock()
+		t.add(RoleSystem, "Conversation cleared.")
 
 	case "/compact":
 		t.compact()
-
-	case "/resume":
-		if len(args) > 0 {
-			t.printSystem(fmt.Sprintf("Resuming: %s", args[0]))
-		} else {
-			t.printSystem("Usage: /resume <session-id>")
-		}
 
 	case "/export":
 		t.exportMarkdown(args)
 
 	case "/diff":
 		t.showGitDiff()
-
-	case "/clear":
-		t.messages = nil
-		t.promptTokens = 0
-		t.completionTokens = 0
-		t.printSystem("Conversation cleared.")
 
 	case "/cost":
 		info := fmt.Sprintf("Tokens: %d prompt + %d completion = %d total",
@@ -382,7 +835,106 @@ Shortcuts:
 		if t.cacheHitRate > 0 {
 			info += fmt.Sprintf(" · Cache: %.0f%%", t.cacheHitRate*100)
 		}
-		t.printSystem(info)
+		t.add(RoleSystem, info)
+
+	case "/provider":
+		if len(args) > 0 {
+			t.provider = args[0]
+			t.add(RoleSystem, "Provider → "+args[0])
+		} else {
+			t.add(RoleSystem, "当前 Provider: "+t.provider+"\n用法: /provider <name>")
+		}
+
+	case "/keys":
+		cfg, err := config.Load()
+		if err != nil {
+			t.add(RoleSystem, "无法读取配置: "+err.Error())
+			return
+		}
+		var b strings.Builder
+		b.WriteString("API 密钥状态：\n")
+		for name, pc := range cfg.Providers {
+			st := "未配置"
+			if pc.APIKey != "" {
+				st = "已配置"
+			}
+			b.WriteString(fmt.Sprintf("  %-14s %s\n", name, st))
+		}
+		b.WriteString("\n用 `icode config key <provider> <key>` 或桌面端设置配置。")
+		t.add(RoleSystem, b.String())
+
+	case "/models":
+		cfg, err := config.Load()
+		if err != nil || len(cfg.Models) == 0 {
+			t.add(RoleSystem, "暂无自定义模型。\n用 `icode config model add <provider> <model_id> [name]` 新增。")
+			return
+		}
+		var b strings.Builder
+		b.WriteString("自定义模型：\n")
+		for _, m := range cfg.Models {
+			name := m.Name
+			if name == "" {
+				name = m.ModelID
+			}
+			b.WriteString(fmt.Sprintf("  %-26s %s / %s\n", m.ID, m.Provider, name))
+		}
+		t.add(RoleSystem, b.String())
+
+	case "/config":
+		cfg, _ := config.Load()
+		lang := "zh-CN"
+		theme := "auto"
+		diff := "unified"
+		syntax := "on"
+		if cfg != nil {
+			lang = cfg.Language
+			theme = cfg.TUI.Theme
+			diff = cfg.TUI.DiffMode
+			if !cfg.TUI.SyntaxHL {
+				syntax = "off"
+			}
+		}
+		t.add(RoleSystem, fmt.Sprintf("当前设置：\n  Model:    %s\n  Provider: %s\n  Mode:     %s\n  Language: %s\n  Theme:    %s\n  Diff:     %s\n  Syntax:   %s\n\n用 `icode config <key> <value>` 修改，或 `/lang` `/theme` 即时切换。",
+			t.model, t.provider, t.mode, lang, theme, diff, syntax))
+
+	case "/history":
+		if len(t.history) == 0 {
+			t.add(RoleSystem, "无历史记录。")
+			return
+		}
+		var b strings.Builder
+		for i, h := range t.history {
+			b.WriteString(fmt.Sprintf("  %d. %s\n", i+1, h))
+		}
+		t.add(RoleSystem, b.String())
+
+	case "/theme":
+		if len(args) > 0 {
+			switch strings.ToLower(args[0]) {
+			case "auto", "dark", "light":
+				t.theme = strings.ToLower(args[0])
+				t.persistSetting(func(c *config.Config) { c.TUI.Theme = t.theme })
+				t.add(RoleSystem, fmt.Sprintf(t.tstr("theme.set"), t.theme))
+			default:
+				t.add(RoleSystem, t.tstr("theme.usage"))
+			}
+		} else {
+			t.add(RoleSystem, t.tstr("theme.usage"))
+		}
+
+	case "/lang":
+		if len(args) > 0 {
+			switch args[0] {
+			case "zh-CN", "zh-TW", "en":
+				t.lang = args[0]
+				t.persistSetting(func(c *config.Config) { c.Language = t.lang })
+				t.add(RoleSystem, fmt.Sprintf(t.tstr("lang.set"), t.lang))
+			default:
+				t.add(RoleSystem, t.tstr("lang.usage"))
+			}
+		} else {
+			t.add(RoleSystem, t.tstr("lang.usage"))
+		}
 
 	default:
 		if t.callback != nil {
@@ -391,51 +943,51 @@ Shortcuts:
 	}
 }
 
-// ── Shell Mode ───────────────────────────────────────────────────
+// add appends a message and refreshes the screen.
+func (t *TUI) add(role Role, content string) {
+	t.AddMessage(role, content)
+}
+
+// ── Shell mode ───────────────────────────────────────────────────
 
 func (t *TUI) execShell(cmdStr string) {
 	cmdStr = strings.TrimSpace(cmdStr)
 	if cmdStr == "" {
 		return
 	}
+	t.add(RoleTool, "bash "+cmdStr)
 
-	fmt.Fprintf(t.writer, "⚡ bash %s\n", cmdStr)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	parts := strings.Fields(cmdStr)
-	if len(parts) == 0 {
-		return
+	var cmd *exec.Cmd
+	if strings.Contains(strings.ToLower(os.Getenv("OS")), "windows") {
+		cmd = exec.CommandContext(ctx, "cmd", "/C", cmdStr)
+	} else {
+		cmd = exec.CommandContext(ctx, "sh", "-c", cmdStr)
 	}
-
-	execCmd := exec.CommandContext(ctx, parts[0], parts[1:]...)
-	output, err := execCmd.CombinedOutput()
-
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		fmt.Fprintf(t.writer, "✖ %s\n", err)
+		t.add(RoleError, err.Error())
 	}
 	if len(output) > 0 {
-		// Print output with indentation
-		for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
-			fmt.Fprintf(t.writer, "  %s\n", line)
-		}
+		t.AppendToolResult(strings.TrimRight(string(output), "\n"))
 	}
-	fmt.Fprintln(t.writer)
 }
 
 // ── Compact ──────────────────────────────────────────────────────
 
 func (t *TUI) compact() {
+	t.mu.Lock()
 	if len(t.messages) < 4 {
-		t.printSystem("Not enough messages to compact.")
+		t.messages = append(t.messages, Message{Role: RoleSystem, Content: "Not enough messages to compact."})
+		t.mu.Unlock()
+		t.render()
 		return
 	}
-
 	var keep []Message
 	var summary strings.Builder
-	summary.WriteString("[Compacted] Summary:\n")
-
+	summary.WriteString("[Compacted] Summary of earlier turns:\n")
 	count := 0
 	for _, m := range t.messages {
 		if m.Role == RoleSystem || count >= len(t.messages)-4 {
@@ -445,9 +997,10 @@ func (t *TUI) compact() {
 			count++
 		}
 	}
-
 	t.messages = keep
-	t.printSystem(summary.String())
+	t.messages = append(t.messages, Message{Role: RoleSystem, Content: summary.String()})
+	t.mu.Unlock()
+	t.render()
 }
 
 // ── Export ───────────────────────────────────────────────────────
@@ -457,14 +1010,16 @@ func (t *TUI) exportMarkdown(args []string) {
 	if len(args) > 0 {
 		filename = args[0]
 	}
+	t.mu.Lock()
+	msgs := append([]Message{}, t.messages...)
+	t.mu.Unlock()
 
 	var sb strings.Builder
 	sb.WriteString("# iCode Conversation Export\n\n")
 	sb.WriteString(fmt.Sprintf("**Model:** %s  \n", t.model))
 	sb.WriteString(fmt.Sprintf("**Mode:** %s  \n\n", t.mode))
 	sb.WriteString("---\n\n")
-
-	for _, m := range t.messages {
+	for _, m := range msgs {
 		switch m.Role {
 		case RoleUser:
 			sb.WriteString("## User\n\n")
@@ -480,40 +1035,148 @@ func (t *TUI) exportMarkdown(args []string) {
 		sb.WriteString(m.Content)
 		sb.WriteString("\n\n")
 	}
-
 	if err := os.WriteFile(filename, []byte(sb.String()), 0644); err != nil {
-		t.printError(fmt.Sprintf("Export failed: %v", err))
+		t.add(RoleError, "Export failed: "+err.Error())
 		return
 	}
-	t.printSystem(fmt.Sprintf("Exported to %s (%d messages)", filename, len(t.messages)))
+	t.add(RoleSystem, fmt.Sprintf("Exported to %s (%d messages)", filename, len(msgs)))
 }
 
-// ── Git Diff ─────────────────────────────────────────────────────
+// ── Git diff ─────────────────────────────────────────────────────
 
 func (t *TUI) showGitDiff() {
 	cmd := exec.Command("git", "diff")
 	output, err := cmd.CombinedOutput()
 	if err != nil && len(output) == 0 {
-		t.printError(fmt.Sprintf("git diff: %v", err))
+		t.add(RoleError, "git diff: "+err.Error())
 		return
 	}
 	if len(output) == 0 {
-		t.printSystem("No unstaged changes.")
+		t.add(RoleSystem, "No unstaged changes.")
 		return
 	}
-	t.printTool("git_diff", "", string(output))
+	t.AddToolMessage("git_diff", "", strings.TrimRight(string(output), "\n"))
 }
 
 // ── Helpers ──────────────────────────────────────────────────────
+
+// persistSetting loads config, applies fn, and writes it back to disk.
+// Errors are silently ignored — the UI setting still takes effect in-session.
+func (t *TUI) persistSetting(fn func(*config.Config)) {
+	cfg, err := config.Load()
+	if err != nil {
+		return
+	}
+	fn(cfg)
+	_ = cfg.Save(config.DefaultPath())
+}
+
+// updateSuggestions recomputes the autocomplete panel based on the current
+// input. It opens when the input is empty (showing all commands) or starts
+// with "/", and filters as the user types.
+func (t *TUI) updateSuggestions() {
+	if !t.rawMode || t.streaming {
+		t.acOpen = false
+		t.acItems = nil
+		return
+	}
+	buf := t.inputBuf
+	if buf == "" {
+		t.acOpen = true
+		t.acItems = t.allSuggestions()
+		t.acIdx = 0
+		return
+	}
+	if strings.HasPrefix(buf, "/") {
+		prefix := strings.TrimSpace(buf)
+		var items []acItem
+		for _, d := range slashDefs {
+			if prefix == "/" || strings.HasPrefix(d.Name, prefix) {
+				items = append(items, acItem{Name: d.Name, Desc: t.tstr(d.Key)})
+			}
+		}
+		if len(items) == 0 {
+			t.acOpen = false
+			t.acItems = nil
+			return
+		}
+		t.acOpen = true
+		t.acItems = items
+		if t.acIdx >= len(items) {
+			t.acIdx = len(items) - 1
+		}
+		if t.acIdx < 0 {
+			t.acIdx = 0
+		}
+		return
+	}
+	t.acOpen = false
+	t.acItems = nil
+}
+
+// allSuggestions returns every slash command as an autocomplete entry.
+func (t *TUI) allSuggestions() []acItem {
+	items := make([]acItem, 0, len(slashDefs))
+	for _, d := range slashDefs {
+		items = append(items, acItem{Name: d.Name, Desc: t.tstr(d.Key)})
+	}
+	return items
+}
+
+// acceptSuggestion replaces the input with the highlighted command + a space.
+func (t *TUI) acceptSuggestion() {
+	if len(t.acItems) == 0 {
+		return
+	}
+	it := t.acItems[t.acIdx]
+	t.inputBuf = it.Name + " "
+	t.cursor = len([]rune(t.inputBuf))
+	t.acOpen = false
+	t.updateSuggestions()
+}
+
+// autocompleteLines renders the suggestion panel shown above the input line.
+// Returns nil when there is nothing to show.
+func (t *TUI) autocompleteLines() []string {
+	if !t.rawMode || t.streaming || !t.acOpen || len(t.acItems) == 0 {
+		return nil
+	}
+	var out []string
+	out = append(out, t.paint("dim", "  ▾ "+t.tstr("ac.title")+"   ("+t.tstr("ac.hint")+")"))
+
+	const maxShow = 9
+	from := 0
+	if t.acIdx >= maxShow {
+		from = t.acIdx - maxShow + 1
+	}
+	show := t.acItems
+	if from+maxShow < len(show) {
+		show = show[from : from+maxShow]
+	} else {
+		show = show[from:]
+	}
+
+	for i, it := range show {
+		globalIdx := from + i
+		sel := globalIdx == t.acIdx
+		name := padEnd(it.Name, 16)
+		if sel {
+			out = append(out, "  "+t.c("cyan")+"▶ "+name+" "+it.Desc+"\x1b[0m")
+		} else {
+			out = append(out, "    "+t.paint("dim", name+" "+it.Desc))
+		}
+	}
+	return out
+}
 
 func formatTokens(n int) string {
 	if n >= 1000000 {
 		return fmt.Sprintf("%.1fM", float64(n)/1000000)
 	}
 	if n >= 1000 {
-		return strconv.FormatFloat(float64(n)/1000, 'f', 1, 64) + "k"
+		return fmt.Sprintf("%.1fk", float64(n)/1000)
 	}
-	return strconv.Itoa(n)
+	return fmt.Sprintf("%d", n)
 }
 
 func shortDir(path string) string {
@@ -529,11 +1192,185 @@ func shortDir(path string) string {
 }
 
 func truncate(s string, n int) string {
-	if len(s) <= n {
+	r := []rune(s)
+	if len(r) <= n {
 		return s
 	}
-	return s[:n] + "..."
+	return string(r[:n]) + "…"
 }
 
-// unused but needed for interface compliance
-var _ = term.IsTerminal
+// wrapPrefixed wraps text to the terminal width, with a first-line prefix and
+// a continuation indent. prefixWidth is the display width of `prefix`.
+func wrapPrefixed(prefix, cont, text string, width int) []string {
+	contentW := width - runeWidthStr(prefix)
+	if contentW < 10 {
+		contentW = 10
+	}
+	wrapped := wrapText(text, contentW)
+	if len(wrapped) == 0 {
+		return []string{prefix}
+	}
+	out := make([]string, len(wrapped))
+	out[0] = prefix + wrapped[0]
+	for i := 1; i < len(wrapped); i++ {
+		out[i] = cont + wrapped[i]
+	}
+	return out
+}
+
+// wrapText wraps text to the given display width (counting CJK as width 2).
+func wrapText(text string, width int) []string {
+	if width < 4 {
+		width = 4
+	}
+	var lines []string
+	for _, para := range strings.Split(text, "\n") {
+		if para == "" {
+			lines = append(lines, "")
+			continue
+		}
+		runes := []rune(para)
+		var cur []rune
+		curW := 0
+		for _, r := range runes {
+			w := runeWidth(r)
+			if curW+w > width && len(cur) > 0 {
+				lines = append(lines, string(cur))
+				cur = cur[:0]
+				curW = 0
+			}
+			cur = append(cur, r)
+			curW += w
+		}
+		lines = append(lines, string(cur))
+	}
+	return lines
+}
+
+func runeWidthStr(s string) int {
+	w := 0
+	for _, r := range s {
+		w += runeWidth(r)
+	}
+	return w
+}
+
+func runeWidth(r rune) int {
+	if r == 0 {
+		return 0
+	}
+	if r >= 0x1100 && (r <= 0x115F ||
+		r == 0x2329 || r == 0x232A ||
+		(r >= 0x2E80 && r <= 0x303E) ||
+		(r >= 0x3041 && r <= 0x33FF) ||
+		(r >= 0x3400 && r <= 0x4DBF) ||
+		(r >= 0x4E00 && r <= 0x9FFF) ||
+		(r >= 0xA000 && r <= 0xA4CF) ||
+		(r >= 0xAC00 && r <= 0xD7A3) ||
+		(r >= 0xF900 && r <= 0xFAFF) ||
+		(r >= 0xFE30 && r <= 0xFE4F) ||
+		(r >= 0xFF00 && r <= 0xFF60) ||
+		(r >= 0xFFE0 && r <= 0xFFE6)) {
+		return 2
+	}
+	return 1
+}
+
+func thinkingLines(text string, width int) []string {
+	inner := width - 4
+	if inner < 10 {
+		inner = 10
+	}
+	box := "┌" + repeat("─", inner) + "┐"
+	var out []string
+	out = append(out, "  "+box)
+	for _, l := range wrapText(text, inner) {
+		out = append(out, "  │ "+padEnd(l, inner)+"│")
+	}
+	out = append(out, "  └"+repeat("─", inner)+"┘")
+	return out
+}
+
+func repeat(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	return strings.Repeat(s, n)
+}
+
+func padEnd(s string, n int) string {
+	w := runeWidthStr(s)
+	if w >= n {
+		return s
+	}
+	return s + strings.Repeat(" ", n-w)
+}
+
+// appVersionStr returns the human-readable version shown in the banner.
+func appVersionStr() string {
+	return "v0.2"
+}
+
+// ── Accessors used by the backend callback ───────────────────────
+
+// CurrentModel returns the active model ID.
+func (t *TUI) CurrentModel() string { return t.model }
+
+// CurrentProvider returns the active provider name.
+func (t *TUI) CurrentProvider() string { return t.provider }
+
+// LoadSession replaces the visible message list (used by /resume).
+func (t *TUI) LoadSession(msgs []Message) {
+	t.mu.Lock()
+	t.messages = msgs
+	t.mu.Unlock()
+	if t.rawMode {
+		t.render()
+	}
+}
+
+// PromptPermission shows an interactive approval dialog and blocks until the
+// user answers. It is invoked from the engine's permission handler, which runs
+// on the streaming goroutine while the main loop is parked in drainStream — so
+// we read the decision key directly from the terminal.
+func (t *TUI) PromptPermission(prompt string) permission.Decision {
+	if !t.rawMode {
+		// Non-interactive (piped) — auto-approve to avoid a hang.
+		return permission.DecisionAllow
+	}
+
+	t.mu.Lock()
+	t.permPending = true
+	t.permPrompt = prompt
+	t.mu.Unlock()
+	t.render()
+
+	reader := bufio.NewReader(t.reader)
+	for {
+		r, _, err := reader.ReadRune()
+		if err != nil {
+			t.clearPerm()
+			return permission.DecisionDeny
+		}
+		switch r {
+		case 'y', 'Y', '\r', '\n':
+			t.clearPerm()
+			return permission.DecisionAllow
+		case 'a', 'A':
+			t.clearPerm()
+			return permission.DecisionAllowAll
+		case 'n', 'N', 0x03: // 'n' or Ctrl+C → deny
+			t.clearPerm()
+			return permission.DecisionDeny
+		}
+	}
+}
+
+// clearPerm dismisses the approval dialog and repaints.
+func (t *TUI) clearPerm() {
+	t.mu.Lock()
+	t.permPending = false
+	t.permPrompt = ""
+	t.mu.Unlock()
+	t.render()
+}

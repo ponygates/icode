@@ -19,6 +19,9 @@ func Execute(version, build, commit string) error {
 	appVersion = version
 	appBuild = build
 	appCommit = commit
+	// Ensure the Windows console uses UTF-8 so Unicode UI glyphs and Chinese
+	// input render correctly instead of as mojibake.
+	fixConsoleCodepage()
 	return rootCmd.Execute()
 }
 
@@ -33,9 +36,19 @@ A multi-model AI coding agent that supports:
   • Native zh-CN / zh-TW / en interface
   • CLI (TUI) + Electron desktop dual experience
 
-Type 'icode chat' to start an interactive session.
+Just run 'icode' (or double-click the executable) to start an interactive
+chat session. Use 'icode chat' for the same, or 'icode --help' for all
+commands.
 `, i18n.Tr("app.name"), i18n.Tr("app.tagline")),
 	Version: appVersion,
+	// When launched with no subcommand — e.g. by double-clicking the
+	// executable — drop straight into the chat so the app actually runs
+	// instead of printing help and immediately closing the window.
+	RunE: func(cmd *cobra.Command, args []string) error {
+		provider, _ := cmd.Flags().GetString("provider")
+		model, _ := cmd.Flags().GetString("model")
+		return startChat(provider, model, "")
+	},
 }
 
 func init() {

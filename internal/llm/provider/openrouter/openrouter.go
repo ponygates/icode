@@ -17,6 +17,9 @@ func New(apiKey, apiBase string) types.Provider {
 		apiBase = DefaultBase
 	}
 
+	// Strictly expose the models as specified: `openrouter/auto` and
+	// `openrouter/free` are passed through verbatim to OpenRouter (no ID
+	// substitution).
 	return openai_compat.New(openai_compat.Config{
 		Name:       ProviderName,
 		APIBase:    apiBase,
@@ -29,8 +32,8 @@ func New(apiKey, apiBase string) types.Provider {
 func DefaultModels() []types.ModelInfo {
 	return []types.ModelInfo{
 		{
-			ID:              "auto",
-			Name:            "OpenRouter Auto",
+		ID:              "openrouter/auto",
+		Name:            "OpenRouter Auto",
 			Description:     "自动选择最优模型路由，平衡质量与成本",
 			Provider:        ProviderName,
 			ContextWindow:   200000,
@@ -51,8 +54,8 @@ func DefaultModels() []types.ModelInfo {
 			UpdatedAt: time.Now(),
 		},
 		{
-			ID:              "free",
-			Name:            "OpenRouter Free",
+		ID:              "openrouter/free",
+		Name:            "OpenRouter Free",
 			Description:     "免费模型聚合，速率有限但零成本",
 			Provider:        ProviderName,
 			ContextWindow:   128000,
