@@ -202,6 +202,7 @@ func (t *TUI) runRaw() error {
 	defer fmt.Fprint(t.writer, "\x1b[?25h")
 
 	t.render()
+	go t.watchResize()
 	reader := bufio.NewReader(t.reader)
 
 	for t.running {
@@ -218,6 +219,34 @@ func (t *TUI) runRaw() error {
 		}
 	}
 	return nil
+}
+
+// watchResize polls the terminal size and reapplies it whenever the window
+// changes. We poll (instead of relying on SIGWINCH) because SIGWINCH is not
+// available on Windows, where a large share of users run iCode. The 150ms
+// cadence is imperceptible and only triggers a repaint on an actual change, so
+// it costs nothing while the size is stable.
+func (t *TUI) watchResize() {
+	fd := int(os.Stdin.Fd())
+	lastW, lastH := 0, 0
+	t.mu.Lock()
+	lastW, lastH = t.width, t.height
+	t.mu.Unlock()
+	for t.running {
+		time.Sleep(150 * time.Millisecond)
+		if w, h, err := term.GetSize(fd); err == nil && w > 0 && h > 0 {
+			t.mu.Lock()
+			changed := w != lastW || h != lastH
+			if changed {
+				lastW, lastH = w, h
+				t.width, t.height = w, h
+			}
+			t.mu.Unlock()
+			if changed && t.rawMode {
+				t.render()
+			}
+		}
+	}
 }
 
 // handleKey processes a single input rune in raw mode.
@@ -402,7 +431,8 @@ func (t *TUI) render() {
 	// Snapshot all state under the data mutex, then write under the render
 	// mutex. This keeps render() safe to call from the streaming goroutine
 	// (which also appends streamed text and triggers renders) without
-	// re-locking t.mu.
+	// re-locking t.mu. Width/height are also snapshotted here so a concurrent
+	// resize (watchResize) cannot race the render.
 	t.mu.Lock()
 	msgs := append([]Message{}, t.messages...)
 	streaming := t.streaming
@@ -413,19 +443,30 @@ func (t *TUI) render() {
 	status := t.statusLine()
 	permPending := t.permPending
 	permPrompt := t.permPrompt
+	W := t.width
+	H := t.height
 	t.mu.Unlock()
 
 	if !rawMode {
 		return // line mode renders incrementally, not full-screen
 	}
-
-	W := t.width
-	H := t.height
 	if W < 20 {
 		W = 20
 	}
 	if H < 10 {
 		H = 10
+	}
+
+	// ── Layout ───────────────────────────────────────────────────
+	// The input box owns the bottom 4 rows. Everything else (header,
+	// conversation, status bar, overlays) lives in the rows above it. We paint
+	// each line at an absolute row with an in-place line clear (\x1b[K) and
+	// never clear the whole screen, so streaming redraws update in place
+	// instead of flashing a blank frame (the old \x1b[2J behaviour).
+	const inputRows = 4
+	contentRows := H - inputRows
+	if contentRows < 4 {
+		contentRows = 4
 	}
 
 	// Bottom status bar: a single compact line (model · tokens · context% ·
@@ -446,18 +487,18 @@ func (t *TUI) render() {
 		)
 	}
 
-	// Input region: top border + content + bottom border + hint = 4 lines.
-	inputH := 4
-
 	// Body height = rows between the top header/hrule and the bottom (status
-	// separator + status + input region + overlays). Claude Code is a single
-	// column, so the conversation takes the full terminal width.
-	bodyH := H - 1 /*header*/ - 1 /*hrule*/ - 1 /*status sep*/ - len(statusW) - inputH - len(permLines) - len(acLines)
+	// separator + status). Claude Code is a single column, so the conversation
+	// takes the full terminal width.
+	bodyH := contentRows - 1 /*header*/ - 2 /*hrule×2*/ - len(statusW) - len(permLines) - len(acLines)
 	if bodyH < 3 {
 		bodyH = 3
 	}
 
 	conv := t.conversationLines(msgs, streaming, streamContent, W)
+	if len(msgs) == 0 && !streaming {
+		conv = append(t.welcomeLines(W), conv...)
+	}
 	if len(conv) > bodyH {
 		conv = conv[len(conv)-bodyH:]
 	}
@@ -477,21 +518,30 @@ func (t *TUI) render() {
 	for _, al := range acLines {
 		out = append(out, al)
 	}
-	maxLines := H - 1
-	if len(out) > maxLines {
-		out = out[len(out)-maxLines:]
+	if len(out) > contentRows {
+		out = out[len(out)-contentRows:]
 	}
 
+	// ── Write frame (absolute rows, in-place clear) ──────────────
 	t.renderMu.Lock()
 	defer t.renderMu.Unlock()
-	fmt.Fprint(t.writer, "\x1b[2J\x1b[H")
-	for _, ln := range out {
-		fmt.Fprintln(t.writer, ln)
+	var buf strings.Builder
+	buf.WriteString("\x1b[?25l") // hide cursor while repainting
+	for i, ln := range out {
+		row := i + 1
+		if row > contentRows {
+			break
+		}
+		buf.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", row))
+		buf.WriteString(ln)
 	}
-	for i := len(out); i < maxLines; i++ {
-		fmt.Fprintln(t.writer)
+	// Clear any rows left between the content block and the input box so old
+	// text from a taller previous frame never lingers.
+	for row := len(out) + 1; row <= contentRows; row++ {
+		buf.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", row))
 	}
-	t.drawInputBox(W, inputBuf, cursor, streaming)
+	fmt.Fprint(t.writer, buf.String())
+	t.drawInputBox(W, H, inputBuf, cursor, streaming)
 }
 
 // headerLine renders the compact top bar: app name (Claude Code's ✻ glyph
@@ -506,6 +556,26 @@ func (t *TUI) headerLine() string {
 	return t.paint("magenta", "✻ iCode") + " " + appVersionStr() +
 		t.paint("dim", "  ·  ") + short +
 		t.paint("dim", "  ·  mode: ") + modeLabel
+}
+
+// welcomeLines renders the Claude Code-style startup screen shown in the
+// conversation area before the first message: the ✻ logo, the active
+// model/provider, the working directory, and a hint line. Once the user sends
+// a message it scrolls away like any other turn.
+func (t *TUI) welcomeLines(width int) []string {
+	var out []string
+	out = append(out, "  "+t.paint("magenta", "✻")+"  "+t.paint("bold", "Welcome to iCode"))
+	out = append(out, "")
+	cwd, _ := os.Getwd()
+	info := "    " + t.paint("dim", "Model:    ") + t.model
+	if t.provider != "" {
+		info += t.paint("dim", "    Provider: ") + t.provider
+	}
+	out = append(out, info)
+	out = append(out, "    "+t.paint("dim", "cwd:      ")+shortDir(cwd))
+	out = append(out, "")
+	out = append(out, "    "+t.paint("dim", t.tstr("welcome.hint")))
+	return out
 }
 
 func (t *TUI) messageLinesW(m Message, width int) []string {
@@ -817,14 +887,26 @@ func modeColor(m Mode) string {
 	}
 }
 
-// drawInputBox renders the Claude Code-style bordered prompt at the bottom of
-// the screen and positions the cursor on the content line. The box is:
+// drawInputBox renders the Claude Code-style bordered prompt anchored to the
+// bottom of the screen and positions the cursor on the content line. The box
+// is drawn at absolute rows (topRow..topRow+3) so it never relies on a trailing
+// newline causing a scroll — which previously pushed the box off-screen and
+// left artifacts. Layout:
 //
-//	╭────────────────────────────────────╮
-//	│ ❯ <input>                           │
-//	╰────────────────────────────────────╯
-//	  esc to cancel · tab to complete · ↵ to send
-func (t *TUI) drawInputBox(W int, inputBuf string, cursor int, streaming bool) {
+//	╭────────────────────────────────────╮   row topRow
+//	│ ❯ <input>                           │   row topRow+1
+//	╰────────────────────────────────────╯   row topRow+2
+//	  esc to cancel · tab to complete · ↵ to send   row topRow+3
+func (t *TUI) drawInputBox(W, H int, inputBuf string, cursor int, streaming bool) {
+	const inputRows = 4
+	topRow := H - inputRows + 1
+	if topRow < 1 {
+		topRow = 1
+	}
+	midRow := topRow + 1
+	botRow := topRow + 2
+	hintRow := topRow + 3
+
 	barLen := W - 2
 	if barLen < 0 {
 		barLen = 0
@@ -850,15 +932,24 @@ func (t *TUI) drawInputBox(W int, inputBuf string, cursor int, streaming bool) {
 		hint = t.paint("dim", "  esc to interrupt")
 	}
 
-	fmt.Fprintln(t.writer, top)
-	fmt.Fprintln(t.writer, mid)
-	fmt.Fprintln(t.writer, bot)
-	fmt.Fprintln(t.writer, hint)
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", topRow))
+	b.WriteString(top)
+	b.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", midRow))
+	b.WriteString(mid)
+	b.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", botRow))
+	b.WriteString(bot)
+	b.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", hintRow))
+	b.WriteString(hint)
 
-	// Move the cursor up onto the content line (the 2nd of the 4 input lines)
-	// and to the column just after the typed prefix.
-	fmt.Fprintf(t.writer, "\x1b[3A")
-	vw := visibleWidth(inputBuf[:cursor])
+	// Position the cursor on the content line, just after the typed prefix.
+	// Count display width up to the cursor rune (not byte) so CJK input places
+	// the caret correctly.
+	runes := []rune(inputBuf)
+	if cursor > len(runes) {
+		cursor = len(runes)
+	}
+	vw := visibleWidth(string(runes[:cursor]))
 	if vw > innerW {
 		vw = innerW
 	}
@@ -866,12 +957,16 @@ func (t *TUI) drawInputBox(W int, inputBuf string, cursor int, streaming bool) {
 	if col > W {
 		col = W
 	}
-	fmt.Fprintf(t.writer, "\x1b[%dG", col)
-	if streaming {
-		fmt.Fprint(t.writer, "\x1b[?25l")
-	} else {
-		fmt.Fprint(t.writer, "\x1b[?25h")
+	if col < 1 {
+		col = 1
 	}
+	b.WriteString(fmt.Sprintf("\x1b[%d;%dH", midRow, col))
+	if streaming {
+		b.WriteString("\x1b[?25l")
+	} else {
+		b.WriteString("\x1b[?25h")
+	}
+	fmt.Fprint(t.writer, b.String())
 }
 
 // ── Line mode (fallback) ─────────────────────────────────────────

@@ -20,6 +20,7 @@ var tuiStrings = map[string]map[string]string{
 		"ac.title":       "命令提示",
 		"ac.hint":        "Ctrl+P/N 选择 · Tab 补全 · Esc 关闭",
 		"banner.hint":    "输入你的需求，或 /help 查看命令。按 Ctrl+C 退出。",
+		"welcome.hint":   "输入你的需求开始对话，或 /help 查看全部命令 · Tab 补全 · ↑↓ 历史",
 		"perm.title":     "需要授权",
 		"perm.allow":     "允许",
 		"perm.all":       "本次会话全部允许",
@@ -58,6 +59,7 @@ var tuiStrings = map[string]map[string]string{
 		"ac.title":       "指令提示",
 		"ac.hint":        "Ctrl+P/N 選擇 · Tab 補全 · Esc 關閉",
 		"banner.hint":    "輸入你的需求，或 /help 檢視指令。按 Ctrl+C 退出。",
+		"welcome.hint":   "輸入你的需求開始對話，或 /help 檢視全部指令 · Tab 補全 · ↑↓ 歷史",
 		"perm.title":     "需要授權",
 		"perm.allow":     "允許",
 		"perm.all":       "本次工作階段全部允許",
@@ -96,6 +98,7 @@ var tuiStrings = map[string]map[string]string{
 		"ac.title":       "Commands",
 		"ac.hint":        "Ctrl+P/N to move · Tab to complete · Esc to close",
 		"banner.hint":    "Type your request, or /help for commands. Ctrl+C to exit.",
+		"welcome.hint":   "Type your request to start, or /help for all commands · Tab to complete · ↑↓ history",
 		"perm.title":     "Needs approval",
 		"perm.allow":     "allow",
 		"perm.all":       "allow all this session",
@@ -170,6 +173,7 @@ type acItem struct {
 var palettes = map[string]map[string]string{
 	"dark": {
 		"dim":    "\x1b[90m",
+		"bold":   "\x1b[1m",
 		"red":    "\x1b[31m",
 		"green":  "\x1b[32m",
 		"yellow": "\x1b[33m",
@@ -179,6 +183,7 @@ var palettes = map[string]map[string]string{
 	},
 	"light": {
 		"dim":    "\x1b[90m",
+		"bold":   "\x1b[1m",
 		"red":    "\x1b[31m",
 		"green":  "\x1b[38;5;28m",
 		"yellow": "\x1b[38;5;136m",
