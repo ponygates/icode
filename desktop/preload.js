@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld('icode', {
   getVersion: () => ipcRenderer.invoke('app:getVersion'),
   getPlatform: () => ipcRenderer.invoke('app:getPlatform'),
   getBackendPort: () => ipcRenderer.invoke('app:getBackendPort'),
+  getBackendURL: () => ipcRenderer.invoke('app:getBackendURL'),
   openExternal: (url) => ipcRenderer.invoke('app:openExternal', url),
 
   // Models
@@ -30,6 +31,7 @@ contextBridge.exposeInMainWorld('icode', {
 
   // Config
   getConfig: () => ipcRenderer.invoke('config:get'),
+  setConfig: (cfg) => ipcRenderer.invoke('config:set', cfg),
   setLanguage: (lang) => ipcRenderer.invoke('config:setLang', lang),
   setApiKey: (provider, apiKey, apiBase) =>
     ipcRenderer.invoke('config:setApiKey', { provider, apiKey, apiBase }),

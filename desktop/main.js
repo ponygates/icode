@@ -138,6 +138,9 @@ ipcMain.handle('app:getVersion', () => app.getVersion());
 ipcMain.handle('app:getPlatform', () => process.platform);
 ipcMain.handle('app:openExternal', (_, url) => shell.openExternal(url));
 ipcMain.handle('app:getBackendPort', () => backendPort);
+ipcMain.handle('app:getBackendURL', () =>
+  backendPort ? `http://127.0.0.1:${backendPort}` : null
+);
 
 // Models
 ipcMain.handle('model:list', async () => {
@@ -246,6 +249,12 @@ ipcMain.handle('config:get', async () => {
   if (!backendReady) return null;
   try { return await apiCall('GET', '/api/config'); }
   catch { return null; }
+});
+
+ipcMain.handle('config:set', async (_, cfg) => {
+  if (!backendReady) return { ok: false, error: 'Backend unavailable' };
+  try { return await apiCall('PUT', '/api/config', cfg); }
+  catch (e) { return { ok: false, error: e.message }; }
 });
 
 ipcMain.handle('config:setLang', async (_, lang) => {

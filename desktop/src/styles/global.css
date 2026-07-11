@@ -16,6 +16,23 @@
   --font-mono: 'Consolas', 'Monaco', 'Source Code Pro', monospace;
 }
 
+/* Light theme (Reasonix-style appearance toggle) */
+:root[data-theme='light'] {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f5f6f8;
+  --bg-tertiary: #e9edf2;
+  --bg-hover: #eef1f5;
+  --text-primary: #1a1a2e;
+  --text-secondary: #4a4a5a;
+  --text-muted: #8a8a9a;
+  --accent: #0288d1;
+  --accent-hover: #039be5;
+  --success: #2e7d32;
+  --warning: #f57c00;
+  --error: #d32f2f;
+  --border-color: #e2e4e9;
+}
+
 * {
   margin: 0;
   padding: 0;
