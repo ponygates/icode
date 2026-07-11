@@ -41,6 +41,19 @@ func TestWelcomeAdaptive(t *testing.T) {
 		t.Fatalf("expected tagline on a roomy terminal:\n%s", roomy)
 	}
 
+	// The banner must be anchored near the top (not vertically centred): on a
+	// 40-row terminal the first logo row must sit within the first ~12 lines,
+	// so it can never be pushed above the visible window. This is the direct
+	// guard against the "top half of the logo missing" regression.
+	for i, ln := range strings.Split(roomy, "\n") {
+		if strings.Contains(ln, logoTop) {
+			if i > 12 {
+				t.Fatalf("logo centred too low (row %d) instead of anchored near top:\n%s", i, roomy)
+			}
+			break
+		}
+	}
+
 	// Cramped terminals of several heights: never a partial logo. Whenever an
 	// interior logo row appears, the top row must appear too (all-or-nothing).
 	for _, sz := range []struct{ w, h int }{{120, 18}, {100, 16}, {90, 14}, {80, 12}, {80, 10}} {

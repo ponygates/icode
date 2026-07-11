@@ -214,7 +214,23 @@ func (t *TUI) runRaw() error {
 	// missing"). The alternate screen gives us a clean, window-sized canvas
 	// where row 1 is always the top of what the user sees. We restore the
 	// original screen (and cursor) on exit.
-	fmt.Fprint(t.writer, "\x1b[?1049h\x1b[2J\x1b[H\x1b[?25l")
+	// Enter the alternate screen buffer and *force the visible window to the
+	// top of a clean canvas* before the first paint. This is critical: a
+	// centred banner computed for a height larger than the real visible window
+	// (or any pre-TUI output still in the scrollback) would leave the top rows
+	// of the ASCII logo painted above the viewport — the "top half of the
+	// banner missing" symptom.
+	//
+	// We combine three measures so it works whether or not the terminal honours
+	// the alternate screen:
+	//   • \x1b[?1049h  enter alt screen (clean, window-sized canvas)
+	//   • \x1b[3J       erase the scrollback history (xterm) so the window
+	//                  can never stay scrolled down to old content
+	//   • \x1b[2J\x1b[H clear the screen and home the cursor to (1,1)
+	//   • \x1b[?25l     hide the cursor while painting
+	// On terminals that ignore ?1049h the 3J/2J/H trio still scroll the window
+	// to the top and clear it, so the banner's top is always visible.
+	fmt.Fprint(t.writer, "\x1b[?1049h\x1b[3J\x1b[2J\x1b[H\x1b[?25l")
 	defer fmt.Fprint(t.writer, "\x1b[?25h\x1b[?1049l")
 
 	t.render()
@@ -552,11 +568,20 @@ func (t *TUI) render() {
 		// Height-aware welcome: welcomeLines picks the richest layout
 		// (logo + tagline + box → logo + tagline → tagline + box → compact)
 		// that fits bodyH, so the ASCII logo is never sliced in half on short
-		// terminals. It is vertically centred in the body for a polished,
-		// Claude Code-like startup screen.
+		// terminals. The banner is anchored near the top of the body (Claude
+		// Code shows its banner at the top, not centred), which keeps the logo
+		// within the first visible rows even when the measured height is larger
+		// than the real visible window.
 		welcome := t.welcomeLines(W, bodyH)
-		if pad := (bodyH - len(welcome)) / 2; pad > 0 {
-			lead := make([]string, pad)
+		// Anchor the welcome near the top (Claude Code shows its banner at the
+		// top, not vertically centred). A single-line margin keeps it clear of
+		// the header rule, and — crucially — keeps the ASCII logo within the
+		// first few visible rows even if the measured terminal height is a bit
+		// larger than the real visible window, which is what previously pushed
+		// a centred banner off the top ("top half of the logo missing").
+		topMargin := 1
+		if topMargin+len(welcome) <= bodyH {
+			lead := make([]string, topMargin)
 			welcome = append(lead, welcome...)
 		}
 		conv = welcome
