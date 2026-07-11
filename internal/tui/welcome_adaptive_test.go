@@ -29,8 +29,8 @@ func renderAt(w, h int) string {
 // short terminal (the "top half missing" bug). It also verifies the full
 // banner shows on a roomy terminal and degrades gracefully when cramped.
 func TestWelcomeAdaptive(t *testing.T) {
-	logoTop := "██╗ ██████╗"    // first row of the big wordmark
-	logoMid := "██║██║     ██║" // an interior row of the big wordmark
+	logoTop := "   _    ___           __  " // first row of the big ASCII wordmark
+	logoMid := "   _  | | | | ___    | |_ " // an interior row of the wordmark
 
 	// Roomy terminal: the whole logo must be present.
 	roomy := renderAt(120, 40)

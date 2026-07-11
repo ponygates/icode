@@ -659,20 +659,21 @@ func (t *TUI) welcomeLines(width, maxH int) []string {
 		t.paint("magenta", "✻")+"  "+t.paint("bold", "Welcome to iCode")+
 			"  "+t.paint("dim", "— "+t.tstr("welcome.tagline")),
 		width-4)
-	box := t.welcomeBox(width)
-	compact := t.welcomeCompact(width)
+	info := t.welcomeInfo(width)
 
-	// Assemble a candidate layout from optional pieces.
-	build := func(withLogo, withBox bool) []string {
+	// Assemble a candidate layout from optional pieces. Keep vertical spacing
+	// tight — one blank line between logo/tagline and info is enough for a
+	// Claude Code-like density.
+	build := func(withLogo, withInfo bool) []string {
 		var o []string
 		if withLogo && logo != nil {
 			o = append(o, logo...)
 			o = append(o, "")
 		}
 		o = append(o, tagline)
-		if withBox {
+		if withInfo {
 			o = append(o, "")
-			o = append(o, box...)
+			o = append(o, info...)
 		}
 		return o
 	}
@@ -680,10 +681,10 @@ func (t *TUI) welcomeLines(width, maxH int) []string {
 	// Richest → leanest. Return the first layout that fits the available
 	// height, so the logo is dropped whole (never sliced) when space is tight.
 	for _, c := range [][]string{
-		build(true, true),  // logo + tagline + box
+		build(true, true),  // logo + tagline + info
 		build(true, false), // logo + tagline
-		build(false, true), // tagline + box
-		compact,            // minimal indented info, no logo/frame
+		build(false, true), // tagline + info
+		info,               // minimal indented info, no logo
 	} {
 		if len(c) > 0 && len(c) <= maxH {
 			return c
@@ -693,72 +694,47 @@ func (t *TUI) welcomeLines(width, maxH int) []string {
 	return []string{tagline}
 }
 
-// welcomeBox renders the Claude Code-style framed info panel (model / provider
-// / cwd / hints inside left+right box walls). On terminals too narrow for a
-// tidy frame it degrades to the plain compact info block.
-func (t *TUI) welcomeBox(width int) []string {
-	if width < 40 {
-		return t.welcomeCompact(width)
-	}
-	boxW := width - 2
-	if boxW < 30 {
-		boxW = 30
-	}
-	contentW := boxW - 4
+// welcomeInfo renders the Claude Code-style startup info block as plain
+// indented lines (model / provider / cwd / hints). Dropping the framed box
+// avoids the border-alignment and width-ambiguity artifacts that box-drawing
+// glyphs can cause on Windows conhost or CJK terminals, while keeping the
+// same information density and clean left margin.
+func (t *TUI) welcomeInfo(width int) []string {
+	cwd, _ := os.Getwd()
+	prefix := "     "
+	contentW := width - visibleWidth(prefix)
 	if contentW < 10 {
 		contentW = 10
 	}
-	bar := repeat("─", boxW-2)
-	top := " " + t.paint("dim", "┌"+bar+"┐")
-	bot := " " + t.paint("dim", "└"+bar+"┘")
-	boxLine := func(inner string) string {
-		return " " + t.paint("dim", "│ ") + fit(inner, contentW) + t.paint("dim", " │")
-	}
 
-	cwd, _ := os.Getwd()
-
-	// Model (left) · Provider (right) on one row when they fit side by side.
-	left := t.paint("dim", "Model:    ") + t.model
-	right := ""
+	// Model row; provider appended on the same line when it fits.
+	modelRow := t.paint("dim", "Model:    ") + t.model
 	if t.provider != "" {
-		right = t.paint("dim", "Provider: ") + t.provider
-	}
-	modelRow := left
-	if right != "" {
-		gap := contentW - visibleWidth(left) - visibleWidth(right)
-		if gap >= 1 {
-			modelRow = left + strings.Repeat(" ", gap) + right
+		provider := t.paint("dim", "Provider: ") + t.provider
+		gap := contentW - visibleWidth(modelRow) - visibleWidth(provider)
+		if gap >= 2 {
+			modelRow = modelRow + strings.Repeat(" ", gap) + provider
 		}
 	}
 
 	var out []string
-	out = append(out, top)
-	out = append(out, boxLine(modelRow))
-	if right != "" && visibleWidth(left)+visibleWidth(right) >= contentW {
-		// Provider didn't fit beside the model — drop it onto its own row.
-		out = append(out, boxLine(right))
+	out = append(out, prefix+modelRow)
+	if t.provider != "" && visibleWidth(t.paint("dim", "Model:    ")+t.model)+visibleWidth(t.paint("dim", "Provider: ")+t.provider) >= contentW {
+		out = append(out, prefix+t.paint("dim", "Provider: ")+t.provider)
 	}
-	out = append(out, boxLine(t.paint("dim", "cwd:      ")+shortDir(cwd)))
-	out = append(out, boxLine(""))
-	out = append(out, boxLine(t.paint("dim", t.tstr("welcome.hint"))))
-	out = append(out, boxLine(t.paint("dim", t.tstr("welcome.close"))))
-	out = append(out, bot)
-	return out
-}
-
-// welcomeCompact renders the plain, frameless welcome info (used on narrow or
-// short terminals where the framed box would not fit).
-func (t *TUI) welcomeCompact(width int) []string {
-	cwd, _ := os.Getwd()
-	var out []string
-	out = append(out, "     "+t.paint("dim", "Model:    ")+t.model)
-	if t.provider != "" {
-		out = append(out, "     "+t.paint("dim", "Provider: ")+t.provider)
-	}
-	out = append(out, "     "+t.paint("dim", "cwd:      ")+shortDir(cwd))
+	out = append(out, prefix+t.paint("dim", "cwd:      ")+shortDir(cwd))
 	out = append(out, "")
-	out = append(out, "     "+t.paint("dim", t.tstr("welcome.hint")))
-	out = append(out, "     "+t.paint("dim", t.tstr("welcome.close")))
+
+	// Wrap long hint/close lines so they never overflow the terminal width and
+	// leave phantom characters on the following line.
+	hint := t.tstr("welcome.hint")
+	close := t.tstr("welcome.close")
+	for _, l := range wrapPrefixed(prefix, prefix, hint, width) {
+		out = append(out, t.paint("dim", l))
+	}
+	for _, l := range wrapPrefixed(prefix, prefix, close, width) {
+		out = append(out, t.paint("dim", l))
+	}
 	return out
 }
 

@@ -1,29 +1,31 @@
 package tui
 
 // icodeLogos holds progressively richer ASCII wordmarks for the startup
-// banner, chosen by available terminal width. Each entry pairs the art with a
-// per-row colour gradient (magenta → purple → blue → cyan) for a polished,
-// Claude-Code-like look that stays crisp on any UTF-8 terminal.
+// banner. They use only plain ASCII glyphs (no box-drawing or block-element
+// Unicode) so they stay crisp and aligned on every terminal, including
+// Windows conhost and CJK fonts where ambiguous-width Unicode blocks often
+// shift or break apart.
 var icodeLogos = []struct {
 	minWidth int
 	lines    []string
 	gradient []string
 }{
-	{40, []string{
-		"██╗ ██████╗ ██████╗ ██████╗ ███████╗",
-		"██║██╔════╝██╔═══██╗██╔══██╗██╔════╝",
-		"██║██║     ██║   ██║██║  ██║█████╗  ",
-		"██║██║     ██║   ██║██║  ██║██╔══╝  ",
-		"██║╚██████╗╚██████╔╝██████╔╝███████╗",
-		"╚═╝ ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝",
+	{45, []string{
+		`   _    ___           __  `,
+		`  (_)  / _ \         / _| `,
+		`   _  | | | | ___    | |_ `,
+		`  | | | | | |/ _ \   |  _|`,
+		`  | | | |_| |  __/   | |  `,
+		`  |_|  \___/ \___/   |_|  `,
 	}, []string{"magenta", "magenta", "purple", "blue", "cyan", "cyan"}},
 	{30, []string{
-		"    _ ______          __   ",
-		"   (_) ____/___  ____/ /__ ",
-		"  / / /   / __ \\/ __  / _ \\",
-		" / / /___/ /_/ / /_/ /  __/",
-		"/_/\\____/\\____/\\__,_/\\___/ ",
-	}, []string{"magenta", "purple", "blue", "cyan", "cyan"}},
+		`  _   ___        __ `,
+		` (_) / _ \      / _|`,
+		`  _ | | | | ___| |_ `,
+		` | || | | |/ _ \  _|`,
+		` | || |_| |  __/ |  `,
+		` |_| \___/ \___|_|  `,
+	}, []string{"magenta", "magenta", "purple", "blue", "cyan", "cyan"}},
 }
 
 // logoLines picks the richest ASCII wordmark that fits the terminal width and
@@ -49,7 +51,7 @@ func (t *TUI) logoLines(width int) []string {
 // Logo returns the ASCII wordmark as plain lines (no ANSI), safe for non-VT
 // consoles and for the CLI startup banner (e.g. `icode` / `icode about`).
 func Logo() []string {
-	// Primary wordmark (the ansi_shadow art) without colour escapes.
+	// Primary wordmark without colour escapes.
 	primary := icodeLogos[0].lines
 	out := make([]string, len(primary))
 	for i, l := range primary {

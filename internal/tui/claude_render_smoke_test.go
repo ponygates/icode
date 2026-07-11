@@ -87,15 +87,16 @@ func TestWelcomeScreen(t *testing.T) {
 	// Case 1: banner should be visible on a fresh session.
 	tui.render()
 	out := buf.String()
-	if !strings.Contains(out, "██████╗") {
-		t.Fatalf("expected big ASCII iCode logo in welcome screen:\n%s", out)
-	}
-	if !strings.Contains(out, "┌") || !strings.Contains(out, "└") {
-		t.Fatalf("expected framed info box (┌/└) in welcome screen:\n%s", out)
-	}
 	if !strings.Contains(out, "Welcome to iCode") {
 		t.Fatalf("expected 'Welcome to iCode' tagline in welcome screen:\n%s", out)
 	}
+	// The wordmark uses plain ASCII (no block/box-drawing glyphs) so it
+	// renders crisply on Windows conhost and CJK terminals.
+	if !strings.Contains(out, "___") || !strings.Contains(out, `/ _ \`) {
+		t.Fatalf("expected plain ASCII iCode logo in welcome screen:\n%s", out)
+	}
+	// Info is shown as indented lines (Claude Code style), not a framed box,
+	// to avoid border-alignment artifacts.
 	if !strings.Contains(out, "Model:") || !strings.Contains(out, "cwd:") {
 		t.Fatalf("expected model/cwd info in welcome screen:\n%s", out)
 	}
@@ -107,7 +108,7 @@ func TestWelcomeScreen(t *testing.T) {
 	}
 	tui.render()
 	out2 := buf.String()
-	if strings.Contains(out2, "██████╗") {
+	if strings.Contains(out2, `/ _ \`) {
 		t.Fatalf("expected welcome logo to be hidden after dismiss:\n%s", out2)
 	}
 }
