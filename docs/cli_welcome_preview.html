@@ -11,13 +11,15 @@
   h1 { font-size: 18px; color: #cba6f7; font-weight: 600; }
   .note { color: #8b93a7; font-size: 13px; line-height: 1.7; margin: 6px 0 22px; }
   .term { background: #07090f; border: 1px solid #1c2030; border-radius: 10px; padding: 16px 18px; box-shadow: 0 10px 40px rgba(0,0,0,.45); }
-  .line { white-space: pre; line-height: 1.55; font-size: 13.5px; }
-  .mag { color: #cba6f7; }
+  .line { white-space: pre; line-height: 1.5; font-size: 13.5px; }
+  .mag { color: #f472d0; }
+  .pur { color: #b48ef0; }
+  .blue { color: #7aa2f7; }
+  .cyan { color: #7de2e2; }
   .dim { color: #6c7393; }
   .bold { color: #f5f7ff; font-weight: 700; }
-  .cyan { color: #89dceb; }
   .hr { color: #2a3048; }
-  .box { color: #5566aa; }
+  .box { color: #4a5680; }
   .input-prefix { color: #89b4fa; }
   .hint { color: #565f7a; }
   h2 { font-size: 14px; color: #a6adc8; margin: 34px 0 10px; font-weight: 600; }
@@ -27,40 +29,43 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>iCode CLI · 启动欢迎屏（仿 Claude Code）</h1>
-  <p class="note">本次更新：ASCII 大 Logo 启动屏 + 可关闭 + 完整欢迎文案 + 本地化输入框提示语，并延续「回复不闪动 / 窗口自适应」。</p>
+  <h1>iCode CLI · 启动欢迎屏（渐变字标 + Claude Code 式方框）</h1>
+  <p class="note">本次更新：更漂亮的渐变 ASCII 字标 + Logo 下方要素用 ASCII 方框左右隔开（Model / Provider 左右分隔），并延续「回复不闪动 / 窗口自适应」。</p>
 
   <div class="term">
     <div class="line"><span class="mag">✻</span> <span class="bold">iCode</span> <span class="dim">v0.2  ·  icode  ·  mode: agent</span></div>
-    <div class="line hr">──────────────────────────────────────────────────────────────</div>
-    <div class="line">   <span class="mag">IIII CCCC OOOO DDDD EEEE</span></div>
-    <div class="line">    <span class="mag">I I C    O   O D   D E</span></div>
-    <div class="line">    <span class="mag">I I C    O   O D   D EEE</span></div>
-    <div class="line">    <span class="mag">I I C    O   O D   D E</span></div>
-    <div class="line">   <span class="mag">IIII CCCC OOOO DDDD EEEE</span></div>
+    <div class="line hr">──────────────────────────────────────────────────────────────────────</div>
+    <div class="line">   <span class="mag">██╗ ██████╗ ██████╗ ██████╗ ███████╗</span></div>
+    <div class="line">   <span class="mag">██║██╔════╝██╔═══██╗██╔══██╗██╔════╝</span></div>
+    <div class="line">   <span class="pur">██║██║     ██║   ██║██║  ██║█████╗  </span></div>
+    <div class="line">   <span class="blue">██║██║     ██║   ██║██║  ██║██╔══╝  </span></div>
+    <div class="line">   <span class="cyan">██║╚██████╗╚██████╔╝██████╔╝███████╗</span></div>
+    <div class="line">   <span class="cyan">╚═╝ ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝</span></div>
     <div class="line"> </div>
     <div class="line">   <span class="mag">✻</span>  <span class="bold">Welcome to iCode</span>  <span class="dim">— 你的 AI 编程伙伴</span></div>
     <div class="line"> </div>
-    <div class="line">     <span class="dim">Model:    </span>deepseek-v4-flash<span class="dim">    Provider: </span>deepseek</div>
-    <div class="line">     <span class="dim">cwd:      </span>ponygates/icode</div>
-    <div class="line"> </div>
-    <div class="line">     <span class="dim">输入你的需求开始对话，或 /help 查看全部命令 · Tab 补全 · ↑↓ 历史</span></div>
-    <div class="line">     <span class="dim">按 Esc 或回车关闭欢迎屏 · 输入即开始</span></div>
-    <div class="line hr">──────────────────────────────────────────────────────────────</div>
+    <div class="line box">┌──────────────────────────────────────────────────────────────┐</div>
+    <div class="line box">│</div> <span class="dim">Model:    </span>deepseek-v4-flash<span class="dim">        Provider: </span>deepseek <span class="box">│</span></div>
+    <div class="line box">│</div> <span class="dim">cwd:      </span>ponygates/icode                                  <span class="box">│</span></div>
+    <div class="line box">│</div>                                                              <span class="box">│</span></div>
+    <div class="line box">│</div> <span class="dim">输入你的需求开始对话，或 /help 查看全部命令 · Tab 补全</span> <span class="box">│</span></div>
+    <div class="line box">│</div> <span class="dim">按 Esc 或回车关闭欢迎屏 · 输入即开始</span>                  <span class="box">│</span></div>
+    <div class="line box">└──────────────────────────────────────────────────────────────┘</div>
+    <div class="line hr">──────────────────────────────────────────────────────────────────────</div>
     <div class="line"><span class="cyan">●</span> deepseek-v4-flash <span class="dim">· deepseek · ↑0 ↓0 · 0% ctx · 0% cache</span></div>
-    <div class="line box">╭────────────────────────────────────────────────────────────╮</div>
+    <div class="line box">╭──────────────────────────────────────────────────────────────╮</div>
     <div class="line box">│</div> <span class="input-prefix">❯</span> <span class="line">                                             </span><span class="box">│</span></div>
-    <div class="line box">╰────────────────────────────────────────────────────────────╯</div>
+    <div class="line box">╰──────────────────────────────────────────────────────────────╯</div>
     <div class="line hint">  esc 取消 · tab 补全 · ↵ 发送</div>
   </div>
 
   <h2>本次更新</h2>
   <ul>
-    <li><b>ASCII 大 Logo</b>：启动屏顶部展示大字 <span class="mag">iCode</span> 字标（纯 ASCII 盒线，任何 UTF-8 终端可读），窄屏（&lt;30 列）自动降级为单行文字。</li>
-    <li><b>可关闭</b>：欢迎屏默认显示，<span class="bold">Esc / 回车</span> 或<b>输入第一个字符</b>即关闭；<code>/welcome</code> 斜杠命令可重新打开（空对话时）。</li>
-    <li><b>欢迎文案</b>：<span class="bold">Welcome to iCode — 你的 AI 编程伙伴</span> + 当前模型 / Provider / 工作目录 + 操作提示。</li>
-    <li><b>输入框提示语本地化</b>：底部提示改为 <code>esc 取消 · tab 补全 · ↵ 发送</code>（生成中显示 <code>esc 中断生成</code>），中/繁/英三语齐全。</li>
-    <li><b>延续此前修复</b>：回复不再闪动（逐行原位擦写）、窗口缩放即时自适应。</li>
+    <li><b>更漂亮的字标</b>：宽终端用 <span class="mag">ansi_shadow</span> 实心块字标（36 列宽），中等终端用 <span class="pur">slant</span> 斜体字标（27 列宽），并施加 <span class="mag">洋红→紫→蓝→青</span> 逐行渐变着色，比旧有的方块字标更精致。</li>
+    <li><b>Claude Code 式方框</b>：Logo 下方的 模型 / Provider / 工作目录 / 提示 全部收进 ASCII 方框，<span class="bold">左右用 <code>│</code> 竖墙隔开</span>；<span class="bold">Model 与 Provider 在同一行左右分隔</span>（放不下时自动换行）。</li>
+    <li><b>窗口自适应</b>：<code>watchResize()</code> 每 150ms 轮询终端尺寸，缩放窗口即时重排，中文按宽度 2 折行，不再错位。</li>
+    <li><b>可关闭 + 文案</b>：Esc / 回车 / 输入首字符即关闭；<code>/welcome</code> 重新打开；底部提示语已中/繁/英本地化。</li>
+    <li><b>窄屏优雅降级</b>：&lt;40 列不显示方框（纯缩进信息），&lt;30 列不显示字标（仅单行文字），始终可读。</li>
   </ul>
 </div>
 </body>

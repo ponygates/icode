@@ -87,8 +87,11 @@ func TestWelcomeScreen(t *testing.T) {
 	// Case 1: banner should be visible on a fresh session.
 	tui.render()
 	out := buf.String()
-	if !strings.Contains(out, "IIII CCCC OOOO DDDD EEEE") {
+	if !strings.Contains(out, "██████╗") {
 		t.Fatalf("expected big ASCII iCode logo in welcome screen:\n%s", out)
+	}
+	if !strings.Contains(out, "┌") || !strings.Contains(out, "└") {
+		t.Fatalf("expected framed info box (┌/└) in welcome screen:\n%s", out)
 	}
 	if !strings.Contains(out, "Welcome to iCode") {
 		t.Fatalf("expected 'Welcome to iCode' tagline in welcome screen:\n%s", out)
@@ -104,7 +107,7 @@ func TestWelcomeScreen(t *testing.T) {
 	}
 	tui.render()
 	out2 := buf.String()
-	if strings.Contains(out2, "IIII CCCC OOOO DDDD EEEE") {
+	if strings.Contains(out2, "██████╗") {
 		t.Fatalf("expected welcome logo to be hidden after dismiss:\n%s", out2)
 	}
 }

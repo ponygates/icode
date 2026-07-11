@@ -602,42 +602,82 @@ func (t *TUI) headerLine() string {
 		t.paint("dim", "  ·  mode: ") + modeLabel
 }
 
-// icodeAsciiLogo is the big wordmark shown on the startup screen. Each row is
-// 4-char-per-letter block joined by a single space; it stays legible on any
-// UTF-8 terminal because it uses only ASCII box glyphs.
-var icodeAsciiLogo = []string{
-	"IIII CCCC OOOO DDDD EEEE",
-	" I I C    O   O D   D E",
-	" I I C    O   O D   D EEE",
-	" I I C    O   O D   D E",
-	"IIII CCCC OOOO DDDD EEEE",
-}
-
 // welcomeLines renders the Claude Code-style startup screen shown in the
-// conversation area before the first message: a big ASCII ✻/iCode logo, a
-// tagline, the active model/provider, the working directory, and a hint line
-// explaining how to dismiss it. It disappears on the first user action.
+// conversation area before the first message: a big ASCII iCode wordmark with
+// a colour gradient, a tagline, and the active model/provider/working
+// directory enclosed in a framed panel (left/right box walls) — exactly the
+// Claude Code welcome aesthetic. It disappears on the first user action.
 func (t *TUI) welcomeLines(width int) []string {
 	var out []string
-	if width >= 30 {
-		for _, ln := range icodeAsciiLogo {
-			out = append(out, "   "+t.paint("magenta", ln))
-		}
+
+	// Big ASCII wordmark (skipped on very narrow terminals).
+	if logo := t.logoLines(width); logo != nil {
+		out = append(out, logo...)
 		out = append(out, "")
 	}
-	// Tagline with the brand sparkle.
-	out = append(out, "   "+t.paint("magenta", "✻")+"  "+t.paint("bold", "Welcome to iCode")+"  "+t.paint("dim", "— "+t.tstr("welcome.tagline")))
-	out = append(out, "")
-	cwd, _ := os.Getwd()
-	info := "     " + t.paint("dim", "Model:    ") + t.model
-	if t.provider != "" {
-		info += t.paint("dim", "    Provider: ") + t.provider
+
+	// Tagline header (Claude Code shows a ✻ + greeting above the box).
+	tagline := t.paint("magenta", "✻") + "  " + t.paint("bold", "Welcome to iCode") +
+		"  " + t.paint("dim", "— "+t.tstr("welcome.tagline"))
+	out = append(out, "   "+fit(tagline, width-4))
+
+	// On terminals too narrow for a tidy box, fall back to plain indented info.
+	if width < 40 {
+		cwd, _ := os.Getwd()
+		out = append(out, "")
+		out = append(out, "     "+t.paint("dim", "Model:    ")+t.model)
+		if t.provider != "" {
+			out = append(out, "     "+t.paint("dim", "Provider: ")+t.provider)
+		}
+		out = append(out, "     "+t.paint("dim", "cwd:      ")+shortDir(cwd))
+		out = append(out, "")
+		out = append(out, "     "+t.paint("dim", t.tstr("welcome.hint")))
+		out = append(out, "     "+t.paint("dim", t.tstr("welcome.close")))
+		return out
 	}
-	out = append(out, info)
-	out = append(out, "     "+t.paint("dim", "cwd:      ")+shortDir(cwd))
-	out = append(out, "")
-	out = append(out, "     "+t.paint("dim", t.tstr("welcome.hint")))
-	out = append(out, "     "+t.paint("dim", t.tstr("welcome.close")))
+
+	// ── Info box (Claude Code-style framed panel, left/right walls) ──
+	boxW := width - 2
+	if boxW < 30 {
+		boxW = 30
+	}
+	contentW := boxW - 4
+	if contentW < 10 {
+		contentW = 10
+	}
+	bar := repeat("─", boxW-2)
+	top := " " + t.paint("dim", "┌"+bar+"┐")
+	bot := " " + t.paint("dim", "└"+bar+"┘")
+	boxLine := func(inner string) string {
+		return " " + t.paint("dim", "│ ")+inner+t.paint("dim", " │")
+	}
+
+	cwd, _ := os.Getwd()
+
+	// Model (left) · Provider (right) on one row when it fits side by side.
+	left := t.paint("dim", "Model:    ")+t.model
+	right := ""
+	if t.provider != "" {
+		right = t.paint("dim", "Provider: ")+t.provider
+	}
+	modelRow := left
+	if right != "" {
+		gap := contentW - visibleWidth(left) - visibleWidth(right)
+		if gap >= 1 {
+			modelRow = left + strings.Repeat(" ", gap) + right
+		}
+	}
+	out = append(out, top)
+	out = append(out, boxLine(fit(modelRow, contentW)))
+	if right != "" && visibleWidth(left)+visibleWidth(right) >= contentW {
+		// Provider didn't fit beside the model — drop it onto its own row.
+		out = append(out, boxLine(fit(right, contentW)))
+	}
+	out = append(out, boxLine(t.paint("dim", "cwd:      ")+shortDir(cwd)))
+	out = append(out, boxLine(""))
+	out = append(out, boxLine(t.paint("dim", t.tstr("welcome.hint"))))
+	out = append(out, boxLine(t.paint("dim", t.tstr("welcome.close"))))
+	out = append(out, bot)
 	return out
 }
 

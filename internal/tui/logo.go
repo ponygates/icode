@@ -1,29 +1,59 @@
 package tui
 
-import "strings"
+// icodeLogos holds progressively richer ASCII wordmarks for the startup
+// banner, chosen by available terminal width. Each entry pairs the art with a
+// per-row colour gradient (magenta → purple → blue → cyan) for a polished,
+// Claude-Code-like look that stays crisp on any UTF-8 terminal.
+var icodeLogos = []struct {
+	minWidth int
+	lines    []string
+	gradient []string
+}{
+	{40, []string{
+		"██╗ ██████╗ ██████╗ ██████╗ ███████╗",
+		"██║██╔════╝██╔═══██╗██╔══██╗██╔════╝",
+		"██║██║     ██║   ██║██║  ██║█████╗  ",
+		"██║██║     ██║   ██║██║  ██║██╔══╝  ",
+		"██║╚██████╗╚██████╔╝██████╔╝███████╗",
+		"╚═╝ ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝",
+	}, []string{"magenta", "magenta", "purple", "blue", "cyan", "cyan"}},
+	{30, []string{
+		"    _ ______          __   ",
+		"   (_) ____/___  ____/ /__ ",
+		"  / / /   / __ \\/ __  / _ \\",
+		" / / /___/ /_/ / /_/ /  __/",
+		"/_/\\____/\\____/\\__,_/\\___/ ",
+	}, []string{"magenta", "purple", "blue", "cyan", "cyan"}},
+}
 
-// asciiLogo is the iCODE wordmark rendered with the figlet "standard" font.
-// Kept as a raw string literal so the backslashes need no escaping.
-const asciiLogo = ` _  ____ ___  ____  _____
-(_)/ ___/ _ \|  _ \| ____|
-| | |  | | | | | | |  _|
-| | |__| |_| | |_| | |___
-|_|\____\___/|____/|_____|`
-
-// logoLines returns the ASCII logo split into lines. When t.color is true the
-// wordmark is accentuated with the brand cyan; otherwise it is returned plain
-// so it stays readable in non-VT (line) consoles.
-func (t *TUI) logoLines() []string {
-	raw := strings.Split(asciiLogo, "\n")
-	out := make([]string, len(raw))
-	for i, l := range raw {
-		out[i] = t.paint("cyan", l)
+// logoLines picks the richest ASCII wordmark that fits the terminal width and
+// returns it with its per-row colour gradient applied (nil when none fits, so
+// very narrow terminals simply skip the logo).
+func (t *TUI) logoLines(width int) []string {
+	for _, lg := range icodeLogos {
+		if width >= lg.minWidth {
+			var out []string
+			for i, ln := range lg.lines {
+				color := "magenta"
+				if i < len(lg.gradient) {
+					color = lg.gradient[i]
+				}
+				out = append(out, "   "+t.paint(color, ln))
+			}
+			return out
+		}
 	}
-	return out
+	return nil
 }
 
 // Logo returns the ASCII wordmark as plain lines (no ANSI), safe for non-VT
-// consoles and for the line-mode startup banner.
+// consoles and for the CLI startup banner (e.g. `icode` / `icode about`).
 func Logo() []string {
-	return strings.Split(asciiLogo, "\n")
+	// Primary wordmark (the ansi_shadow art) without colour escapes.
+	primary := icodeLogos[0].lines
+	out := make([]string, len(primary))
+	for i, l := range primary {
+		out[i] = l
+	}
+	return out
 }
