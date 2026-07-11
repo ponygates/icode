@@ -7,7 +7,7 @@
     "dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
     "build": "vite build",
     "start": "electron .",
-    "dist": "electron-builder"
+    "dist": "node ../build-desktop-backend.js && electron-builder"
   },
   "dependencies": {
     "react": "^18.3.1",
@@ -42,8 +42,8 @@
     ],
     "extraResources": [
       {
-        "from": "../icode.exe",
-        "to": "icode.exe"
+        "from": "icode-server.exe",
+        "to": "icode-server.exe"
       }
     ],
     "win": {

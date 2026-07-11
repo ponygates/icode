@@ -24,6 +24,7 @@ type Mode string
 const (
 	ModePlan  Mode = "plan"
 	ModeAgent Mode = "agent"
+	ModeAuto  Mode = "auto" // read-only auto-approved, mutating ops ask
 	ModeYOLO  Mode = "yolo"
 )
 
@@ -166,6 +167,17 @@ func (g *Gate) Check(sessionID string, action Action) CheckResult {
 	prompt := g.buildPrompt(action)
 
 	switch g.mode {
+	case ModeAuto:
+		// Read-only / safe operations are auto-approved; anything that could
+		// mutate state still asks the user (unless it is on the deny list).
+		if g.isReadOnly(action) {
+			return CheckResult{Decision: DecisionAllow, Reason: "Auto mode: read-only operation", Prompt: prompt}
+		}
+		if g.isDenied(action) {
+			return CheckResult{Decision: DecisionDeny, Reason: "Command is in the deny list", Prompt: prompt}
+		}
+		return CheckResult{Decision: DecisionAsk, Prompt: prompt}
+
 	case ModePlan:
 		if g.isReadOnly(action) {
 			return CheckResult{Decision: DecisionAllow, Reason: "Plan mode: read-only operation", Prompt: prompt}

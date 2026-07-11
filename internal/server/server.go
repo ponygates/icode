@@ -853,7 +853,21 @@ func (s *Server) handleSetPermissionMode(w http.ResponseWriter, r *http.Request)
 	}
 
 	if s.gate != nil {
-		s.gate.SetMode(permission.Mode(req.Mode))
+		// Normalise the desktop mode vocabulary (ask/auto/plan/yolo) onto the
+		// backend's internal modes. "ask" maps to agent (prompt per call);
+		// "auto" maps to the new auto mode (read-only auto, mutating asks).
+		switch req.Mode {
+		case "ask":
+			s.gate.SetMode(permission.ModeAgent)
+		case "auto":
+			s.gate.SetMode(permission.ModeAuto)
+		case "plan":
+			s.gate.SetMode(permission.ModePlan)
+		case "yolo":
+			s.gate.SetMode(permission.ModeYOLO)
+		default:
+			s.gate.SetMode(permission.Mode(req.Mode))
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "mode": req.Mode})
 }

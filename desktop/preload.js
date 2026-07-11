@@ -23,6 +23,9 @@ contextBridge.exposeInMainWorld('icode', {
     ipcRenderer.invoke('chat:send', { sessionId, content }),
   stopChat: (sessionId) =>
     ipcRenderer.invoke('chat:stop', sessionId),
+  // Respond to an interactive permission request raised during streaming.
+  respondPermission: (requestId, decision) =>
+    ipcRenderer.invoke('chat:permissionRespond', { requestId, decision }),
   onChatStream: (callback) => {
     const handler = (_, event) => callback(event);
     ipcRenderer.on('chat:stream', handler);
@@ -39,4 +42,16 @@ contextBridge.exposeInMainWorld('icode', {
 
   // Permission
   setPermissionMode: (mode) => ipcRenderer.invoke('permission:setMode', mode),
+
+  // MCP servers (Reasonix-style tool integration)
+  listMCP: () => ipcRenderer.invoke('mcp:list'),
+  addMCP: (cfg) => ipcRenderer.invoke('mcp:add', cfg),
+  removeMCP: (name) => ipcRenderer.invoke('mcp:remove', name),
+  testMCP: (cfg) => ipcRenderer.invoke('mcp:test', cfg),
+  listMCPTools: () => ipcRenderer.invoke('mcp:tools'),
+
+  // Custom models / presets
+  listCustomModels: () => ipcRenderer.invoke('model:listCustom'),
+  addCustomModel: (m) => ipcRenderer.invoke('model:add', m),
+  deleteCustomModel: (id) => ipcRenderer.invoke('model:delete', id),
 });

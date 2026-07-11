@@ -19,6 +19,7 @@ interface ICodeAPI {
   sendMessage: (sessionId: string, content: string) => Promise<any>;
   stopChat: (sessionId: string) => Promise<any>;
   onChatStream: (callback: (event: any) => void) => () => void;
+  respondPermission: (requestId: string, decision: string) => Promise<any>;
 
   getConfig: () => Promise<any>;
   setConfig: (cfg: any) => Promise<any>;
@@ -26,6 +27,16 @@ interface ICodeAPI {
   setApiKey: (provider: string, apiKey: string, apiBase?: string) => Promise<any>;
   listKeys: () => Promise<any>;
   setPermissionMode: (mode: string) => Promise<any>;
+
+  listMCP: () => Promise<any>;
+  addMCP: (cfg: any) => Promise<any>;
+  removeMCP: (name: string) => Promise<any>;
+  testMCP: (cfg: any) => Promise<any>;
+  listMCPTools: () => Promise<any>;
+
+  listCustomModels: () => Promise<any>;
+  addCustomModel: (m: any) => Promise<any>;
+  deleteCustomModel: (id: string) => Promise<any>;
 }
 
 declare global {

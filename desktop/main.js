@@ -63,15 +63,22 @@ function createWindow() {
 function startBackend() {
   return new Promise((resolve) => {
     const cwd = process.cwd();
-    const binary = process.platform === 'win32' ? 'icode.exe' : 'icode';
 
-    // In dev: look in project directory. In packaged: look in resources.
-    const isDev = process.env.NODE_ENV !== 'production' && !app.isPackaged;
-    const candidates = [
-      path.join(process.resourcesPath || '', binary),
-      path.join(__dirname, '..', '..', binary),
-      path.join(cwd, binary),
-    ];
+    // The packaged desktop ships a GUI-subsystem backend (icode-server.exe on
+    // Windows) so spawning it never opens a console window. In dev we fall back
+    // to the normal console binary so logs are visible.
+    const isPackaged = app.isPackaged;
+    const binary = process.platform === 'win32'
+      ? (isPackaged ? 'icode-server.exe' : 'icode.exe')
+      : (isPackaged ? 'icode-server' : 'icode');
+
+    const candidates = isPackaged
+      ? [path.join(process.resourcesPath || '', binary)]
+      : [
+          path.join(cwd, 'icode.exe'),
+          path.join(__dirname, '..', '..', 'icode.exe'),
+          path.join(__dirname, '..', '..', '..', 'icode.exe'),
+        ];
 
     let backendPath = null;
     for (const p of candidates) {
@@ -244,6 +251,18 @@ ipcMain.handle('chat:stop', async (_, sessionId) => {
   catch { return { ok: false }; }
 });
 
+// Permission response — delivered by the desktop UI when the engine pauses a
+// streaming turn to ask the user whether a tool may run.
+ipcMain.handle('chat:permissionRespond', async (_, { requestId, decision }) => {
+  if (!backendReady) return { ok: false, error: 'Backend unavailable' };
+  try {
+    return await apiCall('POST', '/api/permission/respond', {
+      request_id: requestId,
+      decision,
+    });
+  } catch (e) { return { ok: false, error: e.message }; }
+});
+
 // Config
 ipcMain.handle('config:get', async () => {
   if (!backendReady) return null;
@@ -268,6 +287,60 @@ ipcMain.handle('permission:setMode', async (_, mode) => {
   if (!backendReady) return { ok: false };
   try { return await apiCall('POST', '/api/permission/mode', { mode }); }
   catch { return { ok: false }; }
+});
+
+// ============================================================================
+// MCP servers — Reasonix-style tool integration
+// ============================================================================
+ipcMain.handle('mcp:list', async () => {
+  if (!backendReady) return [];
+  try { return await apiCall('GET', '/api/mcp'); }
+  catch { return []; }
+});
+
+ipcMain.handle('mcp:add', async (_, cfg) => {
+  if (!backendReady) return { ok: false, error: 'Backend unavailable' };
+  try { return await apiCall('PUT', '/api/mcp', cfg); }
+  catch (e) { return { ok: false, error: e.message }; }
+});
+
+ipcMain.handle('mcp:remove', async (_, name) => {
+  if (!backendReady) return { ok: false, error: 'Backend unavailable' };
+  try { return await apiCall('DELETE', `/api/mcp?name=${encodeURIComponent(name)}`); }
+  catch (e) { return { ok: false, error: e.message }; }
+});
+
+ipcMain.handle('mcp:test', async (_, cfg) => {
+  if (!backendReady) return { ok: false, error: 'Backend unavailable' };
+  try { return await apiCall('POST', '/api/mcp/test', cfg); }
+  catch (e) { return { ok: false, error: e.message }; }
+});
+
+ipcMain.handle('mcp:tools', async () => {
+  if (!backendReady) return [];
+  try { return await apiCall('GET', '/api/mcp/tools'); }
+  catch { return []; }
+});
+
+// ============================================================================
+// Custom models / presets
+// ============================================================================
+ipcMain.handle('model:listCustom', async () => {
+  if (!backendReady) return { models: [] };
+  try { return await apiCall('GET', '/api/config/models'); }
+  catch { return { models: [] }; }
+});
+
+ipcMain.handle('model:add', async (_, m) => {
+  if (!backendReady) return { ok: false, error: 'Backend unavailable' };
+  try { return await apiCall('PUT', '/api/config/model', m); }
+  catch (e) { return { ok: false, error: e.message }; }
+});
+
+ipcMain.handle('model:delete', async (_, id) => {
+  if (!backendReady) return { ok: false, error: 'Backend unavailable' };
+  try { return await apiCall('DELETE', `/api/config/model?id=${encodeURIComponent(id)}`); }
+  catch (e) { return { ok: false, error: e.message }; }
 });
 
 // ============================================================================

@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore, Message } from '../stores/appStore';
-import { Send, Plus, Trash2, MessageSquare, Cpu, Shield } from 'lucide-react';
+import { Send, Plus, Trash2, MessageSquare, Cpu, Shield, Square, ShieldAlert } from 'lucide-react';
 import Markdown from '../components/Markdown';
 
 const ChatPage: React.FC = () => {
@@ -10,6 +10,9 @@ const ChatPage: React.FC = () => {
   const [input, setInput] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
   const [backendUrl, setBackendUrl] = useState<string | null>(null);
+  // Interactive permission request pending an answer from the user. When set,
+  // the conversation engine is blocked server-side until we respond.
+  const [pendingPermission, setPendingPermission] = useState<any>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Resolve the local backend URL once so we can stream chat directly from the
@@ -98,6 +101,14 @@ const ChatPage: React.FC = () => {
         const name = event.tool_call?.name || event.ToolCall?.Name || 'tool';
         accumulated += `\n[Tool: ${name}]\n`;
         updateMessage(activeSessionId, { ...assistantMsg, content: accumulated });
+      } else if (ty === 'EventPermission' || ty === 'permission') {
+        // The engine paused to ask whether a tool may run. Surface the request
+        // as a modal and wait for the user's decision (which we send back to
+        // the backend). The stream stays open — engine is blocked until then.
+        const req = event.permission || event.Permission;
+        if (req && req.request_id) {
+          setPendingPermission(req);
+        }
       } else if (ty === 'EventDone' || ty === 'done') {
         const usage = event.meta?.usage || event.meta?.Usage || {};
         updateTokenUsage({
@@ -106,10 +117,18 @@ const ChatPage: React.FC = () => {
           cacheHit: usage.cache_hit_tokens || usage.CacheHitTokens || 0,
           cost: estimateCost(usage, currentModel),
         });
+        setPendingPermission(null);
         settled = true;
         unsub();
         setIsStreaming(false);
+        // Desktop notification when the turn finishes (if enabled in settings).
+        try {
+          if (typeof localStorage !== 'undefined' && localStorage.getItem('icode.notify') === '1' && 'Notification' in window && Notification.permission === 'granted') {
+            new Notification('iCode', { body: '回复已完成' });
+          }
+        } catch { /* ignore */ }
       } else if (ty === 'EventError' || ty === 'error') {
+        setPendingPermission(null);
         settled = true;
         unsub();
         setIsStreaming(false);
@@ -179,6 +198,20 @@ Currently selected: ${currentModel?.name || selectedModel} (${currentModel?.prov
       }
     }
   }, [input, activeSessionId, isStreaming, selectedModel, currentModel, backendUrl]);
+
+  const respondPermission = useCallback(async (requestId: string, decision: string) => {
+    setPendingPermission(null);
+    try {
+      await window.icode?.respondPermission?.(requestId, decision);
+    } catch { /* backend unreachable — engine will time out its own request */ }
+  }, []);
+
+  const handleStop = useCallback(() => {
+    if (!activeSessionId) return;
+    setPendingPermission(null);
+    setIsStreaming(false);
+    window.icode?.stopChat?.(activeSessionId);
+  }, [activeSessionId]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -400,21 +433,99 @@ Currently selected: ${currentModel?.name || selectedModel} (${currentModel?.prov
               lineHeight: 1.5,
             }}
           />
-          <button
-            onClick={handleSend}
-            disabled={!input.trim() || isStreaming}
-            title={t('chat.send')}
-            style={{
-              background: input.trim() ? 'var(--accent)' : 'var(--border-color)',
-              border: 'none', color: input.trim() ? '#000' : 'var(--text-muted)',
-              padding: '6px 10px', borderRadius: 8, cursor: input.trim() ? 'pointer' : 'default',
-              display: 'flex', alignItems: 'center', transition: 'background 0.15s',
-            }}
-          >
-            <Send size={16} />
-          </button>
+          {isStreaming ? (
+            <button
+              onClick={handleStop}
+              title={t('chat.stop') || '停止'}
+              style={{
+                background: 'var(--error)', border: 'none', color: '#fff',
+                padding: '6px 10px', borderRadius: 8, cursor: 'pointer',
+                display: 'flex', alignItems: 'center',
+              }}
+            >
+              <Square size={16} />
+            </button>
+          ) : (
+            <button
+              onClick={handleSend}
+              disabled={!input.trim()}
+              title={t('chat.send')}
+              style={{
+                background: input.trim() ? 'var(--accent)' : 'var(--border-color)',
+                border: 'none', color: input.trim() ? '#000' : 'var(--text-muted)',
+                padding: '6px 10px', borderRadius: 8, cursor: input.trim() ? 'pointer' : 'default',
+                display: 'flex', alignItems: 'center', transition: 'background 0.15s',
+              }}
+            >
+              <Send size={16} />
+            </button>
+          )}
         </div>
       </div>
+
+      {/* Permission request modal — the engine is paused server-side until the
+          user answers. Respond via the backend /api/permission/respond call. */}
+      {pendingPermission && (
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
+        }}>
+          <div style={{
+            width: 440, maxWidth: '90vw', background: 'var(--bg-secondary)',
+            border: '1px solid var(--border-color)', borderRadius: 12,
+            padding: 20, boxShadow: '0 20px 60px rgba(0,0,0,0.45)',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+              <ShieldAlert size={20} style={{ color: 'var(--warning)' }} />
+              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>
+                {t('permission.title') || '权限确认'}
+              </div>
+            </div>
+            <div style={{
+              fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.7,
+              background: 'var(--bg-primary)', borderRadius: 8, padding: '10px 12px',
+              marginBottom: 16, wordBreak: 'break-word',
+            }}>
+              <div style={{ color: 'var(--text-muted)', fontSize: 11, marginBottom: 4 }}>
+                {t('permission.tool') || '工具'}: <span style={{ color: 'var(--accent)' }}>{pendingPermission.tool}</span>
+              </div>
+              <div>{pendingPermission.prompt || (t('permission.confirm') || '是否允许该操作执行？')}</div>
+            </div>
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button
+                onClick={() => respondPermission(pendingPermission.request_id, 'deny')}
+                style={{
+                  padding: '7px 14px', borderRadius: 6, cursor: 'pointer', fontSize: 12,
+                  border: '1px solid var(--border-color)', background: 'var(--bg-primary)',
+                  color: 'var(--text-secondary)',
+                }}
+              >
+                {t('permission.deny') || '拒绝'}
+              </button>
+              <button
+                onClick={() => respondPermission(pendingPermission.request_id, 'allow_all')}
+                style={{
+                  padding: '7px 14px', borderRadius: 6, cursor: 'pointer', fontSize: 12,
+                  border: '1px solid var(--border-color)', background: 'var(--bg-primary)',
+                  color: 'var(--text-secondary)',
+                }}
+              >
+                {t('permission.allowAll') || '本会话全部允许'}
+              </button>
+              <button
+                onClick={() => respondPermission(pendingPermission.request_id, 'allow')}
+                style={{
+                  padding: '7px 14px', borderRadius: 6, cursor: 'pointer', fontSize: 12,
+                  border: 'none', background: 'var(--accent)', color: '#000', fontWeight: 500,
+                }}
+              >
+                {t('permission.allow') || '允许'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 };
