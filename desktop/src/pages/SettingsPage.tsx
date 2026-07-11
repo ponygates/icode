@@ -4,7 +4,7 @@ import { useAppStore } from '../stores/appStore';
 import {
   Globe, Moon, Sun, Key, Info, Check, X, Cpu, Shield,
   Palette, Wrench, RefreshCw, Plus, Trash2,
-  Server, Boxes, Bell, Keyboard, Download, PlayCircle, Database,
+  Server, Boxes, Bell, Keyboard, Download, PlayCircle, Database, ChevronDown,
 } from 'lucide-react';
 
 const PROVIDER_LABELS: Record<string, string> = {
@@ -54,6 +54,43 @@ const kbdStyle: React.CSSProperties = {
   color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)',
 };
 
+// Collapsible settings group. The header toggles open/closed; the chevron
+// rotates to reflect state. Collapsing keeps the long settings page tidy and
+// lets users fold away groups they rarely touch (Claude Code / Reasonix style).
+const Section: React.FC<{
+  icon: React.ReactNode;
+  title: string;
+  collapsed: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}> = ({ icon, title, collapsed, onToggle, children }) => (
+  <div style={card}>
+    <div
+      onClick={onToggle}
+      role="button"
+      aria-expanded={!collapsed}
+      style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        cursor: 'pointer', userSelect: 'none',
+      }}
+    >
+      <div style={{ ...sectionTitle, marginBottom: 0 }}>
+        {icon}
+        <span>{title}</span>
+      </div>
+      <ChevronDown
+        size={16}
+        style={{
+          color: 'var(--text-muted)', flexShrink: 0,
+          transform: collapsed ? 'rotate(-90deg)' : 'rotate(0deg)',
+          transition: 'transform 0.15s ease',
+        }}
+      />
+    </div>
+    {!collapsed && <div style={{ marginTop: 4 }}>{children}</div>}
+  </div>
+);
+
 const SettingsPage: React.FC = () => {
   const { t, i18n } = useTranslation();
   const { language, setLanguage, models, sessions, clearMessages, deleteSession, activeSessionId } = useAppStore();
@@ -90,6 +127,12 @@ const SettingsPage: React.FC = () => {
   const [newName, setNewName] = useState('');
   const [newKey, setNewKey] = useState('');
   const [newBase, setNewBase] = useState('');
+
+  // Collapsible groups. The 大模型 (model) group starts collapsed so the page
+  // opens focused on the rest of the settings and the model block can be
+  // folded away as requested.
+  const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({ model: true });
+  const toggleSection = (id: string) => setCollapsedSections((s) => ({ ...s, [id]: !s[id] }));
 
   const loadAll = useCallback(async () => {
     try {
@@ -391,8 +434,7 @@ const SettingsPage: React.FC = () => {
         {!loaded && <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>加载中…</div>}
 
         {/* ── 模型与预设 ── */}
-        <div style={card}>
-          <div style={sectionTitle}><Cpu size={16} /><span>模型与预设</span></div>
+        <Section icon={<Cpu size={16} />} title="模型与预设" collapsed={!!collapsedSections.model} onToggle={() => toggleSection('model')}>
           <div style={hint}>选择默认模型、调整生成参数。修改后点击保存立即生效。</div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <label style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
@@ -446,11 +488,10 @@ const SettingsPage: React.FC = () => {
           <div style={{ marginTop: 12 }}>
             <button style={saveBtn} onClick={() => saveCfg('模型与预设')}>保存</button>
           </div>
-        </div>
+        </Section>
 
         {/* ── API 提供商 ── */}
-        <div style={card}>
-          <div style={sectionTitle}><Key size={16} /><span>API 提供商</span></div>
+        <Section icon={<Key size={16} />} title="API 提供商" collapsed={!!collapsedSections.providers} onToggle={() => toggleSection('providers')}>
           <div style={hint}>填写各服务商的 API Key，保存后立即生效（无需重启）。Key 仅保存在本地配置文件中，不会上传。</div>
 
           {loaded && providers.length === 0 && (
@@ -514,11 +555,10 @@ const SettingsPage: React.FC = () => {
               <button style={saveBtn} onClick={handleAddProvider}><Plus size={14} /></button>
             </div>
           </div>
-        </div>
+        </Section>
 
         {/* ── 权限模式 ── */}
-        <div style={card}>
-          <div style={sectionTitle}><Shield size={16} /><span>权限模式</span></div>
+        <Section icon={<Shield size={16} />} title="权限模式" collapsed={!!collapsedSections.permission} onToggle={() => toggleSection('permission')}>
           <div style={hint}>控制 AI 执行文件/命令/工具时的确认策略（对标 Reasonix review/auto/yolo）。</div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
             {Object.entries(MODE_LABELS).map(([mode, label]) => (
@@ -536,11 +576,10 @@ const SettingsPage: React.FC = () => {
               </button>
             ))}
           </div>
-        </div>
+        </Section>
 
         {/* ── 外观 ── */}
-        <div style={card}>
-          <div style={sectionTitle}><Palette size={16} /><span>外观</span></div>
+        <Section icon={<Palette size={16} />} title="外观" collapsed={!!collapsedSections.appearance} onToggle={() => toggleSection('appearance')}>
           <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
             {[
               { key: 'dark', icon: Moon, label: '暗色' },
@@ -584,11 +623,10 @@ const SettingsPage: React.FC = () => {
           <div style={{ marginTop: 12 }}>
             <button style={saveBtn} onClick={() => saveCfg('外观')}>保存</button>
           </div>
-        </div>
+        </Section>
 
         {/* ── 工具与安全 ── */}
-        <div style={card}>
-          <div style={sectionTitle}><Wrench size={16} /><span>工具与安全</span></div>
+        <Section icon={<Wrench size={16} />} title="工具与安全" collapsed={!!collapsedSections.tools} onToggle={() => toggleSection('tools')}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <label style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
               Bash 超时（秒）
@@ -626,11 +664,10 @@ const SettingsPage: React.FC = () => {
           <div style={{ marginTop: 12 }}>
             <button style={saveBtn} onClick={() => saveCfg('工具与安全')}>保存</button>
           </div>
-        </div>
+        </Section>
 
         {/* ── 语言 ── */}
-        <div style={card}>
-          <div style={sectionTitle}><Globe size={16} /><span>{t('settings.language')}</span></div>
+        <Section icon={<Globe size={16} />} title={t('settings.language')} collapsed={!!collapsedSections.language} onToggle={() => toggleSection('language')}>
           <div style={{ display: 'flex', gap: 8 }}>
             {languages.map((l) => (
               <button
@@ -645,14 +682,13 @@ const SettingsPage: React.FC = () => {
                 }}
               >
                 {l.label}
-              </button>
+                </button>
             ))}
           </div>
-        </div>
+        </Section>
 
         {/* ── 更新 ── */}
-        <div style={card}>
-          <div style={sectionTitle}><RefreshCw size={16} /><span>更新</span></div>
+        <Section icon={<RefreshCw size={16} />} title="更新" collapsed={!!collapsedSections.update} onToggle={() => toggleSection('update')}>
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>
             <input
               type="checkbox" checked={!!upd.auto_update}
@@ -675,11 +711,10 @@ const SettingsPage: React.FC = () => {
           <div style={{ marginTop: 12 }}>
             <button style={saveBtn} onClick={() => saveCfg('更新')}>保存</button>
           </div>
-        </div>
+        </Section>
 
         {/* ── MCP 服务器 ── */}
-        <div style={card}>
-          <div style={sectionTitle}><Server size={16} /><span>MCP 服务器</span></div>
+        <Section icon={<Server size={16} />} title="MCP 服务器" collapsed={!!collapsedSections.mcp} onToggle={() => toggleSection('mcp')}>
           <div style={hint}>通过 Model Context Protocol 接入外部工具（文件系统、数据库、API 等）。对标 Reasonix 的 MCP 集成。</div>
 
           {loaded && mcpServers.length === 0 && (
@@ -736,11 +771,10 @@ const SettingsPage: React.FC = () => {
             </div>
             {mcpTestResult && <div style={{ marginTop: 6, fontSize: 11, color: 'var(--text-secondary)' }}>{mcpTestResult}</div>}
           </div>
-        </div>
+        </Section>
 
         {/* ── 自定义模型 / 预设 ── */}
-        <div style={card}>
-          <div style={sectionTitle}><Boxes size={16} /><span>自定义模型 / 预设</span></div>
+        <Section icon={<Boxes size={16} />} title="自定义模型 / 预设" collapsed={!!collapsedSections.customModels} onToggle={() => toggleSection('customModels')}>
           <div style={hint}>添加未在内置列表中提供的模型（如私有部署、兼容 OpenAI 的端点）。</div>
 
           {customModels.map((m) => (
@@ -770,20 +804,18 @@ const SettingsPage: React.FC = () => {
             </label>
             <button style={saveBtn} onClick={handleAddCustomModel}><Plus size={14} /> 添加模型</button>
           </div>
-        </div>
+        </Section>
 
         {/* ── 通知 ── */}
-        <div style={card}>
-          <div style={sectionTitle}><Bell size={16} /><span>通知</span></div>
+        <Section icon={<Bell size={16} />} title="通知" collapsed={!!collapsedSections.notify} onToggle={() => toggleSection('notify')}>
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--text-secondary)' }}>
             <input type="checkbox" checked={notify} onChange={(e) => toggleNotify(e.target.checked)} />
             任务完成时显示桌面通知（回复结束 / 需要权限确认时）
           </label>
-        </div>
+        </Section>
 
         {/* ── 快捷键 ── */}
-        <div style={card}>
-          <div style={sectionTitle}><Keyboard size={16} /><span>快捷键</span></div>
+        <Section icon={<Keyboard size={16} />} title="快捷键" collapsed={!!collapsedSections.shortcuts} onToggle={() => toggleSection('shortcuts')}>
           <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 2 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>发送消息</span><kbd style={kbdStyle}>Enter</kbd></div>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>换行</span><kbd style={kbdStyle}>Shift + Enter</kbd></div>
@@ -791,11 +823,10 @@ const SettingsPage: React.FC = () => {
             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>新建会话</span><kbd style={kbdStyle}>Ctrl/⌘ + K</kbd></div>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span>打开设置</span><kbd style={kbdStyle}>Ctrl/⌘ + ,</kbd></div>
           </div>
-        </div>
+        </Section>
 
         {/* ── 数据管理 ── */}
-        <div style={card}>
-          <div style={sectionTitle}><Database size={16} /><span>数据管理</span></div>
+        <Section icon={<Database size={16} />} title="数据管理" collapsed={!!collapsedSections.data} onToggle={() => toggleSection('data')}>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <button style={saveBtn} onClick={() => activeSessionId && exportSession(activeSessionId)} disabled={!activeSessionId}>
               <Download size={14} /> 导出当前会话 (Markdown)
@@ -804,11 +835,10 @@ const SettingsPage: React.FC = () => {
               <Trash2 size={14} /> 清空所有会话
             </button>
           </div>
-        </div>
+        </Section>
 
         {/* ── 关于 ── */}
-        <div style={card}>
-          <div style={sectionTitle}><Info size={16} /><span>{t('settings.about')}</span></div>
+        <Section icon={<Info size={16} />} title={t('settings.about')} collapsed={!!collapsedSections.about} onToggle={() => toggleSection('about')}>
           <div style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.8 }}>
             <div>iCode v0.1.0-dev</div>
             <div>Multi-Model AI Coding Agent</div>
@@ -819,7 +849,7 @@ const SettingsPage: React.FC = () => {
               </a>
             </div>
           </div>
-        </div>
+        </Section>
       </div>
     </div>
   );
