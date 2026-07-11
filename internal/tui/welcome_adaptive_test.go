@@ -1,0 +1,52 @@
+package tui
+
+import (
+	"bytes"
+	"strings"
+	"testing"
+)
+
+// renderAt renders a fresh welcome screen at the given size and returns the
+// plain-text output (ANSI stripped) for assertions.
+func renderAt(w, h int) string {
+	tui := New(Config{Model: "deepseek-v4-flash", Provider: "deepseek", Lang: "zh-CN", Theme: "dark"})
+	var buf bytes.Buffer
+	tui.writer = &buf
+	tui.rawMode = true
+	tui.color = false // no ANSI, so assertions match raw glyphs
+	tui.width = w
+	tui.height = h
+	tui.model = "deepseek-v4-flash"
+	tui.provider = "deepseek"
+	tui.welcomeVisible = true
+	tui.messages = nil
+	tui.render()
+	return buf.String()
+}
+
+// TestWelcomeAdaptive guards the height-adaptive welcome screen: the ASCII
+// logo must render whole or not at all — it must never be sliced in half on a
+// short terminal (the "top half missing" bug). It also verifies the full
+// banner shows on a roomy terminal and degrades gracefully when cramped.
+func TestWelcomeAdaptive(t *testing.T) {
+	logoTop := "██╗ ██████╗"    // first row of the big wordmark
+	logoMid := "██║██║     ██║" // an interior row of the big wordmark
+
+	// Roomy terminal: the whole logo must be present.
+	roomy := renderAt(120, 40)
+	if !strings.Contains(roomy, logoTop) {
+		t.Fatalf("expected full logo on a roomy terminal:\n%s", roomy)
+	}
+	if !strings.Contains(roomy, "Welcome to iCode") {
+		t.Fatalf("expected tagline on a roomy terminal:\n%s", roomy)
+	}
+
+	// Cramped terminals of several heights: never a partial logo. Whenever an
+	// interior logo row appears, the top row must appear too (all-or-nothing).
+	for _, sz := range []struct{ w, h int }{{120, 18}, {100, 16}, {90, 14}, {80, 12}, {80, 10}} {
+		out := renderAt(sz.w, sz.h)
+		if strings.Contains(out, logoMid) && !strings.Contains(out, logoTop) {
+			t.Fatalf("logo sliced in half at %dx%d (interior row without top):\n%s", sz.w, sz.h, out)
+		}
+	}
+}
