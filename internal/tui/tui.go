@@ -734,19 +734,22 @@ func (t *TUI) render() {
 	if permPending {
 		// Claude Code-style bordered permission box
 		title := "⏸ " + t.tstr("perm.title")
-		prompt := truncate(permPrompt, W-8)
-		boxW := min(len(title)+4, W-4)
+		boxW := min(visibleWidth(title)+4, W-4)
 		if boxW < 40 {
 			boxW = 40
 		}
 		if boxW > W-4 {
 			boxW = W - 4
 		}
+		// Truncate the prompt to the inner width by *visible* columns so a
+		// long CJK command can't push the right │ out of line.
+		prompt := truncVisible(permPrompt, boxW-2)
+		opts := "[1] 允许   [2] 全部允许   [3] 拒绝"
 		permLines = append(permLines,
 			t.paint("yellow", "  ╭"+repeat("─", boxW)+"╮"),
 			t.paint("yellow", "  │ ")+t.paint("bold", title)+padVisible("", boxW-visibleWidth(title)-2)+t.paint("yellow", " │"),
-			t.paint("dim", "  │ ")+truncate(prompt, boxW-2)+padVisible("", boxW-visibleWidth(truncate(prompt, boxW-2))-2)+t.paint("dim", " │"),
-			t.paint("yellow", "  │ ")+t.paint("dim", "[1] 允许   [2] 全部允许   [3] 拒绝")+padVisible("", boxW-32)+t.paint("yellow", " │"),
+			t.paint("dim", "  │ ")+prompt+padVisible("", boxW-visibleWidth(prompt)-2)+t.paint("dim", " │"),
+			t.paint("yellow", "  │ ")+t.paint("dim", opts)+padVisible("", boxW-visibleWidth(opts)-2)+t.paint("yellow", " │"),
 			t.paint("yellow", "  ╰"+repeat("─", boxW)+"╯"),
 		)
 	}
@@ -946,15 +949,13 @@ func (t *TUI) welcomeBox(width int) []string {
 		if i < len(right) {
 			r = right[i]
 		}
-		// Pad the left column to leftW and the right column to rightW so the
-		// two `│` borders align on every row even when the content contains
-		// CJK / full-width or punctuation of differing visible widths.
-		pad := leftW - visibleWidth(l)
-		if pad < 0 {
-			pad = 0
-		}
-		row := t.paint("orange", "│") + " " + l + strings.Repeat(" ", pad) +
-			strings.Repeat(" ", gap) + padVisible(r, rightW) + " " + t.paint("orange", "│")
+		// Pin each column to its measured width with fitVis() — which both
+		// pads AND hard-truncates to the exact visible width. The left column
+		// is always ≤ leftW, but after the narrow-terminal trim path rightW
+		// may be smaller than some right-column lines, so truncating (not just
+		// padding) keeps every row's right │ aligned with the ╮/╯ corners.
+		row := t.paint("orange", "│") + " " + fitVis(l, leftW) +
+			strings.Repeat(" ", gap) + fitVis(r, rightW) + " " + t.paint("orange", "│")
 		out = append(out, row)
 	}
 	out = append(out, bot)
@@ -1222,6 +1223,45 @@ func fit(s string, w int) string {
 		return truncVisible(s, w)
 	}
 	return s + strings.Repeat(" ", w-visibleWidth(s))
+}
+
+// fitVis pins s to EXACTLY w visible columns: it hard-truncates (no overflow,
+// even for CJK runes that would otherwise push truncVisible one cell past w)
+// and pads with spaces. ANSI escape sequences are measured as zero width and
+// preserved, so colored box content still aligns. It is used to build framed
+// boxes whose borders must line up on every row regardless of content width.
+func fitVis(s string, w int) string {
+	if w <= 0 {
+		return ""
+	}
+	var b strings.Builder
+	cur := 0
+	inEsc := false
+	for _, ch := range s {
+		if inEsc {
+			b.WriteRune(ch)
+			if ch == 'm' {
+				inEsc = false
+			}
+			continue
+		}
+		if ch == '\x1b' {
+			inEsc = true
+			b.WriteRune(ch)
+			continue
+		}
+		cw := runeWidth(ch)
+		if cur+cw > w {
+			break
+		}
+		b.WriteRune(ch)
+		cur += cw
+	}
+	vw := visibleWidth(b.String())
+	if vw < w {
+		b.WriteString(strings.Repeat(" ", w-vw))
+	}
+	return b.String()
 }
 
 // visibleWidth returns the display width of s, ignoring ANSI escape sequences.
@@ -1789,7 +1829,13 @@ func (t *TUI) printMessage(m Message) {
 		}
 		fmt.Fprintln(t.writer)
 	case RoleThinking:
-		fmt.Fprintf(t.writer, "  ┌─ thinking ─┐\n  │ %s\n  └──────────┘\n\n", truncate(m.Content, 200))
+		// Bordered "thinking" box. Top and bottom span the same 16 columns
+		// (┐/┘ at col 15); the middle row carries a closing │ that lines up
+		// with them, and the content is truncated to the 12-cell inner width
+		// by *visible* columns so CJK text can't push the border out of line.
+		const thinkInner = 12
+		tc := fitVis(m.Content, thinkInner)
+		fmt.Fprintf(t.writer, "  ┌─ thinking ─┐\n  │%s│\n  └────────────┘\n\n", tc)
 	}
 }
 
@@ -2842,7 +2888,7 @@ func thinkingLines(text string, width int) []string {
 	var out []string
 	out = append(out, "  "+top)
 	for _, l := range wrapText(text, inner) {
-		out = append(out, "  │ "+padEnd(l, inner)+"│")
+		out = append(out, "  │ "+fitVis(l, inner-1)+"│")
 	}
 	out = append(out, "  └"+repeat("─", inner)+"┘")
 	return out
