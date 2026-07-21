@@ -65,3 +65,60 @@ func TestWelcomeAdaptive(t *testing.T) {
 		}
 	}
 }
+
+// runeIndex / runeLastIndex find a rune's position by *rune* (cell) index, not
+// byte offset, so multi-byte box-drawing glyphs (│ ╮ ╯) are measured correctly.
+func runeIndex(s string, target rune) int {
+	rs := []rune(s)
+	for i, r := range rs {
+		if r == target {
+			return i
+		}
+	}
+	return -1
+}
+func runeLastIndex(s string, target rune) int {
+	rs := []rune(s)
+	for i := len(rs) - 1; i >= 0; i-- {
+		if rs[i] == target {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestWelcomeBoxRightBorderAligned guards the Claude Code-style two-column
+// welcome box: the right `│` border must sit at the same column on every row,
+// and must match the `╮` / `╯` corners of the top/bottom bar. This regresses the
+// bug where the right column was padded to leftW but NOT to rightW, so rows with
+// shorter right content pulled the right border inward — leaving it misaligned.
+func TestWelcomeBoxRightBorderAligned(t *testing.T) {
+	tui := New(Config{Model: "deepseek-v4-flash", Provider: "deepseek", Lang: "zh-CN", Theme: "dark"})
+	tui.color = false
+	// welcomeBox returns the bare lines (paint() is a no-op with color=false),
+	// so we can assert per-row column alignment directly without parsing the
+	// full-screen frame's cursor-escape encoding.
+	box := tui.welcomeBox(120)
+	if len(box) < 3 {
+		t.Fatalf("welcome box too small: %v", box)
+	}
+	top := box[0]
+	bot := box[len(box)-1]
+	topRight := runeIndex(top, '╮')
+	botRight := runeIndex(bot, '╯')
+	if topRight < 0 || botRight < 0 {
+		t.Fatalf("missing corners: top=%q bot=%q", top, bot)
+	}
+	if topRight != botRight {
+		t.Fatalf("top/bottom right corners misaligned: top col %d, bot col %d", topRight, botRight)
+	}
+	for i, ln := range box[1 : len(box)-1] {
+		c := runeLastIndex(ln, '│')
+		if c < 0 {
+			t.Fatalf("row %d missing right border: %q", i, ln)
+		}
+		if c != topRight {
+			t.Fatalf("row %d right border at col %d, expected %d (matches corners):\n  %q", i, c, topRight, ln)
+		}
+	}
+}

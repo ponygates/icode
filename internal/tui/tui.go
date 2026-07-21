@@ -946,13 +946,15 @@ func (t *TUI) welcomeBox(width int) []string {
 		if i < len(right) {
 			r = right[i]
 		}
-		// Pad the left column to leftW so the right column aligns
+		// Pad the left column to leftW and the right column to rightW so the
+		// two `│` borders align on every row even when the content contains
+		// CJK / full-width or punctuation of differing visible widths.
 		pad := leftW - visibleWidth(l)
 		if pad < 0 {
 			pad = 0
 		}
 		row := t.paint("orange", "│") + " " + l + strings.Repeat(" ", pad) +
-			strings.Repeat(" ", gap) + r + " " + t.paint("orange", "│")
+			strings.Repeat(" ", gap) + padVisible(r, rightW) + " " + t.paint("orange", "│")
 		out = append(out, row)
 	}
 	out = append(out, bot)
