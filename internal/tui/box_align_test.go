@@ -131,6 +131,62 @@ func TestAllBoxesAligned(t *testing.T) {
 	}
 }
 
+// TestWelcomeBoxesSideBySideAligned guards the composed welcome screen: when
+// the two panels are placed side by side, their top/bottom borders must be on
+// the same row, their heights must match, and their outer widths must be equal
+// so the whole block looks like one aligned composition.
+func TestWelcomeBoxesSideBySideAligned(t *testing.T) {
+	for _, color := range []bool{false, true} {
+		tui := New(Config{Model: "openrouter/free", Provider: "openrouter", Mode: "auto", Lang: "zh-CN", Theme: "dark"})
+		tui.color = color
+		// 120 columns is wide enough for the side-by-side layout.
+		boxes := tui.welcomeBoxes(120)
+		if boxes == nil {
+			t.Fatal("welcomeBoxes(120) returned nil")
+		}
+		// Locate the top and bottom border rows. Both boxes share the same row,
+		// so each border row must contain exactly two left corners and two right
+		// corners.
+		topRow := boxes[0]
+		botRow := boxes[len(boxes)-1]
+		topLeft := boxCols(topRow)['╭']
+		topRight := boxCols(topRow)['╮']
+		botLeft := boxCols(botRow)['╰']
+		botRight := boxCols(botRow)['╯']
+		for name, got := range map[string][]int{
+			"top-left":  topLeft,
+			"top-right": topRight,
+			"bot-left":  botLeft,
+			"bot-right": botRight,
+		} {
+			if len(got) != 2 {
+				t.Fatalf("expected 2 %s corners, got %d:\n%s", name, len(got), topRow)
+			}
+		}
+		// The two boxes must have the same outer width (same inner width + same
+		// border), so the gap between their left/right borders is constant.
+		leftW := topRight[0] - topLeft[0] + 1
+		rightW := topRight[1] - topLeft[1] + 1
+		if leftW != rightW {
+			t.Fatalf("left box width %d != right box width %d:\n%s", leftW, rightW, topRow)
+		}
+		// Every content row must contain two left borders and two right borders
+		// (one per box) at the same columns as the top/bottom corners.
+		for i, ln := range boxes[1 : len(boxes)-1] {
+			cols := boxCols(ln)
+			leftBorders := cols['│']
+			if len(leftBorders) < 4 {
+				t.Fatalf("row %d expected 4 vertical borders, got %d:\n%s", i+1, len(leftBorders), ln)
+			}
+			if leftBorders[0] != topLeft[0] || leftBorders[1] != topRight[0] ||
+				leftBorders[2] != topLeft[1] || leftBorders[3] != topRight[1] {
+				t.Fatalf("row %d borders at %v, expected left=%v right=%v:\n%s",
+					i+1, leftBorders, topLeft, topRight, ln)
+			}
+		}
+	}
+}
+
 func itoa(n int) string {
 	if n == 0 {
 		return "0"

@@ -913,20 +913,34 @@ func (t *TUI) welcomeBoxes(width int) []string {
 	rightLines := t.welcomeTipsLines()
 
 	// Equalise heights so the two panels can be placed side by side with their
-	// top and bottom borders perfectly aligned.
+	// top and bottom borders perfectly aligned. Keep content top-aligned so the
+	// first real line of each panel (Welcome back! / Tips for getting started)
+	// sits on the same row, making the two boxes feel horizontally aligned.
 	maxLen := len(leftLines)
 	if len(rightLines) > maxLen {
 		maxLen = len(rightLines)
 	}
-	for len(leftLines) < maxLen {
-		leftLines = append(leftLines, "")
+	leftLines = padSliceBottom(leftLines, maxLen)
+	rightLines = padSliceBottom(rightLines, maxLen)
+
+	// Use the same inner width for both boxes so their outer borders line up
+	// vertically and the whole block looks like one aligned composition.
+	innerW := maxVisibleWidth(leftLines)
+	if w := maxVisibleWidth(rightLines); w > innerW {
+		innerW = w
 	}
-	for len(rightLines) < maxLen {
-		rightLines = append(rightLines, "")
+	if innerW < 16 {
+		innerW = 16
+	}
+	if innerW+4 > width {
+		innerW = width - 4
+	}
+	if innerW < 6 {
+		return nil
 	}
 
-	left := t.buildBox("cyan", leftLines, width)
-	right := t.buildBox("orange", rightLines, width)
+	left := t.buildBoxWithInner("cyan", leftLines, innerW, width)
+	right := t.buildBoxWithInner("orange", rightLines, innerW, width)
 	if left == nil && right == nil {
 		return nil
 	}
@@ -1019,15 +1033,23 @@ func (t *TUI) welcomeTipsLines() []string {
 // content lines become blank bordered rows, which lets two equalised boxes sit
 // side by side without mis-aligning their borders.
 func (t *TUI) buildBox(color string, lines []string, width int) []string {
-	innerW := 0
-	for _, l := range lines {
-		if vw := visibleWidth(l); vw > innerW {
-			innerW = vw
-		}
-	}
+	innerW := maxVisibleWidth(lines)
 	if innerW < 16 {
 		innerW = 16
 	}
+	if innerW+4 > width {
+		innerW = width - 4
+	}
+	if innerW < 6 {
+		return nil
+	}
+	return t.buildBoxWithInner(color, lines, innerW, width)
+}
+
+// buildBoxWithInner is buildBox with the inner width already decided. This lets
+// two boxes be built to exactly the same width so their borders line up when
+// placed side by side.
+func (t *TUI) buildBoxWithInner(color string, lines []string, innerW, width int) []string {
 	if innerW+4 > width {
 		innerW = width - 4
 	}
@@ -1051,6 +1073,32 @@ func (t *TUI) buildBox(color string, lines []string, width int) []string {
 		}
 	}
 	out = append(out, bot)
+	return out
+}
+
+// maxVisibleWidth returns the largest visible width among the supplied lines.
+func maxVisibleWidth(lines []string) int {
+	w := 0
+	for _, l := range lines {
+		if vw := visibleWidth(l); vw > w {
+			w = vw
+		}
+	}
+	return w
+}
+
+// padSliceBottom pads a slice with empty strings at the bottom so it reaches n
+// items. Side-by-side boxes keep their first content line on the same row,
+// which makes the two panels look horizontally aligned.
+func padSliceBottom(items []string, n int) []string {
+	if len(items) >= n {
+		return items
+	}
+	out := make([]string, n)
+	copy(out, items)
+	for i := len(items); i < n; i++ {
+		out[i] = ""
+	}
 	return out
 }
 
