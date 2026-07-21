@@ -893,7 +893,7 @@ func (t *TUI) welcomeBox(width int) []string {
 	left := []string{
 		"  " + t.paint("bold", "Welcome back!"),
 		"",
-		"  " + t.paint("dim", t.model) + "  " + t.paint("dim", "·") + "  API Usage  " + t.paint("dim", "·") + "  Billing",
+		"  " + t.paint("dim", t.model) + "  " + t.paint("dim", "*") + "  API Usage  " + t.paint("dim", "*") + "  Billing",
 		"  " + t.paint("dim", short),
 	}
 

@@ -6,10 +6,22 @@ import (
 
 // boxCols maps each box-drawing rune in a line to its VISIBLE column (CJK-aware),
 // so CJK content no longer fools alignment checks the way raw rune indices do.
+// ANSI escape sequences are measured as zero width, so coloured boxes still align.
 func boxCols(line string) map[rune][]int {
 	out := map[rune][]int{}
 	col := 0
+	inEsc := false
 	for _, r := range line {
+		if inEsc {
+			if r == 'm' {
+				inEsc = false
+			}
+			continue
+		}
+		if r == '\x1b' {
+			inEsc = true
+			continue
+		}
 		if r == '│' || r == '┌' || r == '┐' || r == '└' || r == '┘' ||
 			r == '╭' || r == '╮' || r == '╰' || r == '╯' {
 			out[r] = append(out[r], col)
@@ -68,12 +80,13 @@ func assertBoxAligned(t *testing.T, name string, lines []string) {
 }
 
 func TestAllBoxesAligned(t *testing.T) {
-	tui := New(Config{Model: "deepseek-v4-flash", Provider: "deepseek", Lang: "zh-CN", Theme: "dark"})
-	tui.color = false // strip ANSI so visibleWidth math matches raw glyphs
+	// Plain (no ANSI) variant: width math is straightforward.
+	tuiPlain := New(Config{Model: "deepseek-v4-flash", Provider: "deepseek", Lang: "zh-CN", Theme: "dark"})
+	tuiPlain.color = false
 
 	// Welcome box across terminal widths (narrow triggers the trim path).
 	for _, w := range []int{120, 100, 90, 85, 80} {
-		box := tui.welcomeBox(w)
+		box := tuiPlain.welcomeBox(w)
 		if box == nil {
 			continue
 		}
@@ -82,7 +95,7 @@ func TestAllBoxesAligned(t *testing.T) {
 
 	// Streaming thinking box.
 	for _, w := range []int{120, 90, 80, 70} {
-		assertBoxAligned(t, "thinkingBox("+itoa(w)+")", tui.thinkingBox(w))
+		assertBoxAligned(t, "thinkingBox("+itoa(w)+")", tuiPlain.thinkingBox(w))
 	}
 
 	// "思考" framed block.
@@ -91,6 +104,21 @@ func TestAllBoxesAligned(t *testing.T) {
 	// Permission box replica (uses visibleWidth for the title so CJK titles size correctly).
 	perm := buildPermissionBox("需要执行危险命令", "rm -rf node_modules", 120)
 	assertBoxAligned(t, "permissionBox", perm)
+
+	// Coloured (ANSI) variant: ANSI escape sequences must be counted as zero width.
+	// This is the path the real TUI uses, and is the one most likely to expose
+	// alignment issues on terminals that render ambiguous-width glyphs differently.
+	tuiColor := New(Config{Model: "openrouter/free", Provider: "openrouter", Mode: "yolo", Lang: "zh-CN", Theme: "dark"})
+	tuiColor.color = true
+	for _, w := range []int{120, 100, 90, 85, 80} {
+		box := tuiColor.welcomeBox(w)
+		if box == nil {
+			continue
+		}
+		assertBoxAligned(t, "welcomeBox-color("+itoa(w)+")", box)
+	}
+	logo := tuiColor.logoLines(120)
+	assertBoxAligned(t, "logo-color", logo)
 }
 
 func itoa(n int) string {

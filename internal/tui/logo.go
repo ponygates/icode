@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"unicode/utf8"
 )
 
 // buildLogo renders the iCode startup banner: a single bordered box with the
@@ -103,19 +104,37 @@ func (t *TUI) buildLogo(width int, paint logoPainter) []string {
 		return paint("dim", "│ ") + inner + paint("dim", " │")
 	}
 	kv := func(s string) string {
+		// Colour labels (words ending with ":") dim and values cyan, but preserve
+		// the original spacing exactly. Keeping the original spaces avoids both
+		// compressing deliberate padding and introducing subtle width differences
+		// on terminals that handle colour-switched runs in unexpected ways.
 		var b strings.Builder
-		for i, seg := range strings.Fields(s) {
-			if i > 0 {
-				b.WriteString(" ")
+		i := 0
+		for i < len(s) {
+			r, size := utf8.DecodeRuneInString(s[i:])
+			if r == ' ' {
+				b.WriteRune(r)
+				i += size
+				continue
 			}
+			j := i
+			for j < len(s) {
+				r2, sz := utf8.DecodeRuneInString(s[j:])
+				if r2 == ' ' {
+					break
+				}
+				j += sz
+			}
+			word := s[i:j]
 			switch {
-			case strings.HasSuffix(seg, ":"):
-				b.WriteString(paint("dim", seg))
-			case seg == "(>')>":
-				b.WriteString(paint("yellow", seg))
+			case strings.HasSuffix(word, ":"):
+				b.WriteString(paint("dim", word))
+			case word == "(>')>":
+				b.WriteString(paint("yellow", word))
 			default:
-				b.WriteString(paint("cyan", seg))
+				b.WriteString(paint("cyan", word))
 			}
+			i = j
 		}
 		return b.String()
 	}
