@@ -1,67 +1,27 @@
 {
   "name": "icode-desktop",
-  "version": "0.1.0",
-  "description": "iCode Desktop - Multi-Model AI Coding Agent",
-  "main": "main.js",
+  "version": "0.2.0",
+  "private": true,
+  "description": "iCode Desktop UI — React frontend for the native WebView2 desktop app",
   "scripts": {
-    "dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
-    "build": "vite build",
-    "start": "electron .",
-    "dist": "node ../build-desktop-backend.js && electron-builder"
+    "dev": "vite",
+    "build": "vite build"
   },
   "dependencies": {
+    "highlight.js": "^11.11.1",
+    "i18next": "^23.12.0",
+    "lucide-react": "^0.441.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^6.26.0",
-    "zustand": "^4.5.0",
-    "i18next": "^23.12.0",
     "react-i18next": "^15.0.0",
-    "lucide-react": "^0.441.0"
+    "react-router-dom": "^6.26.0",
+    "zustand": "^4.5.0"
   },
   "devDependencies": {
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",
-    "concurrently": "^8.2.2",
-    "electron": "^32.0.0",
-    "electron-builder": "^24.13.0",
     "typescript": "^5.5.0",
-    "vite": "^5.4.0",
-    "wait-on": "^7.2.0"
-  },
-  "build": {
-    "appId": "com.ponygates.icode",
-    "productName": "iCode",
-    "directories": {
-      "output": "release"
-    },
-    "files": [
-      "dist/**/*",
-      "main.js",
-      "preload.js"
-    ],
-    "extraResources": [
-      {
-        "from": "icode-server.exe",
-        "to": "icode-server.exe"
-      }
-    ],
-    "win": {
-      "target": ["nsis", "portable"],
-      "icon": "assets/icon.png"
-    },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "shortcutName": "iCode"
-    },
-    "mac": {
-      "target": "dmg",
-      "icon": "assets/icon.png"
-    },
-    "linux": {
-      "target": ["AppImage", "deb"],
-      "icon": "assets/icon.png"
-    }
+    "vite": "^5.4.0"
   }
 }

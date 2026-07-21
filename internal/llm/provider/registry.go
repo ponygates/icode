@@ -21,7 +21,7 @@ type Impl struct {
 	// customModels holds user-defined models keyed by their canonical id
 	// (e.g. "deepseek/my-model"). customAliases maps an alternate id (e.g. the
 	// raw provider model id "my-model") to the canonical id so either resolves.
-	customModels map[string]types.ModelInfo
+	customModels  map[string]types.ModelInfo
 	customAliases map[string]string
 }
 

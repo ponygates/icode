@@ -15,8 +15,9 @@ interface ICodeAPI {
   getSession: (id: string) => Promise<any>;
   createSession: (session: any) => Promise<any>;
   deleteSession: (id: string) => Promise<any>;
+  getActiveSession: () => Promise<string | null>;
 
-  sendMessage: (sessionId: string, content: string) => Promise<any>;
+  sendMessage: (sessionId: string, content: string, model?: string, provider?: string) => Promise<any>;
   stopChat: (sessionId: string) => Promise<any>;
   onChatStream: (callback: (event: any) => void) => () => void;
   respondPermission: (requestId: string, decision: string) => Promise<any>;
@@ -37,11 +38,14 @@ interface ICodeAPI {
   listCustomModels: () => Promise<any>;
   addCustomModel: (m: any) => Promise<any>;
   deleteCustomModel: (id: string) => Promise<any>;
+
+  getSecurityLevel: () => Promise<{ level: string }>;
+  setSecurityLevel: (level: string) => Promise<{ ok: boolean; error?: string }>;
 }
 
 declare global {
   interface Window {
-    icode: ICodeAPI;
+    icode?: Partial<ICodeAPI>;
   }
 }
 

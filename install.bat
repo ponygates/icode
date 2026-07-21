@@ -33,7 +33,7 @@ if not exist "%ICO_DIR%\icode.exe" (
 REM Step 2: Add to PATH (current user, permanent)
 echo   [2/3] Adding to PATH...
 set "USER_PATH="
-for /f "skip=2 tokens=3*" %%a in ('reg query HKCU\Environment /v Path 2^>nul') do set "USER_PATH=%%a"
+for /f "tokens=2*" %%a in ('reg query HKCU\Environment /v Path 2^>nul ^| find "REG_"') do set "USER_PATH=%%b"
 if defined USER_PATH (
     echo !USER_PATH! | find /i "%ICO_DIR%" >nul
     if errorlevel 1 (
@@ -49,9 +49,9 @@ if defined USER_PATH (
 
 REM Step 3: Test
 echo   [3/3] Verifying...
-"%ICO_DIR%\icode.exe" doctor 2>nul | findstr "Providers" >nul
+"%ICO_DIR%\icode.exe" doctor 2>&1 | findstr "Providers" >nul
 if errorlevel 1 (
-    echo   WARNING: icode.exe may not work. Run '.\icode.exe doctor' manually.
+    echo   WARNING: icode doctor check failed
 ) else (
     echo   iCode is ready.
 )

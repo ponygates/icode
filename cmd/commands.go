@@ -13,6 +13,10 @@ import (
 	"github.com/ponygates/icode/internal/config"
 	"github.com/ponygates/icode/internal/config/i18n"
 	"github.com/ponygates/icode/internal/core/permission"
+	"github.com/ponygates/icode/internal/core/checkpoint"
+	"github.com/ponygates/icode/internal/core/searchreplace"
+	"github.com/ponygates/icode/internal/core/todo"
+	"github.com/ponygates/icode/internal/llm/provider"
 	"github.com/ponygates/icode/internal/server"
 	"github.com/ponygates/icode/internal/tui"
 	"github.com/ponygates/icode/internal/types"
@@ -53,10 +57,10 @@ func startChat(provider, model, mode string) error {
 		}
 	}
 	if model == "" {
-		model = "deepseek-v4-flash"
+		model = "openrouter/free"
 	}
 	if provider == "" {
-		provider = "deepseek"
+		provider = "openrouter"
 	}
 	if mode == "" {
 		mode = "agent"
@@ -152,8 +156,8 @@ var execCmd = &cobra.Command{
 		// Create a session
 		sess := &types.Session{
 			ID:           fmt.Sprintf("exec-%x", time.Now().UnixNano()),
-			ModelID:      "deepseek-v4-flash",
-			ProviderName: "deepseek",
+			ModelID:      "openrouter/free",
+			ProviderName: "openrouter",
 			Title:        prompt,
 		}
 		if model, _ := cmd.Flags().GetString("model"); model != "" {
@@ -274,16 +278,60 @@ var modelCmd = &cobra.Command{
 	Long:  `List installed models, search by provider, and trigger model list updates.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		refresh, _ := cmd.Flags().GetBool("refresh")
+		search, _ := cmd.Flags().GetString("search")
 
 		if refresh {
-			fmt.Println(i18n.Tr("update.checking"))
+			fmt.Println("🔄 " + i18n.Tr("update.checking"))
+			ctx := context.Background()
+
+			// Bootstrap the app to get the updater service
+			a, err := app.Bootstrap()
+			if err != nil {
+				return fmt.Errorf("bootstrap: %w", err)
+			}
+
+			updates, err := a.Updater.UpdateAll(ctx)
+			if err != nil {
+				return fmt.Errorf("refresh models: %w", err)
+			}
+
+			fmt.Printf("\n%-20s %-6s %-8s %s\n", "Provider", "Count", "Source", "Status")
+			fmt.Println(strings.Repeat("-", 60))
+			total := 0
+			for _, u := range updates {
+				status := "✅"
+				if !u.Success {
+					status = "❌"
+				}
+				fmt.Printf("%-20s %-6d %-8s %s", u.Name, u.Count, u.Source, status)
+				if u.Error != "" {
+					fmt.Printf(" (%s)", u.Error)
+				}
+				fmt.Println()
+				total += u.Count
+			}
+			fmt.Println(strings.Repeat("-", 60))
+			fmt.Printf("Total: %d models across %d providers\n", total, len(updates))
 			fmt.Println(i18n.Tr("update.updated"))
 			return nil
 		}
 
-		fmt.Println("Available models (initial registry):")
+		if search != "" {
+			fmt.Printf("Searching for models matching: %q\n\n", search)
+			// Bootstrap to get registered models
+			a, err := app.Bootstrap()
+			if err != nil {
+				return fmt.Errorf("bootstrap: %w", err)
+			}
+			printModelsBySearch(a.Reg, search)
+			return nil
+		}
+
+		fmt.Println("Available models (built-in registry):")
 		fmt.Println()
 		printDefaultModels()
+		fmt.Println()
+		fmt.Println("Tip: use --refresh to fetch latest models from all providers")
 		return nil
 	},
 }
@@ -317,6 +365,8 @@ var configCmd = &cobra.Command{
 			return nil
 		case len(args) == 1 && args[0] == "providers":
 			return runConfigProviders(cmd, cfg)
+		case len(args) >= 1 && strings.ToLower(args[0]) == "mcp":
+			return runConfigMCP(cmd, cfg, args[1:])
 		case len(args) >= 1 && strings.ToLower(args[0]) == "model":
 			return runConfigModel(cfg, args[1:])
 		case len(args) >= 1 && strings.ToLower(args[0]) == "key":
@@ -498,6 +548,82 @@ func runConfigKey(cfg *config.Config, args []string) error {
 	fmt.Printf("✓ Saved API key for %s  →  %s\n", provider, config.DefaultPath())
 	return nil
 }
+func runConfigMCP(cmd *cobra.Command, cfg *config.Config, args []string) error {
+	if len(args) == 0 {
+		if len(cfg.MCP) == 0 {
+			fmt.Println("\n  No MCP servers configured.")
+			fmt.Println("  Add one with:")
+			fmt.Println("    icode config mcp add <name> --command <cmd> [--mcp-args \"<args>\"] [--mcp-type stdio|sse]")
+			return nil
+		}
+		fmt.Println()
+		fmt.Printf("  %-20s %-8s %-6s %s\n", "Name", "Type", "Enabled", "Command")
+		fmt.Println("  " + strings.Repeat("─", 65))
+		for _, m := range cfg.MCP {
+			enabled := "✓"
+			if !m.Enabled {
+				enabled = "✗"
+			}
+			cmdStr := m.Command
+			if len(m.Args) > 0 {
+				cmdStr += " " + strings.Join(m.Args, " ")
+			}
+			fmt.Printf("  %-20s %-8s %-6s %s\n", m.Name, m.Type, enabled, cmdStr)
+		}
+		fmt.Println()
+		return nil
+	}
+	switch strings.ToLower(args[0]) {
+	case "add":
+		name := ""
+		if len(args) >= 2 {
+			name = args[1]
+		}
+		command, _ := cmd.Flags().GetString("command")
+		mcpArgs, _ := cmd.Flags().GetString("mcp-args")
+		mcpType, _ := cmd.Flags().GetString("mcp-type")
+		mcpURL, _ := cmd.Flags().GetString("mcp-url")
+		enabled, _ := cmd.Flags().GetBool("mcp-enabled")
+		if name == "" {
+			return fmt.Errorf("usage: icode config mcp add <name> --command <cmd> [--mcp-args \"<args>\"]")
+		}
+		if command == "" {
+			return fmt.Errorf("--command flag is required")
+		}
+		var argsList []string
+		if mcpArgs != "" {
+			argsList = strings.Fields(mcpArgs)
+		}
+		m := config.MCPServerCfg{
+			Name:    name,
+			Type:    mcpType,
+			Command: command,
+			Args:    argsList,
+			URL:     mcpURL,
+			Enabled: enabled,
+		}
+		cfg.UpsertMCP(m)
+		if err := cfg.Save(config.DefaultPath()); err != nil {
+			return fmt.Errorf("save config: %w", err)
+		}
+		fmt.Printf("✓ MCP server %q saved  →  %s\n", name, config.DefaultPath())
+		return nil
+	case "rm", "remove", "del", "delete":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: icode config mcp rm <name>")
+		}
+		name := args[1]
+		cfg.RemoveMCP(name)
+		if err := cfg.Save(config.DefaultPath()); err != nil {
+			return fmt.Errorf("save config: %w", err)
+		}
+		fmt.Printf("✓ Removed MCP server %q\n", name)
+		return nil
+	default:
+		return fmt.Errorf("unknown mcp subcommand: %s (try: add, rm)", args[0])
+	}
+}
+
 
 // renderConfigPanel builds a boxed, colored settings panel (plain text so it
 // also works in non-TTY / logged output; ANSI is applied via fmt).
@@ -587,6 +713,12 @@ func init() {
 
 	modelCmd.Flags().BoolP("refresh", "r", false, "Refresh model list from all providers")
 	modelCmd.Flags().String("search", "", "Filter models by name")
+
+	configCmd.Flags().String("command", "", "MCP server command")
+	configCmd.Flags().String("mcp-args", "", "MCP server arguments (space-separated)")
+	configCmd.Flags().String("mcp-type", "stdio", "MCP server type (stdio|sse)")
+	configCmd.Flags().String("mcp-url", "", "MCP server URL (for SSE)")
+	configCmd.Flags().Bool("mcp-enabled", true, "Enable MCP server on startup")
 }
 
 func printDefaultModels() {
@@ -610,7 +742,7 @@ func printDefaultModels() {
 		{"scnet", "deepseek-v4-flash", "tokenplan"},
 		{"scnet", "deepseek-v4-pro", "tokenplan"},
 		{"openrouter", "auto", "Auto Router"},
-		{"openrouter", "free", "Free Tier"},
+		{"openrouter", "openrouter/free", "Free Tier"},
 		{"openrouter", "openai/gpt-4o", "Token Plan"},
 		{"openrouter", "anthropic/claude-sonnet-4", "Coding Plan"},
 		{"openrouter", "google/gemini-2.0-flash-exp:free", "Free Tier"},
@@ -623,6 +755,30 @@ func printDefaultModels() {
 	fmt.Println("  " + strings.Repeat("-", 78))
 	for _, m := range models {
 		fmt.Printf("  [%-12s] %-42s %s\n", m.provider, m.model, m.plan)
+	}
+}
+
+// printModelsBySearch filters and displays models matching a search term.
+func printModelsBySearch(reg *registry.Impl, search string) {
+	models := reg.ListAllModels()
+	matched := false
+	fmt.Printf("  %-16s %-42s %s\n", "Provider", "Model", "Context")
+	fmt.Println("  " + strings.Repeat("-", 78))
+	searchLower := strings.ToLower(search)
+	for _, m := range models {
+		if strings.Contains(strings.ToLower(m.ID), searchLower) ||
+			strings.Contains(strings.ToLower(m.Name), searchLower) ||
+			strings.Contains(strings.ToLower(m.Provider), searchLower) {
+			cw := ""
+			if m.ContextWindow > 0 {
+				cw = fmt.Sprintf("%dK", m.ContextWindow/1024)
+			}
+			fmt.Printf("  [%-12s] %-42s %s\n", m.Provider, m.ID, cw)
+			matched = true
+		}
+	}
+	if !matched {
+		fmt.Printf("  No models found matching %q\n", search)
 	}
 }
 
@@ -716,7 +872,13 @@ func (c *chatCallback) OnSend(text string) {
 			}
 		case types.EventToolUse:
 			c.lastTool = event.ToolCall.Name
-			c.tui.AddToolMessage(event.ToolCall.Name, event.ToolCall.Arguments, "")
+			// Strip empty/no-op parameter objects so the conversation
+			// shows "⏺ git_status" instead of "⏺ git_status {}".
+			args := event.ToolCall.Arguments
+			if strings.TrimSpace(args) == "{}" {
+				args = ""
+			}
+			c.tui.AddToolMessage(event.ToolCall.Name, args, "")
 		case types.EventDone:
 			u := event.Meta.Usage
 			var cacheRate float64
@@ -813,6 +975,73 @@ func (c *chatCallback) OnSlashCommand(cmd string, args []string) {
 		}
 		c.sessionID = ""
 		c.tui.AddMessage(tui.RoleSystem, "Session cleared.")
+	case "/review":
+		edits := searchreplace.StageList()
+		if len(edits) == 0 {
+			c.tui.AddMessage(tui.RoleSystem, "No staged edits. Use the search_replace tool to propose changes first.")
+			break
+		}
+		var b strings.Builder
+		b.WriteString(fmt.Sprintf("Staged edits (%d):\n", len(edits)))
+		for i, ed := range edits {
+			status := "✓ valid"
+			if !ed.Valid {
+				status = "✗ invalid"
+			}
+			searchPreview := strings.ReplaceAll(ed.Search, "\n", "\\n")
+			if len(searchPreview) > 60 {
+				searchPreview = searchPreview[:60] + "..."
+			}
+			b.WriteString(fmt.Sprintf("\n  #%d %s [%s]\n", i, ed.FilePath, status))
+			b.WriteString(fmt.Sprintf("      SEARCH: %q\n", searchPreview))
+			b.WriteString(fmt.Sprintf("      Reason: %s\n", ed.Reason))
+		}
+		b.WriteString("\n/apply   — apply all valid staged edits")
+		b.WriteString("\n/reject  — discard staged edits")
+		c.tui.AddMessage(tui.RoleSystem, b.String())
+
+		case "/undo":
+			steps := 1
+			if len(args) > 0 {
+				fmt.Sscanf(args[0], "%d", &steps)
+			}
+			if checkpoint.DefaultUndo != nil {
+				files, err := checkpoint.DefaultUndo.Undo(context.Background(), steps)
+				if err != nil {
+					c.tui.AddMessage(tui.RoleSystem, "撤销失败: "+err.Error())
+				} else if len(files) == 0 {
+					c.tui.AddMessage(tui.RoleSystem, "没有可撤销的更改")
+				} else {
+					c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("已撤销 %d 步，还原了 %d 个文件:", steps, len(files)))
+					for _, f := range files {
+						c.tui.AddMessage(tui.RoleSystem, "  - "+f)
+					}
+				}
+			} else {
+				c.tui.AddMessage(tui.RoleSystem, "撤销系统未初始化")
+			}
+	case "/apply":
+		n := searchreplace.StageCount()
+		if n == 0 {
+			c.tui.AddMessage(tui.RoleSystem, "No staged edits to apply.")
+			break
+		}
+		results := searchreplace.StageApplyValid()
+		for _, r := range results {
+			c.tui.AddMessage(tui.RoleSystem, r)
+		}
+		c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("Applied %d/%d staged edits. Remaining: %d",
+			countApplied(results), n, searchreplace.StageCount()))
+
+	case "/reject":
+		n := searchreplace.StageCount()
+		if n == 0 {
+			c.tui.AddMessage(tui.RoleSystem, "No staged edits to reject.")
+			break
+		}
+		searchreplace.StageClear()
+		c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("Rejected %d staged edits.", n))
+
 	case "/config":
 		if cfg, cerr := config.LoadOrCreate(); cerr == nil {
 			c.tui.AddMessage(tui.RoleSystem, renderConfigPanel(cfg))
@@ -826,6 +1055,64 @@ func (c *chatCallback) OnSlashCommand(cmd string, args []string) {
 
 func (c *chatCallback) OnPermissionResponse(decision string) {
 	c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("Permission: %s", decision))
+}
+
+// TodoCounts implements tui.Callback — surfaces the current session's todo
+// tally in the status bar. Missing session / empty list → all zeros.
+func (c *chatCallback) TodoCounts() (pending, active, done, total int) {
+	if c.sessionID == "" {
+		return
+	}
+	return todo.Default.Counts(c.sessionID)
+}
+
+func (c *chatCallback) SessionID() string { return c.sessionID }
+
+func (c *chatCallback) OnInterrupt() {
+	if c.app != nil && c.app.Engine != nil && c.sessionID != "" {
+		c.app.Engine.Stop(c.sessionID)
+	}
+}
+
+func (c *chatCallback) OnStatus() string {
+	if c.app == nil {
+		return "引擎未初始化。配置 API Key 后重试。"
+	}
+	var b strings.Builder
+	b.WriteString("iCode 系统状态\n\n")
+
+	cfg, _ := config.Load()
+	if cfg != nil {
+		b.WriteString(fmt.Sprintf("语言: %s\n", cfg.Language))
+		b.WriteString(fmt.Sprintf("默认模型: %s\n", cfg.Defaults.Model))
+		b.WriteString(fmt.Sprintf("默认 Provider: %s\n", cfg.Defaults.Provider))
+		b.WriteString(fmt.Sprintf("权限模式: %s\n\n", cfg.Defaults.Mode))
+
+		b.WriteString("API Key 状态:\n")
+		for name, pc := range cfg.Providers {
+			status := "✓ 已配置"
+			if pc.APIKey == "" {
+				status = "✗ 未配置"
+			}
+			// Mask the key
+			key := pc.APIKey
+			if len(key) > 8 {
+				key = key[:4] + "..." + key[len(key)-4:]
+			} else if key != "" {
+				key = "****"
+			}
+			b.WriteString(fmt.Sprintf("  %-14s %-10s %s\n", name, status, key))
+		}
+	}
+
+	b.WriteString("\n活跃会话: ")
+	if c.sessionID != "" {
+		b.WriteString(c.sessionID[:8] + "...")
+	} else {
+		b.WriteString("无")
+	}
+
+	return b.String()
 }
 
 // estimateCost mirrors core/conversation.calculateCost for the CLI status bar.
@@ -860,6 +1147,16 @@ func formatCost(v float64, cur string) string {
 		return sym + "0.0000"
 	}
 	return fmt.Sprintf("%s%.4f", sym, v)
+}
+
+func countApplied(results []string) int {
+	n := 0
+	for _, r := range results {
+		if strings.HasPrefix(r, "APPLIED") {
+			n++
+		}
+	}
+	return n
 }
 
 var serverCmd = &cobra.Command{

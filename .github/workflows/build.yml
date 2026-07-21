@@ -3,30 +3,110 @@ name: Build & Release
 on:
   push:
     tags: ['v*']
-    branches: [master]
+    branches: [master, main, develop]
   pull_request:
-    branches: [master]
+    branches: [master, main]
 
 permissions:
   contents: write
 
+env:
+  GO_VERSION: '1.26'
+
 jobs:
-  build:
-    name: Build (${{ matrix.os }})
+  # ============================================================================
+  # Test + Vet — run on every push/PR (all branches)
+  # ============================================================================
+  test:
+    name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
 
-      - name: Build
-        run: go build -ldflags="-s -w -X main.Version=${{ github.ref_name }} -X main.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ) -X main.GitCommit=${{ github.sha }}" -o icode${{ matrix.os == 'windows' && '.exe' || '' }} .
+      - name: Print Go version
+        run: go version
+
+      - name: Build all packages
+        run: go build ./...
+
+      - name: Vet all packages
+        run: go vet ./...
+
+      - name: Run all tests
+        run: go test -count=1 -timeout=120s ./...
+
+  # ============================================================================
+  # Frontend — build desktop frontend for embedding
+  # ============================================================================
+  frontend:
+    name: Build Desktop Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build frontend
+        run: |
+          cd desktop
+          npm ci
+          npx vite build
+
+      - name: Upload frontend dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: desktop/dist/
+
+  # ============================================================================
+  # Build — cross-platform binary build
+  # ============================================================================
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: [test, frontend]
+    if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goarch: amd64
+          - os: macos-latest
+            goarch: amd64
+          - os: macos-14
+            goarch: arm64
+          - os: windows-latest
+            goarch: amd64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: internal/embedded/dist/
+
+      - name: Build binary
+        run: |
+          GOARCH=${{ matrix.goarch }} go build -ldflags="-s -w -X main.Version=${GITHUB_REF_NAME#v} -X main.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ) -X main.GitCommit=${{ github.sha }}" -o icode${{ matrix.os == 'windows' && '.exe' || '' }} .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -34,6 +114,9 @@ jobs:
           name: icode-${{ matrix.os }}
           path: icode${{ matrix.os == 'windows' && '.exe' || '' }}
 
+  # ============================================================================
+  # Release — create GitHub Release on version tags
+  # ============================================================================
   release:
     name: Release
     if: startsWith(github.ref, 'refs/tags/v')
@@ -45,18 +128,20 @@ jobs:
           pattern: icode-*
           merge-multiple: true
 
-      - name: Rename artifacts
+      - name: Rename artifacts for release
         run: |
           mv icode-ubuntu-latest icode-linux-amd64
           mv icode-macos-latest icode-darwin-amd64
+          mv icode-macos-14 icode-darwin-arm64
           mv icode-windows-latest icode-windows-amd64.exe
           chmod +x icode-*
 
-      - name: Create Release
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             icode-linux-amd64
             icode-darwin-amd64
+            icode-darwin-arm64
             icode-windows-amd64.exe
           generate_release_notes: true

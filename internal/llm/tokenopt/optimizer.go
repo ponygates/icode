@@ -127,6 +127,17 @@ type Optimizer struct {
 
 	// Cache strategy for this provider.
 	cacheStrategy CacheStrategy
+
+	// turnStartIdx tracks the index in messageLog where the current user
+	// turn began. When a new user message arrives, tool results from the
+	// previous turn (between turnStartIdx and len(messageLog)) are folded
+	// into short placeholders to keep the context lean.
+	turnStartIdx int
+
+	// Snip filter — zero-cost removal of useless turns before any
+	// higher-level compression is applied. Part of the 5-layer pipeline.
+	snipFilter *SnipFilter
+	snipConfig SnipConfig
 }
 
 // Config tunes the optimizer behavior.
@@ -141,6 +152,10 @@ type Config struct {
 
 	// MinKeepMessages is the minimum number of recent messages to always keep.
 	MinKeepMessages int
+
+	// Snip controls zero-cost filtering of useless turns.
+	// Zero value = use defaults (default snip config).
+	Snip SnipConfig
 }
 
 // DefaultConfig returns sensible defaults.
@@ -170,6 +185,11 @@ func New(cfg Config) *Optimizer {
 		cacheStrat = CacheStrategy{}
 	}
 
+	snipCfg := cfg.Snip
+	if snipCfg == (SnipConfig{}) {
+		snipCfg = DefaultSnipConfig()
+	}
+
 	return &Optimizer{
 		systemPrompt:     cfg.SystemPrompt,
 		providerName:     cfg.ProviderName,
@@ -178,6 +198,8 @@ func New(cfg Config) *Optimizer {
 		strategy:         cfg.Strategy,
 		cacheStrategy:    cacheStrat,
 		stats:            Stats{},
+		snipConfig:       snipCfg,
+		snipFilter:       NewSnipFilter(snipCfg),
 	}
 }
 
@@ -198,12 +220,69 @@ func (o *Optimizer) AddMessage(msg types.Message) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
+	// When a new user message arrives, fold the previous turn's tool
+	// results into compact placeholders (Volatile Scratch).
+	if msg.Role == types.RoleUser {
+		o.foldVolatileLocked()
+		o.turnStartIdx = len(o.messageLog)
+	}
+
 	// Compress large tool results to save tokens
 	if msg.Role == types.RoleTool && len(msg.Content) > 4000 {
 		msg.Content = compressToolResult(msg.Content, 4000)
 	}
 
 	o.messageLog = append(o.messageLog, msg)
+}
+
+// foldVolatileLocked scans the turn starting at turnStartIdx and collapses
+// intermediate tool results into short [tool: name → N bytes] placeholders.
+// The last assistant message of the turn is always kept intact.
+func (o *Optimizer) foldVolatileLocked() {
+	if o.turnStartIdx <= 0 || o.turnStartIdx >= len(o.messageLog) {
+		return
+	}
+
+	// Walk backward to find the last assistant block after the last tool
+	// call — that is the "terminal" assistant message whose content should
+	// be kept.
+	lastFinalStart := -1
+	for i := len(o.messageLog) - 1; i >= o.turnStartIdx; i-- {
+		m := o.messageLog[i]
+		if m.Role == types.RoleAssistant && m.Content != "" && len(m.ToolCalls) == 0 {
+			lastFinalStart = i
+			break
+		}
+	}
+
+	// If no final assistant text was found, keep everything as-is (the
+	// turn may still be in progress or was just a plain text response).
+	if lastFinalStart < 0 {
+		return
+	}
+
+	// Fold everything between turnStartIdx and lastFinalStart:
+	//   - tool_result messages → placeholders
+	//   - assistant messages with tool calls → stripped (the result carries
+	//     the context, not the call)
+	// The final assistant message content is kept.
+	for i := o.turnStartIdx; i < lastFinalStart; i++ {
+		m := &o.messageLog[i]
+		if m.Role == types.RoleTool {
+			if len(m.Content) > 80 {
+				bytes := len(m.Content)
+				o.stats.TokensSaved += bytes / 4 // rough estimate
+				m.Content = fmt.Sprintf("[tool result: %d bytes, folded]", bytes)
+			}
+		} else if m.Role == types.RoleAssistant {
+			// Non-terminal assistant messages had tool calls.
+			// Strip their generated text since it's been superseded
+			// by later tool results and the terminal message.
+			if len(m.ToolCalls) > 0 {
+				m.Content = ""
+			}
+		}
+	}
 }
 
 // RecordUsage updates running stats.
@@ -244,10 +323,17 @@ func (o *Optimizer) buildPrefixLocked() string {
 	var sb strings.Builder
 	sb.WriteString(o.systemPrompt)
 
-	if o.compactionSummary != "" {
-		sb.WriteString("\n\n## Previous Conversation Summary\n")
-		sb.WriteString(o.compactionSummary)
-	}
+	// NOTE: compactionSummary is deliberately NOT included here so the
+	// system prefix (system prompt + tool defs) remains immutable across
+	// compactions. If compactionSummary changed the prefix, every provider
+	// cache strategy (DeepSeek stable-prefix, Anthropic cache_control)
+	// would lose the cached prefix on every compaction — i.e. the worst
+	// possible moment for a cache miss.
+	//
+	// Instead, the compaction summary is injected as a separate system
+	// message at position 0 in CompactRequest(). This makes it part of the
+	// conversation log, NOT the prefix, so the immutable prefix stays
+	// cached across compactions.
 
 	if len(o.toolSchemas) > 0 {
 		sb.WriteString("\n\n## Available Tools\n\n")
@@ -282,13 +368,24 @@ func (o *Optimizer) CompactRequest(input string) []types.Message {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
+	// Apply snip filter before compaction (zero-cost removal of useless turns)
+	filtered := o.filterMessages(o.messageLog)
+
 	// If context is overflowing, compact
 	if o.shouldCompactLocked() {
 		o.compactLocked()
 	}
 
-	messages := make([]types.Message, len(o.messageLog))
-	copy(messages, o.messageLog)
+	// Compaction summary is injected as position 0 so it does NOT break
+	// the immutable prefix (system prompt + tool defs) when it changes.
+	messages := make([]types.Message, 0, len(filtered)+2)
+	if o.compactionSummary != "" {
+		messages = append(messages, types.Message{
+			Role:    types.RoleSystem,
+			Content: "## Previous Conversation Summary\n" + o.compactionSummary,
+		})
+	}
+	messages = append(messages, filtered...)
 
 	if input != "" {
 		messages = append(messages, types.Message{

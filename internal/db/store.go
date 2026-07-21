@@ -6,8 +6,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -127,9 +129,12 @@ func (s *Store) Create(sess *types.Session) error {
 	sess.CreatedAt = time.Now()
 	sess.UpdatedAt = time.Now()
 
-	metaJSON, _ := json.Marshal(sess.Metadata)
+	metaJSON, err := json.Marshal(sess.Metadata)
+	if err != nil {
+		return fmt.Errorf("marshal session metadata: %w", err)
+	}
 
-	_, err := s.db.Exec(`INSERT INTO sessions
+	_, err = s.db.Exec(`INSERT INTO sessions
 		(id, title, model_id, provider_name, metadata, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		sess.ID, sess.Title, sess.ModelID, sess.ProviderName, string(metaJSON), now, now,
@@ -154,8 +159,14 @@ func (s *Store) Get(id string) (*types.Session, error) {
 
 	sess.TotalTokens.TotalTokens = sess.TotalTokens.PromptTokens + sess.TotalTokens.CompletionTokens
 	json.Unmarshal([]byte(metaJSON), &sess.Metadata)
-	sess.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
-	sess.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+	sess.CreatedAt, err = time.Parse(time.RFC3339, createdAt)
+	if err != nil {
+		log.Printf("warning: failed to parse created_at %q: %v", createdAt, err)
+	}
+	sess.UpdatedAt, err = time.Parse(time.RFC3339, updatedAt)
+	if err != nil {
+		log.Printf("warning: failed to parse updated_at %q: %v", updatedAt, err)
+	}
 
 	// Load messages
 	messages, err := s.loadMessages(id)
@@ -180,15 +191,26 @@ func (s *Store) List(limit, offset int) ([]types.Session, error) {
 	for rows.Next() {
 		var sess types.Session
 		var metaJSON, createdAt, updatedAt string
-		rows.Scan(&sess.ID, &sess.Title, &sess.ModelID, &sess.ProviderName, &metaJSON,
+		if err := rows.Scan(&sess.ID, &sess.Title, &sess.ModelID, &sess.ProviderName, &metaJSON,
 			&sess.TotalTokens.PromptTokens, &sess.TotalTokens.CompletionTokens,
-			&sess.TotalTokens.CacheHitTokens, &createdAt, &updatedAt)
+			&sess.TotalTokens.CacheHitTokens, &createdAt, &updatedAt); err != nil {
+			return sessions, fmt.Errorf("scan session row: %w", err)
+		}
 
 		sess.TotalTokens.TotalTokens = sess.TotalTokens.PromptTokens + sess.TotalTokens.CompletionTokens
 		json.Unmarshal([]byte(metaJSON), &sess.Metadata)
-		sess.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
-		sess.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+		sess.CreatedAt, err = time.Parse(time.RFC3339, createdAt)
+		if err != nil {
+			log.Printf("warning: failed to parse created_at %q: %v", createdAt, err)
+		}
+		sess.UpdatedAt, err = time.Parse(time.RFC3339, updatedAt)
+		if err != nil {
+			log.Printf("warning: failed to parse updated_at %q: %v", updatedAt, err)
+		}
 		sessions = append(sessions, sess)
+	}
+	if err := rows.Err(); err != nil {
+		return sessions, fmt.Errorf("iterate session rows: %w", err)
 	}
 
 	return sessions, nil
@@ -196,9 +218,12 @@ func (s *Store) List(limit, offset int) ([]types.Session, error) {
 
 func (s *Store) Update(sess *types.Session) error {
 	now := time.Now().UTC().Format(time.RFC3339)
-	metaJSON, _ := json.Marshal(sess.Metadata)
+	metaJSON, err := json.Marshal(sess.Metadata)
+	if err != nil {
+		return fmt.Errorf("marshal session metadata: %w", err)
+	}
 
-	_, err := s.db.Exec(`UPDATE sessions SET
+	_, err = s.db.Exec(`UPDATE sessions SET
 		title = ?, model_id = ?, provider_name = ?, metadata = ?,
 		total_input_tokens = ?, total_output_tokens = ?, total_cache_hits = ?,
 		updated_at = ?
@@ -225,9 +250,12 @@ func (s *Store) AppendMessage(sessionID string, msg types.Message) error {
 		now = time.Now().UTC().Format(time.RFC3339)
 	}
 
-	toolCallsJSON, _ := json.Marshal(msg.ToolCalls)
+	toolCallsJSON, err := json.Marshal(msg.ToolCalls)
+	if err != nil {
+		return fmt.Errorf("marshal message tool calls: %w", err)
+	}
 
-	_, err := s.db.Exec(`INSERT INTO messages
+	_, err = s.db.Exec(`INSERT INTO messages
 		(id, session_id, role, content, tool_calls, tool_id, timestamp,
 			token_count, cache_hit, model, finish_reason)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -252,16 +280,60 @@ func (s *Store) loadMessages(sessionID string) ([]types.Message, error) {
 		var msg types.Message
 		var tcJSON, ts string
 		var cacheHit int
-		rows.Scan(&msg.ID, &msg.Role, &msg.Content, &tcJSON, &msg.ToolID, &ts,
-			&msg.Metadata.TokenCount, &cacheHit, &msg.Metadata.Model, &msg.Metadata.FinishReason)
+		if err := rows.Scan(&msg.ID, &msg.Role, &msg.Content, &tcJSON, &msg.ToolID, &ts,
+			&msg.Metadata.TokenCount, &cacheHit, &msg.Metadata.Model, &msg.Metadata.FinishReason); err != nil {
+			return messages, fmt.Errorf("scan message row: %w", err)
+		}
 
 		msg.Metadata.CacheHit = cacheHit != 0
-		msg.Timestamp, _ = time.Parse(time.RFC3339, ts)
+		msg.Timestamp, err = time.Parse(time.RFC3339, ts)
+		if err != nil {
+			log.Printf("warning: failed to parse message timestamp %q: %v", ts, err)
+		}
 		json.Unmarshal([]byte(tcJSON), &msg.ToolCalls)
 		messages = append(messages, msg)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate message rows: %w", err)
+	}
 
 	return messages, nil
+}
+
+// SearchMessages searches message content across all sessions using LIKE.
+// Results are ordered by most recent first, limited to `limit` rows.
+func (s *Store) SearchMessages(query string, limit int) ([]types.SearchResult, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	pattern := "%" + query + "%"
+	rows, err := s.db.Query(`SELECT m.id, m.session_id, COALESCE(s.title, ''), m.role, m.content, m.timestamp
+		FROM messages m
+		LEFT JOIN sessions s ON m.session_id = s.id
+		WHERE m.content LIKE ?
+		ORDER BY m.timestamp DESC
+		LIMIT ?`, pattern, limit)
+	if err != nil {
+		return nil, fmt.Errorf("search messages: %w", err)
+	}
+	defer rows.Close()
+
+	var results []types.SearchResult
+	for rows.Next() {
+		var r types.SearchResult
+		var ts string
+		if err := rows.Scan(&r.MessageID, &r.SessionID, &r.SessionTitle,
+			&r.Role, &r.Content, &ts); err != nil {
+			return nil, fmt.Errorf("scan search result: %w", err)
+		}
+		r.Timestamp, _ = time.Parse(time.RFC3339, ts)
+		// Find first match position (simple search)
+		lower := strings.ToLower(r.Content)
+		qLower := strings.ToLower(query)
+		r.MatchPos = strings.Index(lower, qLower)
+		results = append(results, r)
+	}
+	return results, rows.Err()
 }
 
 // ============================================================================

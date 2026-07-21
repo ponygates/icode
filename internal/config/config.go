@@ -10,19 +10,51 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// SecurityLevel controls how data is handled when sent to external services.
+// Higher levels = more restrictive. This addresses Claude Code's opaque
+// telemetry problem — iCode NEVER sends data externally without the user
+// knowing exactly what level is active.
+type SecurityLevel string
+
+const (
+	SecLocal        SecurityLevel = "local"         // 本地处理: no API calls at all, pure local
+	SecDesensitize  SecurityLevel = "desensitize"   // 脱敏处理: sanitize PII before sending
+	SecLocalLLM     SecurityLevel = "local-llm"     // 本地大模型: local models only (Ollama etc)
+	SecForeignLLM   SecurityLevel = "foreign-llm"   // 国外大模型: international API providers allowed
+	SecUnrestricted SecurityLevel = "unrestricted"  // 无限制: all providers, no restrictions
+)
+
+func ParseSecurityLevel(s string) SecurityLevel {
+	switch s {
+	case "local":
+		return SecLocal
+	case "desensitize":
+		return SecDesensitize
+	case "local-llm":
+		return SecLocalLLM
+	case "foreign-llm":
+		return SecForeignLLM
+	case "unrestricted":
+		return SecUnrestricted
+	default:
+		return SecLocal // safest default
+	}
+}
+
 // Config is the root configuration object.
 type Config struct {
 	mu sync.RWMutex
 
-	Language  string              `yaml:"language" json:"language"`
-	Providers map[string]ProviderCfg `yaml:"providers" json:"providers"`
-	Models    []ModelCfg          `yaml:"models" json:"models"`
-	Defaults  DefaultCfg          `yaml:"defaults" json:"defaults"`
-	TUI       TUICfg              `yaml:"tui" json:"tui"`
-	Tools     ToolsCfg            `yaml:"tools" json:"tools"`
-	Server    ServerCfg           `yaml:"server" json:"server"`
-	Update    UpdateCfg           `yaml:"update" json:"update"`
-	MCP       []MCPServerCfg      `yaml:"mcp" json:"mcp"`
+	Language      string              `yaml:"language" json:"language"`
+	SecurityLevel SecurityLevel       `yaml:"security_level" json:"security_level"`
+	Providers     map[string]ProviderCfg `yaml:"providers" json:"providers"`
+	Models        []ModelCfg          `yaml:"models" json:"models"`
+	Defaults      DefaultCfg          `yaml:"defaults" json:"defaults"`
+	TUI           TUICfg              `yaml:"tui" json:"tui"`
+	Tools         ToolsCfg            `yaml:"tools" json:"tools"`
+	Server        ServerCfg           `yaml:"server" json:"server"`
+	Update        UpdateCfg           `yaml:"update" json:"update"`
+	MCP           []MCPServerCfg      `yaml:"mcp" json:"mcp"`
 }
 
 // MCPServerCfg describes a single Model Context Protocol server connection.
@@ -41,12 +73,14 @@ type MCPServerCfg struct {
 // DefaultCfg holds the user's preferred model / provider / permission mode,
 // persisted by the settings interface and applied on chat startup.
 type DefaultCfg struct {
-	Model       string  `yaml:"model" json:"model"`
-	Provider    string  `yaml:"provider" json:"provider"`
-	Mode        string  `yaml:"mode" json:"mode"`
-	Temperature float64 `yaml:"temperature" json:"temperature"`
-	MaxTokens   int     `yaml:"max_tokens" json:"max_tokens"`
-	Cache       bool    `yaml:"cache" json:"cache"`
+	Model          string   `yaml:"model" json:"model"`
+	Provider       string   `yaml:"provider" json:"provider"`
+	Mode           string   `yaml:"mode" json:"mode"`
+	Temperature    float64  `yaml:"temperature" json:"temperature"`
+	MaxTokens      int      `yaml:"max_tokens" json:"max_tokens"`
+	Cache          bool     `yaml:"cache" json:"cache"`
+	SystemPrompt   string   `yaml:"system_prompt,omitempty" json:"system_prompt,omitempty"`
+	FallbackModels []string `yaml:"fallback_models,omitempty" json:"fallback_models,omitempty"`
 }
 
 type ProviderCfg struct {
@@ -101,19 +135,22 @@ type UpdateCfg struct {
 }
 
 // Default returns a Config populated with sensible defaults.
+// The default security level is "local" — iCode NEVER sends data externally
+// without explicit user consent. No telemetry, no tracking, no phone-home.
 func Default() *Config {
 	return &Config{
-		Language: "zh-CN",
+		Language:      "zh-CN",
+		SecurityLevel: SecForeignLLM,
 		Defaults: DefaultCfg{
-			Model:       "deepseek-v4-flash",
-			Provider:    "deepseek",
+			Model:       "openrouter/free",
+			Provider:    "openrouter",
 			Mode:        "agent",
 			Temperature: 0.7,
 			MaxTokens:   0,
 			Cache:       true,
 		},
 		Providers: map[string]ProviderCfg{
-			"deepseek":   {APIBase: "https://api.deepseek.com/v1", Timeout: 120},
+			"deepseek":   {APIBase: "https://api.deepseek.com", Timeout: 120},
 			"openrouter": {APIBase: "https://openrouter.ai/api/v1", Timeout: 120},
 			"zhipu":      {APIBase: "https://open.bigmodel.cn/api/paas/v4", Timeout: 120},
 			"kimi":       {APIBase: "https://api.moonshot.cn/v1", Timeout: 120},

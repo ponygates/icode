@@ -19,13 +19,18 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/ponygates/icode/internal/config"
+	projectcontext "github.com/ponygates/icode/internal/core/context"
+	"github.com/ponygates/icode/internal/core/agent"
+	"github.com/ponygates/icode/internal/core/checkpoint"
 	"github.com/ponygates/icode/internal/core/permission"
+	"github.com/ponygates/icode/internal/core/slashcmd"
 	"golang.org/x/term"
 )
 
@@ -35,10 +40,10 @@ type Mode = string
 type Role = string
 
 const (
-	ModeDefault Mode = "default"
-	ModePlan    Mode = "plan"
-	ModeAgent   Mode = "agent"
-	ModeYOLO    Mode = "yolo"
+	ModeAuto  Mode = "auto"
+	ModePlan  Mode = "plan"
+	ModeAgent Mode = "agent"
+	ModeYOLO  Mode = "yolo"
 )
 
 const (
@@ -62,10 +67,21 @@ type Callback interface {
 	OnSend(text string)
 	OnSlashCommand(cmd string, args []string)
 	OnPermissionResponse(decision string)
+	// OnInterrupt is called when the user presses Esc or Ctrl+C during
+	// streaming to cancel the current LLM turn.
+	OnInterrupt()
 	// OnListSessions returns a formatted list of past sessions.
 	OnListSessions() string
 	// OnResume loads a past session's messages; returns a status line.
 	OnResume(id string) string
+	// TodoCounts returns the current session's todo counts for the status
+	// bar. Returns all zeros when there is no active session or no list.
+	TodoCounts() (pending, active, done, total int)
+	// SessionID returns the active session ID, or "".
+	SessionID() string
+	// OnStatus returns a formatted system status report (providers, keys,
+	// MCP servers, cache stats, etc.).
+	OnStatus() string
 }
 
 // StreamWriter is the surface the backend uses to push data into the UI.
@@ -91,17 +107,23 @@ type Config struct {
 // ── TUI ──────────────────────────────────────────────────────────
 
 type TUI struct {
-	mode     Mode
-	model    string
-	provider string
-	lang     string
-	theme    string
-	callback Callback
+	mode          Mode
+	model         string
+	provider      string
+	models        []string // available models (for Tab switching)
+	modelIdx      int      // current index in models slice
+	lang          string
+	theme         string
+	securityLevel string
+	callback      Callback
 
 	// input autocomplete state (raw mode)
 	acOpen  bool
 	acItems []acItem
 	acIdx   int
+
+	// tool output folding (Claude Code-style)
+	toolFolded bool
 
 	mu       sync.Mutex
 	messages []Message
@@ -129,7 +151,7 @@ type TUI struct {
 	dirEntries    []string // cached top-level cwd listing for the explorer pane
 
 	running bool
-	reader  io.Reader
+	reader  io.Reader      // raw mode: *bufio.Reader
 	writer  io.Writer
 
 	// raw-mode state
@@ -145,6 +167,10 @@ type TUI struct {
 	// renderMu serializes terminal writes (the streaming goroutine also renders).
 	renderMu sync.Mutex
 
+	// multiline toggles multi-line input mode. When enabled, Enter inserts a
+	// newline into the input buffer instead of submitting; Alt+Enter submits.
+	multiline bool
+
 	// pending permission prompt (agent mode, interactive approval)
 	permPending bool
 	permPrompt  string
@@ -153,27 +179,48 @@ type TUI struct {
 	// logo + model/dir info). Shown on a fresh session until dismissed via
 	// Esc/Enter, the first keystroke, or the /welcome command.
 	welcomeVisible bool
+
+	// scrollOffset tracks how many lines the user has scrolled up from the
+	// bottom of the conversation. 0 means "auto-follow" (the default).
+	scrollOffset int
+
+	// statusNotice is a one-line flash message shown in the status bar (e.g.
+	// "✓ Model switched to deepseek-v4-flash"), cleared after the next render.
+	statusNotice string
+
+	// lastRenderW, lastRenderH track the dimensions used in the last frame
+	// so render() can detect a size change and issue a full clear.
+	lastRenderW int
+	lastRenderH int
 }
 
-// New creates a TUI instance.
+// New creates a TUI instance. Security level defaults to "local" (safest).
+// Unlike Claude Code, iCode NEVER sends telemetry or usage data anywhere.
 func New(cfg Config) *TUI {
 	if cfg.Mode == "" {
-		cfg.Mode = ModeAgent
+		cfg.Mode = ModeAuto
+	}
+	secLvl := "local"
+	if c, err := config.Load(); err == nil && c.SecurityLevel != "" {
+		secLvl = string(c.SecurityLevel)
 	}
 	return &TUI{
-		mode:       cfg.Mode,
-		model:      cfg.Model,
-		provider:   cfg.Provider,
-		lang:       cfg.Lang,
-		theme:      cfg.Theme,
-		callback:   cfg.Callback,
-		reader:     os.Stdin,
-		writer:     os.Stdout,
-		streamDone: make(chan struct{}, 1),
-		width:      80,
-		height:     24,
-		histIdx:    -1,
-		dirEntries: listCwd(),
+		mode:           cfg.Mode,
+		model:          cfg.Model,
+		provider:       cfg.Provider,
+		lang:           cfg.Lang,
+		theme:          cfg.Theme,
+		securityLevel:  secLvl,
+		callback:       cfg.Callback,
+		reader:         os.Stdin,
+		writer:         os.Stdout,
+		streamDone:     make(chan struct{}, 1),
+		width:          80,
+		height:         24,
+		lastRenderW:    80,
+		lastRenderH:    24,
+		histIdx:        -1,
+		dirEntries:     listCwd(),
 
 		welcomeVisible: true, // show the startup banner on a fresh session
 	}
@@ -191,7 +238,10 @@ func (t *TUI) Run() error {
 			defer term.Restore(fd, state)
 			t.rawMode = true
 			t.color = true
-			if w, h, err := term.GetSize(fd); err == nil && w > 0 && h > 0 {
+			// Initial terminal-size measurement uses termSize() (tries both
+			// stdin and stdout handles) so alt-screen switching and Windows
+			// console quirks don't leave the UI at default 80×24.
+			if w, h, ok := t.termSize(); ok {
 				t.width, t.height = w, h
 			}
 			return t.runRaw()
@@ -233,17 +283,34 @@ func (t *TUI) runRaw() error {
 	fmt.Fprint(t.writer, "\x1b[?1049h\x1b[3J\x1b[2J\x1b[H\x1b[?25l")
 	defer fmt.Fprint(t.writer, "\x1b[?25h\x1b[?1049l")
 
+	// Attempt to resize the terminal window to a comfortable size for the TUI.
+	// Uses ANSI escape \x1b[8;H;Wt supported by Windows Terminal, xterm, etc.
+	// Does nothing (silently fails) on terminals that don't support it.
+	t.resizeTerminal()
+
+	// Immediately re-measure the terminal size before the first render.
+	// The measurement in Run() can be stale on Windows where GetConsoleScreen-
+	// BufferInfo may return cached values from before the alternate-screen
+	// switch. Using termSize() (stdin+stdout) gives the most reliable result.
+	// This also captures the result of the resizeTerminal() call above.
+	if w, h, ok := t.termSize(); ok {
+		t.width, t.height = w, h
+	}
+	// Also record the initial dimensions as last-rendered so the first render
+	// doesn't spuriously trigger a full clear.
+	t.lastRenderW, t.lastRenderH = t.width, t.height
 	t.render()
 	go t.watchResize()
-	reader := bufio.NewReader(t.reader)
+	t.reader = bufio.NewReader(t.reader)
 
 	for t.running {
 		t.render()
-		r, _, err := reader.ReadRune()
+		r, _, err := t.reader.(*bufio.Reader).ReadRune()
 		if err != nil {
 			if err == io.EOF {
 				return nil
 			}
+			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 		if !t.handleKey(r) {
@@ -259,14 +326,13 @@ func (t *TUI) runRaw() error {
 // cadence is imperceptible and only triggers a repaint on an actual change, so
 // it costs nothing while the size is stable.
 func (t *TUI) watchResize() {
-	fd := int(os.Stdin.Fd())
 	lastW, lastH := 0, 0
 	t.mu.Lock()
 	lastW, lastH = t.width, t.height
 	t.mu.Unlock()
 	for t.running {
 		time.Sleep(150 * time.Millisecond)
-		if w, h, err := term.GetSize(fd); err == nil && w > 0 && h > 0 {
+		if w, h, ok := t.termSize(); ok {
 			t.mu.Lock()
 			changed := w != lastW || h != lastH
 			if changed {
@@ -309,7 +375,10 @@ func (t *TUI) handleKey(r rune) bool {
 	switch r {
 	case 0x03: // Ctrl+C
 		if t.streaming {
-			return true // streaming cancelled via engine Stop (best effort)
+			if t.callback != nil {
+				t.callback.OnInterrupt()
+			}
+			return true
 		}
 		if t.inputBuf == "" {
 			fmt.Fprint(t.writer, "\r\n")
@@ -328,6 +397,15 @@ func (t *TUI) handleKey(r rune) bool {
 	case 0x0c: // Ctrl+L — clear & redraw
 		fmt.Fprint(t.writer, "\x1b[2J\x1b[H")
 		return true
+	case 0x0b: // Ctrl+K — clear input buffer
+		t.inputBuf = ""
+		t.cursor = 0
+		return true
+	case 0x0f: // Ctrl+O — dismiss welcome
+		if t.welcomeVisible {
+			t.dismissWelcome()
+			return true
+		}
 	case 0x01: // Ctrl+A — home
 		t.cursor = 0
 		return true
@@ -352,13 +430,80 @@ func (t *TUI) handleKey(r rune) bool {
 		}
 		t.historyNext()
 		return true
-	case 0x09: // Tab — accept highlighted suggestion
+	case 0x09: // Tab — accept suggestion OR cycle model
 		if t.acOpen && len(t.acItems) > 0 {
 			t.acceptSuggestion()
 			return true
 		}
+		if len(t.models) > 1 && !t.streaming {
+			// Cycle to next model
+			t.modelIdx = (t.modelIdx + 1) % len(t.models)
+			t.model = t.models[t.modelIdx]
+			t.add(RoleSystem, "Tab → "+t.model)
+			return true
+		}
 		return true
-	case 0x1b: // Esc — dismiss suggestions / welcome screen
+	case 0x1b:
+		// Arrow keys / escape sequences: read the next bytes from the
+		// buffered reader. Without this, ReadRune would consume each byte
+		// as a separate rune and stray "[" / "A" characters would appear
+		// in the input buffer — the "garbled text on up/down" bug.
+		if br, ok := t.reader.(*bufio.Reader); ok {
+			if ur, _, err := br.ReadRune(); err == nil {
+				// Alt+Enter — submit current input (useful in multi-line mode).
+				if ur == '\r' || ur == '\n' {
+					text := strings.TrimSpace(t.inputBuf)
+					t.inputBuf = ""
+					t.cursor = 0
+					if text != "" {
+						t.pushHistory(text)
+						t.submit(text)
+					}
+					return true
+				}
+				if ur == '[' {
+				dir, _, err2 := br.ReadRune(); err2IsNil := err2 == nil
+				if err2IsNil {
+					switch dir {
+					case 'A': // ↑ history prev
+						if t.acOpen && len(t.acItems) > 0 {
+							if t.acIdx > 0 { t.acIdx-- }
+						} else { t.historyPrev() }
+						return true
+					case 'B': // ↓ history next
+						if t.acOpen && len(t.acItems) > 0 {
+							if t.acIdx < len(t.acItems)-1 { t.acIdx++ }
+						} else { t.historyNext() }
+						return true
+					case 'C': // → cursor right
+						runes := []rune(t.inputBuf)
+						if t.cursor < len(runes) { t.cursor++ }
+						return true
+					case 'D': // ← cursor left
+						if t.cursor > 0 { t.cursor-- }
+						return true
+					case 'H': t.cursor = 0; return true   // Home
+					case 'F': t.cursor = len([]rune(t.inputBuf)); return true // End
+					case '5': // PgUp (^[[5~)
+						br.ReadRune() // consume trailing '~'
+						t.scrollPgUp()
+						return true
+					case '6': // PgDn (^[[6~)
+						br.ReadRune() // consume trailing '~'
+						t.scrollPgDn()
+						return true
+					}
+				}
+			}
+			}
+		}
+		// Plain Esc — stop streaming, dismiss panels, or welcome screen
+		if t.streaming {
+			if t.callback != nil {
+				t.callback.OnInterrupt()
+			}
+			return true
+		}
 		if t.acOpen {
 			t.acOpen = false
 			t.acItems = nil
@@ -369,12 +514,16 @@ func (t *TUI) handleKey(r rune) bool {
 		}
 		return true
 	case '\r', '\n':
+		if t.multiline {
+			// In multi-line mode, Enter inserts a newline. Submit with Alt+Enter.
+			t.inputBuf += "\n"
+			t.cursor++
+			return true
+		}
 		text := strings.TrimSpace(t.inputBuf)
 		t.inputBuf = ""
 		t.cursor = 0
 		if text == "" {
-			// Empty submit: if the welcome banner is up, dismiss it so the
-			// user lands on a clean prompt.
 			if t.dismissWelcome() {
 				return true
 			}
@@ -464,15 +613,25 @@ func (t *TUI) submit(text string) {
 		t.execShell(text[1:])
 		return
 	}
+	// Quick memory append (# prefix) — matches Claude Code's `#` shortcut.
+	// The text after the `#` is written to the user memory file (~/.icode/
+	// CLAUDE.md) and NOT sent to the LLM. This lets users capture a
+	// preference in-line without leaving the chat.
+	if strings.HasPrefix(text, "#") {
+		t.appendMemory(strings.TrimSpace(text[1:]))
+		return
+	}
 	// Slash command
 	if strings.HasPrefix(text, "/") {
 		t.handleSlash(text)
 		return
 	}
 
-	// User message
+	// User message — expand @file references first.
+	expanded := t.expandFileRefs(text)
 	t.mu.Lock()
-	t.messages = append(t.messages, Message{Role: RoleUser, Content: text})
+	t.messages = append(t.messages, Message{Role: RoleUser, Content: expanded})
+	t.scrollOffset = 0 // auto-follow on new turn
 	t.mu.Unlock()
 
 	if t.callback != nil {
@@ -481,7 +640,14 @@ func (t *TUI) submit(text string) {
 		t.streamBuf.Reset()
 		t.turnStart = time.Now()
 		t.mu.Unlock()
-		go t.callback.OnSend(text)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.add(RoleError, fmt.Sprintf("内部错误: %v", r))
+				}
+			}()
+			t.callback.OnSend(expanded)
+		}()
 		t.ensureAnim()
 		t.drainStream()
 	}
@@ -515,9 +681,29 @@ func (t *TUI) render() {
 	H := t.height
 	t.mu.Unlock()
 
+	// Clear one-shot flash notice after rendering
+	if t.statusNotice != "" {
+		t.mu.Lock()
+		t.statusNotice = ""
+		t.mu.Unlock()
+	}
+
 	if !rawMode {
 		return // line mode renders incrementally, not full-screen
 	}
+
+	// Re-measure terminal dimensions on every render so window resizes are
+	// always picked up, even when watchResize's polling misses the change.
+	// Update t.width/t.height so other goroutines see the latest values too.
+	// Try both stdin and stdout handles — on Windows, GetConsoleScreenBufferInfo
+	// may require an output handle on some system configurations.
+	if w, h, ok := t.termSize(); ok {
+		W, H = w, h
+		t.mu.Lock()
+		t.width, t.height = w, h
+		t.mu.Unlock()
+	}
+
 	if W < 20 {
 		W = 20
 	}
@@ -526,12 +712,9 @@ func (t *TUI) render() {
 	}
 
 	// ── Layout ───────────────────────────────────────────────────
-	// The input box owns the bottom 4 rows. Everything else (header,
-	// conversation, status bar, overlays) lives in the rows above it. We paint
-	// each line at an absolute row with an in-place line clear (\x1b[K) and
-	// never clear the whole screen, so streaming redraws update in place
-	// instead of flashing a blank frame (the old \x1b[2J behaviour).
-	const inputRows = 4
+	// The input owns the bottom 3 rows: 1 prompt line + 1 hint line + 1 status
+	// line. Everything else (header, conversation, status bar) lives above.
+	const inputRows = 3
 	contentRows := H - inputRows
 	if contentRows < 4 {
 		contentRows = 4
@@ -549,9 +732,22 @@ func (t *TUI) render() {
 	acLines := t.autocompleteLines()
 	permLines := []string{}
 	if permPending {
+		// Claude Code-style bordered permission box
+		title := "⏸ " + t.tstr("perm.title")
+		prompt := truncate(permPrompt, W-8)
+		boxW := min(len(title)+4, W-4)
+		if boxW < 40 {
+			boxW = 40
+		}
+		if boxW > W-4 {
+			boxW = W - 4
+		}
 		permLines = append(permLines,
-			t.paint("yellow", "  ⏸ "+t.tstr("perm.title")+": "+truncate(permPrompt, W-14)),
-			t.paint("dim", "     [y] "+t.tstr("perm.allow")+"   [a] "+t.tstr("perm.all")+"   [n/^C] "+t.tstr("perm.deny")),
+			t.paint("yellow", "  ╭"+repeat("─", boxW)+"╮"),
+			t.paint("yellow", "  │ ")+t.paint("bold", title)+padVisible("", boxW-visibleWidth(title)-2)+t.paint("yellow", " │"),
+			t.paint("dim", "  │ ")+truncate(prompt, boxW-2)+padVisible("", boxW-visibleWidth(truncate(prompt, boxW-2))-2)+t.paint("dim", " │"),
+			t.paint("yellow", "  │ ")+t.paint("dim", "[1] 允许   [2] 全部允许   [3] 拒绝")+padVisible("", boxW-32)+t.paint("yellow", " │"),
+			t.paint("yellow", "  ╰"+repeat("─", boxW)+"╯"),
 		)
 	}
 
@@ -565,28 +761,32 @@ func (t *TUI) render() {
 
 	conv := t.conversationLines(msgs, streaming, streamContent, W)
 	if welcomeVisible && len(msgs) == 0 && !streaming {
-		// Height-aware welcome: welcomeLines picks the richest layout
-		// (logo + tagline + box → logo + tagline → tagline + box → compact)
-		// that fits bodyH, so the ASCII logo is never sliced in half on short
-		// terminals. The banner is anchored near the top of the body (Claude
-		// Code shows its banner at the top, not centred), which keeps the logo
-		// within the first visible rows even when the measured height is larger
-		// than the real visible window.
 		welcome := t.welcomeLines(W, bodyH)
-		// Anchor the welcome near the top (Claude Code shows its banner at the
-		// top, not vertically centred). A single-line margin keeps it clear of
-		// the header rule, and — crucially — keeps the ASCII logo within the
-		// first few visible rows even if the measured terminal height is a bit
-		// larger than the real visible window, which is what previously pushed
-		// a centred banner off the top ("top half of the logo missing").
-		topMargin := 1
-		if topMargin+len(welcome) <= bodyH {
-			lead := make([]string, topMargin)
-			welcome = append(lead, welcome...)
-		}
+		// Start the welcome at row 1 (right after the hrule). No extra
+		// topMargin — that was pushing the logo partially off-screen
+		// on terminals whose initial height measurement was inaccurate.
 		conv = welcome
-	}
-	if len(conv) > bodyH {
+		// Welcome mode always shows the latest — reset scroll.
+		t.scrollOffset = 0
+	} else if len(conv) > bodyH && t.scrollOffset > 0 {
+		// User has scrolled up: show N lines above the bottom.
+		total := len(conv)
+		maxOff := total - bodyH
+		if t.scrollOffset > maxOff {
+			t.scrollOffset = maxOff
+		}
+		start := total - bodyH - t.scrollOffset
+		conv = conv[start : start+bodyH]
+		// Prepend a scroll indicator.
+		indicator := t.paint("yellow", fmt.Sprintf("  ↑ %d more lines — PgDn/End to follow", t.scrollOffset))
+		conv = append([]string{""}, conv...)          // blank line
+		conv = append([]string{indicator}, conv...)    // indicator
+		if len(conv) > bodyH {
+			conv = conv[:bodyH]
+		}
+	} else if len(conv) > bodyH {
+		// Auto-follow: always show the latest content.
+		t.scrollOffset = 0
 		conv = conv[len(conv)-bodyH:]
 	}
 
@@ -595,7 +795,6 @@ func (t *TUI) render() {
 	out = append(out, t.headerLine())
 	out = append(out, t.hrule(W))
 	out = append(out, conv...)
-	out = append(out, t.hrule(W)) // status bar separator
 	for _, sl := range statusW {
 		out = append(out, sl)
 	}
@@ -612,6 +811,14 @@ func (t *TUI) render() {
 	// ── Write frame (absolute rows, in-place clear) ──────────────
 	t.renderMu.Lock()
 	defer t.renderMu.Unlock()
+
+	// Full clear when dimensions change, so orphaned text from the previous
+	// frame at a different size never bleeds into the new layout.
+	if W != t.lastRenderW || H != t.lastRenderH {
+		fmt.Fprint(t.writer, "\x1b[2J\x1b[H")
+		t.lastRenderW, t.lastRenderH = W, H
+	}
+
 	var buf strings.Builder
 	buf.WriteString("\x1b[?25l") // hide cursor while repainting
 	for i, ln := range out {
@@ -638,103 +845,153 @@ func (t *TUI) headerLine() string {
 	short := shortDir(cwd)
 	modeLabel := t.mode
 	if modeLabel == "" {
-		modeLabel = ModeAgent
+		modeLabel = ModeAuto
 	}
-	return t.paint("magenta", "✻ iCode") + " " + appVersionStr() +
+	return t.paint("orange", "✻ iCode") + " " + appVersionStr() +
 		t.paint("dim", "  ·  ") + short +
 		t.paint("dim", "  ·  mode: ") + modeLabel
 }
 
-// welcomeLines renders the Claude Code-style startup screen shown in the
-// conversation area before the first message: a big ASCII iCode wordmark with
-// a colour gradient, a tagline, and the active model/provider/working
-// directory enclosed in a framed panel (left/right box walls) — exactly the
-// Claude Code welcome aesthetic. It disappears on the first user action.
+// welcomeLines renders the Claude Code-style welcome screen: a single bordered
+// box with two columns inside — left shows model/usage/path, right shows tips
+// and "what's new" notes. The whole box is in the orange/red Claude accent
+// color to match the reference screenshot exactly.
 func (t *TUI) welcomeLines(width, maxH int) []string {
-	if maxH < 1 {
+	if maxH < 1 || width < 30 {
 		return nil
 	}
-	logo := t.logoLines(width) // nil on very narrow terminals
-	tagline := "   " + fit(
-		t.paint("magenta", "✻")+"  "+t.paint("bold", "Welcome to iCode")+
-			"  "+t.paint("dim", "— "+t.tstr("welcome.tagline")),
-		width-4)
-	info := t.welcomeInfo(width)
 
-	// Assemble a candidate layout from optional pieces. Keep vertical spacing
-	// tight — one blank line between logo/tagline and info is enough for a
-	// Claude Code-like density.
-	build := func(withLogo, withInfo bool) []string {
-		var o []string
-		if withLogo && logo != nil {
-			o = append(o, logo...)
-			o = append(o, "")
-		}
-		o = append(o, tagline)
-		if withInfo {
-			o = append(o, "")
-			o = append(o, info...)
-		}
-		return o
+	// Show the full two-column welcome if it fits.
+	box := t.welcomeBox(width)
+	if box != nil && len(box) <= maxH {
+		return box
 	}
 
-	// Richest → leanest. Return the first layout that fits the available
-	// height, so the logo is dropped whole (never sliced) when space is tight.
-	for _, c := range [][]string{
-		build(true, true),  // logo + tagline + info
-		build(true, false), // logo + tagline
-		build(false, true), // tagline + info
-		info,               // minimal indented info, no logo
-	} {
-		if len(c) > 0 && len(c) <= maxH {
-			return c
-		}
-	}
-	// Last resort: just the greeting line (always fits when maxH >= 1).
-	return []string{tagline}
+	// Fallback: minimal welcome on narrow terminals
+	tagline := t.paint("orange", "✦") + "  " + t.paint("bold", "Welcome to iCode")
+	return []string{"  " + tagline}
 }
 
-// welcomeInfo renders the Claude Code-style startup info block as plain
-// indented lines (model / provider / cwd / hints). Dropping the framed box
-// avoids the border-alignment and width-ambiguity artifacts that box-drawing
-// glyphs can cause on Windows conhost or CJK terminals, while keeping the
-// same information density and clean left margin.
-func (t *TUI) welcomeInfo(width int) []string {
+// welcomeBox returns the two-column Claude Code welcome panel wrapped in an
+// orange border, or nil if the terminal is too narrow to fit it.
+func (t *TUI) welcomeBox(width int) []string {
 	cwd, _ := os.Getwd()
-	prefix := "     "
+	short := shortDir(cwd)
+
+	left := []string{
+		t.paint("orange", "  iCode "+appVersionStr()),
+		"",
+		"  " + t.paint("bold", "Welcome back!"),
+		"",
+		"  " + t.paint("orange", "✦") + " " + t.paint("orange", "✦") + " " + t.paint("orange", "✦"),
+		"    " + t.paint("orange", "◆"),
+		"  " + t.paint("orange", "✦") + " " + t.paint("orange", "✦") + " " + t.paint("orange", "✦"),
+		"",
+		"  " + t.paint("dim", t.model) + "  " + t.paint("dim", "·") + "  API Usage  " + t.paint("dim", "·") + "  Billing",
+		"  " + t.paint("dim", short),
+	}
+
+	right := []string{
+		t.paint("orange", "Tips for getting started"),
+		t.paint("orange", "─────────────────────"),
+		"  Run /init to create a ICODE.md file with",
+		"  instructions for iCode",
+		"",
+		t.paint("orange", "What's new"),
+		t.paint("orange", "──────────"),
+		"  Check the iCode changelog for updates",
+	}
+
+	// Build the box with the two columns side by side
+	leftW := 0
+	for _, l := range left {
+		if vw := visibleWidth(l); vw > leftW {
+			leftW = vw
+		}
+	}
+	rightW := 0
+	for _, l := range right {
+		if vw := visibleWidth(l); vw > rightW {
+			rightW = vw
+		}
+	}
+
+	gap := 4
+	totalW := leftW + gap + rightW + 4 // 4 = padding
+	if totalW > width-2 {
+		// Too narrow — trim
+		if rightW > 20 {
+			rightW = 20
+		}
+		totalW = leftW + gap + rightW + 4
+		if totalW > width-2 {
+			return nil
+		}
+	}
+
+	bar := repeat("─", totalW-2)
+	top := t.paint("orange", "╭"+bar+"╮")
+	bot := t.paint("orange", "╰"+bar+"╯")
+	out := []string{top}
+
+	maxRows := len(left)
+	if len(right) > maxRows {
+		maxRows = len(right)
+	}
+	for i := 0; i < maxRows; i++ {
+		var l, r string
+		if i < len(left) {
+			l = left[i]
+		}
+		if i < len(right) {
+			r = right[i]
+		}
+		// Pad the left column to leftW so the right column aligns
+		pad := leftW - visibleWidth(l)
+		if pad < 0 {
+			pad = 0
+		}
+		row := t.paint("orange", "│") + " " + l + strings.Repeat(" ", pad) +
+			strings.Repeat(" ", gap) + r + " " + t.paint("orange", "│")
+		out = append(out, row)
+	}
+	out = append(out, bot)
+	return out
+}
+
+// welcomeLeft returns lines for the left panel: model, provider, cwd.
+func (t *TUI) welcomeLeft(width int) []string {
+	cwd, _ := os.Getwd()
+	prefix := "  "
 	contentW := width - visibleWidth(prefix)
 	if contentW < 10 {
 		contentW = 10
 	}
 
-	// Model row; provider appended on the same line when it fits.
-	modelRow := t.paint("dim", "Model:    ") + t.model
-	if t.provider != "" {
-		provider := t.paint("dim", "Provider: ") + t.provider
-		gap := contentW - visibleWidth(modelRow) - visibleWidth(provider)
-		if gap >= 2 {
-			modelRow = modelRow + strings.Repeat(" ", gap) + provider
-		}
-	}
-
 	var out []string
-	out = append(out, prefix+modelRow)
-	if t.provider != "" && visibleWidth(t.paint("dim", "Model:    ")+t.model)+visibleWidth(t.paint("dim", "Provider: ")+t.provider) >= contentW {
-		out = append(out, prefix+t.paint("dim", "Provider: ")+t.provider)
-	}
-	out = append(out, prefix+t.paint("dim", "cwd:      ")+shortDir(cwd))
+	out = append(out, t.paint("dim", prefix+"Model")+":    "+t.model)
+	out = append(out, t.paint("dim", prefix+"Provider")+": "+t.provider)
+	out = append(out, t.paint("dim", prefix+"Mode")+":     "+t.mode)
+	out = append(out, t.paint("dim", prefix+"cwd")+":     "+shortDir(cwd))
 	out = append(out, "")
+	out = append(out, t.paint("dim", prefix+t.tstr("welcome.hint")))
+	out = append(out, t.paint("dim", prefix+t.tstr("welcome.close")))
+	return out
+}
 
-	// Wrap long hint/close lines so they never overflow the terminal width and
-	// leave phantom characters on the following line.
-	hint := t.tstr("welcome.hint")
-	close := t.tstr("welcome.close")
-	for _, l := range wrapPrefixed(prefix, prefix, hint, width) {
-		out = append(out, t.paint("dim", l))
-	}
-	for _, l := range wrapPrefixed(prefix, prefix, close, width) {
-		out = append(out, t.paint("dim", l))
-	}
+// welcomeRight returns lines for the right panel: quick commands.
+func (t *TUI) welcomeRight(width int) []string {
+	prefix := ""
+	var out []string
+	out = append(out, t.paint("dim", prefix+"Commands:"))
+	out = append(out, "")
+	out = append(out, t.paint("dim", prefix+"  /help")+"    "+t.tstr("cmd.help"))
+	out = append(out, t.paint("dim", prefix+"  /model")+"   "+t.tstr("cmd.model"))
+	out = append(out, t.paint("dim", prefix+"  /provider")+" "+t.tstr("cmd.provider"))
+	out = append(out, t.paint("dim", prefix+"  /mode")+"    "+t.tstr("cmd.mode"))
+	out = append(out, t.paint("dim", prefix+"  /clear")+"   "+t.tstr("cmd.clear"))
+	out = append(out, "")
+	out = append(out, t.paint("dim", prefix+"/exit  /quit  "+t.tstr("cmd.exit")))
 	return out
 }
 
@@ -743,7 +1000,7 @@ func (t *TUI) messageLinesW(m Message, width int) []string {
 	case RoleThinking:
 		return thinkingLines(m.Content, width)
 	case RoleUser:
-		return wrapPrefixed("  ❯ ", "    ", m.Content, width)
+		return wrapPrefixed("  ⏣ ", "    ", m.Content, width)
 	case RoleAssistant:
 		if t.rawMode {
 			return t.renderMarkdown(m.Content, "", "  ", width)
@@ -758,13 +1015,30 @@ func (t *TUI) messageLinesW(m Message, width int) []string {
 		return wrapPrefixed("  × ", "    ", m.Content, width)
 	case RoleTool:
 		var out []string
-		head := "  ⏺ " + m.Tool
-		if m.ToolArgs != "" {
-			head += " " + truncate(m.ToolArgs, 60)
+		pre := "  ⏺ "
+		head := pre + m.Tool
+		// Hide empty/no-op parameter objects like "{}" so the tool line
+		// shows "⏺ git_status" instead of "⏺ git_status {}".
+		args := strings.TrimSpace(m.ToolArgs)
+		if args == "{}" || args == "" {
+			args = ""
+		}
+		if args != "" {
+			head += " " + truncate(args, 60)
 		}
 		out = append(out, t.paint("cyan", head))
 		if m.Content != "" {
-			for _, l := range wrapPrefixed("    ⎿ ", "      ", m.Content, width) {
+			toolOutput := m.Content
+			// Claude Code-style: fold long tool output with a summary line
+			const maxLines = 8
+			if !t.toolFolded {
+				fold := strings.Split(toolOutput, "\n")
+				if len(fold) > maxLines {
+					toolOutput = strings.Join(fold[:maxLines], "\n") + "\n" +
+						t.paint("dim", fmt.Sprintf("    ⎿  ... %d more lines (use /expand to show all)", len(fold)-maxLines))
+				}
+			}
+			for _, l := range wrapPrefixed("    ⎿ ", "      ", toolOutput, width) {
 				out = append(out, t.paint("dim", l))
 			}
 		}
@@ -774,31 +1048,69 @@ func (t *TUI) messageLinesW(m Message, width int) []string {
 }
 
 // conversationLines builds the full-width conversation: every message (+ the
-// in-flight stream). While the model is "thinking" (stream started but no
-// tokens yet) a sliding-bar indicator is shown — Claude Code's Glimmer motion.
+// in-flight stream). Claude Code-style thin dim separators divide turns.
+// While the model is "thinking" (stream started but no tokens yet) a prominent
+// animated thinking box is shown with the rotating spinner and sliding gradient bar.
 func (t *TUI) conversationLines(msgs []Message, streaming bool, streamContent string, width int) []string {
+	sep := t.paint("dim", "  "+strings.Repeat("─", min(width-2, 80)))
 	var lines []string
 	all := append([]Message{}, msgs...)
 	if streaming {
 		all = append(all, Message{Role: RoleAssistant, Content: streamContent})
 	}
 	for i, m := range all {
-		// Replace the empty in-flight assistant message with the thinking bar.
+		// Replace the empty in-flight assistant message with the thinking box.
 		if streaming && i == len(all)-1 && strings.TrimSpace(m.Content) == "" {
 			continue
 		}
-		if i > 0 {
-			lines = append(lines, "") // blank separator between turns
+		// Insert thin separator between turns, except before the first message
+		// or before a tool message (which is part of the same assistant turn).
+		if i > 0 && m.Role != RoleTool && all[i-1].Role != RoleAssistant {
+			lines = append(lines, "")
+			lines = append(lines, sep)
+			lines = append(lines, "")
+		} else if i > 0 {
+			lines = append(lines, "")
 		}
 		lines = append(lines, t.messageLinesW(m, width)...)
 	}
 	if streaming && strings.TrimSpace(streamContent) == "" {
-		lines = append(lines, t.paint("dim", "  "+t.tstr("status.gen"))+"  "+t.thinkingBar())
+		lines = append(lines, "")
+		lines = append(lines, t.thinkingBox(width)...)
 	}
 	return lines
 }
 
+// thinkingBox renders the framed "thinking" indicator — a bordered box
+// containing the spinning glyph and sliding gradient bar, styled to match
+// Claude Code's streaming thinking state. Returns individual lines.
+func (t *TUI) thinkingBox(width int) []string {
+	// Build a headline line with the spinner and slider
+	headline := "  " + t.tstr("status.gen") + "  " + t.thinkingBar()
+
+	boxW := width - 2
+	if boxW < 24 {
+		boxW = 24
+	}
+	inner := t.paint("dim", "│") + " " + padVisible(headline, boxW-4) + " " + t.paint("dim", "│")
+	top := t.paint("dim", "┌"+strings.Repeat("─", boxW-2)+"┐")
+	bot := t.paint("dim", "└"+strings.Repeat("─", boxW-2)+"┘")
+
+	return []string{top, inner, bot}
+}
+
+// padVisible pads s with spaces to reach the given display width, accounting
+// for embedded ANSI escape sequences that take zero visible columns.
+func padVisible(s string, w int) string {
+	vw := visibleWidth(s)
+	if vw >= w {
+		return s
+	}
+	return s + strings.Repeat(" ", w-vw)
+}
+
 // contextBar renders a "NN% ▓▓░░" usage meter of width w (display columns).
+// Colour-coded: green (<50%), yellow (50–80%), red (>80%) — Claude Code style.
 func (t *TUI) contextBar(w int) string {
 	if w < 6 {
 		return strings.Repeat("░", w)
@@ -818,34 +1130,83 @@ func (t *TUI) contextBar(w int) string {
 		barW = 1
 	}
 	filled := barW * pct / 100
-	return fmt.Sprintf("%2d%% ", pct) + strings.Repeat("▓", filled) + strings.Repeat("░", barW-filled)
+
+	// Colour-coded threshold
+	colour := t.c("green") // < 50%
+	if pct > 80 {
+		colour = t.c("red")
+	} else if pct > 50 {
+		colour = t.c("yellow")
+	}
+	pctStr := fmt.Sprintf("%2d%%", pct)
+	if pct > 80 {
+		pctStr = t.paint("bold", pctStr)
+	}
+	reset := "\x1b[0m"
+	if !t.color {
+		colour, reset = "", ""
+		pctStr = fmt.Sprintf("%2d%%", pct)
+	}
+	return colour + pctStr + " " + strings.Repeat("▓", filled) + strings.Repeat("░", barW-filled) + reset
 }
 
-// thinkingBar is a left↔right sliding block that animates while the model
-// generates, giving Claude Code's signature "thinking" motion.
+// thinkingBar is an animated "thinking" indicator inspired by Claude Code's
+// glimmer bar. It combines a rotating spinner on the left with a growing
+// gradient bar on the right that sweeps back and forth. The combined effect
+// gives smooth, continuous motion feedback while the model works.
+//
+// Visual:  ◌ [▓▓▓▓▓░░░░░░░░░]  32%  ⏱ 12s
 func (t *TUI) thinkingBar() string {
-	const n = 12
+	const trackLen = 16
 	elapsed := time.Since(t.turnStart)
-	frame := int(elapsed.Milliseconds() / 120)
+	frame := int(elapsed.Milliseconds() / 100)
 	if frame < 0 {
 		frame = 0
 	}
-	frame %= (2*n - 2)
-	pos := frame
-	if pos >= n {
-		pos = 2*n - 2 - pos
+
+	// ── Spinner ──
+	spinners := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+	spinner := spinners[frame%len(spinners)]
+
+	// ── Context progress bar ──
+	// Use actual context usage when available, otherwise animate.
+	var filled int
+	if t.contextWindow > 0 && t.contextTokens > 0 {
+		filled = t.contextTokens * trackLen / t.contextWindow
+		if filled > trackLen {
+			filled = trackLen
+		}
+	} else {
+		// Animated growing bar during stream
+		filled = (frame % (trackLen + 1))
 	}
+
 	var b strings.Builder
 	b.WriteString("[")
-	for i := 0; i < n; i++ {
-		if i == pos {
-			b.WriteString("█")
+	for i := 0; i < trackLen; i++ {
+		if i < filled {
+			if i < filled-1 {
+				b.WriteString("▓")
+			} else {
+				b.WriteString("▒")
+			}
 		} else {
 			b.WriteString("░")
 		}
 	}
 	b.WriteString("]")
-	return b.String()
+
+	// Context percentage
+	var pctStr string
+	if t.contextWindow > 0 && t.contextTokens > 0 {
+		pct := t.contextTokens * 100 / t.contextWindow
+		if pct > 100 {
+			pct = 100
+		}
+		pctStr = fmt.Sprintf(" %d%%", pct)
+	}
+
+	return t.paint("cyan", spinner) + " " + b.String() + t.paint("dim", pctStr)
 }
 
 // fit returns s padded (or truncated with an ellipsis) to exactly w *visible*
@@ -933,7 +1294,7 @@ func (t *TUI) ensureAnim() {
 	t.animRunning = true
 	t.mu.Unlock()
 	go func() {
-		for {
+		for t.streaming || t.running {
 			t.mu.Lock()
 			if !t.streaming {
 				t.animRunning = false
@@ -944,14 +1305,21 @@ func (t *TUI) ensureAnim() {
 			t.scheduleRender()
 			time.Sleep(110 * time.Millisecond)
 		}
+		t.mu.Lock()
+		t.streaming = false
+		t.animRunning = false
+		t.mu.Unlock()
 	}()
+
 }
 
 // SetContext records the latest request's prompt-token count and the model's
 // context window so the status bar / explorer can show live context usage.
 func (t *TUI) SetContext(tokens, window int) {
+	t.mu.Lock()
 	t.contextTokens = tokens
 	t.contextWindow = window
+	t.mu.Unlock()
 }
 
 // listCwd returns the top-level entries of the current working directory
@@ -995,6 +1363,12 @@ func (t *TUI) statusLine() string {
 	if t.provider != "" {
 		parts = append(parts, d(t.provider))
 	}
+	// Security level badge — always visible so the user knows their privacy
+	// boundary. Unlike Claude Code, no hidden telemetry or phone-home.
+	if t.securityLevel != "" && t.securityLevel != "local" {
+		label := permission.SecurityLabel(config.SecurityLevel(t.securityLevel))
+		parts = append(parts, label)
+	}
 	if t.promptTokens > 0 || t.completionTokens > 0 {
 		parts = append(parts,
 			d("↑"+formatTokens(t.promptTokens)+" ↓"+formatTokens(t.completionTokens)))
@@ -1005,6 +1379,22 @@ func (t *TUI) statusLine() string {
 			pct = 100
 		}
 		parts = append(parts, d(fmt.Sprintf("%d%% ctx", pct)))
+		// Visual context progress bar
+		barW := 10
+		filled := pct * barW / 100
+		if filled > barW {
+			filled = barW
+		}
+		bar := "["
+		for i := 0; i < barW; i++ {
+			if i < filled {
+				bar += "▓"
+			} else {
+				bar += "░"
+			}
+		}
+		bar += "]"
+		parts = append(parts, d(bar))
 	}
 	if t.cacheHitRate > 0 {
 		parts = append(parts, d(fmt.Sprintf("%.0f%% cache", t.cacheHitRate*100)))
@@ -1012,11 +1402,30 @@ func (t *TUI) statusLine() string {
 	if t.cost != "" {
 		parts = append(parts, d(t.cost))
 	}
+	// Todo counters — shown when the current session has an active todo
+	// list. Pending items appear in dim, in-progress in yellow, completed
+	// dim. Zero-list sessions render nothing.
+	if t.callback != nil {
+		if pending, active, done, total := t.callback.TodoCounts(); total > 0 {
+			seg := fmt.Sprintf("☐%d ▶%d ✓%d", pending, active, done)
+			if active > 0 {
+				seg = t.paint("yellow", seg)
+			} else {
+				seg = d(seg)
+			}
+			parts = append(parts, seg)
+		}
+	}
 	if t.streaming {
 		if !t.turnStart.IsZero() {
 			parts = append(parts, d("⏱ "+formatDuration(time.Since(t.turnStart))))
 		}
-		parts = append(parts, d(t.thinkingBar()+" "+t.tstr("status.gen")))
+		// Thinking bar is already shown in the conversation area (thinkingBox),
+		// so don't duplicate it here — Claude Code shows the spinner only once.
+	}
+	// Flash notice (slash command feedback)
+	if t.statusNotice != "" {
+		parts = append(parts, t.statusNotice)
 	}
 	return strings.Join(parts, d(" · "))
 }
@@ -1038,45 +1447,36 @@ func modeColor(m Mode) string {
 	switch m {
 	case ModePlan:
 		return "blue"
+	case ModeAuto:
+		return "green"
 	case ModeYOLO:
 		return "red"
-	case ModeDefault:
-		return "dim"
 	default:
-		return "cyan"
+		// Agent default — Claude Code's signature orange/red
+		return "orange"
 	}
 }
 
-// drawInputBox renders the Claude Code-style bordered prompt anchored to the
-// bottom of the screen and positions the cursor on the content line. The box
-// is drawn at absolute rows (topRow..topRow+3) so it never relies on a trailing
-// newline causing a scroll — which previously pushed the box off-screen and
-// left artifacts. Layout:
+// drawInputBox renders the Claude Code-style single-line prompt — NO box, just
+// `> <input>` on a single row. The hint bar (manual mode · shortcuts · agents)
+// and the status bar (max · /effort) sit on the rows below. This is the exact
+// layout from the Claude Code v2.x screenshots.
 //
-//	╭────────────────────────────────────╮   row topRow
-//	│ ❯ <input>                           │   row topRow+1
-//	╰────────────────────────────────────╯   row topRow+2
-//	  esc to cancel · tab to complete · ↵ to send   row topRow+3
+//	> <input>                                   row topRow
+//	  manual mode on · ? for shortcuts · ↵ for agents   row topRow+1
+//	                                          ⊙max · /effort   row topRow+2
 func (t *TUI) drawInputBox(W, H int, inputBuf string, cursor int, streaming bool) {
-	const inputRows = 4
+	const inputRows = 3
 	topRow := H - inputRows + 1
 	if topRow < 1 {
 		topRow = 1
 	}
-	midRow := topRow + 1
-	botRow := topRow + 2
-	hintRow := topRow + 3
+	hintRow := topRow + 1
+	statusRow := topRow + 2
 
-	barLen := W - 2
-	if barLen < 0 {
-		barLen = 0
-	}
-	bar := repeat("─", barLen)
-	top := "╭" + bar + "╮"
-	bot := "╰" + bar + "╯"
-
-	prefix := t.paint(modeColor(t.mode), "❯") + " "
-	innerW := W - 6 // "│ " + "❯ " + content + " │"
+	// Prompt line: "> <input>"
+	prompt := t.paint(modeColor(t.mode), "❯")
+	innerW := W - 4
 	if innerW < 4 {
 		innerW = 4
 	}
@@ -1084,27 +1484,39 @@ func (t *TUI) drawInputBox(W, H int, inputBuf string, cursor int, streaming bool
 	if visibleWidth(content) > innerW {
 		content = truncVisible(content, innerW)
 	}
-	mid := "│ " + prefix + content + " │"
-	mid = fit(mid, W)
+	line := prompt + " " + content
+	if visibleWidth(line) > W {
+		line = truncVisible(line, W)
+	}
 
+	// Hint row (left side)
 	hint := t.paint("dim", "  "+t.tstr("input.hint"))
 	if streaming {
 		hint = t.paint("dim", "  "+t.tstr("input.hint.streaming"))
 	}
 
+	// Status row (right side, model-style)
+	effort := t.paint("dim", "⊙") + "max"
+	if t.mode == ModeYOLO {
+		effort = t.paint("yellow", "⊙") + "yolo"
+	}
+	rightStatus := effort + t.paint("dim", " · /effort")
+	// Right-align
+	pad := W - visibleWidth(rightStatus) - 2
+	if pad < 0 {
+		pad = 0
+	}
+	statusPadded := strings.Repeat(" ", pad) + rightStatus
+
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", topRow))
-	b.WriteString(top)
-	b.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", midRow))
-	b.WriteString(mid)
-	b.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", botRow))
-	b.WriteString(bot)
+	b.WriteString(line)
 	b.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", hintRow))
 	b.WriteString(hint)
+	b.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", statusRow))
+	b.WriteString(statusPadded)
 
-	// Position the cursor on the content line, just after the typed prefix.
-	// Count display width up to the cursor rune (not byte) so CJK input places
-	// the caret correctly.
+	// Position the cursor on the input line, just after the typed prefix.
 	runes := []rune(inputBuf)
 	if cursor > len(runes) {
 		cursor = len(runes)
@@ -1113,20 +1525,102 @@ func (t *TUI) drawInputBox(W, H int, inputBuf string, cursor int, streaming bool
 	if vw > innerW {
 		vw = innerW
 	}
-	col := 5 + vw // "│ "(2) + "❯ "(2) → content starts at column 5
+	col := 2 + vw // "❯ "(2) → content starts at column 2
 	if col > W {
 		col = W
 	}
 	if col < 1 {
 		col = 1
 	}
-	b.WriteString(fmt.Sprintf("\x1b[%d;%dH", midRow, col))
+	b.WriteString(fmt.Sprintf("\x1b[%d;%dH", topRow, col))
 	if streaming {
 		b.WriteString("\x1b[?25l")
 	} else {
 		b.WriteString("\x1b[?25h")
 	}
 	fmt.Fprint(t.writer, b.String())
+}
+
+// ── Scrolling support ───────────────────────────────────────────
+
+// convHeight returns the number of rows available for conversation content.
+func (t *TUI) convHeight() int {
+	return t.height - 7 // header(1) + hrule(1) + hrule(1) + status(1) + perm(2) + input(4) — rough min
+}
+
+// totalConvLines counts all display lines for the current conversation.
+func (t *TUI) totalConvLines(msgs []Message, streaming bool, streamContent string, width int) int {
+	return len(t.conversationLines(msgs, streaming, streamContent, width))
+}
+
+// scrollPgUp scrolls one page up (or to top).
+func (t *TUI) scrollPgUp() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	bodyH := t.convHeight()
+	if bodyH < 1 {
+		bodyH = 10
+	}
+	t.scrollOffset += bodyH
+	if t.welcomeVisible {
+		t.welcomeVisible = false
+	}
+	t.scheduleRender()
+}
+
+// scrollPgDn scrolls one page down (or to bottom / auto-follow).
+func (t *TUI) scrollPgDn() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	bodyH := t.convHeight()
+	if bodyH < 1 {
+		bodyH = 10
+	}
+	t.scrollOffset -= bodyH
+	if t.scrollOffset < 0 {
+		t.scrollOffset = 0
+	}
+	t.scheduleRender()
+}
+
+// scrollToTop jumps to the oldest conversation lines.
+func (t *TUI) scrollToTop() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	msgs := append([]Message{}, t.messages...)
+	total := len(t.conversationLines(msgs, t.streaming, t.streamBuf.String(), t.width))
+	bodyH := t.convHeight()
+	if total > bodyH {
+		t.scrollOffset = total - bodyH
+	}
+	t.scheduleRender()
+}
+
+// scrollToBottom resumes auto-follow (scroll to latest content).
+func (t *TUI) scrollToBottom() {
+	t.mu.Lock()
+	t.scrollOffset = 0
+	t.mu.Unlock()
+	t.scheduleRender()
+}
+
+// scrollUpSmall moves up a few lines.
+func (t *TUI) scrollUpSmall() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.scrollOffset += 3
+	t.scheduleRender()
+}
+
+// scrollDownSmall moves down a few lines.
+func (t *TUI) scrollDownSmall() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.scrollOffset -= 3
+	if t.scrollOffset < 0 {
+		t.scrollOffset = 0
+	}
+	t.scheduleRender()
 }
 
 // ── Line mode (fallback) ─────────────────────────────────────────
@@ -1164,7 +1658,14 @@ func (t *TUI) runLine() error {
 			t.streamBuf.Reset()
 			t.turnStart = time.Now()
 			t.mu.Unlock()
-			go t.callback.OnSend(text)
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.add(RoleError, fmt.Sprintf("内部错误: %v", r))
+					}
+				}()
+				t.callback.OnSend(text)
+			}()
 			t.drainStream()
 		}
 	}
@@ -1174,11 +1675,11 @@ func (t *TUI) runLine() error {
 func (t *TUI) linePrompt() string {
 	switch t.mode {
 	case ModePlan:
-		return "plan ❯ "
+		return "plan ⏣ "
 	case ModeYOLO:
-		return "yolo ❯ "
+		return "yolo ⏣ "
 	default:
-		return "❯ "
+		return "⏣ "
 	}
 }
 
@@ -1274,7 +1775,11 @@ func (t *TUI) printMessage(m Message) {
 	case RoleError:
 		fmt.Fprintf(t.writer, "  × %s\n\n", m.Content)
 	case RoleTool:
-		fmt.Fprintf(t.writer, "  » %s %s\n", m.Tool, truncate(m.ToolArgs, 60))
+		toolArgs := m.ToolArgs
+		if toolArgs == "{}" || strings.TrimSpace(toolArgs) == "" {
+			toolArgs = ""
+		}
+		fmt.Fprintf(t.writer, "  » %s %s\n", m.Tool, truncate(toolArgs, 60))
 		if m.Content != "" {
 			for _, l := range strings.Split(m.Content, "\n") {
 				fmt.Fprintf(t.writer, "    %s\n", l)
@@ -1378,8 +1883,24 @@ func (t *TUI) handleSlash(text string) {
 		for _, d := range slashDefs {
 			b.WriteString(fmt.Sprintf("  %-14s %s\n", d.Name, t.tstr(d.Key)))
 		}
+
+		// Append user-defined slash commands (.icode/commands/*.md) so
+		// `/help` reflects everything the current session will accept.
+		if custom := slashcmd.Load(slashcmd.DefaultDirs()...).List(); len(custom) > 0 {
+			b.WriteString("\n自定义命令:\n")
+			for _, c := range custom {
+				hint := c.ArgumentHint
+				if hint != "" {
+					hint = " " + hint
+				}
+				b.WriteString(fmt.Sprintf("  %-14s %s\n", c.Name+hint, c.Description))
+			}
+		}
+
+		b.WriteString("\n特殊语法:\n")
+		b.WriteString("  # <内容>          追加到 ~/.icode/CLAUDE.md\n")
+		b.WriteString("  ! <shell>         运行 shell 命令\n")
 		b.WriteString("\n" + t.tstr("sc.title") + ":\n")
-		b.WriteString("  !<command>       " + t.tstr("sc.shell") + "\n")
 		b.WriteString("  Ctrl+C           " + t.tstr("sc.ctrlc") + "\n")
 		b.WriteString("  Ctrl+L           " + t.tstr("sc.ctrll") + "\n")
 		b.WriteString("  Ctrl+P / Ctrl+N  " + t.tstr("sc.history") + "\n")
@@ -1390,10 +1911,19 @@ func (t *TUI) handleSlash(text string) {
 		t.add(RoleSystem, "Goodbye!")
 		t.running = false
 
+	case "/expand":
+		t.toolFolded = !t.toolFolded
+		if t.toolFolded {
+			t.add(RoleSystem, "工具输出已折叠（只显示前 8 行），再运行 /expand 展开全部")
+		} else {
+			t.add(RoleSystem, "工具输出已全部展开")
+		}
+
 	case "/model":
 		if len(args) > 0 {
 			t.model = args[0]
-			t.add(RoleSystem, "Model → "+args[0])
+			t.notice("Model → " + args[0])
+			t.add(RoleSystem, t.tstr("mode.set")+" → "+args[0])
 		}
 
 	case "/mode":
@@ -1433,6 +1963,98 @@ func (t *TUI) handleSlash(text string) {
 	case "/diff":
 		t.showGitDiff()
 
+	case "/rewind":
+		n := 1
+		if len(args) > 0 {
+			fmt.Sscanf(args[0], "%d", &n)
+		}
+		if n <= 0 {
+			t.add(RoleSystem, "用法: /rewind [N]  — 回滚前 N 步工具调用")
+			break
+		}
+		sessionID := ""
+		if t.callback != nil {
+			sessionID = t.callback.SessionID()
+		}
+		if sessionID == "" {
+			t.add(RoleSystem, "没有活跃会话。")
+			break
+		}
+		store, err := checkpoint.GetOrOpen(sessionID)
+		if err != nil {
+			t.add(RoleError, "打开检查点失败: "+err.Error())
+			break
+		}
+		files, err := store.Rewind(context.Background(), n)
+		if err != nil {
+			t.add(RoleError, "回滚失败: "+err.Error())
+			break
+		}
+		msg := fmt.Sprintf("⏪ 已回滚 %d 步。影响文件:\n", n)
+		for _, f := range files {
+			msg += "  " + f + "\n"
+		}
+		t.add(RoleSystem, msg)
+
+	case "/todo":
+		var b strings.Builder
+		sessionID := ""
+		if t.callback != nil {
+			if p, a, d, total := t.callback.TodoCounts(); total > 0 {
+				fmt.Fprintf(&b, "📋 待办 (%d 待处理 · %d 进行中 · %d 完成)\n\n", p, a, d)
+				b.WriteString("（详情可通过 `todo_write` 工具查看 — 当前只在状态栏显示计数）\n")
+			} else {
+				b.WriteString("当前会话没有待办事项。让模型执行任务时会自动创建。\n")
+			}
+		}
+		_ = sessionID
+		t.add(RoleSystem, b.String())
+
+	case "/init":
+		cwd, err := os.Getwd()
+		if err != nil { t.add(RoleError, err.Error()); break }
+		if _, err := os.Stat(filepath.Join(cwd, "ICODE.md")); err == nil {
+			t.add(RoleSystem, "ICODE.md 已存在")
+			break
+		}
+		_ = os.WriteFile(filepath.Join(cwd, "ICODE.md"), []byte("# Project Context\n\nEdit this file.\n"), 0o644)
+		t.add(RoleSystem, "✓ ICODE.md 已生成")
+
+	case "/agents":
+		v := agent.Load(agent.AgentDefaultDirs()...)
+		v.RegisterDefaults()
+		var a strings.Builder
+		a.WriteString("子 agent:\n")
+		for _, d := range v.List() { a.WriteString(fmt.Sprintf("  %s — %s\n", d.Name, d.Description)) }
+		t.add(RoleSystem, a.String())
+
+	case "/mcp":
+		cfg, err := config.Load()
+		if err != nil { t.add(RoleSystem, err.Error()); break }
+		var a strings.Builder
+		a.WriteString("MCP 服务器:\n")
+		for _, s := range cfg.MCP { a.WriteString(fmt.Sprintf("  %s: %s\n", s.Name, s.Command)) }
+		if a.Len() < 12 { a.WriteString("  未配置\n在 ~/.icode/mcp.json 中添加。\n") }
+		t.add(RoleSystem, a.String())
+
+	case "/hooks":
+		home, _ := os.UserHomeDir()
+		path := filepath.Join(home, ".icode", "hooks.yaml")
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			permission.GenerateHooks(path)
+			t.add(RoleSystem, "✓ "+path)
+		} else {
+			data, _ := os.ReadFile(path)
+			t.add(RoleSystem, fmt.Sprintf("📄 %s\n\n```yaml\n%s\n```", path, string(data)))
+		}
+
+	case "/status":
+		if t.callback != nil {
+			t.add(RoleSystem, t.callback.OnStatus())
+		} else {
+			t.add(RoleSystem, "引擎未初始化。")
+		}
+
 	case "/cost":
 		info := fmt.Sprintf("Tokens: %d prompt + %d completion = %d total",
 			t.promptTokens, t.completionTokens, t.promptTokens+t.completionTokens)
@@ -1451,8 +2073,15 @@ func (t *TUI) handleSlash(text string) {
 		} else {
 			t.add(RoleSystem, "当前 Provider: "+t.provider+"\n用法: /provider <name>")
 		}
+case "/multiline":
+		t.multiline = !t.multiline
+		if t.multiline {
+			t.add(RoleSystem, "[Multiline ON] Enter=newline, Alt+Enter=send")
+		} else {
+			t.add(RoleSystem, "[Multiline OFF]")
+		}
 
-	case "/keys":
+
 		cfg, err := config.Load()
 		if err != nil {
 			t.add(RoleSystem, "无法读取配置: "+err.Error())
@@ -1501,8 +2130,9 @@ func (t *TUI) handleSlash(text string) {
 				syntax = "off"
 			}
 		}
-		t.add(RoleSystem, fmt.Sprintf("当前设置：\n  Model:    %s\n  Provider: %s\n  Mode:     %s\n  Language: %s\n  Theme:    %s\n  Diff:     %s\n  Syntax:   %s\n\n用 `icode config <key> <value>` 修改，或 `/lang` `/theme` 即时切换。",
-			t.model, t.provider, t.mode, lang, theme, diff, syntax))
+		t.add(RoleSystem, fmt.Sprintf("当前设置：\n  Model:     %s\n  Provider:  %s\n  Mode:      %s\n  Language:  %s\n  Theme:     %s\n  Diff:      %s\n  Security:  %s\n  Syntax:    %s\n\n用 `icode config <key> <value>` 修改，或 `/lang` `/theme`  `/security` 即时切换。",
+			t.model, t.provider, t.mode, lang, theme, diff,
+			permission.SecurityLabel(config.SecurityLevel(t.securityLevel)), syntax))
 
 	case "/history":
 		if len(t.history) == 0 {
@@ -1543,6 +2173,72 @@ func (t *TUI) handleSlash(text string) {
 			t.add(RoleSystem, t.tstr("lang.usage"))
 		}
 
+	case "/summarize":
+		if len(t.messages) == 0 {
+			t.add(RoleSystem, t.tstr("cmd.summarize")+": 没有对话内容可总结。")
+			return
+		}
+		var b strings.Builder
+		b.WriteString("## 对话总结\n\n")
+		msgCount := 0
+		for _, m := range t.messages {
+			if m.Role == RoleUser || m.Role == RoleAssistant {
+				msgCount++
+			}
+		}
+		b.WriteString(fmt.Sprintf("共 %d 条消息，模型: %s，提供商: %s，模式: %s\n\n", msgCount, t.model, t.provider, t.mode))
+		if t.promptTokens > 0 || t.completionTokens > 0 {
+			b.WriteString(fmt.Sprintf("Token: %d 输入 + %d 输出 = %d 总计", t.promptTokens, t.completionTokens, t.promptTokens+t.completionTokens))
+			if t.cost != "" {
+				b.WriteString(" · 费用: " + t.cost)
+			}
+			if t.cacheHitRate > 0 {
+				b.WriteString(fmt.Sprintf(" · 缓存: %.0f%%", t.cacheHitRate*100))
+			}
+			b.WriteString("\n\n")
+		}
+
+		// List key topics from user messages
+		b.WriteString("### 用户提问\n\n")
+		for _, m := range t.messages {
+			if m.Role == RoleUser {
+				trunc := m.Content
+				if len([]rune(trunc)) > 120 {
+					trunc = string([]rune(trunc)[:120]) + "…"
+				}
+				b.WriteString(fmt.Sprintf("- %s\n", trunc))
+			}
+		}
+		t.add(RoleSystem, b.String())
+
+	case "/review":
+		t.add(RoleSystem, "🔍 审查模式已启用。请描述你想审查的代码或文件路径，我将分析代码质量、安全性和潜在问题。")
+
+	case "/security":
+		if len(args) == 0 {
+			t.add(RoleSystem, fmt.Sprintf(t.tstr("security.usage"),
+				permission.SecurityLabel(config.SecurityLevel(t.securityLevel))))
+			return
+		}
+		newLevel := strings.ToLower(args[0])
+		valid := map[string]config.SecurityLevel{
+			"local":        config.SecLocal,
+			"desensitize":  config.SecDesensitize,
+			"local-llm":    config.SecLocalLLM,
+			"foreign-llm":  config.SecForeignLLM,
+			"unrestricted": config.SecUnrestricted,
+		}
+		level, ok := valid[newLevel]
+		if !ok {
+			t.add(RoleSystem, fmt.Sprintf(t.tstr("security.usage"),
+				permission.SecurityLabel(config.SecurityLevel(t.securityLevel))))
+			return
+		}
+		t.securityLevel = newLevel
+		t.persistSetting(func(c *config.Config) { c.SecurityLevel = level })
+		t.add(RoleSystem, fmt.Sprintf(t.tstr("security.set"),
+			permission.SecurityLabel(level)))
+
 	case "/welcome":
 		t.mu.Lock()
 		empty := len(t.messages) == 0
@@ -1558,10 +2254,60 @@ func (t *TUI) handleSlash(text string) {
 		}
 
 	default:
+		// User-defined slash command? Look it up in .icode/commands/*.md
+		// (user + project scope) and expand it into a normal chat message.
+		if custom := t.tryCustomSlash(cmd, strings.Join(args, " ")); custom {
+			return
+		}
 		if t.callback != nil {
 			t.callback.OnSlashCommand(cmd, args)
 		}
 	}
+}
+
+// tryCustomSlash resolves `cmd` (e.g. "/changelog") against the user- and
+// project-scoped command registry loaded from .icode/commands/*.md. When a
+// match is found, its template is expanded and the result is submitted as a
+// regular user message. Returns true if a custom command handled the input.
+func (t *TUI) tryCustomSlash(cmd, argStr string) bool {
+	reg := slashcmd.Load(slashcmd.DefaultDirs()...)
+	c, ok := reg.Get(cmd)
+	if !ok {
+		return false
+	}
+	expanded, err := c.Expand(context.Background(), argStr)
+	if err != nil {
+		t.add(RoleError, fmt.Sprintf("展开 %s 失败: %v", cmd, err))
+		return true
+	}
+	if strings.TrimSpace(expanded) == "" {
+		t.add(RoleSystem, fmt.Sprintf("命令 %s 展开为空", cmd))
+		return true
+	}
+
+	// Feed the expanded text into the normal submit flow so it is displayed
+	// as a user message and streamed through the LLM. Bypass the leading
+	// prefix scan (! # /) that the raw submit() runs — the expanded body
+	// might legitimately start with any of those characters.
+	t.mu.Lock()
+	t.messages = append(t.messages, Message{Role: RoleUser, Content: fmt.Sprintf("(%s) %s", cmd, argStr)})
+	t.streaming = true
+	t.streamBuf.Reset()
+	t.turnStart = time.Now()
+	t.mu.Unlock()
+	if t.callback != nil {
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.add(RoleError, fmt.Sprintf("内部错误: %v", r))
+				}
+			}()
+			t.callback.OnSend(expanded)
+		}()
+	}
+	t.ensureAnim()
+	t.drainStream()
+	return true
 }
 
 // add appends a message and refreshes the screen.
@@ -1570,6 +2316,23 @@ func (t *TUI) add(role Role, content string) {
 }
 
 // ── Shell mode ───────────────────────────────────────────────────
+
+// appendMemory writes a note to the user memory file (~/.icode/CLAUDE.md)
+// via the context loader's helper. Invoked when the user submits input that
+// starts with `#`, mirroring Claude Code's quick-memory shortcut.
+func (t *TUI) appendMemory(text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		t.add(RoleSystem, "用法: # <要记录的内容>")
+		return
+	}
+	if err := projectcontext.AppendUserMemory(text); err != nil {
+		t.add(RoleError, "追加 memory 失败: "+err.Error())
+		return
+	}
+	path, _ := projectcontext.UserMemoryPath()
+	t.add(RoleSystem, fmt.Sprintf("✓ 已记录到 %s", path))
+}
 
 func (t *TUI) execShell(cmdStr string) {
 	cmdStr = strings.TrimSpace(cmdStr)
@@ -1676,25 +2439,28 @@ func (t *TUI) showGitDiff() {
 		t.add(RoleSystem, "No unstaged changes.")
 		return
 	}
-	t.AddToolMessage("git_diff", "", strings.TrimRight(string(output), "\n"))
+	t.AddToolMessage("git_diff", "", t.colorizeDiffStr(strings.TrimRight(string(output), "\n")))
 }
 
 // ── Helpers ──────────────────────────────────────────────────────
 
 // persistSetting loads config, applies fn, and writes it back to disk.
-// Errors are silently ignored — the UI setting still takes effect in-session.
+// Errors are reported via the UI rather than silently ignored.
 func (t *TUI) persistSetting(fn func(*config.Config)) {
 	cfg, err := config.Load()
 	if err != nil {
+		t.add(RoleError, "配置加载失败: "+err.Error())
 		return
 	}
 	fn(cfg)
-	_ = cfg.Save(config.DefaultPath())
+	if err := cfg.Save(config.DefaultPath()); err != nil {
+		t.add(RoleError, "配置保存失败: "+err.Error())
+	}
 }
 
 // updateSuggestions recomputes the autocomplete panel based on the current
 // input. It opens when the input is empty (showing all commands) or starts
-// with "/", and filters as the user types.
+// with "/" (showing commands) or contains "@" (showing file completions).
 func (t *TUI) updateSuggestions() {
 	if !t.rawMode || t.streaming {
 		t.acOpen = false
@@ -1731,8 +2497,153 @@ func (t *TUI) updateSuggestions() {
 		}
 		return
 	}
+	// @file completions — matches Claude Code's file-attachment autocomplete.
+	if idx := strings.LastIndex(buf, "@"); idx >= 0 {
+		prefix := buf[idx+1:] // text after the @
+		items := t.filesAutocomplete(prefix)
+		if len(items) > 0 {
+			t.acOpen = true
+			t.acItems = items
+			if t.acIdx >= len(items) {
+				t.acIdx = len(items) - 1
+			}
+			if t.acIdx < 0 {
+				t.acIdx = 0
+			}
+			return
+		}
+	}
 	t.acOpen = false
 	t.acItems = nil
+}
+
+// filesAutocomplete returns files and directories that match the given
+// prefix (text after the @ sign). Results are gitignore-aware: directories
+// named .git, node_modules, vendor, dist, target, release are excluded.
+func (t *TUI) filesAutocomplete(prefix string) []acItem {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil
+	}
+	// Determine the directory to search.
+	searchDir := cwd
+	if strings.Contains(prefix, "/") {
+		// User typed a sub-path: "src/foo" → search cwd/src/
+		rel := filepath.Dir(prefix)
+		searchDir = filepath.Join(cwd, rel)
+	}
+	entries, err := os.ReadDir(searchDir)
+	if err != nil {
+		return nil
+	}
+	var items []acItem
+	basePattern := strings.TrimPrefix(prefix, filepath.Dir(prefix)+"/")
+	if basePattern == filepath.Dir(prefix) {
+		basePattern = prefix
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if isIgnoredDir(name) {
+			continue
+		}
+		relPath := strings.TrimPrefix(filepath.Join(filepath.Dir(prefix), name), ".")
+		relPath = strings.TrimPrefix(relPath, "/")
+		if !strings.HasPrefix(strings.ToLower(name), strings.ToLower(basePattern)) {
+			continue
+		}
+		if e.IsDir() {
+			items = append(items, acItem{Name: relPath + "/", Desc: "directory"})
+		} else {
+			info, _ := e.Info()
+			size := ""
+			if info != nil {
+				size = formatFileSize(info.Size())
+			}
+			items = append(items, acItem{Name: relPath, Desc: size})
+		}
+		if len(items) >= 50 {
+			break
+		}
+	}
+	return items
+}
+
+// isIgnoredDir returns true for directories that should be hidden from
+// @file autocomplete (mirrors common .gitignore patterns).
+func isIgnoredDir(name string) bool {
+	switch name {
+	case ".git", "node_modules", "vendor", "dist", "target", "release",
+		"__pycache__", ".venv", ".next", "build", "out", ".icloud":
+		return true
+	}
+	return false
+}
+
+// formatFileSize renders a byte count into a human-readable string.
+func formatFileSize(n int64) string {
+	switch {
+	case n < 1024:
+		return fmt.Sprintf("%d B", n)
+	case n < 1024*1024:
+		return fmt.Sprintf("%.0f KB", float64(n)/1024)
+	default:
+		return fmt.Sprintf("%.1f MB", float64(n)/(1024*1024))
+	}
+}
+
+// expandFileRefs scans text for `@path/to/file` references (not preceded by
+// a word character) and replaces them with [file: path]\n<content>\n. This
+// lets users quickly attach file context in the TUI. For desktop/clients
+// that handle file attachment natively, this is a no-op fallback.
+func (t *TUI) expandFileRefs(text string) string {
+	var result strings.Builder
+	remaining := text
+	for {
+		idx := strings.Index(remaining, "@")
+		if idx < 0 || (idx > 0 && isWordChar(remaining[idx-1])) {
+			result.WriteString(remaining)
+			break
+		}
+		result.WriteString(remaining[:idx])
+		rest := remaining[idx+1:]
+
+		// Extract the path: everything until whitespace or end.
+		end := strings.IndexAny(rest, " \t\n")
+		path := rest
+		if end >= 0 {
+			path = rest[:end]
+			rest = rest[end:]
+		} else {
+			rest = ""
+		}
+		path = strings.TrimSpace(path)
+		if path == "" {
+			result.WriteString("@")
+			remaining = rest
+			continue
+		}
+		// Resolve relative to CWD
+		fullPath := path
+		if !filepath.IsAbs(path) {
+			if cwd, err := os.Getwd(); err == nil {
+				fullPath = filepath.Join(cwd, path)
+			}
+		}
+		data, err := os.ReadFile(fullPath)
+		if err != nil {
+			result.WriteString("@")
+			result.WriteString(path)
+			remaining = rest
+			continue
+		}
+		result.WriteString(fmt.Sprintf("[file: %s]\n%s\n", path, strings.TrimSpace(string(data))))
+		remaining = rest
+	}
+	return result.String()
+}
+
+func isWordChar(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' || b == '.'
 }
 
 // allSuggestions returns every slash command as an autocomplete entry.
@@ -1744,12 +2655,30 @@ func (t *TUI) allSuggestions() []acItem {
 	return items
 }
 
-// acceptSuggestion replaces the input with the highlighted command + a space.
+// acceptSuggestion replaces the input with the highlighted autocomplete
+// entry. For slash commands this inserts the command name. For @file refs
+// it replaces the "@prefix" with the file path and the file content.
 func (t *TUI) acceptSuggestion() {
 	if len(t.acItems) == 0 {
 		return
 	}
 	it := t.acItems[t.acIdx]
+
+	// If this is an @file autocomplete item (name starts with a path
+	// separator or "./"), replace the "@prefix" with the file path.
+	if strings.Contains(t.inputBuf, "@") && !strings.HasPrefix(it.Name, "/") {
+		idx := strings.LastIndex(t.inputBuf, "@")
+		path := strings.TrimPrefix(it.Name, "./")
+		// Replace the @prefix with the file path
+		t.inputBuf = t.inputBuf[:idx] + "@" + path + " "
+		t.cursor = len([]rune(t.inputBuf))
+		t.acOpen = false
+		t.updateSuggestions()
+		// When the user sends the message, the frontend will automatically
+		// read the @file reference and prepend its content.
+		return
+	}
+
 	t.inputBuf = it.Name + " "
 	t.cursor = len([]rune(t.inputBuf))
 	t.acOpen = false
@@ -1954,6 +2883,23 @@ func (t *TUI) CurrentModel() string { return t.model }
 // CurrentProvider returns the active provider name.
 func (t *TUI) CurrentProvider() string { return t.provider }
 
+// SetModels updates the available model list for Tab switching.
+func (t *TUI) SetModels(models []string) {
+	t.models = models
+	// Find current model index
+	for i, m := range models {
+		if m == t.model {
+			t.modelIdx = i
+			return
+		}
+	}
+}
+
+// notice sets a one-line flash message shown on the next render.
+func (t *TUI) notice(msg string) {
+	t.statusNotice = " " + t.paint("green", "✓") + " " + msg
+}
+
 // LoadSession replaces the visible message list (used by /resume).
 func (t *TUI) LoadSession(msgs []Message) {
 	t.mu.Lock()
@@ -1988,13 +2934,13 @@ func (t *TUI) PromptPermission(prompt string) permission.Decision {
 			return permission.DecisionDeny
 		}
 		switch r {
-		case 'y', 'Y', '\r', '\n':
+		case '1', 'y', 'Y', '\r', '\n':
 			t.clearPerm()
 			return permission.DecisionAllow
-		case 'a', 'A':
+		case '2', 'a', 'A':
 			t.clearPerm()
 			return permission.DecisionAllowAll
-		case 'n', 'N', 0x03: // 'n' or Ctrl+C → deny
+		case '3', 'n', 'N', 0x03: // '3', 'n', or Ctrl+C → deny
 			t.clearPerm()
 			return permission.DecisionDeny
 		}
@@ -2009,3 +2955,52 @@ func (t *TUI) clearPerm() {
 	t.mu.Unlock()
 	t.render()
 }
+
+// termSize returns the current terminal dimensions, trying both stdin and
+// stdout handles. On Windows, GetConsoleScreenBufferInfo requires an output
+// handle; term.GetSize is called with stdin, and if that fails, stdout.
+func (t *TUI) termSize() (w, h int, ok bool) {
+	for _, fd := range []int{int(os.Stdin.Fd()), int(os.Stdout.Fd())} {
+		if w, h, err := term.GetSize(fd); err == nil && w > 0 && h > 0 {
+			return w, h, true
+		}
+	}
+	return 0, 0, false
+}
+
+// resizeTerminal requests the terminal to resize to a comfortable size for
+// the iCode TUI. Uses two approaches:
+//
+//  1. ANSI escape \x1b[8;H;Wt — supported by Windows Terminal, xterm, iTerm2,
+//     GNOME Terminal, etc. Silently ignored by terminals that don't support it.
+//  2. On Windows, a fallback using SetConsoleScreenBufferInfo / SetConsoleWindowInfo
+//     for legacy conhost / cmd.exe (see resize_windows.go).
+//
+// The function does nothing if the terminal is already at least 120×36.
+func (t *TUI) resizeTerminal() {
+	w, h, ok := t.termSize()
+	if !ok {
+		return
+	}
+
+	// Target: at least 120 columns × 36 rows — minimum comfortable for a TUI.
+	const wantW, wantH = 120, 36
+	if w >= wantW && h >= wantH {
+		return // already big enough
+	}
+	if w < wantW {
+		w = wantW
+	}
+	if h < wantH {
+		h = wantH
+	}
+
+	// 1. ANSI escape (works in most modern terminals).
+	fmt.Fprintf(t.writer, "\x1b[8;%d;%dt", h, w)
+
+	// 2. Windows API fallback (in resize_windows.go, compiled only on Windows).
+	resizeTerminalWindows(w, h)
+}
+
+// resizeTerminalWindows is defined in resize_windows.go (Windows) and
+// resize_stub.go (all other platforms).

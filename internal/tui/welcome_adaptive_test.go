@@ -24,42 +24,44 @@ func renderAt(w, h int) string {
 	return buf.String()
 }
 
-// TestWelcomeAdaptive guards the height-adaptive welcome screen: the ASCII
-// logo must render whole or not at all — it must never be sliced in half on a
-// short terminal (the "top half missing" bug). It also verifies the full
-// banner shows on a roomy terminal and degrades gracefully when cramped.
+// TestWelcomeAdaptive guards the height-adaptive welcome screen: the Claude
+// Code-style two-column box must render whole or not at all — it must never be
+// sliced in half on a short terminal. It also verifies the full banner shows
+// on a roomy terminal and degrades gracefully when cramped.
 func TestWelcomeAdaptive(t *testing.T) {
-	logoTop := "   _    ___           __  " // first row of the big ASCII wordmark
-	logoMid := "   _  | | | | ___    | |_ " // an interior row of the wordmark
+	welcomeTop := "iCode v"        // first row of the Claude Code welcome box
+	welcomeTip := "Tips for getting started" // right-column header
 
-	// Roomy terminal: the whole logo must be present.
+	// Roomy terminal: the whole welcome box must be present.
 	roomy := renderAt(120, 40)
-	if !strings.Contains(roomy, logoTop) {
-		t.Fatalf("expected full logo on a roomy terminal:\n%s", roomy)
+	if !strings.Contains(roomy, welcomeTop) {
+		t.Fatalf("expected welcome box on a roomy terminal:\n%s", roomy)
 	}
-	if !strings.Contains(roomy, "Welcome to iCode") {
-		t.Fatalf("expected tagline on a roomy terminal:\n%s", roomy)
+	if !strings.Contains(roomy, welcomeTip) {
+		t.Fatalf("expected tips section on a roomy terminal:\n%s", roomy)
+	}
+	if !strings.Contains(roomy, "Welcome back!") {
+		t.Fatalf("expected 'Welcome back!' on a roomy terminal:\n%s", roomy)
 	}
 
 	// The banner must be anchored near the top (not vertically centred): on a
-	// 40-row terminal the first logo row must sit within the first ~12 lines,
-	// so it can never be pushed above the visible window. This is the direct
-	// guard against the "top half of the logo missing" regression.
+	// 40-row terminal the first welcome row must sit within the first ~12 lines,
+	// so it can never be pushed above the visible window.
 	for i, ln := range strings.Split(roomy, "\n") {
-		if strings.Contains(ln, logoTop) {
+		if strings.Contains(ln, welcomeTop) {
 			if i > 12 {
-				t.Fatalf("logo centred too low (row %d) instead of anchored near top:\n%s", i, roomy)
+				t.Fatalf("welcome anchored too low (row %d) instead of near top:\n%s", i, roomy)
 			}
 			break
 		}
 	}
 
-	// Cramped terminals of several heights: never a partial logo. Whenever an
-	// interior logo row appears, the top row must appear too (all-or-nothing).
+	// Cramped terminals of several heights: never a partial welcome. Whenever
+	// the tip section appears, the top row must appear too.
 	for _, sz := range []struct{ w, h int }{{120, 18}, {100, 16}, {90, 14}, {80, 12}, {80, 10}} {
 		out := renderAt(sz.w, sz.h)
-		if strings.Contains(out, logoMid) && !strings.Contains(out, logoTop) {
-			t.Fatalf("logo sliced in half at %dx%d (interior row without top):\n%s", sz.w, sz.h, out)
+		if strings.Contains(out, welcomeTip) && !strings.Contains(out, welcomeTop) {
+			t.Fatalf("welcome sliced in half at %dx%d (tip without top):\n%s", sz.w, sz.h, out)
 		}
 	}
 }

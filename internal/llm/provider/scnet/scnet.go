@@ -18,17 +18,9 @@ const (
 )
 
 func New(apiKey, apiBase string) types.Provider {
-	if apiBase == "" {
-		apiBase = DefaultBase
-	}
-
-	return openai_compat.New(openai_compat.Config{
-		Name:       ProviderName,
-		APIBase:    apiBase,
-		APIKey:     apiKey,
-		TimeoutSec: 180,
-		Models:     DefaultModels(),
-	})
+	return openai_compat.NewProvider(openai_compat.FactoryConfig{
+		Name: ProviderName, DefaultBase: DefaultBase, TimeoutSec: 180,
+	}, apiKey, apiBase, DefaultModels())
 }
 
 func DefaultModels() []types.ModelInfo {

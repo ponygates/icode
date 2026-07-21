@@ -22,18 +22,10 @@ const (
 
 // New creates a DeepSeek provider with prefix-cache support enabled.
 func New(apiKey, apiBase string) types.Provider {
-	if apiBase == "" {
-		apiBase = DefaultBase
-	}
-
-	return openai_compat.New(openai_compat.Config{
-		Name:         ProviderName,
-		APIBase:      apiBase,
-		APIKey:       apiKey,
-		TimeoutSec:   180,
-		CacheSupport: true,
-		Models:       DefaultModels(),
-	})
+	return openai_compat.NewProvider(openai_compat.FactoryConfig{
+		Name: ProviderName, DefaultBase: DefaultBase,
+		TimeoutSec: 180, CacheSupport: true,
+	}, apiKey, apiBase, DefaultModels())
 }
 
 // DefaultModels returns the current DeepSeek model list (July 2026).

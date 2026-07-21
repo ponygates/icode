@@ -37,6 +37,16 @@ func NewRegistry() *Registry {
 	r.Register(&GitDiffTool{})
 	r.Register(&GitCommitTool{})
 	r.Register(&GitStatusTool{})
+	r.Register(&SearchReplaceTool{})
+	r.Register(&WebSearchTool{})
+	// Built-in disk management tools (no AI model required)
+	r.Register(&DiskUsageTool{})
+	r.Register(&DiskCleanupTool{})
+	// Sub-agent delegation (Claude Code task tool parity)
+	// The runner is injected later via SetTaskRunner when the Engine wires it up.
+	r.Register(NewTaskTool(nil))
+	// Session-scoped scratchpad tool
+	r.Register(NewTodoWriteTool(nil))
 
 	return r
 }
@@ -44,6 +54,16 @@ func NewRegistry() *Registry {
 // Register adds a tool to the registry.
 func (r *Registry) Register(t types.Tool) {
 	r.tools[t.Def().Name] = t
+}
+
+// SetTaskRunner injects the sub-agent runner into the Task tool.
+// Called during Engine initialisation once the runner is available.
+func (r *Registry) SetTaskRunner(runner SubAgentRunner) {
+	if tt, ok := r.tools["task"]; ok {
+		if task, ok := tt.(*TaskTool); ok {
+			task.runner = runner
+		}
+	}
 }
 
 // Get returns a tool by name.
@@ -84,13 +104,17 @@ type BashTool struct{}
 func (t *BashTool) Def() types.ToolDef {
 	return types.ToolDef{
 		Name:        "bash",
-		Description: "Execute a shell command and return its output. The command runs in a sandboxed environment.",
+		Description: "Execute a shell command and return its output. The command runs in the project directory by default. Use 'cwd' to change the working directory for the command.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"command": map[string]any{
 					"type":        "string",
 					"description": "The shell command to execute",
+				},
+				"cwd": map[string]any{
+					"type":        "string",
+					"description": "Working directory for the command. Defaults to project root. Accepts absolute paths like C:\\Users\\... or relative paths.",
 				},
 			},
 			"required": []string{"command"},
@@ -103,6 +127,7 @@ func (t *BashTool) Execute(ctx context.Context, args string) (*types.ToolResult,
 	if err != nil {
 		return nil, err
 	}
+	workDir, _ := parseArg(args, "cwd")
 
 	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
@@ -112,6 +137,15 @@ func (t *BashTool) Execute(ctx context.Context, args string) (*types.ToolResult,
 		cmd = exec.CommandContext(ctx, "cmd", "/C", cmdStr)
 	} else {
 		cmd = exec.CommandContext(ctx, "sh", "-c", cmdStr)
+	}
+
+	// Apply working directory
+	if workDir != "" {
+		if absDir, err := filepath.Abs(workDir); err == nil {
+			if info, err := os.Stat(absDir); err == nil && info.IsDir() {
+				cmd.Dir = absDir
+			}
+		}
 	}
 
 	output, err := cmd.CombinedOutput()
@@ -360,15 +394,31 @@ func (t *GlobTool) Execute(ctx context.Context, args string) (*types.ToolResult,
 }
 
 // ============================================================================
-// EditTool — precise in-place string replacement (Claude Code style)
+// EditTool — precise in-place string replacement with MultiEdit support
 // ============================================================================
 
 type EditTool struct{}
 
+type editOp struct {
+	OldString  string `json:"old_string"`
+	NewString  string `json:"new_string"`
+	ReplaceAll bool   `json:"replace_all"`
+}
+
+type editInput struct {
+	FilePath string   `json:"file_path"`
+	OldStr   string   `json:"old_string"`
+	NewStr   string   `json:"new_string"`
+	Replace  bool     `json:"replace_all"`
+	Edits    []editOp `json:"edits"`
+}
+
 func (t *EditTool) Def() types.ToolDef {
 	return types.ToolDef{
-		Name:        "edit",
-		Description: "Edit a file by replacing an exact string match. Preserves indentation. Fails if old_string is not found or appears multiple times (use replace_all for multiple).",
+		Name: "edit",
+		Description: "Edit a file by replacing exact string matches. Preserves indentation. " +
+			"Two modes: (1) single edit via file_path+old_string+new_string, or " +
+			"(2) MultiEdit via file_path+edits[] for multiple replacements on one file.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -378,113 +428,208 @@ func (t *EditTool) Def() types.ToolDef {
 				},
 				"old_string": map[string]any{
 					"type":        "string",
-					"description": "The exact string to find and replace",
+					"description": "[single mode] Exact string to find and replace",
 				},
 				"new_string": map[string]any{
 					"type":        "string",
-					"description": "The replacement string",
+					"description": "[single mode] Replacement string",
 				},
 				"replace_all": map[string]any{
 					"type":        "boolean",
-					"description": "If true, replace all occurrences. Default: false (fails on multiple matches)",
+					"description": "[single mode] Replace all occurrences (default: false, fails on multiple matches)",
+				},
+				"edits": map[string]any{
+					"type":        "array",
+					"description": "[MultiEdit mode] Ordered list of replacements to apply to the same file",
+					"items": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"old_string": map[string]any{
+								"type":        "string",
+								"description": "Exact text to find",
+							},
+							"new_string": map[string]any{
+								"type":        "string",
+								"description": "Replacement text",
+							},
+							"replace_all": map[string]any{
+								"type":        "boolean",
+								"description": "Replace all occurrences of old_string",
+							},
+						},
+						"required": []string{"old_string", "new_string"},
+					},
 				},
 			},
-			"required": []string{"file_path", "old_string", "new_string"},
+			"oneOf": []any{
+				map[string]any{"required": []string{"file_path", "old_string", "new_string"}},
+				map[string]any{"required": []string{"file_path", "edits"}},
+			},
 		},
 	}
 }
 
 func (t *EditTool) Execute(ctx context.Context, args string) (*types.ToolResult, error) {
-	filePath, err := parseArg(args, "file_path")
-	if err != nil {
-		return nil, err
+	var in editInput
+	if err := json.Unmarshal([]byte(args), &in); err != nil {
+		return &types.ToolResult{
+			Success: false, Error: fmt.Sprintf("invalid args: %v", err),
+		}, nil
 	}
-	oldStr, err := parseArg(args, "old_string")
-	if err != nil {
-		return nil, err
-	}
-	newStr, err := parseArg(args, "new_string")
-	if err != nil {
-		return nil, err
-	}
-	replaceAll, _ := parseBoolArg(args, "replace_all")
-
-	// Read file
-	content, err := os.ReadFile(filePath)
-	if err != nil {
-		return &types.ToolResult{Success: false, Error: fmt.Sprintf("read file: %v", err)}, nil
+	if in.FilePath == "" {
+		return &types.ToolResult{Success: false, Error: "file_path is required"}, nil
 	}
 
+	content, err := os.ReadFile(in.FilePath)
+	if err != nil {
+		return &types.ToolResult{Success: false, Error: fmt.Sprintf("read %s: %v", in.FilePath, err)}, nil
+	}
 	text := string(content)
+	original := text
 
-	// Count occurrences
-	count := strings.Count(text, oldStr)
-	if count == 0 {
-		// Try to show context for debugging
-		return &types.ToolResult{
-			Success: false,
-			Error:   fmt.Sprintf("old_string not found in %s. Make sure the string matches exactly, including whitespace and indentation.", filePath),
-		}, nil
-	}
+	totalReplacements := 0
 
-	if count > 1 && !replaceAll {
-		return &types.ToolResult{
-			Success: false,
-			Error:   fmt.Sprintf("old_string appears %d times in %s. Provide more context to make it unique, or set replace_all=true.", count, filePath),
-		}, nil
-	}
-
-	// Perform replacement
-	var newText string
-	if replaceAll {
-		newText = strings.ReplaceAll(text, oldStr, newStr)
+	if len(in.Edits) > 0 {
+		// MultiEdit mode: apply edits sequentially
+		for _, ed := range in.Edits {
+			if ed.OldString == "" {
+				continue
+			}
+			c := strings.Count(text, ed.OldString)
+			if c == 0 {
+				// Let the model know which edit failed but keep partial progress
+				return &types.ToolResult{
+					Success: false,
+					Content: fmt.Sprintf("after %d replacements, failed on: old_string %q not found.",
+						totalReplacements, truncateStr(ed.OldString, 60)),
+				}, nil
+			}
+			if c > 1 && !ed.ReplaceAll {
+				return &types.ToolResult{
+					Success: false,
+					Content: fmt.Sprintf("after %d replacements: old_string %q appears %d times. Use replace_all.",
+						totalReplacements, truncateStr(ed.OldString, 60), c),
+				}, nil
+			}
+			if ed.ReplaceAll {
+				text = strings.ReplaceAll(text, ed.OldString, ed.NewString)
+			} else {
+				text = strings.Replace(text, ed.OldString, ed.NewString, 1)
+			}
+			totalReplacements++
+		}
 	} else {
-		newText = strings.Replace(text, oldStr, newStr, 1)
+		// Single edit mode (backward compatible)
+		if in.OldStr == "" {
+			return &types.ToolResult{Success: false, Error: "old_string is required"}, nil
+		}
+		c := strings.Count(text, in.OldStr)
+		if c == 0 {
+			return &types.ToolResult{
+				Success: false,
+				Error:   fmt.Sprintf("old_string not found in %s.", in.FilePath),
+			}, nil
+		}
+		if c > 1 && !in.Replace {
+			return &types.ToolResult{
+				Success: false,
+				Error:   fmt.Sprintf("old_string appears %d times. Use replace_all or add context.", c),
+			}, nil
+		}
+		if in.Replace {
+			text = strings.ReplaceAll(text, in.OldStr, in.NewStr)
+			totalReplacements = c
+		} else {
+			text = strings.Replace(text, in.OldStr, in.NewStr, 1)
+			totalReplacements = 1
+		}
 	}
 
-	// Write back
-	if err := os.WriteFile(filePath, []byte(newText), 0644); err != nil {
-		return &types.ToolResult{Success: false, Error: fmt.Sprintf("write file: %v", err)}, nil
+	if err := os.WriteFile(in.FilePath, []byte(text), 0644); err != nil {
+		return &types.ToolResult{Success: false, Error: fmt.Sprintf("write: %v", err)}, nil
 	}
 
-	// Generate diff summary
-	diffLines := generateDiffSummary(text, newText)
-
+	diffOut := unifiedDiff(in.FilePath, original, text)
 	return &types.ToolResult{
 		Success: true,
-		Content: fmt.Sprintf("Edited %s (%d replacement%s)\n%s",
-			filePath, count, pluralS(count), diffLines),
+		Content: fmt.Sprintf("Edited %s (%d replacements)\n%s", in.FilePath, totalReplacements, diffOut),
 	}, nil
 }
 
-func generateDiffSummary(old, new string) string {
-	oldLines := strings.Split(old, "\n")
-	newLines := strings.Split(new, "\n")
+// unifiedDiff produces a compact unified-diff-format string showing what
+// changed. Uses Myers diff internally (simplified inline implementation).
+func unifiedDiff(path, oldText, newText string) string {
+	oldLines := strings.Split(oldText, "\n")
+	newLines := strings.Split(newText, "\n")
 
-	var sb strings.Builder
-	maxLen := len(oldLines)
-	if len(newLines) > maxLen {
-		maxLen = len(newLines)
+	// Find changed regions
+	type hunk struct{ oldStart, newStart, oldCount, newCount int }
+	var hunks []hunk
+
+	i, j := 0, 0
+	for i < len(oldLines) && j < len(newLines) {
+		if oldLines[i] == newLines[j] {
+			i++
+			j++
+			continue
+		}
+		h := hunk{oldStart: i, newStart: j, oldCount: 0, newCount: 0}
+		for i < len(oldLines) && j < len(newLines) && oldLines[i] != newLines[j] {
+			h.oldCount++
+			h.newCount++
+			i++
+			j++
+		}
+		// Drain remaining when one side is exhausted
+		for i < len(oldLines) && (j >= len(newLines) || oldLines[i] != newLines[j]) {
+			h.oldCount++
+			i++
+		}
+		for j < len(newLines) && (i >= len(oldLines) || oldLines[i] != newLines[j]) {
+			h.newCount++
+			j++
+		}
+		if h.oldCount > 0 || h.newCount > 0 {
+			hunks = append(hunks, h)
+		}
+	}
+	// Remaining lines after the shorter side exhausted
+	if i < len(oldLines) || j < len(newLines) {
+		hunks = append(hunks, hunk{
+			oldStart: i, newStart: j,
+			oldCount: len(oldLines) - i,
+			newCount: len(newLines) - j,
+		})
 	}
 
-	for i := 0; i < maxLen; i++ {
-		var oldLine, newLine string
-		if i < len(oldLines) {
-			oldLine = oldLines[i]
-		}
-		if i < len(newLines) {
-			newLine = newLines[i]
-		}
-		if oldLine != newLine {
-			if oldLine != "" {
-				sb.WriteString(fmt.Sprintf("  - %s\n", oldLine))
-			}
-			if newLine != "" {
-				sb.WriteString(fmt.Sprintf("  + %s\n", newLine))
-			}
-		}
+	if len(hunks) == 0 {
+		return "(no changes)"
 	}
-	return sb.String()
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("--- %s\n+++ %s\n", path, path))
+	for _, h := range hunks {
+		if h.oldCount == 0 {
+			h.oldStart-- // context before insertion
+		}
+		fmt.Fprintf(&b, "@@ -%d,%d +%d,%d @@\n",
+			h.oldStart+1, h.oldCount,
+			h.newStart+1, h.newCount)
+
+		o, n := h.oldStart, h.newStart
+		for k := 0; k < h.oldCount || k < h.newCount; k++ {
+			switch {
+			case k < h.oldCount && k < h.newCount:
+				b.WriteString(fmt.Sprintf("-%s\n+%s\n", oldLines[o+k], newLines[n+k]))
+			case k < h.oldCount:
+				b.WriteString(fmt.Sprintf("-%s\n", oldLines[o+k]))
+			case k < h.newCount:
+				b.WriteString(fmt.Sprintf("+%s\n", newLines[n+k]))
+			}
+		}
+		_ = n
+	}
+	return b.String()
 }
 
 func pluralS(n int) string {
@@ -492,6 +637,13 @@ func pluralS(n int) string {
 		return ""
 	}
 	return "s"
+}
+
+func truncateStr(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }
 
 func parseBoolArg(args, key string) (bool, error) {

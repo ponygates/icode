@@ -25,17 +25,10 @@ const (
 
 // New creates an NVIDIA NIM provider (OpenAI-compatible, no prefix-cache API).
 func New(apiKey, apiBase string) types.Provider {
-	if apiBase == "" {
-		apiBase = DefaultBase
-	}
-	return openai_compat.New(openai_compat.Config{
-		Name:         ProviderName,
-		APIBase:      apiBase,
-		APIKey:       apiKey,
-		TimeoutSec:   180,
-		CacheSupport: false,
-		Models:       DefaultModels(),
-	})
+	return openai_compat.NewProvider(openai_compat.FactoryConfig{
+		Name: ProviderName, DefaultBase: DefaultBase,
+		TimeoutSec: 180, CacheSupport: false,
+	}, apiKey, apiBase, DefaultModels())
 }
 
 // freePlan is the pricing plan for every NIM free-endpoint model ($0).

@@ -1,78 +1,252 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   iCode Desktop — Reasonix-inspired Apple flat design system
+   
+   Design principles:
+   - No shadows. None. Not even subtle.
+   - Hairline borders (0.5px where supported)
+   - Generous whitespace
+   - Large titles (SF Pro / system font, 24px+)
+   - Subtle, low-contrast hover states
+   - Smooth theme transitions
+   ═══════════════════════════════════════════════════════════════════════ */
+
 :root {
-  --bg-primary: #1a1a2e;
-  --bg-secondary: #16213e;
-  --bg-tertiary: #0f3460;
-  --bg-hover: #1e3a5f;
-  --text-primary: #e8e8e8;
-  --text-secondary: #a0a0b0;
-  --text-muted: #666680;
-  --accent: #4fc3f7;
-  --accent-hover: #81d4fa;
-  --success: #81c784;
-  --warning: #ffb74d;
-  --error: #ef5350;
-  --border-color: #2a2a4a;
-  --border-radius: 8px;
-  --font-mono: 'Consolas', 'Monaco', 'Source Code Pro', monospace;
+  /* --- Spacing scale (4px grid) --- */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 20px;
+  --s6: 24px;
+  --s8: 32px;
+  --s12: 48px;
+
+  /* --- Typography scale --- */
+  --text-xs: 10px;
+  --text-sm: 11px;
+  --text-base: 13px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --text-2xl: 24px;
+  --text-3xl: 32px;
+
+  /* --- Radius scale --- */
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 20px;
+  --r-full: 999px;
+
+  /* --- Colors — Dark (default) --- */
+  --bg-primary: #0d1117;
+  --bg-secondary: #161b22;
+  --bg-tertiary: #21262d;
+  --bg-hover: rgba(177,186,196,0.08);
+  --bg-active: rgba(177,186,196,0.12);
+  --text-primary: #e6edf3;
+  --text-secondary: #8b949e;
+  --text-muted: #484f58;
+  --accent: #58a6ff;
+  --accent-soft: rgba(88,166,255,0.12);
+  --accent-hover: #79c0ff;
+  --success: #3fb950;
+  --success-soft: rgba(63,185,80,0.12);
+  --warning: #d2991d;
+  --warning-soft: rgba(210,153,29,0.12);
+  --error: #f85149;
+  --error-soft: rgba(248,81,73,0.12);
+  --border-color: rgba(177,186,196,0.15);
+  --border-strong: rgba(177,186,196,0.25);
+  --font-mono: 'Cascadia Code', 'Fira Code', 'JetBrains Mono', 'Consolas', 'Monaco', monospace;
+
+  /* --- No shadows (Reasonix principle) --- */
+  --shadow-none: none;
+
+  /* --- Transition presets --- */
+  --t-fast: 0.12s ease;
+  --t-normal: 0.18s ease;
+  --t-slow: 0.25s ease;
 }
 
-/* Light theme (Reasonix-style appearance toggle) */
+/* Light theme */
 :root[data-theme='light'] {
   --bg-primary: #ffffff;
-  --bg-secondary: #f5f6f8;
-  --bg-tertiary: #e9edf2;
-  --bg-hover: #eef1f5;
-  --text-primary: #1a1a2e;
-  --text-secondary: #4a4a5a;
-  --text-muted: #8a8a9a;
-  --accent: #0288d1;
-  --accent-hover: #039be5;
-  --success: #2e7d32;
-  --warning: #f57c00;
-  --error: #d32f2f;
-  --border-color: #e2e4e9;
+  --bg-secondary: #f5f5f7;
+  --bg-tertiary: #e8e8ed;
+  --bg-hover: rgba(0,0,0,0.04);
+  --bg-active: rgba(0,0,0,0.06);
+  --text-primary: #1d1d1f;
+  --text-secondary: #6e6e73;
+  --text-muted: #aeaeb2;
+  --accent: #0071e3;
+  --accent-soft: rgba(0,113,227,0.08);
+  --accent-hover: #0066cc;
+  --success: #248a3d;
+  --success-soft: rgba(36,138,61,0.08);
+  --warning: #b25000;
+  --warning-soft: rgba(178,80,0,0.08);
+  --error: #d70015;
+  --error-soft: rgba(215,0,21,0.08);
+  --border-color: rgba(0,0,0,0.08);
+  --border-strong: rgba(0,0,0,0.15);
 }
 
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-}
+/* --- Base --- */
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', sans-serif;
-  font-size: 13px;
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', 'Microsoft YaHei', 'PingFang SC', sans-serif;
+  font-size: var(--text-base);
   line-height: 1.6;
   overflow: hidden;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-::-webkit-scrollbar {
-  width: 6px;
+html { scroll-behavior: smooth; }
+
+/* --- Scrollbar — thin, minimal --- */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: var(--r-full); }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+button { font-family: inherit; cursor: pointer; }
+input, textarea { font-family: inherit; font-size: var(--text-base); }
+
+::selection { background: var(--accent-soft); color: var(--accent); }
+
+/* --- Focus — subtle ring --- */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 2px; }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Animations
+   ═══════════════════════════════════════════════════════════════════════ */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(2px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(0.97); }
+  to   { opacity: 1; transform: scale(1); }
+}
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position:  200% 0; }
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.3; }
+}
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
 }
 
-::-webkit-scrollbar-track {
-  background: transparent;
+/* ═══════════════════════════════════════════════════════════════════════
+   Utility classes
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* Card — hairline border, no shadow, generous padding */
+.card {
+  background: var(--bg-secondary);
+  border: 0.5px solid var(--border-color);
+  border-radius: var(--r-lg);
+  padding: var(--s5);
 }
 
-::-webkit-scrollbar-thumb {
-  background: #3a3a5a;
-  border-radius: 3px;
+/* Large Apple-style title */
+.page-title {
+  font-size: var(--text-2xl);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+  line-height: 1.2;
+}
+.page-subtitle {
+  font-size: var(--text-base);
+  color: var(--text-secondary);
+  font-weight: 400;
 }
 
-::-webkit-scrollbar-thumb:hover {
-  background: #4a4a6a;
+/* Interactive surface — scales on press/hover (no shadow) */
+.interactive {
+  transition: background var(--t-fast), transform var(--t-fast);
+}
+.interactive:hover { background: var(--bg-hover); }
+.interactive:active { transform: scale(0.98); background: var(--bg-active); }
+
+/* Navigation item */
+.nav-item {
+  display: flex; align-items: center; gap: var(--s2);
+  padding: var(--s2) var(--s3); border-radius: var(--r-sm);
+  font-size: var(--text-base); color: var(--text-secondary);
+  transition: all var(--t-fast); border: none; background: none;
+}
+.nav-item:hover  { background: var(--bg-hover); color: var(--text-primary); }
+.nav-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 500; }
+
+/* Message bubble — Reasonix: no shadow, hairline border, large radius */
+.msg-bubble {
+  background: var(--bg-secondary);
+  border: 0.5px solid var(--border-color);
+  border-radius: var(--r-lg);
+  animation: fadeIn var(--t-slow) ease-out;
 }
 
-button {
-  font-family: inherit;
+/* Action buttons — hidden until parent hover */
+.action-hidden { opacity: 0; transition: opacity var(--t-fast); }
+.msg-bubble:hover .action-hidden,
+.sidebar-item:hover .action-hidden { opacity: 1; }
+
+/* Sidebar item */
+.sidebar-item {
+  transition: background var(--t-fast), color var(--t-fast);
+  border-radius: var(--r-sm);
+}
+.sidebar-item:hover  { background: var(--bg-hover); }
+.sidebar-item.active  { background: var(--accent-soft); color: var(--accent); }
+
+/* Skeleton loading */
+.skeleton {
+  background: linear-gradient(90deg, var(--bg-tertiary) 25%, var(--bg-secondary) 50%, var(--bg-tertiary) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+  border-radius: var(--r-sm);
 }
 
-input, textarea {
-  font-family: inherit;
-  font-size: 13px;
+/* Toast notification — hairline border, minimal */
+.toast {
+  position: fixed; bottom: var(--s6); right: var(--s6); z-index: 3000;
+  padding: var(--s2) var(--s4); border-radius: var(--r-md);
+  background: var(--bg-secondary); border: 0.5px solid var(--border-color);
+  animation: slideUp var(--t-slow) ease-out;
+  font-size: var(--text-sm); color: var(--text-primary);
 }
 
-::selection {
-  background: var(--accent);
-  color: #000;
+/* Glass overlay for modals */
+.glass-overlay {
+  background: rgba(0,0,0,0.35);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+:root[data-theme='light'] .glass-overlay {
+  background: rgba(0,0,0,0.12);
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  html { scroll-behavior: auto; }
 }

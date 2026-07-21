@@ -40,6 +40,14 @@ type Config struct {
 	CacheSupport bool
 }
 
+// FactoryConfig holds per-provider static configuration used by NewProvider.
+type FactoryConfig struct {
+	Name         string
+	DefaultBase  string
+	TimeoutSec   int
+	CacheSupport bool
+}
+
 // New creates a new OpenAI-compatible provider.
 func New(cfg Config) *BaseProvider {
 	if cfg.TimeoutSec <= 0 {
@@ -56,6 +64,23 @@ func New(cfg Config) *BaseProvider {
 			Timeout: time.Duration(cfg.TimeoutSec) * time.Second,
 		},
 	}
+}
+
+// NewProvider creates a provider using factory config + runtime credentials.
+// DefaultBase is used when apiBase is empty, eliminating repetitive if-statements
+// in each concrete provider's New().
+func NewProvider(fc FactoryConfig, apiKey, apiBase string, models []types.ModelInfo) *BaseProvider {
+	if apiBase == "" {
+		apiBase = fc.DefaultBase
+	}
+	return New(Config{
+		Name:         fc.Name,
+		APIBase:      apiBase,
+		APIKey:       apiKey,
+		TimeoutSec:   fc.TimeoutSec,
+		CacheSupport: fc.CacheSupport,
+		Models:       models,
+	})
 }
 
 // Name returns the provider identifier.
@@ -130,6 +155,71 @@ func (p *BaseProvider) Health(ctx context.Context) error {
 }
 
 // ============================================================================
+// Retry / backoff for transient API failures
+// ============================================================================
+
+// retryableStatus returns true for HTTP status codes that warrant a retry.
+func retryableStatus(code int) bool {
+	switch code {
+	case http.StatusTooManyRequests, // 429
+		http.StatusServiceUnavailable,          // 503
+		http.StatusBadGateway,                  // 502
+		http.StatusGatewayTimeout:              // 504
+		return true
+	}
+	return false
+}
+
+// doRequestWithRetry executes an HTTP request with exponential backoff.
+// It retries on transient network errors and retryable HTTP status codes
+// (429, 502, 503, 504) with up to maxRetries attempts.
+func (p *BaseProvider) doRequestWithRetry(ctx context.Context, httpReq *http.Request, maxRetries int) (*http.Response, error) {
+	backoff := 100 * time.Millisecond
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		// Clone the request body for each retry (body can only be read once).
+		var bodyReader io.Reader
+		if httpReq.Body != nil {
+			bodyBytes, _ := io.ReadAll(httpReq.Body)
+			httpReq.Body.Close()
+			bodyReader = bytes.NewReader(bodyBytes)
+			httpReq.Body = io.NopCloser(bodyReader)
+		}
+
+		resp, err := p.httpClient.Do(httpReq)
+		if err != nil {
+			// Transient network error — retry if we have attempts left.
+			if attempt < maxRetries {
+				select {
+				case <-time.After(backoff):
+					backoff *= 2
+					continue
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			}
+			return nil, err
+		}
+
+		// Retry on rate-limit / server-error status codes.
+		if resp.StatusCode >= 400 && retryableStatus(resp.StatusCode) && attempt < maxRetries {
+			resp.Body.Close()
+			select {
+			case <-time.After(backoff):
+				backoff *= 2
+				continue
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+
+		return resp, nil
+	}
+
+	return nil, fmt.Errorf("max retries exceeded")
+}
+
+// ============================================================================
 // Chat — non-streaming completion
 // ============================================================================
 
@@ -146,7 +236,7 @@ func (p *BaseProvider) Chat(ctx context.Context, req types.ChatRequest) (*types.
 	p.setAuth(httpReq)
 	p.setHeaders(httpReq)
 
-	resp, err := p.httpClient.Do(httpReq)
+	resp, err := p.doRequestWithRetry(ctx, httpReq, 3)
 	if err != nil {
 		return nil, fmt.Errorf("chat request: %w", err)
 	}
@@ -177,7 +267,7 @@ func (p *BaseProvider) ChatStream(ctx context.Context, req types.ChatRequest) (<
 	p.setAuth(httpReq)
 	p.setHeaders(httpReq)
 
-	resp, err := p.httpClient.Do(httpReq)
+	resp, err := p.doRequestWithRetry(ctx, httpReq, 3)
 	if err != nil {
 		return nil, fmt.Errorf("stream request: %w", err)
 	}
@@ -201,6 +291,7 @@ func (p *BaseProvider) readStream(body io.ReadCloser, ch chan types.StreamEvent)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 	toolCalls := make(map[int]*types.LiveToolCall)
+	eventsProduced := false
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -210,6 +301,7 @@ func (p *BaseProvider) readStream(body io.ReadCloser, ch chan types.StreamEvent)
 
 		data := strings.TrimPrefix(line, "data: ")
 		if data == "[DONE]" {
+			eventsProduced = true
 			ch <- types.StreamEvent{
 				Type: types.EventDone,
 				Meta: types.StreamMeta{FinishReason: "stop"},
@@ -222,8 +314,28 @@ func (p *BaseProvider) readStream(body io.ReadCloser, ch chan types.StreamEvent)
 			continue
 		}
 
+		// Handle usage-only chunk with no choices (e.g. some providers
+		// send usage in a final chunk separately from the last choice).
+		if len(chunk.Choices) == 0 && chunk.Usage != nil {
+			eventsProduced = true
+			ch <- types.StreamEvent{
+				Type: types.EventDone,
+				Meta: types.StreamMeta{
+					Usage: types.TokenUsage{
+						PromptTokens:     chunk.Usage.PromptTokens,
+						CompletionTokens: chunk.Usage.CompletionTokens,
+						TotalTokens:      chunk.Usage.TotalTokens,
+					},
+					FinishReason: "",
+					Model:        "",
+				},
+			}
+			continue
+		}
+
 		// Handle usage in final chunk
 		if chunk.Usage != nil {
+			eventsProduced = true
 			ch <- types.StreamEvent{
 				Type: types.EventDone,
 				Meta: types.StreamMeta{
@@ -233,7 +345,7 @@ func (p *BaseProvider) readStream(body io.ReadCloser, ch chan types.StreamEvent)
 						TotalTokens:      chunk.Usage.TotalTokens,
 					},
 					FinishReason: chunk.Choices[0].FinishReason,
-					Model:       chunk.Model,
+					Model:        chunk.Model,
 				},
 			}
 			return
@@ -269,21 +381,32 @@ func (p *BaseProvider) readStream(body io.ReadCloser, ch chan types.StreamEvent)
 				}
 				toolCalls[idx] = ltc
 				ch <- types.StreamEvent{
-					Type:    types.EventToolUse,
+					Type:     types.EventToolUse,
 					ToolCall: ltc,
 				}
 			}
 		}
 
 		if choice.FinishReason != "" {
+			eventsProduced = true
 			ch <- types.StreamEvent{
 				Type: types.EventDone,
 				Meta: types.StreamMeta{
 					FinishReason: choice.FinishReason,
-					Model:       chunk.Model,
+					Model:        chunk.Model,
 				},
 			}
 			return
+		}
+	}
+
+	// No events were produced — the provider returned a successful HTTP
+	// response but NO valid SSE data. This typically means the API key is
+	// missing or invalid, and the provider returned a non-streaming body.
+	if !eventsProduced {
+		ch <- types.StreamEvent{
+			Type:    types.EventError,
+			Content: "No response from provider — please check your API key in Settings → Models",
 		}
 	}
 }
@@ -336,6 +459,10 @@ func (p *BaseProvider) buildRequestBody(req types.ChatRequest, stream bool) (io.
 		"model":    req.Model,
 		"messages": messages,
 		"stream":   stream,
+	}
+
+	if len(req.CacheBreakpoints) > 0 {
+		body["cache_breakpoints"] = req.CacheBreakpoints
 	}
 
 	if req.MaxTokens > 0 {
@@ -403,8 +530,8 @@ func (p *BaseProvider) parseChatResponse(body io.Reader) (*types.Message, error)
 
 	choice := resp.Choices[0]
 	msg := &types.Message{
-		Role:    types.RoleAssistant,
-		Content: choice.Message.Content,
+		Role:      types.RoleAssistant,
+		Content:   choice.Message.Content,
 		Timestamp: time.Now(),
 		Metadata: types.MessageMeta{
 			Model:        resp.Model,
@@ -442,10 +569,10 @@ type chatResponse struct {
 }
 
 type chatChoice struct {
-	Index        int            `json:"index"`
-	Message      chatMessage    `json:"message,omitempty"`
-	Delta        chatDelta      `json:"delta,omitempty"`
-	FinishReason string         `json:"finish_reason,omitempty"`
+	Index        int         `json:"index"`
+	Message      chatMessage `json:"message,omitempty"`
+	Delta        chatDelta   `json:"delta,omitempty"`
+	FinishReason string      `json:"finish_reason,omitempty"`
 }
 
 type chatMessage struct {

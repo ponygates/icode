@@ -19,8 +19,8 @@ import (
 )
 
 const (
-	ProviderName = "anthropic"
-	DefaultBase  = "https://api.anthropic.com/v1"
+	ProviderName     = "anthropic"
+	DefaultBase      = "https://api.anthropic.com/v1"
 	AnthropicVersion = "2023-06-01"
 )
 
@@ -49,9 +49,9 @@ func New(apiKey, apiBase string) *Provider {
 	}
 }
 
-func (p *Provider) Name() string                             { return ProviderName }
-func (p *Provider) ListModels() []types.ModelInfo            { return p.models }
-func (p *Provider) SupportsCache() bool                      { return true }
+func (p *Provider) Name() string                  { return ProviderName }
+func (p *Provider) ListModels() []types.ModelInfo { return p.models }
+func (p *Provider) SupportsCache() bool           { return true }
 
 // SetCredentials updates the API key and base URL at runtime. Empty values are
 // left unchanged. See openai_compat.BaseProvider for rationale.
@@ -165,11 +165,10 @@ func (p *Provider) readSSEStream(body io.ReadCloser, ch chan types.StreamEvent) 
 	scanner.Buffer(make([]byte, 0, 128*1024), 1024*1024)
 
 	var (
-		currentBlock   string   // current text block being accumulated
+		currentBlock   string // current text block being accumulated
 		toolName       string
 		toolArgs       strings.Builder
 		toolID         string
-		toolIndex      int
 		currentToolIdx int = -1
 		usage          *anthropicUsage
 	)
@@ -188,7 +187,23 @@ func (p *Provider) readSSEStream(body io.ReadCloser, ch chan types.StreamEvent) 
 				// Next data line has the delta
 			case "content_block_stop":
 				// Block complete
-				if currentBlock != "" && currentToolIdx < 0 {
+				if currentToolIdx >= 0 {
+					// Tool use block finished — emit with complete args
+					ch <- types.StreamEvent{
+						Type: types.EventToolUse,
+						ToolCall: &types.LiveToolCall{
+							Index:     currentToolIdx,
+							ID:        toolID,
+							Name:      toolName,
+							Arguments: toolArgs.String(),
+						},
+					}
+					currentToolIdx = -1
+					toolID = ""
+					toolName = ""
+					toolArgs.Reset()
+				}
+				if currentBlock != "" {
 					ch <- types.StreamEvent{
 						Type:    types.EventText,
 						Content: currentBlock,
@@ -294,9 +309,6 @@ func (p *Provider) readSSEStream(body io.ReadCloser, ch chan types.StreamEvent) 
 		}
 	}
 
-	_ = toolID
-	_ = toolArgs
-	_ = toolIndex
 }
 
 func parseUsage(u map[string]any) *anthropicUsage {
@@ -479,13 +491,13 @@ func (p *Provider) parseMessagesResponse(body io.Reader) (*types.Message, error)
 // ============================================================================
 
 type messagesResponse struct {
-	ID         string            `json:"id"`
-	Type       string            `json:"type"`
-	Role       string            `json:"role"`
-	Model      string            `json:"model"`
-	Content    []contentBlock    `json:"content"`
-	StopReason string            `json:"stop_reason"`
-	Usage      anthropicUsage    `json:"usage"`
+	ID         string         `json:"id"`
+	Type       string         `json:"type"`
+	Role       string         `json:"role"`
+	Model      string         `json:"model"`
+	Content    []contentBlock `json:"content"`
+	StopReason string         `json:"stop_reason"`
+	Usage      anthropicUsage `json:"usage"`
 }
 
 type contentBlock struct {
@@ -497,9 +509,9 @@ type contentBlock struct {
 }
 
 type anthropicUsage struct {
-	InputTokens        int `json:"input_tokens"`
-	OutputTokens       int `json:"output_tokens"`
-	CacheReadTokens    int `json:"cache_read_input_tokens"`
+	InputTokens         int `json:"input_tokens"`
+	OutputTokens        int `json:"output_tokens"`
+	CacheReadTokens     int `json:"cache_read_input_tokens"`
 	CacheCreationTokens int `json:"cache_creation_input_tokens"`
 }
 

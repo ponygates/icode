@@ -45,8 +45,8 @@ func TestClaudeStyleRender(t *testing.T) {
 	if !strings.Contains(out, "$0.0123") {
 		t.Fatalf("expected cost in status bar:\n%s", out)
 	}
-	if !strings.Contains(out, "╭") || !strings.Contains(out, "╰") {
-		t.Fatalf("expected bordered input box (╭/╰) in output:\n%s", out)
+	if !strings.Contains(out, "┌") || !strings.Contains(out, "└") {
+		t.Fatalf("expected bordered input box (┌/└) in output:\n%s", out)
 	}
 	if !strings.Contains(out, "●") {
 		t.Fatalf("expected model status dot '●' in output:\n%s", out)
@@ -69,8 +69,8 @@ func TestClaudeStyleRender(t *testing.T) {
 	}
 }
 
-// TestWelcomeScreen verifies the Claude Code-style startup banner: the big
-// ASCII iCode logo plus the model/dir info, and that dismissWelcome() hides it.
+// TestWelcomeScreen verifies the Claude Code-style startup banner: the
+// two-column box with "Welcome back!" on the left and tips on the right.
 func TestWelcomeScreen(t *testing.T) {
 	tui := New(Config{Model: "deepseek-v4-flash", Provider: "deepseek", Lang: "zh-CN", Theme: "dark"})
 	var buf bytes.Buffer
@@ -82,23 +82,26 @@ func TestWelcomeScreen(t *testing.T) {
 	tui.model = "deepseek-v4-flash"
 	tui.provider = "deepseek"
 	tui.welcomeVisible = true
-	tui.messages = nil // fresh session
+	tui.messages = nil
 
 	// Case 1: banner should be visible on a fresh session.
 	tui.render()
 	out := buf.String()
-	if !strings.Contains(out, "Welcome to iCode") {
-		t.Fatalf("expected 'Welcome to iCode' tagline in welcome screen:\n%s", out)
+	if !strings.Contains(out, "Welcome back!") {
+		t.Fatalf("expected 'Welcome back!' in welcome screen:\n%s", out)
 	}
-	// The wordmark uses plain ASCII (no block/box-drawing glyphs) so it
-	// renders crisply on Windows conhost and CJK terminals.
-	if !strings.Contains(out, "___") || !strings.Contains(out, `/ _ \`) {
-		t.Fatalf("expected plain ASCII iCode logo in welcome screen:\n%s", out)
+	if !strings.Contains(out, "iCode v") {
+		t.Fatalf("expected 'iCode v...' branding in welcome screen:\n%s", out)
 	}
-	// Info is shown as indented lines (Claude Code style), not a framed box,
-	// to avoid border-alignment artifacts.
-	if !strings.Contains(out, "Model:") || !strings.Contains(out, "cwd:") {
-		t.Fatalf("expected model/cwd info in welcome screen:\n%s", out)
+	// Two-column layout: tips on the right, info on the left
+	if !strings.Contains(out, "Tips for getting started") {
+		t.Fatalf("expected tips section in welcome screen:\n%s", out)
+	}
+	if !strings.Contains(out, "What's new") {
+		t.Fatalf("expected 'what's new' section in welcome screen:\n%s", out)
+	}
+	if !strings.Contains(out, "deepseek-v4-flash") {
+		t.Fatalf("expected model name in welcome screen:\n%s", out)
 	}
 
 	// Case 2: dismiss should hide the banner.

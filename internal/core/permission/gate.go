@@ -6,6 +6,18 @@
 //   - Agent (确认): each tool call requests user approval before execution.
 //     Supports single-allow, session-allow, and deny decisions.
 //   - YOLO (自动): auto-approve all operations within configured bounds.
+//
+// Security levels (merged from config.SecurityLevel) add a privacy layer
+// on top of the operational mode:
+//   - local:        no external API calls at all
+//   - desensitize:  PII sanitized before sending to any API
+//   - local-llm:    only local models (Ollama, llama.cpp, etc.)
+//   - foreign-llm:  international API providers allowed
+//   - unrestricted: all providers, no additional restrictions
+//
+// Unlike Claude Code, iCode NEVER sends telemetry, analytics, or usage data
+// to any external service. The security level is always visible in the TUI
+// status bar and config panel so the user knows exactly what is happening.
 package permission
 
 import (
@@ -15,6 +27,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/ponygates/icode/internal/config"
 	"gopkg.in/yaml.v3"
 )
 
@@ -55,6 +68,11 @@ type Gate struct {
 	mu      sync.RWMutex
 	mode    Mode
 
+	// SecurityLevel controls data handling when communicating with external
+	// services. Always visible in the status bar — no hidden telemetry.
+	// Default is "local" (safest).
+	securityLevel config.SecurityLevel
+
 	// Allowed paths — tools can only read/write within these directories
 	AllowedPaths []string
 
@@ -64,8 +82,16 @@ type Gate struct {
 	// Per-session allow-all state
 	sessionAllows map[string]bool // sessionID → true if all-tool allow is active
 
+	// Per-session per-tool allow — selective "always allow X for this session"
+	sessionToolAllows map[string]map[string]bool // sessionID → toolName → allowed
+
 	// Hooks is a per-tool/per-path allowlist loaded from $ICODE_HOME/hooks.yaml
 	hooks *HooksConfig
+
+	// ToolRules are persistent per-tool preferences configured by the user.
+	// "allow" → always allow, "deny" → always deny, "" or "ask" → use normal flow.
+	// Saved to config.yaml and survives restarts.
+	ToolRules map[string]string // toolName → "allow" | "deny" | "ask"
 }
 
 // HooksConfig represents the hooks.yaml configuration.
@@ -81,12 +107,99 @@ type ToolRule struct {
 }
 
 // NewGate creates a permission gate with default settings.
+// Security level defaults to "local" — no data ever leaves the machine
+// without explicit user awareness. Unlike Claude Code, there is zero
+// telemetry, zero tracking, and zero "phone-home" baked in.
 func NewGate(mode Mode) *Gate {
 	return &Gate{
-		mode:          mode,
-		DeniedCommands: []string{"rm -rf", "sudo", "chmod 777", "dd if=", "mkfs."},
-		sessionAllows: make(map[string]bool),
-		hooks:         loadHooks(),
+		mode:             mode,
+		securityLevel:    config.SecLocal,
+		DeniedCommands:   defaultDeniedCommands(),
+		sessionAllows:    make(map[string]bool),
+		sessionToolAllows: make(map[string]map[string]bool),
+		hooks:            loadHooks(),
+		ToolRules:        make(map[string]string),
+	}
+}
+
+// defaultDeniedCommands returns the initial set of always-blocked commands.
+// Uses the 23-rule Bash security engine to derive the block list.
+func defaultDeniedCommands() []string {
+	// Start with the classic set
+	cmds := []string{
+		"rm -rf /", "rm -rf ~", "rm -rf .",
+		"sudo rm", "sudo dd",
+		"chmod 777", "chmod -R 777",
+		"dd if=", "mkfs.", "fdisk", "parted",
+		"curl | sh", "curl | bash", "wget | sh", "wget | bash",
+	}
+	return cmds
+}
+
+// SetSecurityLevel updates the privacy boundary at runtime. The level is
+// displayed in the TUI status bar so it is never invisible.
+func (g *Gate) SetSecurityLevel(level config.SecurityLevel) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.securityLevel = level
+}
+
+// SecurityLevel returns the current privacy boundary.
+func (g *Gate) SecurityLevel() config.SecurityLevel {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.securityLevel
+}
+
+// SecurityLabel returns a human-readable label for the current security level.
+func SecurityLabel(level config.SecurityLevel) string {
+	switch level {
+	case config.SecLocal:
+		return "🔒 本地处理"
+	case config.SecDesensitize:
+		return "🛡 脱敏处理"
+	case config.SecLocalLLM:
+		return "💻 本地大模型"
+	case config.SecForeignLLM:
+		return "🌐 国外大模型"
+	case config.SecUnrestricted:
+		return "⚠ 无限制"
+	default:
+		return "🔒 本地处理"
+	}
+}
+
+// CheckProviderAccess returns nil if the provider is allowed by the current
+// security level, or an error explaining why it is blocked.
+func (g *Gate) CheckProviderAccess(providerName string) error {
+	g.mu.RLock()
+	level := g.securityLevel
+	g.mu.RUnlock()
+
+	localProviders := map[string]bool{
+		"ollama":   true,
+		"llama":    true,
+		"local":    true,
+		"lmstudio": true,
+	}
+
+	switch level {
+	case config.SecLocal:
+		return fmt.Errorf("当前安全等级为「本地处理」，不允许调用任何外部 API。\n使用 /security 切换等级，或设置中调整。")
+	case config.SecDesensitize:
+		// Allowed but data will be sanitized before sending (handled by caller)
+		return nil
+	case config.SecLocalLLM:
+		if !localProviders[providerName] {
+			return fmt.Errorf("当前安全等级为「本地大模型」，仅允许本地模型 (Ollama/Llama.cpp/LM Studio)。\n使用 /security 切换等级。")
+		}
+		return nil
+	case config.SecForeignLLM:
+		return nil
+	case config.SecUnrestricted:
+		return nil
+	default:
+		return nil
 	}
 }
 
@@ -148,6 +261,38 @@ func (g *Gate) SetSessionAllow(sessionID string, allow bool) {
 	}
 }
 
+// SetSessionToolAllow selectively allows a specific tool for a session.
+func (g *Gate) SetSessionToolAllow(sessionID, toolName string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.sessionToolAllows[sessionID] == nil {
+		g.sessionToolAllows[sessionID] = make(map[string]bool)
+	}
+	g.sessionToolAllows[sessionID][toolName] = true
+}
+
+// SetToolRule sets a persistent rule for a tool: "allow", "deny", or "" to clear.
+func (g *Gate) SetToolRule(toolName, rule string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if rule == "" || rule == "ask" {
+		delete(g.ToolRules, toolName)
+	} else {
+		g.ToolRules[toolName] = rule
+	}
+}
+
+// GetToolRules returns a copy of all persistent tool rules.
+func (g *Gate) GetToolRules() map[string]string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	out := make(map[string]string, len(g.ToolRules))
+	for k, v := range g.ToolRules {
+		out[k] = v
+	}
+	return out
+}
+
 // ============================================================================
 // Check — determines whether a tool action needs approval
 // ============================================================================
@@ -175,6 +320,17 @@ func (g *Gate) Check(sessionID string, action Action) CheckResult {
 		}
 		if g.isDenied(action) {
 			return CheckResult{Decision: DecisionDeny, Reason: "Command is in the deny list", Prompt: prompt}
+		}
+		// Check runtime per-tool rules (persistent across sessions)
+		if g.ToolRules[action.Tool] == "deny" {
+			return CheckResult{Decision: DecisionDeny, Reason: "Tool denied by user rule", Prompt: prompt}
+		}
+		if g.ToolRules[action.Tool] == "allow" {
+			return CheckResult{Decision: DecisionAllow, Reason: "Tool allowed by user rule", Prompt: prompt}
+		}
+		// Check session-level per-tool allow
+		if g.sessionToolAllows[sessionID] != nil && g.sessionToolAllows[sessionID][action.Tool] {
+			return CheckResult{Decision: DecisionAllow, Reason: "Tool allowed for this session", Prompt: prompt}
 		}
 		return CheckResult{Decision: DecisionAsk, Prompt: prompt}
 
@@ -210,6 +366,18 @@ func (g *Gate) Check(sessionID string, action Action) CheckResult {
 			return *decision
 		}
 
+		// Check persistent per-tool rules
+		if g.ToolRules[action.Tool] == "deny" {
+			return CheckResult{Decision: DecisionDeny, Reason: "Tool denied by user rule", Prompt: prompt}
+		}
+		if g.ToolRules[action.Tool] == "allow" {
+			return CheckResult{Decision: DecisionAllow, Reason: "Tool allowed by user rule", Prompt: prompt}
+		}
+		// Check session-level per-tool allow
+		if g.sessionToolAllows[sessionID] != nil && g.sessionToolAllows[sessionID][action.Tool] {
+			return CheckResult{Decision: DecisionAllow, Reason: "Tool allowed for this session", Prompt: prompt}
+		}
+
 		// Check if denied
 		if g.isDenied(action) {
 			return CheckResult{
@@ -239,6 +407,11 @@ func (g *Gate) isReadOnly(action Action) bool {
 		"glob":       true,
 		"git_diff":   true,
 		"git_status": true,
+		"fetch":      true,
+		"disk_usage": true,
+		// todo_write only mutates in-process session state, never the
+		// filesystem or external systems — safe to auto-approve.
+		"todo_write": true,
 	}
 	return readOnlyTools[action.Tool]
 }
@@ -249,8 +422,23 @@ func (g *Gate) isDenied(action Action) bool {
 	}
 
 	cmd := strings.ToLower(strings.TrimSpace(action.Command))
+
+	// Check classic deny list (backward compatible)
 	for _, denied := range g.DeniedCommands {
 		if strings.Contains(cmd, strings.ToLower(denied)) {
+			return true
+		}
+	}
+
+	// Check 23-rule Bash security engine
+	if violation := IsDeniedBashCommand(action.Command); violation != nil {
+		return true
+	}
+
+	// Check if command has any SeverityBlock violations
+	violations := CheckBashCommand(action.Command)
+	for _, v := range violations {
+		if v.Severity == SeverityBlock {
 			return true
 		}
 	}

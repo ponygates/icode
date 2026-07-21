@@ -1,91 +1,202 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { MessageSquare, Cpu, Settings, PanelLeftClose, Github } from 'lucide-react';
+import { useAppStore } from '../stores/appStore';
+import { MessageSquare, Cpu, Settings, BarChart, ArrowLeftRight, PanelLeftClose, Github, Plus, Server } from 'lucide-react';
 
-interface Props {
-  onToggle: () => void;
-}
+interface Props { onToggle: () => void; }
 
 const Sidebar: React.FC<Props> = ({ onToggle }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const location = useLocation();
+  const [collapsed, setCollapsed] = useState(false);
+
+  const {
+    sessions, activeSessionId, selectedModel,
+    setActiveSession, createSession, deleteSession,
+  } = useAppStore();
+  const currentModel = useAppStore((s) => s.models.find((m) => m.id === s.selectedModel));
+  const backendConnected = useAppStore((s) => s.backendConnected);
+  const backendChecking = useAppStore((s) => s.backendChecking);
 
   const navItems = [
     { path: '/', icon: MessageSquare, label: t('sidebar.chat') },
     { path: '/models', icon: Cpu, label: t('sidebar.models') },
-    { path: '/settings', icon: Settings, label: t('sidebar.settings') },
+    { path: '/analytics', icon: BarChart, label: '分析' },
+    { path: '/compare', icon: ArrowLeftRight, label: '对比' },
+    { action: 'settings', icon: Settings, label: t('sidebar.settings') },
   ];
 
-  const isActive = (path: string) => {
-    if (path === '/') return location.pathname === '/';
-    return location.pathname.startsWith(path);
+  const handleNav = (item: typeof navItems[0]) => {
+    if ('action' in item) {
+      window.dispatchEvent(new CustomEvent('icode:open-settings'));
+    } else { navigate(item.path); }
   };
+
+  const isActive = (item: typeof navItems[0]) => {
+    if ('action' in item) return false;
+    if (item.path === '/') return location.pathname === '/';
+    return location.pathname.startsWith(item.path);
+  };
+
+  const toggleCollapse = () => { setCollapsed(!collapsed); };
+
+  const sidebarWidth = collapsed ? 52 : 220;
 
   return (
     <div style={{
-      width: 220, minWidth: 220, background: 'var(--bg-secondary)',
-      borderRight: '1px solid var(--border-color)', display: 'flex',
-      flexDirection: 'column', height: '100vh',
+      width: sidebarWidth, minWidth: sidebarWidth, background: 'var(--bg-secondary)',
+      borderRight: '0.5px solid var(--border-color)', display: 'flex',
+      flexDirection: 'column', height: '100vh', transition: 'width var(--t-normal)',
     }}>
       {/* Header */}
       <div style={{
-        padding: '16px 16px 12px', borderBottom: '1px solid var(--border-color)',
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        padding: collapsed ? '14px 10px' : '18px 16px 12px',
+        borderBottom: '0.5px solid var(--border-color)',
+        display: 'flex', alignItems: 'center', justifyContent: collapsed ? 'center' : 'space-between',
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontSize: 20, fontWeight: 600, color: 'var(--accent)' }}>iCode</span>
-        </div>
+        {!collapsed && (
+          <span style={{ fontSize: 18, fontWeight: 700, color: 'var(--accent)', letterSpacing: '-0.02em' }}>
+            iCode
+          </span>
+        )}
         <button
-          onClick={onToggle}
+          onClick={collapsed ? toggleCollapse : onToggle}
+          className="interactive"
           style={{
             background: 'none', border: 'none', color: 'var(--text-muted)',
-            cursor: 'pointer', padding: 4, display: 'flex',
+            padding: 4, display: 'flex', borderRadius: 4,
           }}
         >
-          <PanelLeftClose size={16} />
+          <PanelLeftClose size={16} style={collapsed ? { transform: 'rotate(180deg)' } : undefined} />
         </button>
       </div>
 
       {/* Navigation */}
-      <nav style={{ flex: 1, padding: '8px 8px' }}>
-        {navItems.map((item) => (
-          <button
-            key={item.path}
-            onClick={() => navigate(item.path)}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 10, width: '100%',
-              padding: '8px 12px', marginBottom: 2, borderRadius: 6,
-              background: isActive(item.path) ? 'var(--bg-tertiary)' : 'transparent',
-              color: isActive(item.path) ? 'var(--accent)' : 'var(--text-secondary)',
-              border: 'none', cursor: 'pointer', fontSize: 13,
-              transition: 'background 0.15s',
-            }}
-          >
-            <item.icon size={16} />
-            <span>{item.label}</span>
-          </button>
-        ))}
+      <nav style={{ padding: '8px 6px', borderBottom: '0.5px solid var(--border-color)' }}>
+        {navItems.map((item) => {
+          const active = isActive(item);
+          return (
+            <button
+              key={item.path || item.action}
+              onClick={() => handleNav(item)}
+              title={item.label}
+              className={active ? 'nav-item active' : 'nav-item'}
+              style={{ width: '100%', justifyContent: collapsed ? 'center' : 'flex-start', marginBottom: 2 }}
+            >
+              <item.icon size={16} style={active ? { color: 'var(--accent)' } : undefined} />
+              {!collapsed && <span>{item.label}</span>}
+            </button>
+          );
+        })}
       </nav>
+
+      {/* Session history */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: collapsed ? '4px 4px' : '6px 6px' }}>
+        {!collapsed && (
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            padding: '8px 8px 4px', color: 'var(--text-muted)',
+            fontSize: 9, letterSpacing: 1, textTransform: 'uppercase', fontWeight: 600,
+          }}>
+            <span>会话</span>
+            <button
+              onClick={() => createSession(selectedModel, currentModel?.provider || 'openrouter')}
+              className="interactive"
+              style={{
+                background: 'none', border: 'none', color: 'var(--text-muted)',
+                padding: 3, display: 'flex', borderRadius: 4,
+              }}
+            >
+              <Plus size={12} />
+            </button>
+          </div>
+        )}
+        {sessions.length === 0 && !collapsed && (
+          <div style={{ padding: '16px 8px', color: 'var(--text-muted)', fontSize: 11, textAlign: 'center' }}>
+            暂无会话
+          </div>
+        )}
+        {sessions.slice(-20).reverse().map((s) => {
+          const active = s.id === activeSessionId;
+          return (
+            <div
+              key={s.id}
+              onClick={() => { setActiveSession(s.id); navigate('/'); }}
+              className={`sidebar-item${active ? ' active' : ''}`}
+              title={!collapsed ? undefined : (s.title || s.id.slice(0, 6))}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6,
+                padding: collapsed ? '6px 6px' : '6px 8px', cursor: 'pointer',
+                justifyContent: collapsed ? 'center' : 'flex-start',
+              }}
+              onMouseEnter={(e) => {
+                if (collapsed) return;
+                const btn = e.currentTarget.lastElementChild as HTMLElement;
+                if (btn) btn.style.opacity = '0.6';
+              }}
+              onMouseLeave={(e) => {
+                if (collapsed) return;
+                const btn = e.currentTarget.lastElementChild as HTMLElement;
+                if (btn) btn.style.opacity = '0';
+              }}
+            >
+              <div style={{
+                width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
+                background: active ? 'var(--accent)' : 'transparent',
+                transition: 'background var(--t-fast)',
+              }} />
+              {!collapsed && (
+                <>
+                  <div style={{
+                    flex: 1, overflow: 'hidden', textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap', fontSize: 11.5, lineHeight: 1.3,
+                  }}>
+                    {s.title || `会话 ${s.id.slice(0, 6)}`}
+                  </div>
+                  <button className="action-hidden"
+                    onClick={(e) => { e.stopPropagation(); deleteSession(s.id); }}
+                    title="删除"
+                    style={{
+                      background: 'none', border: 'none', color: 'var(--text-muted)',
+                      cursor: 'pointer', padding: 2, display: 'flex', fontSize: 10,
+                    }}
+                    onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--error)'; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--text-muted)'; }}
+                  >×</button>
+                </>
+              )}
+            </div>
+          );
+        })}
+      </div>
 
       {/* Footer */}
       <div style={{
-        padding: '12px 16px', borderTop: '1px solid var(--border-color)',
-        fontSize: 11, color: 'var(--text-muted)',
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        padding: '10px 12px', borderTop: '0.5px solid var(--border-color)',
+        fontSize: 10, color: 'var(--text-muted)',
       }}>
-        <span>v0.1.0-dev</span>
-        <button
-          onClick={() => window.icode?.openExternal?.('https://github.com/ponygates/icode')}
-          style={{
-            background: 'none', border: 'none', color: 'var(--text-muted)',
-            cursor: 'pointer', padding: 2, display: 'flex',
-          }}
-          title="GitHub"
-        >
-          <Github size={14} />
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4, justifyContent: collapsed ? 'center' : 'flex-start' }}>
+          <div style={{
+            width: 6, height: 6, borderRadius: '50%',
+            background: backendChecking ? 'var(--text-muted)' : backendConnected ? 'var(--success)' : 'var(--warning)',
+            flexShrink: 0,
+          }} />
+          {!collapsed && (
+            <span>{backendChecking ? '连接中…' : backendConnected ? '已连接' : '未连接'}</span>
+          )}
+        </div>
+        {!collapsed && (
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <span>v0.4.0</span>
+            <button
+              onClick={() => window.icode?.openExternal?.('https://github.com/ponygates/icode')}
+              className="interactive"
+              style={{ background: 'none', border: 'none', color: 'var(--text-muted)', padding: 2, display: 'flex', borderRadius: 4 }}
+            ><Github size={13} /></button>
+          </div>
+        )}
       </div>
     </div>
   );

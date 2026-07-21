@@ -26,13 +26,23 @@ const (
 // ============================================================================
 
 type Message struct {
-	ID        string        `json:"id"`
-	Role      Role          `json:"role"`
-	Content   string        `json:"content"`
-	ToolCalls []ToolCall    `json:"tool_calls,omitempty"`
-	ToolID    string        `json:"tool_id,omitempty"`
-	Timestamp time.Time     `json:"timestamp"`
-	Metadata  MessageMeta   `json:"metadata,omitempty"`
+	ID          string        `json:"id"`
+	Role        Role          `json:"role"`
+	Content     string        `json:"content"`
+	ToolCalls   []ToolCall    `json:"tool_calls,omitempty"`
+	ToolID      string        `json:"tool_id,omitempty"`
+	Timestamp   time.Time     `json:"timestamp"`
+	Metadata    MessageMeta   `json:"metadata,omitempty"`
+	Attachments []Attachment  `json:"attachments,omitempty"`
+}
+
+// Attachment represents inline content (images, PDFs, etc.) attached to
+// a message. Currently only image attachments are supported.
+type Attachment struct {
+	Type     string `json:"type"`     // "image", "pdf"
+	MIMEType string `json:"mime"`     // "image/png", "image/jpeg", …
+	Data     string `json:"data"`     // base64-encoded content
+	AltText  string `json:"alt_text,omitempty"` // optional description
 }
 
 type MessageMeta struct {
@@ -314,6 +324,17 @@ type Session struct {
 	TotalTokens TokenUsage `json:"total_tokens"`
 }
 
+// SearchResult represents a message found by SearchMessages.
+type SearchResult struct {
+	SessionID   string    `json:"session_id"`
+	SessionTitle string   `json:"session_title"`
+	MessageID   string    `json:"message_id"`
+	Role        Role      `json:"role"`
+	Content     string    `json:"content"`
+	Timestamp   time.Time `json:"timestamp"`
+	MatchPos    int       `json:"match_pos"` // character position of first match
+}
+
 type SessionStore interface {
 	Create(s *Session) error
 	Get(id string) (*Session, error)
@@ -321,6 +342,7 @@ type SessionStore interface {
 	Update(s *Session) error
 	Delete(id string) error
 	AppendMessage(sessionID string, msg Message) error
+	SearchMessages(query string, limit int) ([]SearchResult, error)
 }
 
 // ============================================================================

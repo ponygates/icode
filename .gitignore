@@ -11,6 +11,7 @@ vendor/
 node_modules/
 desktop/dist/
 desktop/release/
+internal/embedded/dist/
 
 # IDE
 .idea/
@@ -24,10 +25,38 @@ Thumbs.db
 
 # Logs
 *.log
+server_err.txt
+server_log.txt
+
+# Test artifacts
+*.test
+coverage.out
+coverage.html
+
+# Release build output
+release/
+
+# Merge conflict artifacts
+*.orig
+*.patch
+
+# Environment files with secrets
+.env*
+
+# Deprecated desktop launcher artifacts
+desktop-launcher.exe
+build-desktop-backend.js
 
 # Config (local)
 .icoderc.yaml
 .icoderc.yml
 
+# iCode runtime data (conversations, undo history, agents)
+.icode/
+
 # Local working memory (project data, not source)
 .workbuddy/
+.reasonix/
+
+# Backup files
+*.bak

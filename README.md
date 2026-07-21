@@ -147,21 +147,49 @@ Customize per-tool rules in `~/.icode/hooks.yaml`.
 
 ## MCP Integration
 
-Connect to any MCP server for extended tool capabilities:
+Connect to any MCP server for extended tool capabilities. Supports both stdio and SSE transport protocols.
+
+### Configuration
+
+Add entries under the `mcp` key in `~/.icode/config.yaml`:
 
 ```yaml
-# ~/.icode/mcp.json
-{
-  "mcpServers": {
-    "filesystem": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"],
-      "enabled": true
-    }
-  }
-}
+mcp:
+  - name: filesystem
+    type: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"]
+    enabled: true
+  - name: fetch
+    type: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-fetch"]
+    enabled: true
 ```
+
+### Desktop Management
+
+Use Settings → MCP page for visual add, edit, delete, and test of MCP servers.
+
+### CLI Commands
+
+```bash
+icoode config add-mcp --name my-server --command npx --args "-y @modelcontextprotocol/server-filesystem /path"
+icode config list-mcp
+icode config remove-mcp --name my-server
+```
+
+### API Endpoints
+
+```http
+GET  /api/mcp       # List all MCP servers with connection status
+PUT  /api/mcp       # Add or update an MCP server
+DELETE /api/mcp     # Remove an MCP server
+POST /api/mcp/test  # Test connection without persisting
+GET  /api/mcp/tools # List all discovered MCP tools
+```
+
+MCP tools are automatically injected into the engine as `mcp_<server>_<tool>` and can be used directly in conversations.
 
 ## Installation
 

@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -20,7 +21,9 @@ import (
 
 	"github.com/ponygates/icode/internal/config"
 	"github.com/ponygates/icode/internal/core/conversation"
+	"github.com/ponygates/icode/internal/core/checkpoint"
 	"github.com/ponygates/icode/internal/core/permission"
+	"github.com/ponygates/icode/internal/core/todo"
 	"github.com/ponygates/icode/internal/db"
 	"github.com/ponygates/icode/internal/llm/provider/openai_compat"
 	"github.com/ponygates/icode/internal/mcp"
@@ -91,6 +94,7 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 	// Sessions
 	mux.HandleFunc("/api/sessions", s.handleSessions)
 	mux.HandleFunc("/api/sessions/", s.handleSessionByID)
+	mux.HandleFunc("/api/search", s.handleSearch)
 
 	// Chat
 	mux.HandleFunc("/api/chat", s.handleChat)
@@ -108,19 +112,34 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 
 	// Permission
 	mux.HandleFunc("/api/permission/mode", s.handleSetPermissionMode)
+	mux.HandleFunc("/api/permission/rules", s.handleToolRules)
+	mux.HandleFunc("/api/permission/allow-tool", s.handleSessionToolAllow)
 	mux.HandleFunc("/api/permission/respond", s.handlePermissionRespond)
 	mux.HandleFunc("/api/permission/session-allow", s.handleSessionAllow)
+
+	// Checkpoints — Reasonix-style rewind history
+	mux.HandleFunc("/api/checkpoints/", s.handleCheckpoints)
+	mux.HandleFunc("/api/checkpoints/rewind", s.handleRewind)
+
+	// Memory
+	mux.HandleFunc("/api/memory/icode", s.handleMemory)
 
 	// MCP (Model Context Protocol) server management — Reasonix-style tool integration
 	mux.HandleFunc("/api/mcp", s.handleMCP)
 	mux.HandleFunc("/api/mcp/test", s.handleMCPTest)
 	mux.HandleFunc("/api/mcp/tools", s.handleMCPTools)
 
+	// Todo list (session-scoped scratchpad backing the TodoWrite tool)
+	mux.HandleFunc("/api/todos/", s.handleTodos)
+
+	// Analytics: token/cache/cost stats for a session
+	mux.HandleFunc("/api/analytics/", s.handleAnalytics)
+
 	// Static frontend — serve the desktop UI at /
 	mux.HandleFunc("/", s.handleFrontend)
 
 	// CORS middleware
-	handler := corsMiddleware(mux)
+	handler := s.corsMiddleware(mux)
 
 	addr := fmt.Sprintf("127.0.0.1:%d", s.port)
 	listener, err := net.Listen("tcp", addr)
@@ -323,7 +342,9 @@ func (s *Server) handleConfigModel(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPut:
 		var m config.ModelCfg
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
+			_ = r.Body.Close()
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
@@ -380,7 +401,9 @@ func (s *Server) handleConfigProvider(w http.ResponseWriter, r *http.Request) {
 			TimeoutSec int   `json:"timeout_sec"`
 			Disabled  bool   `json:"disabled"`
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			_ = r.Body.Close()
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
@@ -483,6 +506,30 @@ func (s *Server) handleRefreshModels(w http.ResponseWriter, r *http.Request) {
 		"results": updates,
 	})
 }
+// handleSearch searches message content across all sessions.
+func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	query := r.URL.Query().Get("q")
+	if query == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "query parameter q is required"})
+		return
+	}
+	limit := 20
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if n, err := fmt.Sscanf(l, "%d", &limit); err != nil || n != 1 {
+			limit = 20
+		}
+	}
+	results, err := s.store.SearchMessages(query, limit)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"results": results, "query": query})
+}
 
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -496,7 +543,9 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 
 	case http.MethodPost:
 		var sess types.Session
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		if err := json.NewDecoder(r.Body).Decode(&sess); err != nil {
+			_ = r.Body.Close()
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
@@ -535,7 +584,9 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 			ModelID  string `json:"model_id"`
 			Provider string `json:"provider"`
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			_ = r.Body.Close()
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
@@ -578,12 +629,15 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		SessionID string `json:"session_id"`
-		Content   string `json:"content"`
-		Model     string `json:"model"`
-		Provider  string `json:"provider"`
+		SessionID   string              `json:"session_id"`
+		Content     string              `json:"content"`
+		Model       string              `json:"model"`
+		Provider    string              `json:"provider"`
+		Attachments []types.Attachment  `json:"attachments,omitempty"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		_ = r.Body.Close()
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
@@ -593,6 +647,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	log.Printf("[server] chat: session=%s model=%s provider=%s", req.SessionID, req.Model, req.Provider)
+
 	// Ensure a session exists for this conversation.
 	if req.SessionID == "" {
 		req.SessionID = fmt.Sprintf("web-%d", time.Now().UnixNano())
@@ -601,8 +657,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		sess = &types.Session{
 			ID:           req.SessionID,
-			ModelID:      orDefault(req.Model, "deepseek-v4-flash"),
-			ProviderName: orDefault(req.Provider, "deepseek"),
+			ModelID:      orDefault(req.Model, "openrouter/free"),
+			ProviderName: orDefault(req.Provider, "openrouter"),
 			Title:        firstLine(req.Content, 40),
 		}
 		_ = s.store.Create(sess)
@@ -629,23 +685,69 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-
-	eventCh, err := s.engine.Send(r.Context(), req.SessionID, req.Content)
-	if err != nil {
-		fmt.Fprintf(w, "data: {\"type\":\"error\",\"content\":%q}\n\n", err.Error())
+	// Pre-check: resolve the model to verify Provider + credentials exist
+	prov, _, resolveErr := s.reg.ResolveModel(sess.ModelID)
+	if resolveErr != nil {
+		log.Printf("[server] chat: resolve model %q failed: %v", sess.ModelID, resolveErr)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		errData, _ := json.Marshal(types.StreamEvent{
+			Type:    types.EventError,
+			Content: fmt.Sprintf("模型 %q 未找到，请检查设置中的模型配置", sess.ModelID),
+		})
+		fmt.Fprintf(w, "data: %s\n\n", errData)
+		flusher.Flush()
+		return
+	}
+	// Quick health check to verify provider connectivity
+	if healthErr := prov.Health(r.Context()); healthErr != nil {
+		log.Printf("[server] chat: provider %s health check failed: %v", sess.ProviderName, healthErr)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		errData, _ := json.Marshal(types.StreamEvent{
+			Type:    types.EventError,
+			Content: fmt.Sprintf("无法连接 %s: %v。请检查 API Key 和网络设置（Ctrl+, 打开设置）", sess.ProviderName, healthErr),
+		})
+		fmt.Fprintf(w, "data: %s\n\n", errData)
 		flusher.Flush()
 		return
 	}
 
-	for event := range eventCh {
-		data, _ := json.Marshal(event)
-		fmt.Fprintf(w, "data: %s\n\n", data)
-		flusher.Flush()
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
 
-		if event.Type == types.EventDone || event.Type == types.EventError {
+	// Use a timeout context so a hung provider doesn't block the stream
+	// indefinitely. 120s matches the server WriteTimeout.
+	chatCtx, cancel := context.WithTimeout(r.Context(), 115*time.Second)
+	defer cancel()
+
+	eventCh, err := s.engine.Send(chatCtx, req.SessionID, req.Content, req.Attachments)
+	if err != nil {
+		log.Printf("[server] chat: engine.Send failed session=%s model=%s err=%v", req.SessionID, sess.ModelID, err)
+		errData, _ := json.Marshal(types.StreamEvent{
+			Type:    types.EventError,
+			Content: err.Error(),
+		})
+		fmt.Fprintf(w, "data: %s\n\n", errData)
+		flusher.Flush()
+		return
+	}
+
+	for {
+		select {
+		case event, ok := <-eventCh:
+			if !ok {
+				return
+			}
+			data, _ := json.Marshal(event)
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+
+			if event.Type == types.EventDone || event.Type == types.EventError {
+				return
+			}
+		case <-r.Context().Done():
 			return
 		}
 	}
@@ -660,7 +762,12 @@ func (s *Server) handleChatStop(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		SessionID string `json:"session_id"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		_ = r.Body.Close()
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
 
 	if s.engine != nil {
 		s.engine.Stop(req.SessionID)
@@ -674,7 +781,9 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, s.cfg)
 	case http.MethodPut:
 		var cfg config.Config
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+			_ = r.Body.Close()
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
@@ -686,6 +795,8 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		s.cfg.Defaults.Temperature = cfg.Defaults.Temperature
 		s.cfg.Defaults.MaxTokens = cfg.Defaults.MaxTokens
 		s.cfg.Defaults.Cache = cfg.Defaults.Cache
+		s.cfg.Defaults.SystemPrompt = cfg.Defaults.SystemPrompt
+		s.cfg.Defaults.FallbackModels = cfg.Defaults.FallbackModels
 		s.cfg.TUI.Theme = cfg.TUI.Theme
 		s.cfg.TUI.DiffMode = cfg.TUI.DiffMode
 		s.cfg.TUI.SyntaxHL = cfg.TUI.SyntaxHL
@@ -697,6 +808,8 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		s.cfg.Update.IntervalH = cfg.Update.IntervalH
 		// Push generation parameters into the live engine.
 		s.engine.SetGenerationParams(s.cfg.Defaults.Temperature, s.cfg.Defaults.MaxTokens)
+		s.engine.SetSystemPrompt(s.cfg.Defaults.SystemPrompt)
+	s.engine.SetFallbackModels(s.cfg.Defaults.FallbackModels)
 		// Push tool sandbox settings into the live permission gate so the
 		// desktop "工具与权限" settings take effect without a restart.
 		if s.gate != nil {
@@ -761,7 +874,9 @@ func (s *Server) handleSetKey(w http.ResponseWriter, r *http.Request) {
 		APIKey   string `json:"api_key"`
 		APIBase  string `json:"api_base"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		_ = r.Body.Close()
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
@@ -769,6 +884,21 @@ func (s *Server) handleSetKey(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "provider is required"})
 		return
 	}
+
+	// When user adds an API key for an external provider, auto-elevate the
+	// security level from "local" to "foreign-llm" so the chat actually works.
+	// Local-only providers (ollama, llama, lmstudio) don't trigger this.
+	localProviders := map[string]bool{"ollama": true, "llama": true, "local": true, "lmstudio": true}
+	if req.APIKey != "" && !localProviders[req.Provider] {
+		if s.cfg.SecurityLevel == config.SecLocal {
+			s.cfg.SecurityLevel = config.SecForeignLLM
+			_ = s.cfg.Save(config.DefaultPath())
+		}
+		if s.gate != nil {
+			s.gate.SetSecurityLevel(s.cfg.SecurityLevel)
+		}
+	}
+
 	pc := s.cfg.Providers[req.Provider]
 	if req.APIKey != "" {
 		pc.APIKey = req.APIKey
@@ -796,7 +926,9 @@ func (s *Server) handleSetLanguage(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Language string `json:"language"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		_ = r.Body.Close()
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
@@ -847,7 +979,9 @@ func (s *Server) handleSetPermissionMode(w http.ResponseWriter, r *http.Request)
 	var req struct {
 		Mode string `json:"mode"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		_ = r.Body.Close()
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
@@ -884,7 +1018,9 @@ func (s *Server) handleSessionAllow(w http.ResponseWriter, r *http.Request) {
 		SessionID string `json:"session_id"`
 		Allow     bool   `json:"allow"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		_ = r.Body.Close()
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
@@ -906,7 +1042,9 @@ func (s *Server) handlePermissionRespond(w http.ResponseWriter, r *http.Request)
 		RequestID string `json:"request_id"`
 		Decision  string `json:"decision"` // "allow" | "deny" | "allow_all"
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		_ = r.Body.Close()
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
@@ -924,6 +1062,58 @@ func (s *Server) handlePermissionRespond(w http.ResponseWriter, r *http.Request)
 	if s.engine != nil {
 		s.engine.SetPermissionResponse(req.RequestID, decision)
 	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleToolRules returns the persistent tool rules and allows updating them.
+func (s *Server) handleToolRules(w http.ResponseWriter, r *http.Request) {
+	if s.engine == nil || s.gate == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "not available"})
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		rules := s.gate.GetToolRules()
+		writeJSON(w, http.StatusOK, map[string]any{"rules": rules})
+	case http.MethodPost:
+		var body struct {
+			Tool string `json:"tool"`
+			Rule string `json:"rule"`
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			_ = r.Body.Close()
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		s.gate.SetToolRule(body.Tool, body.Rule)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleSessionToolAllow records a per-tool allow for a session.
+func (s *Server) handleSessionToolAllow(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		SessionID string `json:"session_id"`
+		Tool      string `json:"tool"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		_ = r.Body.Close()
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	if s.gate == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "gate not available"})
+		return
+	}
+	s.gate.SetSessionToolAllow(body.SessionID, body.Tool)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -1043,12 +1233,18 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 
 	case http.MethodPut:
 		var req config.MCPServerCfg
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			_ = r.Body.Close()
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
 		if req.Name == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "name is required"})
+			return
+		}
+		if req.Command != "" && containsDangerousChars(req.Command) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "command contains dangerous characters"})
 			return
 		}
 		if req.Type == "" {
@@ -1077,7 +1273,9 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Name string `json:"name"`
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+			_ = r.Body.Close()
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "name is required"})
 			return
 		}
@@ -1105,12 +1303,18 @@ func (s *Server) handleMCPTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req config.MCPServerCfg
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		_ = r.Body.Close()
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
 	if req.Name == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "name is required"})
+		return
+	}
+	if req.Command != "" && containsDangerousChars(req.Command) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "command contains dangerous characters"})
 		return
 	}
 	if req.Type == "" {
@@ -1194,6 +1398,26 @@ func (s *Server) registerCustomModel(m config.ModelCfg) {
 	s.reg.RegisterCustomModel(info, m.ModelID)
 }
 
+// containsDangerousChars reports whether s contains shell metacharacters or
+// path traversal sequences that could be used for command injection.
+func containsDangerousChars(s string) bool {
+	dangerous := []string{";", "&", "|", "`", "$", "(", ")", "{", "}", "<", ">", "!", "#", "*", "?", "[", "]", "~", "\n", "\r", ".."}
+	for _, ch := range dangerous {
+		if strings.Contains(s, ch) {
+			return true
+		}
+	}
+	return false
+}
+
+var embeddedFrontend fs.FS
+
+// SetEmbeddedFrontend sets the embedded frontend filesystem (from go:embed)
+// so handleFrontend can serve the UI without relying on disk files.
+func SetEmbeddedFrontend(f fs.FS) {
+	embeddedFrontend = f
+}
+
 // handleFrontend serves the desktop UI.
 // The standalone desktop/index.html is a self-contained build that talks to
 // the real backend; we prefer it, then fall back to the Vite dist output.
@@ -1204,9 +1428,36 @@ func (s *Server) handleFrontend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Strategy 1: Embedded frontend (from go:embed, always available in
+	// the self-contained binary). This is the primary path for the
+	// desktop launcher — no disk files needed.
+	if embeddedFrontend != nil {
+		path := r.URL.Path
+		if path == "/" || path == "" {
+			path = "/index.html"
+		}
+		path = strings.TrimPrefix(path, "/")
+		data, err := fs.ReadFile(embeddedFrontend, path)
+		if err == nil {
+			// Set content type based on extension
+			if strings.HasSuffix(path, ".css") {
+				w.Header().Set("Content-Type", "text/css")
+			} else if strings.HasSuffix(path, ".js") {
+				w.Header().Set("Content-Type", "application/javascript")
+			} else if strings.HasSuffix(path, ".html") {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			} else if strings.HasSuffix(path, ".svg") {
+				w.Header().Set("Content-Type", "image/svg+xml")
+			}
+			w.Write(data)
+			return
+		}
+	}
+
+	// Strategy 2: Disk files (for development without rebuild).
 	candidates := []string{
-		filepath.Join("desktop", "index.html"),
 		filepath.Join("desktop", "dist", "index.html"),
+		filepath.Join("desktop", "index.html"),
 		filepath.Join("..", "desktop", "dist", "index.html"),
 	}
 
@@ -1231,9 +1482,22 @@ func (s *Server) handleFrontend(w http.ResponseWriter, r *http.Request) {
 <p>API available at <a href="/api/health" style="color:#89b4fa">/api/health</a></p></body></html>`)
 }
 
-func corsMiddleware(next http.Handler) http.Handler {
+func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		origin := r.Header.Get("Origin")
+		allowedOrigin := ""
+		if origin != "" {
+			// Only allow localhost and 127.0.0.1 origins.
+			if strings.HasPrefix(origin, "http://localhost:") ||
+				strings.HasPrefix(origin, "http://127.0.0.1:") ||
+				strings.HasPrefix(origin, "https://localhost:") ||
+				strings.HasPrefix(origin, "https://127.0.0.1:") {
+				allowedOrigin = origin
+			}
+		} else {
+			allowedOrigin = fmt.Sprintf("http://localhost:%d", s.port)
+		}
+		w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 
@@ -1243,4 +1507,179 @@ func corsMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// handleTodos serves the session-scoped todo list at /api/todos/{sessionID}.
+//   GET  → { items: [...], counts: {pending, in_progress, completed, total} }
+//   POST → replaces the list (used by the desktop for manual edits; the
+//          model-driven flow goes through the todo_write tool instead)
+func (s *Server) handleTodos(w http.ResponseWriter, r *http.Request) {
+	// URL shape: /api/todos/<sessionID>
+	sessionID := strings.TrimPrefix(r.URL.Path, "/api/todos/")
+	if sessionID == "" || strings.Contains(sessionID, "/") {
+		http.Error(w, "sessionID required", http.StatusBadRequest)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		items := todo.Default.Get(sessionID)
+		p, a, d, t := todo.Default.Counts(sessionID)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items": items,
+			"counts": map[string]int{
+				"pending":     p,
+				"in_progress": a,
+				"completed":   d,
+				"total":       t,
+			},
+		})
+	case http.MethodPost:
+		var body struct {
+			Items []todo.TodoItem `json:"items"`
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			_ = r.Body.Close()
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		saved := todo.Default.Replace(sessionID, body.Items)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": saved})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
+	sessionID := strings.TrimPrefix(r.URL.Path, "/api/analytics/")
+	if sessionID == "" || strings.Contains(sessionID, "/") {
+		http.Error(w, "sessionID required", http.StatusBadRequest)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.engine == nil {
+		writeJSON(w, 503, map[string]any{"error": "engine not available"})
+		return
+	}
+	stats := s.engine.SessionStats(sessionID)
+	if stats == nil {
+		writeJSON(w, 404, map[string]any{"error": "no data for session"})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(stats)
+}
+
+// ── Checkpoints ──
+
+func (s *Server) handleCheckpoints(w http.ResponseWriter, r *http.Request) {
+	sessionID := strings.TrimPrefix(r.URL.Path, "/api/checkpoints/")
+	if sessionID == "" || sessionID == "rewind" {
+		http.Error(w, "missing session id", http.StatusBadRequest)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		store, err := checkpoint.GetOrOpen(sessionID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		entries, err := store.List(r.Context())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(entries)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleRewind(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		SessionID string `json:"session_id"`
+		Steps     int    `json:"steps"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	if body.SessionID == "" {
+		http.Error(w, "missing session_id", http.StatusBadRequest)
+		return
+	}
+	if body.Steps <= 0 {
+		body.Steps = 1
+	}
+	store, err := checkpoint.GetOrOpen(body.SessionID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	files, err := store.Rewind(r.Context(), body.Steps)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"ok": true, "steps": body.Steps, "files": files,
+	})
+}
+
+// ── Memory ──
+
+func (s *Server) handleMemory(w http.ResponseWriter, r *http.Request) {
+	// Find ICODE.md in current directory or parent
+	wd, _ := os.Getwd()
+	icodePath := findICODEPath(wd)
+	switch r.Method {
+	case http.MethodGet:
+		data, err := os.ReadFile(icodePath)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"content": ""})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"content": string(data)})
+	case http.MethodPut:
+		var body struct {
+			Content string `json:"content"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid body", http.StatusBadRequest)
+			return
+		}
+		if err := os.WriteFile(icodePath, []byte(body.Content), 0644); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"ok": "true"})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func findICODEPath(wd string) string {
+	for _, name := range []string{"ICODE.md", "icode.md", "CLAUDE.md", "claude.md"} {
+		p := filepath.Join(wd, name)
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return filepath.Join(wd, "ICODE.md")
 }

@@ -146,21 +146,54 @@ icode server --port 0          # 启动 HTTP API 服务（桌面版使用）
 
 ## MCP 集成
 
-连接任意 MCP 服务器扩展工具能力：
+连接任意 MCP 服务器扩展工具能力，支持 stdio 和 SSE 两种传输协议。
+
+### 配置文件
+
+在 `~/.icode/config.yaml` 的 `mcp` 下配置：
 
 ```yaml
-# ~/.icode/mcp.json
-{
-  "mcpServers": {
-    "filesystem": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/项目路径"],
-      "enabled": true
-    }
-  }
-}
+mcp:
+  - name: filesystem
+    type: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/项目路径"]
+    enabled: true
+  - name: fetch
+    type: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-fetch"]
+    enabled: true
 ```
+
+### 桌面版管理
+
+在桌面版的设置 → MCP 页面中可视化添加、编辑、删除和测试 MCP 服务器。
+
+### CLI 命令
+
+```bash
+# 添加 MCP 服务器
+icode config add-mcp --name my-server --command npx --args "-y @modelcontextprotocol/server-filesystem /path"
+
+# 列出已配置的 MCP 服务器
+icode config list-mcp
+
+# 删除 MCP 服务器
+icode config remove-mcp --name my-server
+```
+
+### API 接口
+
+```http
+GET  /api/mcp       # 列出所有 MCP 服务器及连接状态
+PUT  /api/mcp       # 添加或更新 MCP 服务器
+DELETE /api/mcp     # 删除 MCP 服务器
+POST /api/mcp/test  # 测试连接（不持久化）
+GET  /api/mcp/tools # 列出所有已发现的 MCP 工具
+```
+
+MCP 工具自动以 `mcp_<服务器名>_<工具名>` 格式注入引擎，可直接在对话中调用。
 
 ## 安装方式
 

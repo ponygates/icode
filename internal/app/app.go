@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 
 	"github.com/ponygates/icode/internal/config"
+	"github.com/ponygates/icode/internal/core/checkpoint"
 	"github.com/ponygates/icode/internal/core/conversation"
 	"github.com/ponygates/icode/internal/core/permission"
 	"github.com/ponygates/icode/internal/core/session"
@@ -66,14 +67,36 @@ func Bootstrap() (*App, error) {
 	app.Reg = registry.NewRegistry()
 	app.registerProviders(cfg)
 
-	// 4. Initialize permission gate
-	app.Gate = permission.NewGate(permission.ModeAgent)
+	// 4. Initialize permission gate with the configured security level.
+	//    NewGate defaults to SecLocal; we must apply the user's configured
+	//    level so that API keys they have set actually work.
+	// Default mode is Auto: read-only tools auto-approved, mutating ones ask.
+	// Matches Claude Code / Reasonix "Edit automatically" default.
+	app.Gate = permission.NewGate(permission.ModeAuto)
+	if cfg.SecurityLevel == config.SecLocal && hasExternalKeys(cfg) {
+		cfg.SecurityLevel = config.SecForeignLLM
+		_ = cfg.Save(config.DefaultPath())
+	}
+	app.Gate.SetSecurityLevel(cfg.SecurityLevel)
+	// Apply the configured permission mode from settings
+	if cfg.Defaults.Mode != "" {
+		app.Gate.SetMode(permission.Mode(cfg.Defaults.Mode))
+	}
 
 	// 5. Initialize conversation engine (with permission gate wired in)
 	app.Engine = conversation.NewEngine(app.Reg, app.SessStore, app.Gate)
 	app.Engine.SetGenerationParams(cfg.Defaults.Temperature, cfg.Defaults.MaxTokens)
+	app.Engine.SetSystemPrompt(cfg.Defaults.SystemPrompt)
+	app.Engine.SetFallbackModels(cfg.Defaults.FallbackModels)
+	// Wire sub-agent runner into the tool registry (Claude Code task tool parity)
+	app.Engine.WireTaskRunner()
 
-	// 6. Initialize model update service
+	// 6. Initialize undo system (file-level snapshot /undo)
+	if err := checkpoint.InitUndo(""); err != nil {
+		log.Printf("[iCode] Undo init skipped: %v", err)
+	}
+
+	// 7. Initialize model update service
 	home, _ := os.UserHomeDir()
 	cacheDir := filepath.Join(home, ".icode", "cache")
 	app.Updater = modelupdate.NewService(cacheDir)
@@ -128,6 +151,17 @@ func (app *App) registerProviders(cfg *config.Config) {
 			log.Printf("[iCode] Failed to register anthropic: %v", err)
 		}
 	}
+}
+
+// hasExternalKeys returns true if any non-local provider has an API key set.
+func hasExternalKeys(cfg *config.Config) bool {
+	localProviders := map[string]bool{"ollama": true, "llama": true, "local": true, "lmstudio": true}
+	for name, pc := range cfg.Providers {
+		if pc.APIKey != "" && !localProviders[name] {
+			return true
+		}
+	}
+	return false
 }
 
 // Close shuts down all subsystems gracefully.

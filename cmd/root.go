@@ -19,6 +19,14 @@ func Execute(version, build, commit string) error {
 	appVersion = version
 	appBuild = build
 	appCommit = commit
+
+	// When launched by double-clicking in Explorer (not from a terminal),
+	// automatically start desktop mode on Windows, or show a message on
+	// other platforms. This makes the binary feel like a proper desktop app.
+	if isDoubleClicked() {
+		return runDesktop()
+	}
+
 	// Ensure the Windows console uses UTF-8 so Unicode UI glyphs and Chinese
 	// input render correctly instead of as mojibake.
 	fixConsoleCodepage()
@@ -53,6 +61,7 @@ commands.
 
 func init() {
 	rootCmd.AddCommand(chatCmd)
+	rootCmd.AddCommand(desktopCmd)
 	rootCmd.AddCommand(execCmd)
 	rootCmd.AddCommand(authCmd)
 	rootCmd.AddCommand(modelCmd)

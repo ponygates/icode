@@ -3,8 +3,12 @@
 package cmd
 
 import (
+	"fmt"
+	"os"
 	"syscall"
 	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
 const (
@@ -12,15 +16,32 @@ const (
 	stdOutputHandle                 = ^uintptr(0) - 10 // -11
 )
 
+// isDoubleClicked returns true when the binary was launched by double-clicking
+// in Windows Explorer. It uses GetConsoleProcessList: when launched from a
+// terminal (cmd/powershell) the console has 2+ processes attached; when
+// double-clicked the console is brand-new with only this process (count = 1).
+func isDoubleClicked() bool {
+	// If there are command-line args, definitely not a double-click
+	if len(os.Args) > 1 {
+		return false
+	}
+
+	// Check via Windows API
+	kernel32 := syscall.NewLazyDLL("kernel32.dll")
+	getProcList := kernel32.NewProc("GetConsoleProcessList")
+	if getProcList.Find() != nil {
+		return false
+	}
+	var pids [4]uint32
+	ret, _, _ := getProcList.Call(uintptr(unsafe.Pointer(&pids[0])), 4)
+	return ret == 1
+}
+
 // fixConsoleCodepage configures the Windows console for iCode:
 //  1. Sets input/output code pages to UTF-8 (65001) so Unicode UI glyphs
-//     (◆ ▸ » ● ×) and Chinese user input render correctly instead of as
-//     mojibake in the default GBK (CP936) console.
-//  2. Enables virtual-terminal processing so ANSI escape sequences (colors,
-//     cursor movement) used by the full-screen TUI render correctly.
-//
-// Both changes are per-process and revert when the program exits, leaving the
-// user's shell untouched.
+//     and Chinese user input render correctly.
+//  2. Enables virtual-terminal processing so ANSI escape sequences used
+//     by the full-screen TUI render correctly.
 func fixConsoleCodepage() {
 	kernel32 := syscall.NewLazyDLL("kernel32.dll")
 	setCP := kernel32.NewProc("SetConsoleCP")
@@ -47,4 +68,24 @@ func fixConsoleCodepage() {
 	}
 	mode |= enableVirtualTerminalProcessing
 	setConsoleMode.Call(hOut, uintptr(mode))
+}
+
+// showCLIMessage displays a native message box telling the user this is a
+// command-line tool, then waits for a key press before exiting.
+func showCLIMessage() {
+	windows.MessageBox(windows.HWND(0),
+		windows.StringToUTF16Ptr("This is a command line tool.\r\n\r\n"+
+			"You need to open cmd.exe / PowerShell and run it from there:\r\n\r\n"+
+			"  cd \\path\\to\\icode\r\n"+
+			"  icode.exe\r\n\r\n"+
+			"双击桌面版请使用 iCode.exe（桌面应用程序）。"),
+		windows.StringToUTF16Ptr("iCode — 命令行工具"),
+		windows.MB_OK|windows.MB_ICONINFORMATION|windows.MB_TOPMOST)
+	// Also print to console in case it's visible
+	fmt.Println("\nThis is a command line tool.")
+	fmt.Println("You need to open cmd.exe / PowerShell and run icode.exe from there.")
+	fmt.Println("For the desktop app, double-click iCode.exe instead.")
+	fmt.Print("\n按 Enter 键退出...")
+	fmt.Scanln()
+	os.Exit(0)
 }

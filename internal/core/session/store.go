@@ -4,6 +4,7 @@ package session
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -103,4 +104,53 @@ func (s *Store) AppendMessage(sessionID string, msg types.Message) error {
 	sess.Messages = append(sess.Messages, msg)
 	sess.UpdatedAt = time.Now()
 	return nil
+}
+
+// SearchMessages performs a simple case-insensitive content search across all sessions.
+func (s *Store) SearchMessages(query string, limit int) ([]types.SearchResult, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+
+	qLower := strings.ToLower(query)
+	var results []types.SearchResult
+
+	for _, sess := range s.sessions {
+		for _, msg := range sess.Messages {
+			lower := strings.ToLower(msg.Content)
+			if pos := strings.Index(lower, qLower); pos >= 0 {
+				title := ""
+				if sess != nil {
+					title = sess.Title
+				}
+				results = append(results, types.SearchResult{
+					SessionID:    sess.ID,
+					SessionTitle: title,
+					MessageID:   msg.ID,
+					Role:        msg.Role,
+					Content:     msg.Content,
+					Timestamp:   msg.Timestamp,
+					MatchPos:    pos,
+				})
+			}
+		}
+	}
+
+	// Sort by timestamp descending (most recent first)
+	for i := 0; i < len(results); i++ {
+		for j := i + 1; j < len(results); j++ {
+			if results[j].Timestamp.After(results[i].Timestamp) {
+				results[i], results[j] = results[j], results[i]
+			}
+		}
+	}
+
+	if len(results) > limit {
+		results = results[:limit]
+	}
+
+	return results, nil
 }

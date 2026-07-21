@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -95,8 +96,14 @@ func (c *Client) connectStdio(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// Create cancellable context so Close() can clean up the subprocess
+	ctx, c.cancel = context.WithCancel(ctx)
 	c.cmd = exec.CommandContext(ctx, c.config.Command, c.config.Args...)
-	c.cmd.Env = c.config.Env
+
+	// Merge env vars: inherit parent environment, then overlay configured vars
+	if len(c.config.Env) > 0 {
+		c.cmd.Env = append(os.Environ(), c.config.Env...)
+	}
 
 	var err error
 	c.stdin, err = c.cmd.StdinPipe()
@@ -113,7 +120,7 @@ func (c *Client) connectStdio(ctx context.Context) error {
 		return fmt.Errorf("start server: %w", err)
 	}
 
-	// Start the JSON-RPC reader
+	// Start the JSON-RPC reader — it exits when ctx is cancelled or the pipe closes
 	go c.readLoop()
 
 	// Initialize the MCP session
@@ -252,13 +259,26 @@ func (c *Client) Tools() []types.ToolDef {
 	return c.tools
 }
 
-// Close terminates the server connection.
+// Close terminates the server connection and cleans up all resources.
 func (c *Client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// Cancel the context first — kills the subprocess via CommandContext.
 	if c.cancel != nil {
 		c.cancel()
+	}
+	// Unblock any goroutines waiting on pending RPC responses.
+	for id, ch := range c.pending {
+		ch <- &jsonrpcResponse{
+			JSONRPC: "2.0",
+			ID:      id,
+			Error: &jsonrpcError{
+				Code:    -1,
+				Message: "client closed",
+			},
+		}
+		delete(c.pending, id)
 	}
 	if c.stdin != nil {
 		c.stdin.Close()
@@ -341,15 +361,14 @@ func (c *Client) call(ctx context.Context, method string, params any) (*jsonrpcR
 }
 
 func (c *Client) sendNotification(ctx context.Context, method string, params any) {
-	id := c.reqID.Add(1)
-	notif := map[string]any{
-		"jsonrpc": "2.0",
-		"method":  method,
-		"params":  params,
+	notif := jsonrpcNotification{
+		JSONRPC: "2.0",
+		Method:  method,
+		Params:  params,
 	}
 	data, _ := json.Marshal(notif)
+	// Notifications have no ID per JSON-RPC 2.0 spec, so no pending cleanup needed.
 	c.stdin.Write(append(data, '\n'))
-	_ = id
 }
 
 func (c *Client) readLoop() {
