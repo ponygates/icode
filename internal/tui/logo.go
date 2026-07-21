@@ -1,153 +1,114 @@
 package tui
 
 import (
-	"fmt"
-	"os"
 	"strings"
-	"unicode/utf8"
 )
 
-// buildLogo renders the iCode startup banner: a single bordered box with the
-// iCode wordmark + pony-mascot accent on top, followed by live session info
-// (model / provider / mode / cwd / context-window usage / cache hit-rate) and
-// the quick-command list.
-//
-// IMPORTANT: every glyph here is either ASCII, a CP437 box-drawing character
-// (┌┐└┘│─), or a CP437 block element (█░). These are the ONLY character classes
-// that render reliably on legacy Windows conhost (raster font / OEM codepage),
-// where decorative Unicode symbols such as ✦ ◆ ✻ ● ⏱ ✓ ⏸ and emoji like 🐴
-// have NO glyph and would make the logo "disappear". The pony mascot is drawn
-// with the ASCII accent "(>')>" instead of an emoji.
-func (t *TUI) logoLines(width int) []string {
-	return t.buildLogo(width, t.paint)
-}
-
-// Logo returns the iCode wordmark banner as PLAIN (non-ANSI) lines, safe for
-// non-VT consoles — e.g. piped output or `icode version`. Live values fall
-// back to placeholders since no session is attached.
-func Logo() []string {
-	t := &TUI{}
-	return t.buildLogo(80, func(_, s string) string { return s })
-}
-
-// logoPainter applies a colour; buildLogo takes it as a parameter so the same
+// logoPainter applies a colour; asciiLogo takes it as a parameter so the same
 // layout can be emitted coloured (TUI) or plain (Logo()).
 type logoPainter func(color, s string) string
 
-func (t *TUI) buildLogo(width int, paint logoPainter) []string {
-	if width < 36 {
-		return nil
-	}
-	cwd, _ := os.Getwd()
-	short := shortDir(cwd)
-	model := t.model
-	if model == "" {
-		model = "—"
-	}
-	provider := t.provider
-	if provider == "" {
-		provider = "—"
-	}
-	mode := t.mode
-	if mode == "" {
-		mode = ModeAuto
+// asciiLogo returns the iCode startup LOGO: a plum-blossom (棉花梅花) ASCII
+// motif above a block-letter "ICODE" wordmark, plus a centered tagline. It is
+// rendered WITHOUT a surrounding box — the user asked to drop the old bordered
+// banner — so there is nothing to mis-align. Every glyph is ASCII, and █ / ░
+// are CP437 block elements that render reliably on legacy Windows conhost
+// (raster font / OEM codepage) where decorative Unicode (✦ ◆ ✻ 🐴 …) has no
+// glyph and would make the logo disappear.
+
+// logoFont defines each block letter as 5 equal-width rows using █ (full
+// block). Widths: I=3, C/O/D/E=6 — verified so the wordmark stays rectangular.
+var logoFont = map[rune][]string{
+	'I': {"███", " █ ", " █ ", " █ ", "███"},
+	'C': {"██████", "█     ", "█     ", "█     ", "██████"},
+	'O': {"██████", "█    █", "█    █", "█    █", "██████"},
+	'D': {"█████ ", "█    █", "█    █", "█    █", "█████ "},
+	'E': {"██████", "█     ", "█████ ", "█     ", "██████"},
+}
+
+const logoWord = "ICODE"
+
+// plumBlossom is the 棉花梅花 motif; each row is exactly 11 cells wide so it
+// can be centred over the wordmark.
+var plumBlossom = []string{
+	"   .-~-.   ",
+	"  (     )  ",
+	"  <  o  >  ",
+	"  (     )  ",
+	"   '-.-'   ",
+}
+
+// logoLines renders the LOGO using the TUI's paint() so colours apply.
+func (t *TUI) logoLines(width int) []string {
+	return t.asciiLogo(width, t.paint)
+}
+
+// Logo returns the plain LOGO (no ANSI) plus a version line. Used for non-TTY
+// output such as pipes and `icode version`.
+func Logo() []string {
+	t := &TUI{}
+	lines := t.asciiLogo(80, func(_, s string) string { return s })
+	lines = append(lines, "")
+	lines = append(lines, "iCode "+appVersionStr()+"  ·  多模型 AI 编程助手")
+	return lines
+}
+
+// asciiLogo builds the full art block (flower above wordmark above tagline),
+// all rows exactly wordW visible cells wide, then centres the block within the
+// terminal width.
+func (t *TUI) asciiLogo(width int, paint logoPainter) []string {
+	if width < 40 {
+		// Too narrow for the block wordmark — fall back to a single line.
+		return []string{paint("cyan", "ICODE") + "  " + paint("dim", "多模型 AI 编程助手")}
 	}
 
-	brand := "* iCode " + appVersionStr() + "    多模型 AI 编程助手  (>')>"
-	l1 := "Model:    " + model + "          Provider: " + provider
-	l2 := "Mode:     " + mode + "               CWD: " + short
-
-	var meter string
-	if t.contextWindow > 0 && t.contextTokens >= 0 {
-		pct := t.contextTokens * 100 / t.contextWindow
-		if pct < 0 {
-			pct = 0
-		}
-		if pct > 100 {
-			pct = 100
-		}
-		cells := 10
-		filled := pct * cells / 100
-		bar := strings.Repeat("█", filled) + strings.Repeat("░", cells-filled)
-		meter = fmt.Sprintf("Context:  %dK / %dK [%s] %d%%", t.contextTokens/1000, t.contextWindow/1000, bar, pct)
-	} else {
-		meter = "Context:  —"
-	}
-	cache := "Cache:    "
-	if t.cacheHitRate > 0 {
-		cache += fmt.Sprintf("%.0f%%", t.cacheHitRate*100)
-	} else {
-		cache += "—"
-	}
-	commands := "/help  /model  /provider  /mode  /clear  /exit"
-
-	contents := []string{brand, l1, l2, meter, cache, commands}
-	cw := 0
-	for _, c := range contents {
-		if w := visibleWidth(c); w > cw {
-			cw = w
-		}
-	}
-	if cw < 24 {
-		cw = 24
-	}
-	if cw+4 > width {
-		// Too narrow for the full banner — let the caller fall back.
-		return nil
-	}
-	innerDash := cw + 2
-
-	top := paint("dim", "┌"+repeat("─", innerDash)+"┐")
-	bot := paint("dim", "└"+repeat("─", innerDash)+"┘")
-	sep := paint("dim", "│ "+repeat("─", cw)+" │")
-	row := func(inner string) string {
-		return paint("dim", "│ ") + inner + paint("dim", " │")
-	}
-	kv := func(s string) string {
-		// Colour labels (words ending with ":") dim and values cyan, but preserve
-		// the original spacing exactly. Keeping the original spaces avoids both
-		// compressing deliberate padding and introducing subtle width differences
-		// on terminals that handle colour-switched runs in unexpected ways.
+	// Build the block "ICODE" wordmark first, then measure its TRUE visible
+	// width. Using len() would mis-count the █ block runes (3 UTF-8 bytes
+	// each) and push the centring maths off by ~50 columns.
+	wordRows := make([]string, 5)
+	for r := 0; r < 5; r++ {
 		var b strings.Builder
-		i := 0
-		for i < len(s) {
-			r, size := utf8.DecodeRuneInString(s[i:])
-			if r == ' ' {
-				b.WriteRune(r)
-				i += size
-				continue
+		for i, ch := range logoWord {
+			letter := logoFont[ch]
+			b.WriteString(paint("cyan", letter[r]))
+			if i < len(logoWord)-1 {
+				b.WriteString(" ")
 			}
-			j := i
-			for j < len(s) {
-				r2, sz := utf8.DecodeRuneInString(s[j:])
-				if r2 == ' ' {
-					break
-				}
-				j += sz
-			}
-			word := s[i:j]
-			switch {
-			case strings.HasSuffix(word, ":"):
-				b.WriteString(paint("dim", word))
-			case word == "(>')>":
-				b.WriteString(paint("yellow", word))
-			default:
-				b.WriteString(paint("cyan", word))
-			}
-			i = j
 		}
-		return b.String()
+		wordRows[r] = b.String()
 	}
+	wordW := visibleWidth(wordRows[0])
 
-	out := []string{top}
-	out = append(out, row(fitVis(paint("magenta", brand), cw)))
-	out = append(out, sep)
-	out = append(out, row(fitVis(kv(l1), cw)))
-	out = append(out, row(fitVis(kv(l2), cw)))
-	out = append(out, row(fitVis(kv(meter), cw)))
-	out = append(out, row(fitVis(kv(cache), cw)))
-	out = append(out, sep)
-	out = append(out, row(fitVis(paint("dim", commands), cw)))
-	out = append(out, bot)
+	// Compose the art block (flower, then wordmark, then tagline), each row
+	// padded to exactly wordW cells so terminal-centring stays consistent.
+	tag := paint("dim", "多模型 AI 编程助手")
+	art := make([]string, 0, len(plumBlossom)+len(wordRows)+1)
+	for _, fl := range plumBlossom {
+		art = append(art, padToCenter(paint("magenta", fl), wordW))
+	}
+	art = append(art, wordRows...)
+	art = append(art, padToCenter(tag, wordW))
+
+	// Centre the whole block within the terminal width.
+	left := (width - wordW) / 2
+	if left < 0 {
+		left = 0
+	}
+	pad := strings.Repeat(" ", left)
+	out := make([]string, 0, len(art))
+	for _, l := range art {
+		out = append(out, pad+l)
+	}
 	return out
+}
+
+// padToCenter centres s (measured by visible width, ANSI ignored) within w
+// cells, returning a string exactly w cells wide.
+func padToCenter(s string, w int) string {
+	vw := visibleWidth(s)
+	if vw >= w {
+		return s
+	}
+	left := (w - vw) / 2
+	return strings.Repeat(" ", left) + s + strings.Repeat(" ", w-vw-left)
 }

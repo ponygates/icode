@@ -90,8 +90,8 @@ func TestWelcomeScreen(t *testing.T) {
 	if !strings.Contains(out, "Welcome back!") {
 		t.Fatalf("expected 'Welcome back!' in welcome screen:\n%s", out)
 	}
-	if !strings.Contains(out, "iCode v") {
-		t.Fatalf("expected 'iCode v...' branding in welcome screen:\n%s", out)
+	if !strings.Contains(out, "多模型 AI 编程助手") {
+		t.Fatalf("expected LOGO tagline '多模型 AI 编程助手' in welcome screen:\n%s", out)
 	}
 	// Two-column layout: tips on the right, info on the left
 	if !strings.Contains(out, "Tips for getting started") {
@@ -111,7 +111,7 @@ func TestWelcomeScreen(t *testing.T) {
 	}
 	tui.render()
 	out2 := buf.String()
-	if strings.Contains(out2, "* iCode") {
-		t.Fatalf("expected welcome logo to be hidden after dismiss:\n%s", out2)
+	if strings.Contains(out2, "Welcome back!") {
+		t.Fatalf("expected welcome panel to be hidden after dismiss:\n%s", out2)
 	}
 }

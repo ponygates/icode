@@ -24,12 +24,12 @@ func renderAt(w, h int) string {
 	return buf.String()
 }
 
-// TestWelcomeAdaptive guards the height-adaptive welcome screen: the Claude
-// Code-style two-column box must render whole or not at all — it must never be
-// sliced in half on a short terminal. It also verifies the full banner shows
-// on a roomy terminal and degrades gracefully when cramped.
+// TestWelcomeAdaptive guards the height-adaptive welcome screen: the LOGO plus
+// the two startup panels must render whole or not at all — it must never be
+// sliced in half on a short terminal. It also verifies the full screen shows on
+// a roomy terminal and degrades gracefully when cramped.
 func TestWelcomeAdaptive(t *testing.T) {
-	welcomeTop := "iCode v"        // first row of the Claude Code welcome box
+	welcomeTop := "Welcome back!" // first content row of the left panel
 	welcomeTip := "Tips for getting started" // right-column header
 
 	// Roomy terminal: the whole welcome box must be present.
@@ -45,11 +45,12 @@ func TestWelcomeAdaptive(t *testing.T) {
 	}
 
 	// The banner must be anchored near the top (not vertically centred): on a
-	// 40-row terminal the first welcome row must sit within the first ~12 lines,
-	// so it can never be pushed above the visible window.
+	// 40-row terminal the first welcome row must sit within the first ~18 lines
+	// (LOGO art is ~11 rows, then a blank, then the panel top), so it can never
+	// be pushed above the visible window.
 	for i, ln := range strings.Split(roomy, "\n") {
 		if strings.Contains(ln, welcomeTop) {
-			if i > 12 {
+			if i > 18 {
 				t.Fatalf("welcome anchored too low (row %d) instead of near top:\n%s", i, roomy)
 			}
 			break
@@ -87,38 +88,44 @@ func runeLastIndex(s string, target rune) int {
 	return -1
 }
 
-// TestWelcomeBoxRightBorderAligned guards the Claude Code-style two-column
-// welcome box: the right `│` border must sit at the same column on every row,
-// and must match the `╮` / `╯` corners of the top/bottom bar. This regresses the
-// bug where the right column was padded to leftW but NOT to rightW, so rows with
-// shorter right content pulled the right border inward — leaving it misaligned.
+// TestWelcomeBoxRightBorderAligned guards the two startup panels: the right
+// `│` border of each panel must sit at the same column on every row, and must
+// match the `╮` / `╯` corners of the top/bottom bar. This regresses the bug
+// where the right column was padded but not truncated, so rows with shorter
+// right content pulled the right border inward — leaving it misaligned.
 func TestWelcomeBoxRightBorderAligned(t *testing.T) {
 	tui := New(Config{Model: "deepseek-v4-flash", Provider: "deepseek", Lang: "zh-CN", Theme: "dark"})
 	tui.color = false
-	// welcomeBox returns the bare lines (paint() is a no-op with color=false),
-	// so we can assert per-row column alignment directly without parsing the
-	// full-screen frame's cursor-escape encoding.
-	box := tui.welcomeBox(120)
-	if len(box) < 3 {
-		t.Fatalf("welcome box too small: %v", box)
-	}
-	top := box[0]
-	bot := box[len(box)-1]
-	topRight := runeIndex(top, '╮')
-	botRight := runeIndex(bot, '╯')
-	if topRight < 0 || botRight < 0 {
-		t.Fatalf("missing corners: top=%q bot=%q", top, bot)
-	}
-	if topRight != botRight {
-		t.Fatalf("top/bottom right corners misaligned: top col %d, bot col %d", topRight, botRight)
-	}
-	for i, ln := range box[1 : len(box)-1] {
-		c := runeLastIndex(ln, '│')
-		if c < 0 {
-			t.Fatalf("row %d missing right border: %q", i, ln)
+	// buildBox returns the bare lines (paint() is a no-op with color=false),
+	// so we can assert per-row column alignment directly.
+	for _, name := range []string{"info", "tips"} {
+		var box []string
+		if name == "info" {
+			box = tui.welcomeInfoBox(120)
+		} else {
+			box = tui.welcomeTipsBox(120)
 		}
-		if c != topRight {
-			t.Fatalf("row %d right border at col %d, expected %d (matches corners):\n  %q", i, c, topRight, ln)
+		if len(box) < 3 {
+			t.Fatalf("%s box too small: %v", name, box)
+		}
+		top := box[0]
+		bot := box[len(box)-1]
+		topRight := runeIndex(top, '╮')
+		botRight := runeIndex(bot, '╯')
+		if topRight < 0 || botRight < 0 {
+			t.Fatalf("%s missing corners: top=%q bot=%q", name, top, bot)
+		}
+		if topRight != botRight {
+			t.Fatalf("%s top/bottom right corners misaligned: top col %d, bot col %d", name, topRight, botRight)
+		}
+		for i, ln := range box[1 : len(box)-1] {
+			c := runeLastIndex(ln, '│')
+			if c < 0 {
+				t.Fatalf("%s row %d missing right border: %q", name, i, ln)
+			}
+			if c != topRight {
+				t.Fatalf("%s row %d right border at col %d, expected %d (matches corners):\n  %q", name, i, c, topRight, ln)
+			}
 		}
 	}
 }

@@ -856,49 +856,152 @@ func (t *TUI) headerLine() string {
 		t.paint("dim", "  ·  mode: ") + modeLabel
 }
 
-// welcomeLines renders the startup screen. The top of the screen is the iCode
-// branded LOGO banner (model/provider/mode/cwd/context + pony accent); if there
-// is vertical room, the Claude Code-style two-column tips box is appended below
-// it. On narrow terminals it falls back to the tips box alone, then to a
-// minimal one-liner.
+// welcomeLines renders the startup screen: an ASCII LOGO (plum blossom +
+// block-letter ICODE wordmark, deliberately WITHOUT a surrounding box so it can
+// never be mis-aligned) on top, followed by the two startup panels — the LEFT
+// panel merges the live session info (model / provider / mode / cwd / context /
+// cache / quick commands) with the "Welcome back!" greeting, and the RIGHT panel
+// shows tips & what's new. The two panels sit side by side when they fit, and
+// stack vertically on narrow terminals.
 func (t *TUI) welcomeLines(width, maxH int) []string {
 	if maxH < 1 || width < 30 {
 		return nil
 	}
-
 	logo := t.logoLines(width)
-	box := t.welcomeBox(width)
-
-	// Logo + tips when both fit (preferred, richest view).
-	if logo != nil && box != nil && len(logo)+len(box) <= maxH {
-		return append(append([]string{}, logo...), box...)
+	boxes := t.welcomeBoxes(width)
+	if boxes == nil {
+		if logo != nil {
+			return logo
+		}
+		return []string{"  " + t.paint("orange", "*") + "  " + t.paint("bold", "Welcome to iCode")}
 	}
-	// Logo alone when it fits.
-	if logo != nil && len(logo) <= maxH {
-		return logo
+	// Centre the panel block (side-by-side or stacked) within the terminal so
+	// it shares the LOGO's centre axis — the whole welcome stays cohesive.
+	boxesW := 0
+	for _, l := range boxes {
+		if vw := visibleWidth(l); vw > boxesW {
+			boxesW = vw
+		}
 	}
-	// Tips box alone when it fits.
-	if box != nil && len(box) <= maxH {
-		return box
+	if indent := (width - boxesW) / 2; indent > 0 {
+		pad := strings.Repeat(" ", indent)
+		for i := range boxes {
+			boxes[i] = pad + boxes[i]
+		}
 	}
-	// Minimal fallback on very small terminals.
+	combined := append(append([]string{}, logo...), append([]string{""}, boxes...)...)
+	if len(combined) <= maxH {
+		return combined
+	}
+	// Too tall for the full logo + panels: drop the logo, keep the panels.
+	if len(boxes) <= maxH {
+		return boxes
+	}
+	// Still too tall: show the left panel alone (it carries the greeting).
+	left := t.welcomeInfoBox(width)
+	if left != nil && len(left) <= maxH {
+		return left
+	}
 	return []string{"  " + t.paint("orange", "*") + "  " + t.paint("bold", "Welcome to iCode")}
 }
 
-// welcomeBox returns the two-column Claude Code welcome panel wrapped in an
-// orange border, or nil if the terminal is too narrow to fit it.
-func (t *TUI) welcomeBox(width int) []string {
-	cwd, _ := os.Getwd()
-	short := shortDir(cwd)
+// welcomeBoxes returns the two startup panels as a single block: side by side
+// when they fit horizontally, stacked vertically otherwise. Returns nil if
+// neither panel can be built.
+func (t *TUI) welcomeBoxes(width int) []string {
+	leftLines := t.welcomeInfoLines()
+	rightLines := t.welcomeTipsLines()
 
-	left := []string{
-		"  " + t.paint("bold", "Welcome back!"),
-		"",
-		"  " + t.paint("dim", t.model) + "  " + t.paint("dim", "*") + "  API Usage  " + t.paint("dim", "*") + "  Billing",
-		"  " + t.paint("dim", short),
+	// Equalise heights so the two panels can be placed side by side with their
+	// top and bottom borders perfectly aligned.
+	maxLen := len(leftLines)
+	if len(rightLines) > maxLen {
+		maxLen = len(rightLines)
+	}
+	for len(leftLines) < maxLen {
+		leftLines = append(leftLines, "")
+	}
+	for len(rightLines) < maxLen {
+		rightLines = append(rightLines, "")
 	}
 
-	right := []string{
+	left := t.buildBox("cyan", leftLines, width)
+	right := t.buildBox("orange", rightLines, width)
+	if left == nil && right == nil {
+		return nil
+	}
+	if left == nil {
+		return right
+	}
+	if right == nil {
+		return left
+	}
+	gap := 3
+	if boxWidth(left[0])+gap+boxWidth(right[0]) <= width {
+		return joinSideBySide(left, right, gap)
+	}
+	// Not enough horizontal room — stack them instead.
+	return append(append([]string{}, left...), append([]string{""}, right...)...)
+}
+
+// welcomeInfoBox returns the LEFT panel (greeting + live session info) as a
+// bordered box.
+func (t *TUI) welcomeInfoBox(width int) []string {
+	return t.buildBox("cyan", t.welcomeInfoLines(), width)
+}
+
+// welcomeTipsBox returns the RIGHT panel (tips & what's new) as a bordered box.
+func (t *TUI) welcomeTipsBox(width int) []string {
+	return t.buildBox("orange", t.welcomeTipsLines(), width)
+}
+
+// welcomeInfoLines builds the LEFT panel content: greeting + live session info.
+// This is the content the user asked to pull out of the old (mis-aligned) top
+// banner and merge into the new left panel.
+func (t *TUI) welcomeInfoLines() []string {
+	cwd, _ := os.Getwd()
+	short := shortDir(cwd)
+	var meter string
+	if t.contextWindow > 0 && t.contextTokens >= 0 {
+		pct := t.contextTokens * 100 / t.contextWindow
+		if pct < 0 {
+			pct = 0
+		}
+		if pct > 100 {
+			pct = 100
+		}
+		cells := 10
+		filled := pct * cells / 100
+		bar := repeat("█", filled) + repeat("░", cells-filled)
+		meter = "Context:  " + fmt.Sprintf("%dK / %dK", t.contextTokens/1000, t.contextWindow/1000) +
+			" [" + bar + "] " + fmt.Sprintf("%d%%", pct)
+	} else {
+		meter = "Context:  —"
+	}
+	cache := "Cache:    "
+	if t.cacheHitRate > 0 {
+		cache += fmt.Sprintf("%.0f%%", t.cacheHitRate*100)
+	} else {
+		cache += "—"
+	}
+	return []string{
+		t.paint("bold", "Welcome back!"),
+		"",
+		"Model:    " + t.model,
+		"Provider: " + t.provider,
+		"Mode:     " + t.mode,
+		"CWD:      " + short,
+		"",
+		meter,
+		cache,
+		"",
+		"/help  /model  /provider  /mode  /clear  /exit",
+	}
+}
+
+// welcomeTipsLines builds the RIGHT panel content: tips & what's new.
+func (t *TUI) welcomeTipsLines() []string {
+	return []string{
 		t.paint("orange", "Tips for getting started"),
 		t.paint("orange", "─────────────────────"),
 		"  Run /init to create a ICODE.md file with",
@@ -908,98 +1011,76 @@ func (t *TUI) welcomeBox(width int) []string {
 		t.paint("orange", "──────────"),
 		"  Check the iCode changelog for updates",
 	}
+}
 
-	// Build the box with the two columns side by side
-	leftW := 0
-	for _, l := range left {
-		if vw := visibleWidth(l); vw > leftW {
-			leftW = vw
+// buildBox wraps content lines in a single bordered box (╭╮╰╯ corners) using
+// fitVis() for every row, so the left/right borders line up with the corners on
+// every line — including CJK content and the coloured progress meter. Empty
+// content lines become blank bordered rows, which lets two equalised boxes sit
+// side by side without mis-aligning their borders.
+func (t *TUI) buildBox(color string, lines []string, width int) []string {
+	innerW := 0
+	for _, l := range lines {
+		if vw := visibleWidth(l); vw > innerW {
+			innerW = vw
 		}
 	}
-	rightW := 0
-	for _, l := range right {
-		if vw := visibleWidth(l); vw > rightW {
-			rightW = vw
-		}
+	if innerW < 16 {
+		innerW = 16
 	}
-
-	gap := 4
-	totalW := leftW + gap + rightW + 4 // 4 = padding
-	if totalW > width-2 {
-		// Too narrow — trim
-		if rightW > 20 {
-			rightW = 20
-		}
-		totalW = leftW + gap + rightW + 4
-		if totalW > width-2 {
-			return nil
-		}
+	if innerW+4 > width {
+		innerW = width - 4
 	}
-
-	bar := repeat("─", totalW-2)
-	top := t.paint("orange", "╭"+bar+"╮")
-	bot := t.paint("orange", "╰"+bar+"╯")
+	if innerW < 6 {
+		return nil
+	}
+	c := t.c(color)
+	reset := "\x1b[0m"
+	if !t.color {
+		c, reset = "", ""
+	}
+	bar := repeat("─", innerW+2)
+	top := c + "╭" + bar + "╮" + reset
+	bot := c + "╰" + bar + "╯" + reset
 	out := []string{top}
-
-	maxRows := len(left)
-	if len(right) > maxRows {
-		maxRows = len(right)
-	}
-	for i := 0; i < maxRows; i++ {
-		var l, r string
-		if i < len(left) {
-			l = left[i]
+	for _, l := range lines {
+		if l == "" {
+			out = append(out, c+"│ "+reset+strings.Repeat(" ", innerW)+c+" │"+reset)
+		} else {
+			out = append(out, c+"│ "+reset+fitVis(l, innerW)+c+" │"+reset)
 		}
-		if i < len(right) {
-			r = right[i]
-		}
-		// Pin each column to its measured width with fitVis() — which both
-		// pads AND hard-truncates to the exact visible width. The left column
-		// is always ≤ leftW, but after the narrow-terminal trim path rightW
-		// may be smaller than some right-column lines, so truncating (not just
-		// padding) keeps every row's right │ aligned with the ╮/╯ corners.
-		row := t.paint("orange", "│") + " " + fitVis(l, leftW) +
-			strings.Repeat(" ", gap) + fitVis(r, rightW) + " " + t.paint("orange", "│")
-		out = append(out, row)
 	}
 	out = append(out, bot)
 	return out
 }
 
-// welcomeLeft returns lines for the left panel: model, provider, cwd.
-func (t *TUI) welcomeLeft(width int) []string {
-	cwd, _ := os.Getwd()
-	prefix := "  "
-	contentW := width - visibleWidth(prefix)
-	if contentW < 10 {
-		contentW = 10
+// joinSideBySide zips two equal-height box blocks row by row, separated by gap
+// spaces. Both boxes must already have the same number of rows (the caller
+// equalises content via welcomeBoxes).
+func joinSideBySide(a, b []string, gap int) []string {
+	n := len(a)
+	if len(b) > n {
+		n = len(b)
 	}
-
-	var out []string
-	out = append(out, t.paint("dim", prefix+"Model")+":    "+t.model)
-	out = append(out, t.paint("dim", prefix+"Provider")+": "+t.provider)
-	out = append(out, t.paint("dim", prefix+"Mode")+":     "+t.mode)
-	out = append(out, t.paint("dim", prefix+"cwd")+":     "+shortDir(cwd))
-	out = append(out, "")
-	out = append(out, t.paint("dim", prefix+t.tstr("welcome.hint")))
-	out = append(out, t.paint("dim", prefix+t.tstr("welcome.close")))
+	gapStr := strings.Repeat(" ", gap)
+	out := make([]string, n)
+	for i := 0; i < n; i++ {
+		x, y := "", ""
+		if i < len(a) {
+			x = a[i]
+		}
+		if i < len(b) {
+			y = b[i]
+		}
+		out[i] = x + gapStr + y
+	}
 	return out
 }
 
-// welcomeRight returns lines for the right panel: quick commands.
-func (t *TUI) welcomeRight(width int) []string {
-	prefix := ""
-	var out []string
-	out = append(out, t.paint("dim", prefix+"Commands:"))
-	out = append(out, "")
-	out = append(out, t.paint("dim", prefix+"  /help")+"    "+t.tstr("cmd.help"))
-	out = append(out, t.paint("dim", prefix+"  /model")+"   "+t.tstr("cmd.model"))
-	out = append(out, t.paint("dim", prefix+"  /provider")+" "+t.tstr("cmd.provider"))
-	out = append(out, t.paint("dim", prefix+"  /mode")+"    "+t.tstr("cmd.mode"))
-	out = append(out, t.paint("dim", prefix+"  /clear")+"   "+t.tstr("cmd.clear"))
-	out = append(out, "")
-	out = append(out, t.paint("dim", prefix+"/exit  /quit  "+t.tstr("cmd.exit")))
-	return out
+// boxWidth returns the visible width of a box's top (or bottom) border line —
+// i.e. the full rendered width of that box.
+func boxWidth(topLine string) int {
+	return visibleWidth(topLine)
 }
 
 func (t *TUI) messageLinesW(m Message, width int) []string {

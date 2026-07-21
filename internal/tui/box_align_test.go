@@ -84,13 +84,20 @@ func TestAllBoxesAligned(t *testing.T) {
 	tuiPlain := New(Config{Model: "deepseek-v4-flash", Provider: "deepseek", Lang: "zh-CN", Theme: "dark"})
 	tuiPlain.color = false
 
-	// Welcome box across terminal widths (narrow triggers the trim path).
+	// Welcome panels across terminal widths. The left (info) panel carries
+	// CJK + the coloured context meter; the right (tips) panel is shorter — the
+	// two are equalised and placed side by side, so each must align internally.
 	for _, w := range []int{120, 100, 90, 85, 80} {
-		box := tuiPlain.welcomeBox(w)
+		box := tuiPlain.welcomeInfoBox(w)
 		if box == nil {
 			continue
 		}
-		assertBoxAligned(t, "welcomeBox("+itoa(w)+")", box)
+		assertBoxAligned(t, "welcomeInfoBox("+itoa(w)+")", box)
+		box = tuiPlain.welcomeTipsBox(w)
+		if box == nil {
+			continue
+		}
+		assertBoxAligned(t, "welcomeTipsBox("+itoa(w)+")", box)
 	}
 
 	// Streaming thinking box.
@@ -111,14 +118,17 @@ func TestAllBoxesAligned(t *testing.T) {
 	tuiColor := New(Config{Model: "openrouter/free", Provider: "openrouter", Mode: "yolo", Lang: "zh-CN", Theme: "dark"})
 	tuiColor.color = true
 	for _, w := range []int{120, 100, 90, 85, 80} {
-		box := tuiColor.welcomeBox(w)
+		box := tuiColor.welcomeInfoBox(w)
 		if box == nil {
 			continue
 		}
-		assertBoxAligned(t, "welcomeBox-color("+itoa(w)+")", box)
+		assertBoxAligned(t, "welcomeInfoBox-color("+itoa(w)+")", box)
+		box = tuiColor.welcomeTipsBox(w)
+		if box == nil {
+			continue
+		}
+		assertBoxAligned(t, "welcomeTipsBox-color("+itoa(w)+")", box)
 	}
-	logo := tuiColor.logoLines(120)
-	assertBoxAligned(t, "logo-color", logo)
 }
 
 func itoa(n int) string {
