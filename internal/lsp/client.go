@@ -27,6 +27,8 @@ import (
 	"os/exec"
 	"sync"
 	"sync/atomic"
+
+	executil "github.com/ponygates/icode/internal/executil"
 )
 
 // Transport manages the JSON-RPC communication with a language server.
@@ -45,7 +47,7 @@ type Transport struct {
 func NewTransport(ctx context.Context, command string, args ...string) (*Transport, error) {
 	ctx, cancel := context.WithCancel(ctx)
 
-	cmd := exec.CommandContext(ctx, command, args...)
+	cmd := executil.CommandContext(ctx, command, args...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		cancel()

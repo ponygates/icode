@@ -5,11 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 
+	"github.com/ponygates/icode/internal/executil"
 	"github.com/ponygates/icode/internal/types"
 )
 
@@ -33,7 +33,7 @@ func (t *DiskUsageTool) Execute(ctx context.Context, args string) (*types.ToolRe
 
 	if runtime.GOOS == "windows" {
 		// Use PowerShell for reliable disk info
-		cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-Command",
+		cmd := executil.CommandContext(ctx, "powershell", "-NoProfile", "-Command",
 			`Get-PSDrive -PSProvider FileSystem | Where-Object { $_.Used -ne $null -and ($_.Used + $_.Free) -gt 0 } | `+
 				`ForEach-Object { $pct = [math]::Round(($_.Used / ($_.Used + $_.Free)) * 100); `+
 				`"{0} | Used={1:N1}GB Free={2:N1}GB Total={3:N1}GB | {4}%" -f `+
@@ -44,7 +44,7 @@ func (t *DiskUsageTool) Execute(ctx context.Context, args string) (*types.ToolRe
 		}
 		output.WriteString(string(out))
 	} else {
-		cmd := exec.CommandContext(ctx, "df", "-h")
+		cmd := executil.CommandContext(ctx, "df", "-h")
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			return &types.ToolResult{Success: false, Error: fmt.Sprintf("df failed: %v", err)}, nil
@@ -164,7 +164,7 @@ func (t *DiskCleanupTool) Execute(ctx context.Context, args string) (*types.Tool
 	if target == "windows_update" || target == "all" {
 		totalCleaned += cleanPath("Win Update Downloads", filepath.Join(systemRoot, "SoftwareDistribution", "Download"))
 		if !dryRun {
-			cmd := exec.CommandContext(ctx, "dism", "/online", "/cleanup-image", "/startcomponentcleanup", "/resetbase", "/quiet")
+			cmd := executil.CommandContext(ctx, "dism", "/online", "/cleanup-image", "/startcomponentcleanup", "/resetbase", "/quiet")
 			cmd.Run() // best-effort, ignore errors
 			output.WriteString("  DISM component cleanup: completed (best-effort)\n")
 		}

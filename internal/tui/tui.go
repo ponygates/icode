@@ -31,6 +31,7 @@ import (
 	"github.com/ponygates/icode/internal/core/checkpoint"
 	"github.com/ponygates/icode/internal/core/permission"
 	"github.com/ponygates/icode/internal/core/slashcmd"
+	"github.com/ponygates/icode/internal/executil"
 	"golang.org/x/term"
 )
 
@@ -2397,9 +2398,9 @@ func (t *TUI) execShell(cmdStr string) {
 
 	var cmd *exec.Cmd
 	if strings.Contains(strings.ToLower(os.Getenv("OS")), "windows") {
-		cmd = exec.CommandContext(ctx, "cmd", "/C", cmdStr)
+		cmd = executil.CommandContext(ctx, "cmd", "/C", cmdStr)
 	} else {
-		cmd = exec.CommandContext(ctx, "sh", "-c", cmdStr)
+		cmd = executil.CommandContext(ctx, "sh", "-c", cmdStr)
 	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -2480,7 +2481,7 @@ func (t *TUI) exportMarkdown(args []string) {
 // ── Git diff ─────────────────────────────────────────────────────
 
 func (t *TUI) showGitDiff() {
-	cmd := exec.Command("git", "diff")
+	cmd := executil.Command("git", "diff")
 	output, err := cmd.CombinedOutput()
 	if err != nil && len(output) == 0 {
 		t.add(RoleError, "git diff: "+err.Error())

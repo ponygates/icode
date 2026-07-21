@@ -6,7 +6,7 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $binary = Join-Path $scriptDir "icode.exe"
 
 if (-not (Test-Path $binary)) {
-    Write-Host "iCode binary not found. Run 'go build -o icode.exe .' first." -ForegroundColor Red
+    Write-Host "iCode binary not found. Run 'go build -ldflags=\"-s -w -H windowsgui\" -o icode.exe .' first (build.bat also works)." -ForegroundColor Red
     exit 1
 }
 

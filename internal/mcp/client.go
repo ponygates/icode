@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ponygates/icode/internal/executil"
 	"github.com/ponygates/icode/internal/types"
 )
 
@@ -98,7 +99,7 @@ func (c *Client) connectStdio(ctx context.Context) error {
 
 	// Create cancellable context so Close() can clean up the subprocess
 	ctx, c.cancel = context.WithCancel(ctx)
-	c.cmd = exec.CommandContext(ctx, c.config.Command, c.config.Args...)
+	c.cmd = executil.CommandContext(ctx, c.config.Command, c.config.Args...)
 
 	// Merge env vars: inherit parent environment, then overlay configured vars
 	if len(c.config.Env) > 0 {

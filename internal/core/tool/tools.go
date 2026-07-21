@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ponygates/icode/internal/executil"
 	"github.com/ponygates/icode/internal/types"
 )
 
@@ -134,9 +135,9 @@ func (t *BashTool) Execute(ctx context.Context, args string) (*types.ToolResult,
 
 	var cmd *exec.Cmd
 	if strings.Contains(os.Getenv("OS"), "Windows") {
-		cmd = exec.CommandContext(ctx, "cmd", "/C", cmdStr)
+		cmd = executil.CommandContext(ctx, "cmd", "/C", cmdStr)
 	} else {
-		cmd = exec.CommandContext(ctx, "sh", "-c", cmdStr)
+		cmd = executil.CommandContext(ctx, "sh", "-c", cmdStr)
 	}
 
 	// Apply working directory
@@ -705,7 +706,7 @@ func (t *GitDiffTool) Execute(ctx context.Context, args string) (*types.ToolResu
 	ctx2, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx2, "git", cmdArgs...)
+	cmd := executil.CommandContext(ctx2, "git", cmdArgs...)
 	output, err := cmd.CombinedOutput()
 	if err != nil && len(output) == 0 {
 		return &types.ToolResult{Success: false, Error: fmt.Sprintf("git diff: %v", err)}, nil
@@ -743,13 +744,13 @@ func (t *GitCommitTool) Execute(ctx context.Context, args string) (*types.ToolRe
 	defer cancel()
 
 	// git add -A
-	addCmd := exec.CommandContext(ctx2, "git", "add", "-A")
+	addCmd := executil.CommandContext(ctx2, "git", "add", "-A")
 	if err := addCmd.Run(); err != nil {
 		return &types.ToolResult{Success: false, Error: fmt.Sprintf("git add: %v", err)}, nil
 	}
 
 	// git commit -m
-	commitCmd := exec.CommandContext(ctx2, "git", "commit", "-m", msg)
+	commitCmd := executil.CommandContext(ctx2, "git", "commit", "-m", msg)
 	output, err := commitCmd.CombinedOutput()
 	if err != nil {
 		return &types.ToolResult{Success: false, Error: fmt.Sprintf("git commit: %v\n%s", err, string(output))}, nil
@@ -775,7 +776,7 @@ func (t *GitStatusTool) Execute(ctx context.Context, args string) (*types.ToolRe
 	ctx2, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx2, "git", "status", "--short", "--branch")
+	cmd := executil.CommandContext(ctx2, "git", "status", "--short", "--branch")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return &types.ToolResult{Success: false, Error: fmt.Sprintf("git status: %v", err)}, nil

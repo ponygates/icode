@@ -36,6 +36,7 @@ import (
 	"strings"
 	"time"
 
+	executil "github.com/ponygates/icode/internal/executil"
 	"gopkg.in/yaml.v3"
 )
 
@@ -221,9 +222,9 @@ func runShell(parent context.Context, cmd string) string {
 
 	var c *exec.Cmd
 	if isWindows() {
-		c = exec.CommandContext(ctx, "cmd", "/C", cmd)
+		c = executil.CommandContext(ctx, "cmd", "/C", cmd)
 	} else {
-		c = exec.CommandContext(ctx, "sh", "-c", cmd)
+		c = executil.CommandContext(ctx, "sh", "-c", cmd)
 	}
 	out, _ := c.CombinedOutput()
 

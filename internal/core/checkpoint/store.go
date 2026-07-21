@@ -5,11 +5,12 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	executil "github.com/ponygates/icode/internal/executil"
 )
 
 type Store struct {
@@ -134,7 +135,7 @@ func (s *Store) Status(ctx context.Context) string {
 
 func (s *Store) gitCmd(ctx context.Context, args ...string) (string, error) {
 	cmdArgs := append([]string{"--git-dir", s.gitDir, "--work-tree", s.workDir}, args...)
-	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
+	cmd := executil.CommandContext(ctx, "git", cmdArgs...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }

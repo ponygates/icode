@@ -23,7 +23,8 @@ iCode is an open-source AI coding agent that works in your terminal and on your 
 # Install from source
 git clone https://github.com/ponygates/icode.git
 cd icode
-go build -o icode .
+go build -o icode .                                          # Linux / macOS
+go build -ldflags="-s -w -H windowsgui" -o icode.exe .       # Windows: no black console on double-click
 
 # Configure your first API key
 ./icode auth set --provider deepseek --key sk-your-key-here
@@ -216,7 +217,8 @@ brew install ponygates/icode/icode
 
 ```bash
 # Build
-go build -o icode .
+go build -o icode .                                          # Linux / macOS
+go build -ldflags="-s -w -H windowsgui" -o icode.exe .       # Windows: no black console on double-click
 
 # Test
 go test ./...

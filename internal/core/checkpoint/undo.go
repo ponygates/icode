@@ -19,10 +19,11 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+
+	executil "github.com/ponygates/icode/internal/executil"
 )
 
 // FileSnapshot manages undo snapshots of workspace files.
@@ -257,7 +258,7 @@ func (fs *FileSnapshot) gitCmd(ctx context.Context, args ...string) (string, err
 		"--git-dir", fs.gitDir,
 		"--work-tree", fs.undoDir,
 	}, args...)
-	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
+	cmd := executil.CommandContext(ctx, "git", cmdArgs...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
