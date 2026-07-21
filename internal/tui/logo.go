@@ -1,164 +1,134 @@
 package tui
 
 import (
+	"fmt"
+	"os"
 	"strings"
 )
 
-// icodeLogos holds progressively richer visual banners for the startup screen.
-// The design uses full-width box-drawing rectangles: left panel for iCode branding,
-// right panel for welcome/status info. The horse/pony motif is integrated into
-// the right panel as a compact ASCII accent.
+// buildLogo renders the iCode startup banner: a single bordered box with the
+// iCode wordmark + pony-mascot accent on top, followed by live session info
+// (model / provider / mode / cwd / context-window usage / cache hit-rate) and
+// the quick-command list.
 //
-// Layout (wide variant, ≥90 cols):
-//
-//	┌──────────────────────────────────────────────────┐
-//	│  ✦ iCode  v0.3                🐴 多模型 AI 编程助手 │
-//	│  ──────────────────────────────────────────────── │
-//	│  Model: deepseek-v4-flash     Mode: agent        │
-//	│  Provider: deepseek           CWD: /project/src  │
-//	│  Context: 42K/128K ████░░░░   Cache: 65%        │
-//	└──────────────────────────────────────────────────┘
-var icodeLogos = []struct {
-	minWidth int
-	lines    []string
-}{
-	// ── Full layout (≥90 cols) ──
-	{90, []string{
-		`┌─────────────────────────────────────────────────────────────────┐`,
-		`│                                                                 │`,
-		`│    ✦ iCode  v0.3                  🐴  多模型 AI 编程助手        │`,
-		`│    ─────────────────────────────────────────────────────          │`,
-		`│    Model:     deepseek-v4-flash         Provider: deepseek       │`,
-		`│    Mode:      agent                     CWD: ~/project/src       │`,
-		`│    Context:   42K / 128K ████░░░░░░░    Cache: 65%               │`,
-		`│                                                                 │`,
-		`│    ─────────────────────────────────────────────────────          │`,
-		`│    /help  /model  /provider  /mode  /clear  /multiline  /exit   │`,
-		`└─────────────────────────────────────────────────────────────────┘`,
-	}},
-
-	// ── Medium layout (≥68 cols) ──
-	{68, []string{
-		`┌───────────────────────────────────────────────────────┐`,
-		`│                                                       │`,
-		`│    ✦ iCode v0.3        🐴 多模型 AI 编程助手         │`,
-		`│    ─────────────────────────────────────────              │`,
-		`│    Model: deepseek-v4-flash  Provider: deepseek        │`,
-		`│    Mode:  agent              CWD: ~/project            │`,
-		`│    Context: 42K/128K ████░   Cache: 65%               │`,
-		`│                                                       │`,
-		`└───────────────────────────────────────────────────────┘`,
-	}},
-
-	// ── Compact layout (≥48 cols) ──
-	{48, []string{
-		`┌──────────────────────────────────────┐`,
-		`│                                      │`,
-		`│    ✦ iCode v0.3   🐴 编程助手        │`,
-		`│    ──────────────────────────           │`,
-		`│    Model: deepseek-v4-flash           │`,
-		`│    Mode:  agent                      │`,
-		`│                                      │`,
-		`└──────────────────────────────────────┘`,
-	}},
-
-	// ── Mini layout (≥32 cols) ──
-	{32, []string{
-		`┌──────────────────────────┐`,
-		`│  ✦ iCode v0.3  🐴       │`,
-		`│  deepseek-v4-flash      │`,
-		`│  mode: agent            │`,
-		`└──────────────────────────┘`,
-	}},
-}
-
-// logoLines picks the richest banner that fits the terminal width.
-// Colors are applied: frame dim, content magenta, horse yellow.
+// IMPORTANT: every glyph here is either ASCII, a CP437 box-drawing character
+// (┌┐└┘│─), or a CP437 block element (█░). These are the ONLY character classes
+// that render reliably on legacy Windows conhost (raster font / OEM codepage),
+// where decorative Unicode symbols such as ✦ ◆ ✻ ● ⏱ ✓ ⏸ and emoji like 🐴
+// have NO glyph and would make the logo "disappear". The pony mascot is drawn
+// with the ASCII accent "(>')>" instead of an emoji.
 func (t *TUI) logoLines(width int) []string {
-	for _, lg := range icodeLogos {
-		if width >= lg.minWidth {
-			out := make([]string, len(lg.lines))
-			for i, ln := range lg.lines {
-				switch {
-				case i == 0 || i == len(lg.lines)-1:
-					// Top/bottom border → dim frame
-					out[i] = t.paint("dim", ln)
-				case strings.Contains(ln, "✦"):
-					// iCode branding line → magenta
-					out[i] = t.paint("magenta", ln)
-				case strings.Contains(ln, "🐴"):
-					// Horse accent line → warm
-					out[i] = strings.Replace(ln, "🐴", t.paint("yellow", "🐴"), 1)
-					out[i] = colorLogoContent(out[i], t)
-				case strings.Contains(ln, "─"):
-					// Separator line → dim
-					out[i] = t.paint("dim", ln)
-				default:
-					// Content rows → apply colour per segment
-					out[i] = colorLogoContent(ln, t)
-				}
-			}
-			return out
-		}
-	}
-	return nil
+	return t.buildLogo(width, t.paint)
 }
 
-// colorLogoContent colours segments inside a banner content row.
-// Left-aligned labels are dim, values are bright, horse emoji is warm.
-func colorLogoContent(ln string, t *TUI) string {
-	// Preserve frame borders
-	if !strings.HasPrefix(ln, "│") {
-		return ln
-	}
-	lnRunes := []rune(ln)
-	if len(lnRunes) < 3 {
-		return ln
-	}
-	leftBorder := string(lnRunes[0])
-	content := string(lnRunes[1 : len(lnRunes)-1])
-	rightBorder := string(lnRunes[len(lnRunes)-1])
-
-	// Colour segments inside
-	var colored strings.Builder
-	colored.WriteString(t.paint("dim", leftBorder))
-
-	// Split content by key:value boundaries
-	segments := strings.Fields(content)
-	for j, seg := range segments {
-		if j > 0 {
-			colored.WriteString(" ")
-		}
-		// Labels with colons → dim
-		if strings.HasSuffix(seg, ":") {
-			colored.WriteString(t.paint("dim", seg))
-		} else if seg == "🐴" {
-			colored.WriteString(t.paint("yellow", seg))
-		} else {
-			colored.WriteString(t.paint("cyan", seg))
-		}
-	}
-	colored.WriteString(t.paint("dim", rightBorder))
-	return colored.String()
-}
-
-// horseDetails returns supplementary horse art lines.
-func horseDetails() []string {
-	return []string{
-		`     ,,,`,
-		`   ,'  \,`,
-		`  /__ __\`,
-		` /  ))\  `,
-		`/  /_/   `,
-	}
-}
-
-// Logo returns the wordmark as plain lines (no ANSI), safe for non-VT consoles.
+// Logo returns the iCode wordmark banner as PLAIN (non-ANSI) lines, safe for
+// non-VT consoles — e.g. piped output or `icode version`. Live values fall
+// back to placeholders since no session is attached.
 func Logo() []string {
-	for _, lg := range icodeLogos {
-		if 80 >= lg.minWidth {
-			return lg.lines
+	t := &TUI{}
+	return t.buildLogo(80, func(_, s string) string { return s })
+}
+
+// logoPainter applies a colour; buildLogo takes it as a parameter so the same
+// layout can be emitted coloured (TUI) or plain (Logo()).
+type logoPainter func(color, s string) string
+
+func (t *TUI) buildLogo(width int, paint logoPainter) []string {
+	if width < 36 {
+		return nil
+	}
+	cwd, _ := os.Getwd()
+	short := shortDir(cwd)
+	model := t.model
+	if model == "" {
+		model = "—"
+	}
+	provider := t.provider
+	if provider == "" {
+		provider = "—"
+	}
+	mode := t.mode
+	if mode == "" {
+		mode = ModeAuto
+	}
+
+	brand := "* iCode " + appVersionStr() + "    多模型 AI 编程助手  (>')>"
+	l1 := "Model:    " + model + "          Provider: " + provider
+	l2 := "Mode:     " + mode + "               CWD: " + short
+
+	var meter string
+	if t.contextWindow > 0 && t.contextTokens >= 0 {
+		pct := t.contextTokens * 100 / t.contextWindow
+		if pct < 0 {
+			pct = 0
+		}
+		if pct > 100 {
+			pct = 100
+		}
+		cells := 10
+		filled := pct * cells / 100
+		bar := strings.Repeat("█", filled) + strings.Repeat("░", cells-filled)
+		meter = fmt.Sprintf("Context:  %dK / %dK [%s] %d%%", t.contextTokens/1000, t.contextWindow/1000, bar, pct)
+	} else {
+		meter = "Context:  —"
+	}
+	cache := "Cache:    "
+	if t.cacheHitRate > 0 {
+		cache += fmt.Sprintf("%.0f%%", t.cacheHitRate*100)
+	} else {
+		cache += "—"
+	}
+	commands := "/help  /model  /provider  /mode  /clear  /exit"
+
+	contents := []string{brand, l1, l2, meter, cache, commands}
+	cw := 0
+	for _, c := range contents {
+		if w := visibleWidth(c); w > cw {
+			cw = w
 		}
 	}
-	return icodeLogos[len(icodeLogos)-1].lines
+	if cw < 24 {
+		cw = 24
+	}
+	if cw+4 > width {
+		// Too narrow for the full banner — let the caller fall back.
+		return nil
+	}
+	innerDash := cw + 2
+
+	top := paint("dim", "┌"+repeat("─", innerDash)+"┐")
+	bot := paint("dim", "└"+repeat("─", innerDash)+"┘")
+	sep := paint("dim", "│ "+repeat("─", cw)+" │")
+	row := func(inner string) string {
+		return paint("dim", "│ ") + inner + paint("dim", " │")
+	}
+	kv := func(s string) string {
+		var b strings.Builder
+		for i, seg := range strings.Fields(s) {
+			if i > 0 {
+				b.WriteString(" ")
+			}
+			switch {
+			case strings.HasSuffix(seg, ":"):
+				b.WriteString(paint("dim", seg))
+			case seg == "(>')>":
+				b.WriteString(paint("yellow", seg))
+			default:
+				b.WriteString(paint("cyan", seg))
+			}
+		}
+		return b.String()
+	}
+
+	out := []string{top}
+	out = append(out, row(fitVis(paint("magenta", brand), cw)))
+	out = append(out, sep)
+	out = append(out, row(fitVis(kv(l1), cw)))
+	out = append(out, row(fitVis(kv(l2), cw)))
+	out = append(out, row(fitVis(kv(meter), cw)))
+	out = append(out, row(fitVis(kv(cache), cw)))
+	out = append(out, sep)
+	out = append(out, row(fitVis(paint("dim", commands), cw)))
+	out = append(out, bot)
+	return out
 }

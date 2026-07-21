@@ -439,7 +439,7 @@ func (t *TUI) handleKey(r rune) bool {
 			// Cycle to next model
 			t.modelIdx = (t.modelIdx + 1) % len(t.models)
 			t.model = t.models[t.modelIdx]
-			t.add(RoleSystem, "Tab → "+t.model)
+			t.add(RoleSystem, "Tab -> "+t.model)
 			return true
 		}
 		return true
@@ -733,7 +733,7 @@ func (t *TUI) render() {
 	permLines := []string{}
 	if permPending {
 		// Claude Code-style bordered permission box
-		title := "⏸ " + t.tstr("perm.title")
+		title := "? " + t.tstr("perm.title")
 		boxW := min(visibleWidth(title)+4, W-4)
 		if boxW < 40 {
 			boxW = 40
@@ -841,8 +841,8 @@ func (t *TUI) render() {
 	t.drawInputBox(W, H, inputBuf, cursor, streaming)
 }
 
-// headerLine renders the compact top bar: app name (Claude Code's ✻ glyph
-// style), working directory, and mode — the signature Claude Code header.
+// headerLine renders the compact top bar: app name (orange "iCode" wordmark),
+// working directory, and mode — the signature Claude Code-style header.
 func (t *TUI) headerLine() string {
 	cwd, _ := os.Getwd()
 	short := shortDir(cwd)
@@ -850,29 +850,38 @@ func (t *TUI) headerLine() string {
 	if modeLabel == "" {
 		modeLabel = ModeAuto
 	}
-	return t.paint("orange", "✻ iCode") + " " + appVersionStr() +
+	return t.paint("orange", "iCode") + " " + appVersionStr() +
 		t.paint("dim", "  ·  ") + short +
 		t.paint("dim", "  ·  mode: ") + modeLabel
 }
 
-// welcomeLines renders the Claude Code-style welcome screen: a single bordered
-// box with two columns inside — left shows model/usage/path, right shows tips
-// and "what's new" notes. The whole box is in the orange/red Claude accent
-// color to match the reference screenshot exactly.
+// welcomeLines renders the startup screen. The top of the screen is the iCode
+// branded LOGO banner (model/provider/mode/cwd/context + pony accent); if there
+// is vertical room, the Claude Code-style two-column tips box is appended below
+// it. On narrow terminals it falls back to the tips box alone, then to a
+// minimal one-liner.
 func (t *TUI) welcomeLines(width, maxH int) []string {
 	if maxH < 1 || width < 30 {
 		return nil
 	}
 
-	// Show the full two-column welcome if it fits.
+	logo := t.logoLines(width)
 	box := t.welcomeBox(width)
+
+	// Logo + tips when both fit (preferred, richest view).
+	if logo != nil && box != nil && len(logo)+len(box) <= maxH {
+		return append(append([]string{}, logo...), box...)
+	}
+	// Logo alone when it fits.
+	if logo != nil && len(logo) <= maxH {
+		return logo
+	}
+	// Tips box alone when it fits.
 	if box != nil && len(box) <= maxH {
 		return box
 	}
-
-	// Fallback: minimal welcome on narrow terminals
-	tagline := t.paint("orange", "✦") + "  " + t.paint("bold", "Welcome to iCode")
-	return []string{"  " + tagline}
+	// Minimal fallback on very small terminals.
+	return []string{"  " + t.paint("orange", "*") + "  " + t.paint("bold", "Welcome to iCode")}
 }
 
 // welcomeBox returns the two-column Claude Code welcome panel wrapped in an
@@ -882,13 +891,7 @@ func (t *TUI) welcomeBox(width int) []string {
 	short := shortDir(cwd)
 
 	left := []string{
-		t.paint("orange", "  iCode "+appVersionStr()),
-		"",
 		"  " + t.paint("bold", "Welcome back!"),
-		"",
-		"  " + t.paint("orange", "✦") + " " + t.paint("orange", "✦") + " " + t.paint("orange", "✦"),
-		"    " + t.paint("orange", "◆"),
-		"  " + t.paint("orange", "✦") + " " + t.paint("orange", "✦") + " " + t.paint("orange", "✦"),
 		"",
 		"  " + t.paint("dim", t.model) + "  " + t.paint("dim", "·") + "  API Usage  " + t.paint("dim", "·") + "  Billing",
 		"  " + t.paint("dim", short),
@@ -1003,7 +1006,7 @@ func (t *TUI) messageLinesW(m Message, width int) []string {
 	case RoleThinking:
 		return thinkingLines(m.Content, width)
 	case RoleUser:
-		return wrapPrefixed("  ⏣ ", "    ", m.Content, width)
+		return wrapPrefixed("  > ", "    ", m.Content, width)
 	case RoleAssistant:
 		if t.rawMode {
 			return t.renderMarkdown(m.Content, "", "  ", width)
@@ -1018,10 +1021,10 @@ func (t *TUI) messageLinesW(m Message, width int) []string {
 		return wrapPrefixed("  × ", "    ", m.Content, width)
 	case RoleTool:
 		var out []string
-		pre := "  ⏺ "
+		pre := "  * "
 		head := pre + m.Tool
 		// Hide empty/no-op parameter objects like "{}" so the tool line
-		// shows "⏺ git_status" instead of "⏺ git_status {}".
+		// shows "* git_status" instead of "* git_status {}".
 		args := strings.TrimSpace(m.ToolArgs)
 		if args == "{}" || args == "" {
 			args = ""
@@ -1401,7 +1404,7 @@ func listCwd() []string {
 func (t *TUI) statusLine() string {
 	d := func(s string) string { return t.paint("dim", s) }
 	var parts []string
-	parts = append(parts, t.paint("green", "●")+" "+t.model)
+	parts = append(parts, t.paint("green", "*")+" "+t.model)
 	if t.provider != "" {
 		parts = append(parts, d(t.provider))
 	}
@@ -1449,7 +1452,7 @@ func (t *TUI) statusLine() string {
 	// dim. Zero-list sessions render nothing.
 	if t.callback != nil {
 		if pending, active, done, total := t.callback.TodoCounts(); total > 0 {
-			seg := fmt.Sprintf("☐%d ▶%d ✓%d", pending, active, done)
+			seg := fmt.Sprintf("[ ]%d >%d [x]%d", pending, active, done)
 			if active > 0 {
 				seg = t.paint("yellow", seg)
 			} else {
@@ -1460,7 +1463,7 @@ func (t *TUI) statusLine() string {
 	}
 	if t.streaming {
 		if !t.turnStart.IsZero() {
-			parts = append(parts, d("⏱ "+formatDuration(time.Since(t.turnStart))))
+			parts = append(parts, d("T "+formatDuration(time.Since(t.turnStart))))
 		}
 		// Thinking bar is already shown in the conversation area (thinkingBox),
 		// so don't duplicate it here — Claude Code shows the spinner only once.
@@ -1517,7 +1520,7 @@ func (t *TUI) drawInputBox(W, H int, inputBuf string, cursor int, streaming bool
 	statusRow := topRow + 2
 
 	// Prompt line: "> <input>"
-	prompt := t.paint(modeColor(t.mode), "❯")
+	prompt := t.paint(modeColor(t.mode), ">")
 	innerW := W - 4
 	if innerW < 4 {
 		innerW = 4
@@ -1538,9 +1541,9 @@ func (t *TUI) drawInputBox(W, H int, inputBuf string, cursor int, streaming bool
 	}
 
 	// Status row (right side, model-style)
-	effort := t.paint("dim", "⊙") + "max"
+	effort := t.paint("dim", "*") + "max"
 	if t.mode == ModeYOLO {
-		effort = t.paint("yellow", "⊙") + "yolo"
+		effort = t.paint("yellow", "*") + "yolo"
 	}
 	rightStatus := effort + t.paint("dim", " · /effort")
 	// Right-align
@@ -1717,11 +1720,11 @@ func (t *TUI) runLine() error {
 func (t *TUI) linePrompt() string {
 	switch t.mode {
 	case ModePlan:
-		return "plan ⏣ "
+		return "plan > "
 	case ModeYOLO:
-		return "yolo ⏣ "
+		return "yolo > "
 	default:
-		return "⏣ "
+		return "> "
 	}
 }
 
@@ -1729,7 +1732,7 @@ func (t *TUI) printBanner() {
 	cwd, _ := os.Getwd()
 	fmt.Fprintln(t.writer)
 	fmt.Fprintln(t.writer, strings.Repeat("─", 60))
-	fmt.Fprintf(t.writer, "◆ iCode %s  %s\n", appVersionStr(), shortDir(cwd))
+	fmt.Fprintf(t.writer, "* iCode %s  %s\n", appVersionStr(), shortDir(cwd))
 	fmt.Fprintf(t.writer, "  Model: %s  Mode: %s\n", t.model, t.mode)
 	fmt.Fprintln(t.writer, strings.Repeat("─", 60))
 	fmt.Fprintln(t.writer, "  "+t.tstr("banner.hint"))
@@ -1737,7 +1740,7 @@ func (t *TUI) printBanner() {
 }
 
 func (t *TUI) printUser(text string) {
-	fmt.Fprintf(t.writer, "  ▸ %s\n\n", text)
+	fmt.Fprintf(t.writer, "  > %s\n\n", text)
 }
 
 // ── StreamWriter ─────────────────────────────────────────────────
@@ -1809,7 +1812,7 @@ func (t *TUI) AppendToolResult(content string) {
 func (t *TUI) printMessage(m Message) {
 	switch m.Role {
 	case RoleUser:
-		fmt.Fprintf(t.writer, "  ▸ %s\n\n", m.Content)
+		fmt.Fprintf(t.writer, "  > %s\n\n", m.Content)
 	case RoleAssistant:
 		t.printAssistant(m.Content)
 	case RoleSystem:
@@ -1839,12 +1842,12 @@ func (t *TUI) printMessage(m Message) {
 	}
 }
 
-// printAssistant renders assistant text in line mode (◆ prefix).
+// printAssistant renders assistant text in line mode (* prefix).
 func (t *TUI) printAssistant(text string) {
 	lines := strings.Split(text, "\n")
 	for i, line := range lines {
 		if i == 0 {
-			fmt.Fprintf(t.writer, "  ◆ %s\n", line)
+			fmt.Fprintf(t.writer, "  * %s\n", line)
 		} else {
 			fmt.Fprintf(t.writer, "    %s\n", line)
 		}
@@ -1970,14 +1973,14 @@ func (t *TUI) handleSlash(text string) {
 	case "/model":
 		if len(args) > 0 {
 			t.model = args[0]
-			t.notice("Model → " + args[0])
-			t.add(RoleSystem, t.tstr("mode.set")+" → "+args[0])
+			t.notice("Model -> " + args[0])
+			t.add(RoleSystem, t.tstr("mode.set")+" -> "+args[0])
 		}
 
 	case "/mode":
 		if len(args) > 0 {
 			t.mode = args[0]
-			t.add(RoleSystem, "Mode → "+args[0])
+			t.add(RoleSystem, "Mode -> "+args[0])
 		}
 
 	case "/session", "/sessions":
@@ -2066,7 +2069,7 @@ func (t *TUI) handleSlash(text string) {
 			break
 		}
 		_ = os.WriteFile(filepath.Join(cwd, "ICODE.md"), []byte("# Project Context\n\nEdit this file.\n"), 0o644)
-		t.add(RoleSystem, "✓ ICODE.md 已生成")
+		t.add(RoleSystem, "[x] ICODE.md 已生成")
 
 	case "/agents":
 		v := agent.Load(agent.AgentDefaultDirs()...)
@@ -2090,7 +2093,7 @@ func (t *TUI) handleSlash(text string) {
 		path := filepath.Join(home, ".icode", "hooks.yaml")
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			permission.GenerateHooks(path)
-			t.add(RoleSystem, "✓ "+path)
+			t.add(RoleSystem, "[x] "+path)
 		} else {
 			data, _ := os.ReadFile(path)
 			t.add(RoleSystem, fmt.Sprintf("📄 %s\n\n```yaml\n%s\n```", path, string(data)))
@@ -2117,7 +2120,7 @@ func (t *TUI) handleSlash(text string) {
 	case "/provider":
 		if len(args) > 0 {
 			t.provider = args[0]
-			t.add(RoleSystem, "Provider → "+args[0])
+			t.add(RoleSystem, "Provider -> "+args[0])
 		} else {
 			t.add(RoleSystem, "当前 Provider: "+t.provider+"\n用法: /provider <name>")
 		}
@@ -2379,7 +2382,7 @@ func (t *TUI) appendMemory(text string) {
 		return
 	}
 	path, _ := projectcontext.UserMemoryPath()
-	t.add(RoleSystem, fmt.Sprintf("✓ 已记录到 %s", path))
+	t.add(RoleSystem, fmt.Sprintf("[x] 已记录到 %s", path))
 }
 
 func (t *TUI) execShell(cmdStr string) {
@@ -2759,7 +2762,7 @@ func (t *TUI) autocompleteLines() []string {
 		sel := globalIdx == t.acIdx
 		name := padEnd(it.Name, 16)
 		if sel {
-			out = append(out, "  "+t.c("cyan")+"▶ "+name+" "+it.Desc+"\x1b[0m")
+			out = append(out, "  "+t.c("cyan")+"> "+name+" "+it.Desc+"\x1b[0m")
 		} else {
 			out = append(out, "    "+t.paint("dim", name+" "+it.Desc))
 		}
@@ -2945,7 +2948,7 @@ func (t *TUI) SetModels(models []string) {
 
 // notice sets a one-line flash message shown on the next render.
 func (t *TUI) notice(msg string) {
-	t.statusNotice = " " + t.paint("green", "✓") + " " + msg
+	t.statusNotice = " " + t.paint("green", "[x]") + " " + msg
 }
 
 // LoadSession replaces the visible message list (used by /resume).

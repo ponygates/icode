@@ -20,7 +20,7 @@ func TestRenderMarkdownSmoke(t *testing.T) {
 		"```go\nfunc main() {\n\tfmt.Println(\"hello\")\n}\n```\n" +
 		"Plain trailing paragraph with Chinese 中文测试 to verify CJK width."
 
-	lines := tui.renderMarkdown(sample, "  ◆ ", "    ", tui.width)
+	lines := tui.renderMarkdown(sample, "  * ", "    ", tui.width)
 	if len(lines) == 0 {
 		t.Fatal("expected non-empty markdown output")
 	}
@@ -32,7 +32,7 @@ func TestRenderMarkdownSmoke(t *testing.T) {
 	}
 	// Headings, code fence, list marker should be present somewhere.
 	joined := strings.Join(lines, "\n")
-	for _, want := range []string{"◆", "─", "│", "▌", "┌", "└"} {
+	for _, want := range []string{"*", "─", "│", ">", "┌", "└"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("expected decorative marker %q in output", want)
 		}

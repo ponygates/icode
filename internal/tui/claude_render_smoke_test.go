@@ -8,7 +8,7 @@ import (
 )
 
 // TestClaudeStyleRender verifies the Claude Code-style single-column layout:
-// the compact header (✻ iCode), the bottom status bar (model · ctx · cost),
+// the compact header (iCode), the bottom status bar (model · ctx · cost),
 // the bordered input box, and the sliding thinking bar all render without
 // panicking and contain the expected structural markers.
 func TestClaudeStyleRender(t *testing.T) {
@@ -36,8 +36,8 @@ func TestClaudeStyleRender(t *testing.T) {
 	// Case 1: idle (not streaming) — should render conversation + status + box.
 	tui.render()
 	out := buf.String()
-	if !strings.Contains(out, "✻ iCode") {
-		t.Fatalf("expected Claude Code-style header '✻ iCode' in output:\n%s", out)
+	if !strings.Contains(out, "iCode") {
+		t.Fatalf("expected Claude Code-style header 'iCode' in output:\n%s", out)
 	}
 	if !strings.Contains(out, "ctx") {
 		t.Fatalf("expected context %%-meter ('ctx') in status bar:\n%s", out)
@@ -48,8 +48,8 @@ func TestClaudeStyleRender(t *testing.T) {
 	if !strings.Contains(out, "┌") || !strings.Contains(out, "└") {
 		t.Fatalf("expected bordered input box (┌/└) in output:\n%s", out)
 	}
-	if !strings.Contains(out, "●") {
-		t.Fatalf("expected model status dot '●' in output:\n%s", out)
+	if !strings.Contains(out, "*") {
+		t.Fatalf("expected model status marker '*' in output:\n%s", out)
 	}
 
 	// Case 2: streaming with no tokens yet — should show the sliding thinking bar.
@@ -111,7 +111,7 @@ func TestWelcomeScreen(t *testing.T) {
 	}
 	tui.render()
 	out2 := buf.String()
-	if strings.Contains(out2, `/ _ \`) {
+	if strings.Contains(out2, "* iCode") {
 		t.Fatalf("expected welcome logo to be hidden after dismiss:\n%s", out2)
 	}
 }

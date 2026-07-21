@@ -112,7 +112,7 @@ func (t *TUI) renderMarkdown(content, prefix, cont string, width int) []string {
 		// Blockquote.
 		if strings.HasPrefix(trim, ">") {
 			text := strings.TrimSpace(strings.TrimPrefix(trim, ">"))
-			styled := t.c("dim") + "▌ " + t.renderInline(text) + "\x1b[0m"
+			styled := t.c("dim") + "> " + t.renderInline(text) + "\x1b[0m"
 			out = append(out, t.wrapANSI(prefix, cont, styled, width)...)
 			lineIdx++
 			continue
