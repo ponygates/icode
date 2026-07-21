@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../stores/appStore';
-import { MessageSquare, Cpu, Settings, BarChart, ArrowLeftRight, PanelLeftClose, Github, Plus, Server } from 'lucide-react';
+import { MessageSquare, Cpu, Settings, BarChart, ArrowLeftRight, PanelLeftClose, Github, Plus, Server, Pencil } from 'lucide-react';
 
 interface Props { onToggle: () => void; }
 
@@ -11,10 +11,12 @@ const Sidebar: React.FC<Props> = ({ onToggle }) => {
   const navigate = useNavigate();
   const location = useLocation();
   const [collapsed, setCollapsed] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState('');
 
   const {
     sessions, activeSessionId, selectedModel,
-    setActiveSession, createSession, deleteSession,
+    setActiveSession, createSession, deleteSession, renameSession,
   } = useAppStore();
   const currentModel = useAppStore((s) => s.models.find((m) => m.id === s.selectedModel));
   const backendConnected = useAppStore((s) => s.backendConnected);
@@ -120,10 +122,11 @@ const Sidebar: React.FC<Props> = ({ onToggle }) => {
         )}
         {sessions.slice(-20).reverse().map((s) => {
           const active = s.id === activeSessionId;
+          const isEditing = editingId === s.id;
           return (
             <div
               key={s.id}
-              onClick={() => { setActiveSession(s.id); navigate('/'); }}
+              onClick={() => { if (!isEditing) { setActiveSession(s.id); navigate('/'); } }}
               className={`sidebar-item${active ? ' active' : ''}`}
               title={!collapsed ? undefined : (s.title || s.id.slice(0, 6))}
               style={{
@@ -133,13 +136,15 @@ const Sidebar: React.FC<Props> = ({ onToggle }) => {
               }}
               onMouseEnter={(e) => {
                 if (collapsed) return;
-                const btn = e.currentTarget.lastElementChild as HTMLElement;
-                if (btn) btn.style.opacity = '0.6';
+                e.currentTarget.querySelectorAll('.action-hidden').forEach((el) => {
+                  (el as HTMLElement).style.opacity = '0.6';
+                });
               }}
               onMouseLeave={(e) => {
                 if (collapsed) return;
-                const btn = e.currentTarget.lastElementChild as HTMLElement;
-                if (btn) btn.style.opacity = '0';
+                e.currentTarget.querySelectorAll('.action-hidden').forEach((el) => {
+                  (el as HTMLElement).style.opacity = '0';
+                });
               }}
             >
               <div style={{
@@ -149,12 +154,42 @@ const Sidebar: React.FC<Props> = ({ onToggle }) => {
               }} />
               {!collapsed && (
                 <>
-                  <div style={{
-                    flex: 1, overflow: 'hidden', textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap', fontSize: 11.5, lineHeight: 1.3,
-                  }}>
-                    {s.title || `会话 ${s.id.slice(0, 6)}`}
-                  </div>
+                  {isEditing ? (
+                    <input
+                      autoFocus
+                      value={editValue}
+                      onChange={(e) => setEditValue(e.target.value)}
+                      onClick={(e) => e.stopPropagation()}
+                      onBlur={() => { renameSession(s.id, editValue); setEditingId(null); }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') { e.preventDefault(); renameSession(s.id, editValue); setEditingId(null); }
+                        else if (e.key === 'Escape') { e.preventDefault(); setEditingId(null); }
+                      }}
+                      style={{
+                        flex: 1, fontSize: 11.5, lineHeight: 1.3, minWidth: 0,
+                        background: 'var(--bg-tertiary)', color: 'var(--text-primary)',
+                        border: '0.5px solid var(--accent)', borderRadius: 4,
+                        padding: '2px 4px', outline: 'none',
+                      }}
+                    />
+                  ) : (
+                    <div style={{
+                      flex: 1, overflow: 'hidden', textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap', fontSize: 11.5, lineHeight: 1.3,
+                    }}>
+                      {s.title || `会话 ${s.id.slice(0, 6)}`}
+                    </div>
+                  )}
+                  <button className="action-hidden"
+                    onClick={(e) => { e.stopPropagation(); setEditingId(s.id); setEditValue(s.title || ''); }}
+                    title="重命名"
+                    style={{
+                      background: 'none', border: 'none', color: 'var(--text-muted)',
+                      cursor: 'pointer', padding: 2, display: 'flex',
+                    }}
+                    onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--accent)'; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--text-muted)'; }}
+                  ><Pencil size={11} /></button>
                   <button className="action-hidden"
                     onClick={(e) => { e.stopPropagation(); deleteSession(s.id); }}
                     title="删除"

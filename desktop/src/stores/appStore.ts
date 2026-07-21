@@ -80,6 +80,7 @@ interface AppStore {
   createSession: (modelId: string, provider: string) => void;
   setActiveSession: (id: string) => void;
   deleteSession: (id: string) => void;
+  renameSession: (id: string, title: string) => void;
   loadSessions: () => Promise<void>;
 
   // Messages
@@ -364,6 +365,26 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   setActiveSession: (id) => set({ activeSessionId: id }),
+
+  renameSession: (id, title) => {
+    const clean = (title || '').trim();
+    // Update local state immediately for responsive UI.
+    set((state) => ({
+      sessions: state.sessions.map((s) =>
+        s.id === id ? { ...s, title: clean || s.title } : s
+      ),
+    }));
+    if (!clean) return;
+    const { backendUrl } = get();
+    if (backendUrl) {
+      fetch(`${backendUrl}/api/sessions/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: clean }),
+      }).catch(() => {});
+    }
+  },
+
   deleteSession: (id) => {
     set((state) => {
       const remaining = state.sessions.filter((s) => s.id !== id);

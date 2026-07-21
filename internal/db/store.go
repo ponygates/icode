@@ -207,6 +207,12 @@ func (s *Store) List(limit, offset int) ([]types.Session, error) {
 		if err != nil {
 			log.Printf("warning: failed to parse updated_at %q: %v", updatedAt, err)
 		}
+		// Attach messages so the desktop client can restore full history on
+		// reload. Best-effort: a message-loading failure must never break the
+		// session list.
+		if msgs, merr := s.loadMessages(sess.ID); merr == nil {
+			sess.Messages = msgs
+		}
 		sessions = append(sessions, sess)
 	}
 	if err := rows.Err(); err != nil {

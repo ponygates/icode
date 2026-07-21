@@ -37,6 +37,28 @@ func isDoubleClicked() bool {
 	return ret == 1
 }
 
+// hideOwnConsole detaches this process from its console when the console is
+// NOT shared with a parent terminal. That is exactly the case when the binary
+// is launched by double-clicking in Explorer (or "icode desktop" from a
+// shortcut): Windows allocates a brand-new console that would otherwise show
+// as a black CMD window behind the desktop GUI. Calling FreeConsole() makes
+// that window disappear. If the process was started from an existing
+// cmd/PowerShell (console shared, process count > 1) we keep the console so
+// CLI usage and logs are unaffected.
+func hideOwnConsole() {
+	kernel32 := syscall.NewLazyDLL("kernel32.dll")
+	getProcList := kernel32.NewProc("GetConsoleProcessList")
+	freeConsole := kernel32.NewProc("FreeConsole")
+	if getProcList.Find() != nil || freeConsole.Find() != nil {
+		return
+	}
+	var pids [4]uint32
+	ret, _, _ := getProcList.Call(uintptr(unsafe.Pointer(&pids[0])), 4)
+	if ret == 1 {
+		freeConsole.Call()
+	}
+}
+
 // fixConsoleCodepage configures the Windows console for iCode:
 //  1. Sets input/output code pages to UTF-8 (65001) so Unicode UI glyphs
 //     and Chinese user input render correctly.
