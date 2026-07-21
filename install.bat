@@ -19,7 +19,7 @@ REM Step 1: Build if needed
 if not exist "%ICO_DIR%\icode.exe" (
     echo   [1/3] Building icode.exe...
     cd /d "%ICO_DIR%"
-    go build -ldflags="-s -w" -o icode.exe . 2>nul
+    go build -ldflags="-s -w -H windowsgui" -o icode.exe . 2>nul
     if errorlevel 1 (
         echo   ERROR: Build failed. Is Go installed? Run 'go version'.
         pause

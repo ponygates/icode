@@ -66,7 +66,11 @@ echo.
 echo   [2/3] Building icode.exe (single binary)...
 
 REM Determine build flags
-set "LDFLAGS=-s -w"
+REM  -H windowsgui: link as a GUI-subsystem app so double-clicking icode.exe
+REM  never flashes a black CMD/console window. CLI usage still works because
+REM  the process re-attaches to the parent terminal's console at startup
+REM  (see cmd/codepage_windows.go setupConsoleIO).
+set "LDFLAGS=-s -w -H windowsgui"
 set "BUILD_TAGS="
 if "%BUILD_DESKTOP%"=="0" (
     set "BUILD_TAGS=-tags noembedded"

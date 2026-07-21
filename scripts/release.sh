@@ -76,7 +76,15 @@ build() {
     local os="$1" arch="$2" suffix="$3"
     local out="release/icode-${os}-${arch}${suffix}"
 
-    CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -ldflags="$LDFLAGS" -o "$out" .
+    # On Windows, link as a GUI-subsystem app so double-clicking the exe does
+    # not flash a console window. CLI mode re-attaches to the parent terminal's
+    # console at startup (cmd/codepage_windows.go setupConsoleIO).
+    local ldflags="$LDFLAGS"
+    if [ "$os" = "windows" ]; then
+        ldflags="$ldflags -H windowsgui"
+    fi
+
+    CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -ldflags="$ldflags" -o "$out" .
     ok "Built: $out"
 }
 

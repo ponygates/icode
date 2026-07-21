@@ -6,8 +6,10 @@ package cmd
 // UTF-8 locales by default.
 func fixConsoleCodepage() {}
 
-// isDoubleClicked is always false on non-Windows (no Explorer double-click).
-func isDoubleClicked() bool { return false }
+// setupConsoleIO is a no-op on non-Windows platforms: they use console-
+// subsystem binaries with inherited stdio, so a terminal is always available.
+// Returns true to keep the CLI dispatch path in Execute.
+func setupConsoleIO() bool { return true }
 
 // showCLIMessage is a no-op on non-Windows.
 func showCLIMessage() {}

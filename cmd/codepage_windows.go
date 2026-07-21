@@ -13,49 +13,78 @@ import (
 
 const (
 	enableVirtualTerminalProcessing = 0x0004
+	stdInputHandle                  = ^uintptr(0) - 9  // -10
 	stdOutputHandle                 = ^uintptr(0) - 10 // -11
+	stdErrorHandle                  = ^uintptr(0) - 11 // -12
+	// attachParentProcess is the special (DWORD)-1 argument to AttachConsole
+	// meaning "attach to the console of the parent process".
+	attachParentProcess = ^uintptr(0)
 )
 
-// isDoubleClicked returns true when the binary was launched by double-clicking
-// in Windows Explorer. It uses GetConsoleProcessList: when launched from a
-// terminal (cmd/powershell) the console has 2+ processes attached; when
-// double-clicked the console is brand-new with only this process (count = 1).
-func isDoubleClicked() bool {
-	// If there are command-line args, definitely not a double-click
-	if len(os.Args) > 1 {
-		return false
+// setupConsoleIO wires up standard I/O for the GUI-subsystem binary.
+//
+// iCode is now linked with -H windowsgui so that double-clicking the exe from
+// Explorer does NOT create a black console window (previously a console flashed
+// on screen and was hidden after the fact via FreeConsole). The trade-off of a
+// GUI-subsystem binary is that when it IS launched from a terminal the process
+// no longer automatically inherits the parent's console, so CLI output would go
+// nowhere. This function restores that:
+//
+//   - If Go already has valid standard handles (output was redirected to a file
+//     or pipe, e.g. `icode ... > out.txt`), keep them untouched.
+//   - Otherwise try to attach to the parent process's console (the cmd/
+//     PowerShell that launched us). On success, rebind Go's os.Stdin/Stdout/
+//     Stderr to that console so the TUI and all CLI output work normally.
+//   - If there is no parent console (a genuine Explorer double-click), return
+//     false — the caller then starts desktop mode.
+//
+// Returns true when a usable console/stdio is available (CLI context), false
+// when the process has no console at all (double-click / GUI-launch context).
+func setupConsoleIO() bool {
+	// Case 1: stdout was inherited (redirect/pipe) — nothing to do.
+	if h := os.Stdout.Fd(); h != 0 && h != uintptr(syscall.InvalidHandle) {
+		return true
 	}
 
-	// Check via Windows API
-	kernel32 := syscall.NewLazyDLL("kernel32.dll")
-	getProcList := kernel32.NewProc("GetConsoleProcessList")
-	if getProcList.Find() != nil {
-		return false
+	// Case 2: launched from a terminal — attach to the parent's console.
+	if attachParentConsole() {
+		rebindStdHandles()
+		return true
 	}
-	var pids [4]uint32
-	ret, _, _ := getProcList.Call(uintptr(unsafe.Pointer(&pids[0])), 4)
-	return ret == 1
+
+	// Case 3: no console (double-clicked in Explorer).
+	return false
 }
 
-// hideOwnConsole detaches this process from its console when the console is
-// NOT shared with a parent terminal. That is exactly the case when the binary
-// is launched by double-clicking in Explorer (or "icode desktop" from a
-// shortcut): Windows allocates a brand-new console that would otherwise show
-// as a black CMD window behind the desktop GUI. Calling FreeConsole() makes
-// that window disappear. If the process was started from an existing
-// cmd/PowerShell (console shared, process count > 1) we keep the console so
-// CLI usage and logs are unaffected.
-func hideOwnConsole() {
+// attachParentConsole attaches this GUI-subsystem process to the console of its
+// parent process (the cmd/PowerShell that started it). Returns true on success.
+func attachParentConsole() bool {
 	kernel32 := syscall.NewLazyDLL("kernel32.dll")
-	getProcList := kernel32.NewProc("GetConsoleProcessList")
-	freeConsole := kernel32.NewProc("FreeConsole")
-	if getProcList.Find() != nil || freeConsole.Find() != nil {
-		return
+	attachConsole := kernel32.NewProc("AttachConsole")
+	if attachConsole.Find() != nil {
+		return false
 	}
-	var pids [4]uint32
-	ret, _, _ := getProcList.Call(uintptr(unsafe.Pointer(&pids[0])), 4)
-	if ret == 1 {
-		freeConsole.Call()
+	r, _, _ := attachConsole.Call(attachParentProcess)
+	return r != 0
+}
+
+// rebindStdHandles reopens the freshly-attached console's I/O devices
+// (CONIN$/CONOUT$) and routes both the process-level standard handles and Go's
+// os.Stdin/Stdout/Stderr to them, so subsequent fmt.* and the raw-mode TUI read
+// and write to the real console.
+func rebindStdHandles() {
+	kernel32 := syscall.NewLazyDLL("kernel32.dll")
+	setStdHandle := kernel32.NewProc("SetStdHandle")
+
+	if out, err := os.OpenFile("CONOUT$", os.O_RDWR, 0); err == nil {
+		setStdHandle.Call(stdOutputHandle, out.Fd())
+		setStdHandle.Call(stdErrorHandle, out.Fd())
+		os.Stdout = out
+		os.Stderr = out
+	}
+	if in, err := os.OpenFile("CONIN$", os.O_RDWR, 0); err == nil {
+		setStdHandle.Call(stdInputHandle, in.Fd())
+		os.Stdin = in
 	}
 }
 

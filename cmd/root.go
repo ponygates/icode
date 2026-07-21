@@ -3,6 +3,7 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/ponygates/icode/internal/config/i18n"
 	"github.com/spf13/cobra"
@@ -20,10 +21,17 @@ func Execute(version, build, commit string) error {
 	appBuild = build
 	appCommit = commit
 
-	// When launched by double-clicking in Explorer (not from a terminal),
-	// automatically start desktop mode on Windows, or show a message on
-	// other platforms. This makes the binary feel like a proper desktop app.
-	if isDoubleClicked() {
+	// The binary is linked as a GUI-subsystem app on Windows so double-clicking
+	// it never flashes a console window. setupConsoleIO restores CLI stdio when
+	// we were actually launched from a terminal (attaching to the parent
+	// console) and reports whether a console is available.
+	consoleReady := setupConsoleIO()
+
+	// No console AND no CLI arguments means a genuine Explorer double-click:
+	// start desktop mode so the binary feels like a proper desktop app. Any
+	// explicit subcommand/flag (e.g. `icode desktop`, `icode chat`) falls
+	// through to the normal Cobra dispatch below.
+	if !consoleReady && len(os.Args) <= 1 {
 		return runDesktop()
 	}
 

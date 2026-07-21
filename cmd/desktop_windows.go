@@ -39,10 +39,9 @@ var desktopCmd = &cobra.Command{
 
 // runDesktop boots the backend and opens the native desktop window.
 func runDesktop() error {
-	// Hide the black CMD/console window when launched standalone (double-click
-	// or "icode desktop" from a shortcut) without affecting CLI-in-terminal use.
-	hideOwnConsole()
-
+	// Note: the binary is linked with -H windowsgui, so a standalone launch
+	// (double-click / shortcut) never allocates a console window in the first
+	// place — there is nothing to hide here.
 	exePath, _ := os.Executable()
 	rootDir := filepath.Dir(exePath)
 	_ = os.Chdir(rootDir)
