@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 	"strings"
 	"time"
 )
+
 // ── Raw mode (full screen) ───────────────────────────────────────
 
 func (t *TUI) runRaw() error {
@@ -89,6 +91,11 @@ func (t *TUI) runRaw() error {
 // cadence is imperceptible and only triggers a repaint on an actual change, so
 // it costs nothing while the size is stable.
 func (t *TUI) watchResize() {
+	defer func() {
+		if r := recover(); r != nil {
+			writeCliLog(fmt.Sprintf("[tui] watchResize panic: %v\n%s", r, debug.Stack()))
+		}
+	}()
 	lastW, lastH := 0, 0
 	t.mu.Lock()
 	lastW, lastH = t.width, t.height

@@ -1,5 +1,32 @@
 # 更新日志
 
+## v0.27.0 — CLI 闪退兜底 + 桌面欢迎界面防卡死（2026-07-25）
+
+> 第二十三批：修复「CLI 版打开后闪退」+「桌面版启动后卡在欢迎界面」。本环境无法跑真实 TTY / WebView2，故以「崩溃可生存 + 可诊断」为主：把所有静默崩溃转成可记录事件，并消除前端初始化挂死的可能。
+
+### 🛡️ CLI 打开后闪退（静默进程退出）
+- 根因定位：`Execute` 的 `recover` 只能兜住**主 goroutine** 的 panic；而 `render()` 也会由后台 goroutine 触发（`watchResize` 轮询、`ensureAnim` 动画 ticker、流式回调），这些 goroutine 内的 panic **无法被主 goroutine 的 recover 捕获**，会直接杀死整个 Go 进程 → 窗口一闪即逝（闪退）。主 goroutine 渲染 panic 虽会被 `Execute` 捕获并显示错误，但后台 goroutine 渲染 panic 是静默的。
+- 修复：
+  - `internal/tui/render.go`：`render()` 函数体整体包 `defer recover()`——任何渲染 panic（含后台 goroutine 触发）都不再击穿进程；同时恢复终端（显示光标、退出 alt-screen）并把堆栈写入 `~/.icode/cli.log`。
+  - `internal/tui/raw_input.go`：`watchResize` goroutine 加 `defer recover()`（ panic 写 `cli.log`）。
+  - `internal/tui/render.go`：`ensureAnim` 动画 ticker goroutine 加 `defer recover()`。
+  - 新增包内 `writeCliLog()`：统一把崩溃堆栈追加到 `~/.icode/cli.log`，便于事后定位（不再静默丢失）。
+
+### 🔧 桌面启动后卡在欢迎界面
+- 诊断：后端端点（`/api/health` `/api/sessions` `/api/models`）本机实测均 <20ms 返回，故非后端挂死；卡死更可能来自①某次渲染抛错（React 无错误边界 → 整棵卸载 → 白屏/假死）或②初始化中某个 fetch 挂起导致界面无响应。
+- 修复：
+  - `desktop/src/components/ErrorBoundary.tsx`（新增）+ `main.tsx` 包裹 `<App/>`：渲染期异常不再白屏，改为显示错误信息（含堆栈）与「重试」按钮，并存入 `localStorage.icode.lastError`。
+  - `desktop/src/App.tsx`：启动初始化重构——本地 UI 配置（主题/字号/首跑向导）**先行且绝不涉及网络**；后端相关加载（`checkBackend`/`fetchMode`/`loadSessions`/…）整体包进 **12s 超时**（`Promise.race`），慢/不可达的后端绝不会再让界面卡死，仅显示「离线」横幅，界面始终可交互。
+  - `desktop/src/stores/appStore.ts`：新增 `fetchWithTimeout`（AbortController，8s），用于 `checkBackend` 的三路发现请求，单路挂起会快速失败而非耗尽窗口。
+
+### ✅ 验证
+- `go build -tags nogui` 全绿；`go test ./internal/tui/`（`TestRender*` 含新增欢迎路径）全绿；新增 `render_welcome_test.go` 覆盖「空消息 + 欢迎横幅」的打开态渲染，确认不 panic。
+- `go vet ./internal/tui/...` 全绿；`gofmt -l` 干净。
+- `NODE_OPTIONS= npm run build` 前端全绿；`go build -ldflags="-s -w -H windowsgui" -o icode.exe .` 全绿，`icode version`→0.27.0；前端已重嵌 `internal/embedded/dist`。
+
+### ⚠️ 说明 / 仍需你协助
+- 本沙箱无真实终端与 WebView2，无法 100% 复现闪退/卡死。v0.27.0 已把两类故障转为**可生存 + 可诊断**：若 CLI 仍闪退，请附 `~/.icode/cli.log`；若桌面仍卡/白屏，请附控制台报错与 `localStorage.icode.lastError`（F12 → Application → Local Storage）。据此可精准定位真因。
+
 ## v0.26.0 — 桌面闪退防护（goroutine/panic 兜底）+ 模型对比页订阅优化（2026-07-25）
 
 > 第二十二批：修复「点击左侧模型时卡死」+「启动后偶发闪退」。根因是后端进程被 goroutine panic 静默击杀（详见下）。

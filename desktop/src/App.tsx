@@ -42,21 +42,12 @@ const App: React.FC = () => {
   useEffect(() => {
     let cancelled = false;
     const init = async () => {
-      await checkBackend();
-      await fetchMode();
-      if (cancelled) return;
-      loadSecurityLevel();
-      await loadSessions();
-      await loadWorkspaces();
-      await refreshModels();
-      await loadDesktopSettings();
-      if (cancelled) return;
-      // Font size from localStorage
+      // 1) Local UI setup first — never touches the network, so it can't hang
+      //    and the welcome screen is always fully styled and interactive.
       const savedFontSize = localStorage.getItem('icode.fontSize');
       if (savedFontSize) {
         document.documentElement.style.fontSize = savedFontSize + 'px';
       }
-      // Theme from local config
       const theme = localStorage.getItem('icode.theme') || 'dark';
       const root = document.documentElement;
       if (theme === 'auto') {
@@ -64,10 +55,31 @@ const App: React.FC = () => {
       } else {
         root.setAttribute('data-theme', theme);
       }
-      // Show setup wizard on first run (no API key configured)
       const seen = localStorage.getItem('icode.wizard.seen');
       if (!seen && !hasAnyKey()) {
         setShowWizard(true);
+      }
+
+      // 2) Backend-dependent loads, wrapped in a hard timeout so a slow or
+      //    unreachable backend can NEVER leave the app stuck on the welcome
+      //    screen. The UI stays responsive and simply shows "backend offline".
+      try {
+        await Promise.race([
+          (async () => {
+            await checkBackend();
+            if (cancelled) return;
+            await fetchMode();
+            loadSecurityLevel();
+            await loadSessions();
+            await loadWorkspaces();
+            await refreshModels();
+            await loadDesktopSettings();
+          })(),
+          new Promise<void>((resolve) => setTimeout(resolve, 12000)),
+        ]);
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.warn('[iCode] startup backend load failed:', e);
       }
     };
     init();

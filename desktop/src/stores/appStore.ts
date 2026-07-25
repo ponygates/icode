@@ -2,6 +2,19 @@ import { create } from 'zustand';
 import { subscribeWithSelector } from 'zustand/middleware';
 import i18n from '../i18n';
 
+// fetchWithTimeout wraps fetch with an AbortController so a single call can
+// never hang forever (which previously could leave the app stuck on the
+// welcome screen when the backend was slow or unreachable).
+async function fetchWithTimeout(url: string, opts: RequestInit = {}, ms = 8000): Promise<Response> {
+  const ctrl = new AbortController();
+  const id = setTimeout(() => ctrl.abort(), ms);
+  try {
+    return await fetch(url, { ...opts, signal: ctrl.signal });
+  } finally {
+    clearTimeout(id);
+  }
+}
+
 export interface Model {
   id: string;
   name: string;
@@ -270,7 +283,7 @@ export const useAppStore = create<AppStore>()(
         const url = await window.icode.getBackendURL();
         if (url) {
           set({ backendUrl: url });
-          const res = await fetch(`${url}/api/health`, { method: 'GET', cache: 'no-cache' });
+          const res = await fetchWithTimeout(`${url}/api/health`, { method: 'GET', cache: 'no-cache' });
           if (res.ok) {
             const health = await res.json().catch(() => ({}));
             set({ backendConnected: true, backendChecking: false, backendVersion: health.version || '' });
@@ -283,7 +296,7 @@ export const useAppStore = create<AppStore>()(
       const origin = window.location.origin;
       if (origin && origin !== 'null' && !origin.startsWith('file://')) {
         try {
-          const relRes = await fetch(`${origin}/api/health`, { method: 'GET', cache: 'no-cache' });
+          const relRes = await fetchWithTimeout(`${origin}/api/health`, { method: 'GET', cache: 'no-cache' });
           if (relRes.ok) {
             const health = await relRes.json().catch(() => ({}));
             set({ backendUrl: origin, backendConnected: true, backendChecking: false, backendVersion: health.version || '' });
@@ -295,7 +308,7 @@ export const useAppStore = create<AppStore>()(
       // Strategy 3: Try localhost discovery (common dev scenario)
       for (const port of [57356, 8080, 3000]) {
         try {
-          const lr = await fetch(`http://127.0.0.1:${port}/api/health`, { method: 'GET', cache: 'no-cache' });
+          const lr = await fetchWithTimeout(`http://127.0.0.1:${port}/api/health`, { method: 'GET', cache: 'no-cache' });
           if (lr.ok) {
             const health = await lr.json().catch(() => ({}));
             set({ backendUrl: `http://127.0.0.1:${port}`, backendConnected: true, backendChecking: false, backendVersion: health.version || '' });

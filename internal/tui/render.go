@@ -3,6 +3,8 @@ package tui
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"time"
@@ -10,9 +12,42 @@ import (
 	"github.com/ponygates/icode/internal/config"
 	"github.com/ponygates/icode/internal/core/permission"
 )
+
+// writeCliLog appends a diagnostic message to ~/.icode/cli.log so a crash is
+// never silent — the user (or a helper) can inspect it after a "flash close".
+func writeCliLog(s string) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		fmt.Fprint(os.Stderr, s)
+		return
+	}
+	dir := filepath.Join(home, ".icode")
+	_ = os.MkdirAll(dir, 0o755)
+	f, err := os.OpenFile(filepath.Join(dir, "cli.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		fmt.Fprint(os.Stderr, s)
+		return
+	}
+	defer f.Close()
+	f.WriteString(s)
+}
+
 // ── Rendering (raw mode) ─────────────────────────────────────────
 
 func (t *TUI) render() {
+	// A render must never crash the whole process. Renders are also triggered
+	// from background goroutines (watchResize, the streaming animation ticker,
+	// streaming callbacks) that have no caller-level recover, and an uncaught
+	// panic in ANY goroutine kills the entire Go process — the classic silent
+	// "flash close" (闪退) on launch. Restoring the terminal to a usable state
+	// and logging the stack turns that into a diagnosable, recoverable event.
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprint(os.Stdout, "\x1b[?25h\x1b[?1049l")
+			writeCliLog(fmt.Sprintf("[tui] render panic: %v\n%s", r, debug.Stack()))
+		}
+	}()
+
 	// Snapshot all state under the data mutex, then write under the render
 	// mutex. This keeps render() safe to call from the streaming goroutine
 	// (which also appends streamed text and triggers renders) without
@@ -157,8 +192,8 @@ func (t *TUI) render() {
 		conv = conv[start : start+bodyH]
 		// Prepend a scroll indicator.
 		indicator := t.paint("yellow", fmt.Sprintf("  ↑ %d more lines — PgDn/End to follow", t.scrollOffset))
-		conv = append([]string{""}, conv...)          // blank line
-		conv = append([]string{indicator}, conv...)    // indicator
+		conv = append([]string{""}, conv...)        // blank line
+		conv = append([]string{indicator}, conv...) // indicator
 		if len(conv) > bodyH {
 			conv = conv[:bodyH]
 		}
@@ -959,6 +994,11 @@ func (t *TUI) ensureAnim() {
 	t.animRunning = true
 	t.mu.Unlock()
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				writeCliLog(fmt.Sprintf("[tui] anim ticker panic: %v\n%s", r, debug.Stack()))
+			}
+		}()
 		for t.streaming || t.running {
 			t.mu.Lock()
 			if !t.streaming {
