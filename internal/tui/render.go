@@ -441,13 +441,14 @@ func (t *TUI) helpBox(W, bodyH int) []string {
 	rows := []row{
 		{"Enter", "发送消息"},
 		{"Shift+Tab", "切换模式 auto → plan → agent → yolo"},
-		{"↑ / ↓", "历史记录上 / 下"},
+		{"↑ / ↓", "滚动会话（上 / 下）"},
 		{"← / →", "光标左右移动"},
 		{"Home / End", "行首 / 行尾（或 Ctrl+A / Ctrl+E）"},
 		{"Ctrl+W / Ctrl+U", "删除前一个词 / 删除到行首"},
 		{"Ctrl+L", "清屏并重绘"},
 		{"Ctrl+K", "清空输入"},
 		{"Ctrl+C / Ctrl+D", "中断 / 退出"},
+		{"Ctrl+P / Ctrl+N", "历史记录上 / 下"},
 		{"PgUp / PgDn", "会话上 / 下翻页"},
 		{"鼠标滚轮", "滚动会话"},
 		{"点击输入行", "移动编辑光标"},
@@ -1322,6 +1323,56 @@ func (t *TUI) scrollDownSmall() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.scrollOffset -= 3
+	if t.scrollOffset < 0 {
+		t.scrollOffset = 0
+	}
+	t.scheduleRender()
+}
+
+// canScroll reports whether the conversation has more display lines than the
+// visible body, i.e. the viewport can be scrolled. It snapshots the needed
+// state under the lock so callers (key handler) don't race the stream.
+func (t *TUI) canScroll() bool {
+	t.mu.Lock()
+	streaming := t.streaming
+	msgs := append([]Message{}, t.messages...)
+	streamContent := t.streamBuf.String()
+	W := t.width
+	H := t.height
+	t.mu.Unlock()
+	bodyH := H - 7
+	if bodyH < 3 {
+		bodyH = 3
+	}
+	total := t.totalConvLines(msgs, streaming, streamContent, W)
+	return total > bodyH
+}
+
+// scrollUp moves the conversation viewport up by n display lines (towards
+// older content). render() clamps scrollOffset to the maximum, so over-
+// scrolling is harmless. It also dismisses the welcome banner if present.
+func (t *TUI) scrollUp(n int) {
+	if n <= 0 {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.welcomeVisible {
+		t.welcomeVisible = false
+	}
+	t.scrollOffset += n
+	t.scheduleRender()
+}
+
+// scrollDown moves the conversation viewport down by n display lines (towards
+// newer content), never past the bottom (auto-follow at offset 0).
+func (t *TUI) scrollDown(n int) {
+	if n <= 0 {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.scrollOffset -= n
 	if t.scrollOffset < 0 {
 		t.scrollOffset = 0
 	}

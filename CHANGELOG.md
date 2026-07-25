@@ -1,5 +1,22 @@
 # 更新日志
 
+## v0.28.0 — CLI 对话支持 ↑/↓ 方向键滚动（2026-07-25）
+
+> 第二十四批：用户要求「CLI 版侧边可以上下滚动」。会话本身已支持 PgUp/PgDn、鼠标滚轮、点/拖滚动条，但方向键被历史记录占用。本批把 ↑/↓ 改为驱动会话的「侧边」滚动条，每按一次滚一行；历史记录改为 Ctrl+P/Ctrl+N。
+
+### 🖱️ CLI 对话支持方向键滚动
+- 新增 `internal/tui/render.go` 三个方法：`canScroll()`（判断对话是否超出可视区）、`scrollUp(n)` / `scrollDown(n)`（按显示行上下滚，超出由 `render()` 自动 clamp，不越界）。
+- `internal/tui/raw_input.go` 的 `handleKey` 中 ↑/↓（CSI `A`/`B`）改为：
+  - 自动补全打开时 → 移动补全光标（保持原行为）。
+  - 否则若已上滚（`scrollOffset > 0`）或对话可滚动（`canScroll()`）→ 滚动会话一行；在底部再按 ↓ 则交回给历史记录（`historyNext`）。
+  - 对话无溢出时 → 仍走历史记录（旧行为，避免无内容时方向键失效）。
+- 历史记录上/下保留在 **Ctrl+P / Ctrl+N**（本就可用），与方向键解耦。
+- `desktop/src` 无改动；帮助页（`helpBox`）同步：↑/↓ 说明改为「滚动会话（上/下）」，并新增「Ctrl+P / Ctrl+N 历史记录上/下」一行。
+
+### ✅ 验证
+- `go build -tags nogui ./...` 全绿；`go test ./internal/tui/`（含新增 `TestArrowScrollsConversation` / `TestArrowFallsBackToHistoryWhenNotScrollable`）全绿；`go vet ./internal/tui/...` 全绿；`gofmt -l` 干净。
+- 行为说明：↑/↓ 滚会话一行；PgUp/PgDn 翻页；鼠标滚轮滚动；点/拖右侧滚动条跳转；Ctrl+P/Ctrl+N 翻历史。
+
 ## v0.27.0 — CLI 闪退兜底 + 桌面欢迎界面防卡死（2026-07-25）
 
 > 第二十三批：修复「CLI 版打开后闪退」+「桌面版启动后卡在欢迎界面」。本环境无法跑真实 TTY / WebView2，故以「崩溃可生存 + 可诊断」为主：把所有静默崩溃转成可记录事件，并消除前端初始化挂死的可能。

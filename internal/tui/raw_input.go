@@ -250,20 +250,27 @@ func (t *TUI) handleKey(r rune) bool {
 					return true
 				}
 				switch c1 {
-				case 'A': // ↑ history prev
+				case 'A': // ↑ scroll conversation up, else history prev
 					if t.acOpen && len(t.acItems) > 0 {
 						if t.acIdx > 0 {
 							t.acIdx--
 						}
+					} else if !t.welcomeVisible && (t.scrollOffset > 0 || t.canScroll()) {
+						// ↑ / ↓ now drive the conversation's side scrollbar so
+						// the user can scroll with the arrow keys; Ctrl+P / Ctrl+N
+						// keep history navigation.
+						t.scrollUp(1)
 					} else {
 						t.historyPrev()
 					}
 					return true
-				case 'B': // ↓ history next
+				case 'B': // ↓ scroll conversation down, else history next
 					if t.acOpen && len(t.acItems) > 0 {
 						if t.acIdx < len(t.acItems)-1 {
 							t.acIdx++
 						}
+					} else if !t.welcomeVisible && t.scrollOffset > 0 {
+						t.scrollDown(1)
 					} else {
 						t.historyNext()
 					}
