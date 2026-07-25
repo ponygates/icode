@@ -82,7 +82,7 @@ function linkify(text: string, key: string): React.ReactNode[] {
 }
 
 // ── code block with syntax highlighting and copy ──
-const CodeBlock: React.FC<{ code: string; lang: string }> = ({ code, lang }) => {
+const CodeBlock = React.memo(({ code, lang }: { code: string; lang: string }) => {
   const { t } = useTranslation();
   const [copied, setCopied] = useState(false);
   const handleCopy = () => {
@@ -94,29 +94,29 @@ const CodeBlock: React.FC<{ code: string; lang: string }> = ({ code, lang }) => 
   const highlighted = useMemo(() => {
     try {
       if (lang && hljs.getLanguage(lang)) {
-        return hljs.highlight(code, { language: lang }).value;
+        return hljs.highlight(code, { language: lang });
       }
-      return hljs.highlightAuto(code).value;
+      return hljs.highlightAuto(code);
     } catch {
-      return code;
+      return { value: code, language: '' };
     }
   }, [code, lang]);
 
   return (
     <div style={{ margin: '8px 0' }}>
       <div style={codeHead}>
-        <span>{lang || hljs.highlightAuto(code).language || 'code'}</span>
+        <span>{lang || highlighted.language || 'code'}</span>
         <button onClick={handleCopy} style={copyBtn}>{copied ? `✓ ${t('markdown.copied')}` : t('markdown.copy')}</button>
       </div>
       <pre style={{ ...codeBlock, borderRadius: lang ? '0 0 6px 6px' : 6 }}>
-        <code dangerouslySetInnerHTML={{ __html: highlighted }} />
+        <code dangerouslySetInnerHTML={{ __html: highlighted.value }} />
       </pre>
     </div>
   );
-};
+});
 
 // ── main Markdown component ──
-const Markdown: React.FC<{ text: string }> = ({ text }) => {
+const Markdown = React.memo(({ text }: { text: string }) => {
   const lines = text.split('\n');
   const blocks: React.ReactNode[] = [];
   let i = 0, key = 0;
@@ -315,6 +315,6 @@ const Markdown: React.FC<{ text: string }> = ({ text }) => {
   }
 
   return <div style={{ fontSize: 13, lineHeight: 1.7 }}>{blocks}</div>;
-};
+});
 
 export default Markdown;

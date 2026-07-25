@@ -8,8 +8,8 @@ import (
 // layout can be emitted coloured (TUI) or plain (Logo()).
 type logoPainter func(color, s string) string
 
-// asciiLogo returns the iCode startup LOGO: a plum-blossom (棉花梅花) ASCII
-// motif above a block-letter "ICODE" wordmark, plus a centered tagline. It is
+// asciiLogo returns the iCode startup LOGO: a plum-blossom (梅花) ASCII motif to
+// the LEFT of a block-letter "ICODE" wordmark, plus a centered tagline. It is
 // rendered WITHOUT a surrounding box — the user asked to drop the old bordered
 // banner — so there is nothing to mis-align. Every glyph is ASCII, and █ / ░
 // are CP437 block elements that render reliably on legacy Windows conhost
@@ -28,38 +28,40 @@ var logoFont = map[rune][]string{
 
 const logoWord = "ICODE"
 
-// blossomRaw is the 棉花梅花 motif: a five-petal plum flower (top) carried on
-// a curved branch with two leaves (bottom) — the classic 梅花 composition.
-// Every row is plain ASCII (no East-Asian Ambiguous glyphs, no Unicode art
-// that vanishes on legacy conhost) so it renders on any terminal, and it is
-// re-coloured per render. Glyph map:
-//   '(' ')' '*' = petal (arc outline + fill)   'o' = pistil   '.' = stamen
-//   '|' '/' '\' = branch                       '~' = leaf
-// Each row is exactly 13 cells wide so the art stays symmetric when centred.
-// Five-petal layout: top petal (row 0), upper-left+upper-right (row 1),
-// lower-left+lower-right (row 3), with stamens ringing the pistil (row 2).
+// blossomW is the fixed visible width of every blossom row. Keeping it constant
+// lets the art be centred/padded deterministically regardless of ANSI colour.
+const blossomW = 11
+
+// blossomRaw is the 梅花 (plum-blossom) motif: five rounded petals arranged as a
+// pentagon around a bright pistil, sitting on a small leafy branch — the classic
+// 梅花 composition, sized to exactly 5 rows so it lines up beside the 5-row
+// "ICODE" wordmark. Every row is plain ASCII (no East-Asian Ambiguous glyphs,
+// no Unicode art that vanishes on legacy conhost) so it renders on any terminal,
+// and it is re-coloured per render. Glyph map: '(' ')' '@' = petal (rounded
+// outline + fill); '*' = pistil; '|' '/' '\' = branch; '~' = leaf.
+// Five-petal layout: top petal (row 0), upper-left+upper-right (row 1, spread
+// wide), pistil (row 2), lower-left+lower-right (row 3, angled inward), and the
+// leafy branch (row 4).
 var blossomRaw = []string{
-	"     (*)     ",
-	"   (*) (*)   ",
-	"    . o .    ",
-	"   (*) (*)   ",
-	"      |      ",
-	"    / | \\    ",
-	"   ~  |  ~   ",
+	"    (@)    ",
+	" (@)   (@) ",
+	"    (*)    ",
+	"  (@) (@)  ",
+	"   ~\\|/~   ",
 }
 
-// paintBlossomRow colours one raw blossom row: petals magenta (arc + fill),
-// pistil and stamens yellow, branch dim (grey — palette-safe on both
-// light/dark terminals), leaves green. A plain (no-ANSI) renderer passes a
-// paint func that returns the text unchanged, so `icode version` / pipes
-// still show the ASCII art.
+// paintBlossomRow colours one raw blossom row: petals magenta (rounded outline +
+// fill), the pistil yellow (bright centre), branch dim (grey — palette-safe on
+// both light/dark terminals), leaves green. A plain (no-ANSI) renderer passes a
+// paint func that returns the text unchanged, so `icode version` / pipes still
+// show the ASCII art.
 func paintBlossomRow(paint logoPainter, row string) string {
 	var b strings.Builder
 	for _, r := range row {
 		switch r {
-		case '(', ')', '*':
+		case '(', ')', '@':
 			b.WriteString(paint("magenta", string(r)))
-		case 'o', '.':
+		case '*':
 			b.WriteString(paint("yellow", string(r)))
 		case '|', '/', '\\':
 			b.WriteString(paint("dim", string(r)))
@@ -87,15 +89,10 @@ func Logo() []string {
 	return lines
 }
 
-// asciiLogo builds the full art block (flower above wordmark above tagline),
-// all rows exactly wordW visible cells wide, then centres the block within the
-// terminal width.
+// asciiLogo builds the LOGO with the plum blossom to the LEFT of the block
+// "ICODE" wordmark (flower + gap + wordmark, side by side), a tagline centred
+// underneath, then centres the whole block within the terminal width.
 func (t *TUI) asciiLogo(width int, paint logoPainter) []string {
-	if width < 40 {
-		// Too narrow for the block wordmark — fall back to a single line.
-		return []string{paint("cyan", "ICODE") + "  " + paint("dim", "多模型 AI 编程助手")}
-	}
-
 	// Build the block "ICODE" wordmark first, then measure its TRUE visible
 	// width. Using len() would mis-count the █ block runes (3 UTF-8 bytes
 	// each) and push the centring maths off by ~50 columns.
@@ -113,18 +110,48 @@ func (t *TUI) asciiLogo(width int, paint logoPainter) []string {
 	}
 	wordW := visibleWidth(wordRows[0])
 
-	// Compose the art block (flower, then wordmark, then tagline), each row
-	// padded to exactly wordW cells so terminal-centring stays consistent.
-	tag := paint("dim", "多模型 AI 编程助手")
-	art := make([]string, 0, len(blossomRaw)+len(wordRows)+1)
-	for _, fl := range blossomRaw {
-		art = append(art, padToCenter(paintBlossomRow(paint, fl), wordW))
+	const gap = "   " // 3-space gutter between blossom and wordmark
+	blockW := blossomW + len(gap) + wordW
+
+	if width < blockW {
+		// Too narrow for the side-by-side block — fall back to a single line.
+		return []string{paint("cyan", "ICODE") + "  " + paint("dim", "多模型 AI 编程助手")}
 	}
-	art = append(art, wordRows...)
-	art = append(art, padToCenter(tag, wordW))
+
+	// Build the coloured blossom rows, each padded to exactly blossomW cells.
+	flowerRows := make([]string, len(blossomRaw))
+	for i, fl := range blossomRaw {
+		flowerRows[i] = padToCenter(paintBlossomRow(paint, fl), blossomW)
+	}
+
+	// Compose flower (left) + gap + wordmark (right), row by row. Both blocks
+	// are 5 rows tall; the offsets vertically centre the shorter one should the
+	// heights ever diverge.
+	n := len(wordRows)
+	if len(flowerRows) > n {
+		n = len(flowerRows)
+	}
+	fOff := (n - len(flowerRows)) / 2
+	wOff := (n - len(wordRows)) / 2
+	art := make([]string, 0, n+1)
+	for r := 0; r < n; r++ {
+		fcell := strings.Repeat(" ", blossomW)
+		if idx := r - fOff; idx >= 0 && idx < len(flowerRows) {
+			fcell = flowerRows[idx]
+		}
+		wcell := strings.Repeat(" ", wordW)
+		if idx := r - wOff; idx >= 0 && idx < len(wordRows) {
+			wcell = wordRows[idx]
+		}
+		art = append(art, fcell+gap+wcell)
+	}
+
+	// Tagline centred under the whole side-by-side block.
+	tag := paint("dim", "多模型 AI 编程助手")
+	art = append(art, padToCenter(tag, blockW))
 
 	// Centre the whole block within the terminal width.
-	left := (width - wordW) / 2
+	left := (width - blockW) / 2
 	if left < 0 {
 		left = 0
 	}

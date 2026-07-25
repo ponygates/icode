@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import i18n from '../i18n';
 import { useAppStore, Message, Attachment } from '../stores/appStore';
@@ -74,6 +74,9 @@ const ChatPage: React.FC = () => {
   const [attachedImages, setAttachedImages] = useState<{ mime: string; data: string }[]>([]);
   const [gitBranch, setGitBranch] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const stickToBottomRef = useRef(true);
+  const scrollRafRef = useRef<number | null>(null);
 
   // Resolve the local backend URL once so we can stream chat directly from the
   // renderer (bypassing the fragile Electron IPC+SSE bridge). Falls back to the
@@ -108,6 +111,33 @@ const ChatPage: React.FC = () => {
       return { id, title: s?.title || t('chat.session') };
     })
     .filter((tab) => tab.id);
+
+  // Derived: files the agent has touched, recomputed only when messages change
+  // (was an inline IIFE re-running every render → expensive during streaming).
+  const fileActions = useMemo(() => {
+    const files = new Map<string, string>();
+    (activeSession?.messages || []).forEach((msg) => {
+      if (!msg.content) return;
+      const patterns = [
+        /read_file\b.*?["'`]([^"'`\n]+?)["'`]/g,
+        /write_file\b.*?["'`]([^"'`\n]+?)["'`]/g,
+        /\b(?:edit|bash)\b.*?["'`]([^"'`\n]+?)["'`]/g,
+        /\b([\w\/\\\.\-]+\.(?:tsx?|jsx?|go|py|rs|java|rb|html|css|json|yaml|yml|md|toml))\b/g,
+      ];
+      patterns.forEach((re) => {
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(msg.content)) !== null) {
+          const path = m[1].replace(/\\/g, '/');
+          if (path.length > 2 && !path.startsWith('http') && !files.has(path)) {
+            const action = msg.content.includes('write_file') ? 'write'
+              : msg.content.includes('edit') ? 'edit' : 'read';
+            files.set(path, action);
+          }
+        }
+      });
+    });
+    return Array.from(files.entries());
+  }, [activeSession?.messages]);
 
   const handleTabSelect = (id: string) => {
     setActiveSession(id);
@@ -182,7 +212,15 @@ const ChatPage: React.FC = () => {
   }, [activeSessionId, sessions.length, selectedModel, currentModel]);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (!stickToBottomRef.current) return;
+    const el = messagesEndRef.current;
+    if (!el) return;
+    if (scrollRafRef.current == null) {
+      scrollRafRef.current = requestAnimationFrame(() => {
+        scrollRafRef.current = null;
+        el.scrollIntoView({ behavior: 'auto' });
+      });
+    }
   }, [activeSession?.messages]);
 
   // Fetch git branch for the status bar
@@ -286,23 +324,37 @@ const ChatPage: React.FC = () => {
     const provider = currentModel?.provider || 'openrouter';
     let accumulated = '';
     let settled = false;
+    let rafId: number | null = null;
+
+    // Coalesce token updates into at most one store write per animation frame.
+    // This prevents the whole message list + sidebar from re-rendering on every
+    // single streamed token (the main source of the "laggy" feel).
+    const flushNow = () => {
+      if (rafId != null) { cancelAnimationFrame(rafId); rafId = null; }
+      updateMessage(sid, { ...assistantMsg, content: accumulated });
+    };
+    const scheduleFlush = () => {
+      if (rafId == null) {
+        rafId = requestAnimationFrame(() => { rafId = null; flushNow(); });
+      }
+    };
 
     const onEvent = (event: any) => {
       if (settled) return;
       const ty = event?.type;
-      console.log('[iCode stream] event:', ty, event);
       if (ty === 'text') {
         accumulated += event.content || '';
-        updateMessage(sid, { ...assistantMsg, content: accumulated });
+        scheduleFlush();
       } else if (ty === 'tool_use') {
         const name = event.tool_call?.name || event.ToolCall?.Name || 'tool';
         accumulated += `\n⏺ ${name}\n`;
-        updateMessage(sid, { ...assistantMsg, content: accumulated });
+        scheduleFlush();
       } else if (ty === 'permission') {
         const req = event.permission || event.Permission;
         if (req?.request_id) setPendingPermission(req);
       } else if (ty === 'done') {
         settled = true;
+        flushNow();
         setIsStreaming(false);
         setPendingPermission(null);
         const u = event.meta?.usage || {};
@@ -314,12 +366,10 @@ const ChatPage: React.FC = () => {
         });
       } else if (ty === 'error') {
         settled = true;
+        accumulated += '\n❌ ' + (event.content || t('chat.unknownError'));
+        flushNow();
         setIsStreaming(false);
         setPendingPermission(null);
-        updateMessage(sid, {
-          ...assistantMsg,
-          content: (accumulated || '') + '\n❌ ' + (event.content || t('chat.unknownError')),
-        });
       }
     };
 
@@ -546,10 +596,19 @@ const ChatPage: React.FC = () => {
       {/* Middle: conversation + session-stats sidebar (Reasonix style) */}
       <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
         {/* Messages */}
-        <div style={{
-          flex: 1, overflowY: 'auto', padding: '24px 24px',
-          display: 'flex', flexDirection: 'column', gap: 4,
-        }}>
+        <div
+          ref={scrollContainerRef}
+          onScroll={() => {
+            const el = scrollContainerRef.current;
+            if (!el) return;
+            const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+            stickToBottomRef.current = distance <= 80;
+          }}
+          style={{
+            flex: 1, overflowY: 'auto', padding: '24px 24px',
+            display: 'flex', flexDirection: 'column', gap: 4,
+          }}
+        >
           {/* Welcome — Apple-style large title with plum blossom logo */}
           {activeSession?.messages.length === 0 && !isStreaming && (
             <div style={{
@@ -742,36 +801,12 @@ const ChatPage: React.FC = () => {
           fontSize: 12, color: 'var(--text-secondary)', display: 'flex', flexDirection: 'column', gap: 14,
         }}>
           {/* Files touched by agent */}
-          {(() => {
-            const files = new Map<string, string>();
-            (activeSession?.messages || []).forEach(msg => {
-              if (!msg.content) return;
-              const patterns = [
-                /read_file\b.*?["'`]([^"'`\n]+?)["'`]/g,
-                /write_file\b.*?["'`]([^"'`\n]+?)["'`]/g,
-                /\b(?:edit|bash)\b.*?["'`]([^"'`\n]+?)["'`]/g,
-                /\b([\w\/\\\.\-]+\.(?:tsx?|jsx?|go|py|rs|java|rb|html|css|json|yaml|yml|md|toml))\b/g,
-              ];
-              patterns.forEach(re => {
-                let m: RegExpExecArray | null;
-                while ((m = re.exec(msg.content)) !== null) {
-                  const path = m[1].replace(/\\/g, '/');
-                  if (path.length > 2 && !path.startsWith('http') && !files.has(path)) {
-                    const action = msg.content.includes('write_file') ? 'write' :
-                                   msg.content.includes('edit') ? 'edit' : 'read';
-                    files.set(path, action);
-                  }
-                }
-              });
-            });
-            const fileList = Array.from(files.entries());
-            if (fileList.length === 0) return null;
-            return (
+          {fileActions.length > 0 && (
               <div className="card" style={{ padding: 12 }}>
                 <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8, fontWeight: 500 }}>
-                  {t('chat.fileActions')} · {fileList.length}
+                  {t('chat.fileActions')} · {fileActions.length}
                 </div>
-                {fileList.map(([path, action]) => (
+                {fileActions.map(([path, action]) => (
                   <div key={path} style={{
                     display: 'flex', alignItems: 'center', gap: 6,
                     padding: '3px 0', fontSize: 11, fontFamily: 'var(--font-mono)',
@@ -791,8 +826,7 @@ const ChatPage: React.FC = () => {
                   </div>
                 ))}
               </div>
-            );
-          })()}
+          )}
 
           {/* Card 1: Context Window */}
           <div className="card" style={{ padding: 14 }}>
