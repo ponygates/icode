@@ -24,7 +24,7 @@ const value: React.CSSProperties = {
 
 const ModelCompare: React.FC = () => {
   const { t } = useTranslation();
-  const { models } = useAppStore();
+  const models = useAppStore((s) => s.models);
   const [left, setLeft] = useState<string>(models[0]?.id || '');
   const [right, setRight] = useState<string>(models[1]?.id || '');
 

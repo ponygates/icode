@@ -1,5 +1,27 @@
 # 更新日志
 
+## v0.26.0 — 桌面闪退防护（goroutine/panic 兜底）+ 模型对比页订阅优化（2026-07-25）
+
+> 第二十二批：修复「点击左侧模型时卡死」+「启动后偶发闪退」。根因是后端进程被 goroutine panic 静默击杀（详见下）。
+
+### 🛡️ 闪退根因（后端进程被 goroutine panic 击杀）
+- `cmd/desktop_windows.go` 中 `runWebView` 跑在独立 goroutine、`runTray` 跑在主 goroutine；二者**均无 `recover`**。而 `net/http` 只恢复「handler 自身」的 panic，**不会**恢复 handler 派生的子 goroutine。任何在上述 goroutine 中的 panic（WebView2 初始化/子类化/`w.Run()` 消息泵的 Edge 异常、托盘回调）都会直接终止整个进程 → 窗口瞬间消失（闪退），且因 `-H windowsgui` 无控制台、`panic()` 写 `os.Stderr` 被丢弃，**无任何堆栈留存**。
+- 日志铁证：`~/.icode/desktop.log` 显示 10:36:30 启动、10:36:38 又被拉起（用户闪退后手动重开）——典型进程被杀。
+
+### 🔧 修复
+- `cmd/desktop_common.go`：兜底把 `os.Stderr` 重定向到同一 `desktop.log`，使 Go panic / fatal error 的堆栈可被记录（而非静默丢失），下次崩溃即可定位。
+- `cmd/tray_windows.go`：`runWebView` 与托盘菜单 goroutine 加 `defer recover()`，panic 时记堆栈并让后端继续存活（窗口异常不再拖死整个进程）。
+- `pkg/modelupdate/service.go`：`UpdateAll` 的 per-provider goroutine 加 `recover()`（抓取模型目录时某个 provider 异常不会击杀进程）。
+- `internal/server/server.go`：新增 `recoverMiddleware` 包裹所有路由，handler panic → 干净 500 + 堆栈入日志，而非进程崩溃。
+- `desktop/src/pages/ModelCompare.tsx`：`const { models } = useAppStore()`（订阅整个 store，任一 state 变更都重渲染）改为 `useAppStore((s) => s.models)` 选择器，避免无关更新触发整页重渲染。
+
+### ✅ 验证
+- `go vet ./internal/server/... ./pkg/modelupdate/... ./cmd/...` 全绿；`gofmt -l` 干净。
+- `NODE_OPTIONS= npm run build` 前端全绿（1817 modules）；`go build -ldflags="-s -w -H windowsgui" -o icode.exe .` 全绿，`icode version`→0.26.0；前端已重嵌 `internal/embedded/dist`。
+
+### ⚠️ 已知限制 / 仍需你协助
+- 本批为「崩溃生存 + 可诊断」加固：若闪退源于 **WebView2/Edge 渲染进程自身崩溃**（非 Go panic），`recover` 能让后端存活并记日志，但窗口仍需手动从托盘「显示窗口」恢复。若仍闪退，请附上新的 `~/.icode/desktop.log` 全文，里面现已包含 panic 堆栈，可精准定位。
+
 ## v0.25.0 — 桌面启动卡死修复：持久化防抖 + 启动顺序校正（2026-07-25）
 
 > 第二十一批：修复「桌面版启动时卡死」。v0.24.0 解决了运行期流式卡顿，但冷启动仍会冻结——根因在 store 的模块级订阅。

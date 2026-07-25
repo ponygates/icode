@@ -7,8 +7,10 @@ import (
 	"context"
 	"encoding/binary"
 	"image/png"
+	"log"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sync/atomic"
 	"syscall"
 
@@ -54,6 +56,15 @@ var (
 // 同时子类化其窗口过程并注册全局热键。调用方（主 goroutine）应随后
 // 运行 runTray 以托管系统托盘消息泵。
 func runWebView(url string) {
+	// Recover from any panic inside WebView2 init / message pump so a single
+	// Edge/Win32 hiccup cannot silently kill the whole desktop process (the
+	// backend would otherwise die too, leaving the UI "frozen"). The stack is
+	// logged to desktop.log for diagnosis.
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[desktop] runWebView panic: %v\n%s", r, debug.Stack())
+		}
+	}()
 	cache, _ := os.UserCacheDir()
 	dataPath := filepath.Join(cache, "icode", "webview")
 
@@ -172,6 +183,11 @@ func runTray() {
 		// 显隐通过菜单项"显示窗口 / 隐藏到托盘"或全局热键 Ctrl+Shift+Space 完成。
 
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[desktop] tray menu goroutine panic: %v\n%s", r, debug.Stack())
+				}
+			}()
 			for {
 				select {
 				case <-mShow.ClickedCh:

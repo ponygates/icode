@@ -65,6 +65,12 @@ func bootDesktopBackend() (*desktopBoot, error) {
 	logFile, logErr := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if logErr == nil {
 		log.SetOutput(logFile)
+		// Redirect os.Stderr into the same log file. Under -H windowsgui the
+		// process has no console, so Go panics / fatal errors (which write to
+		// os.Stderr and bypass the log package) would otherwise be lost
+		// silently. Capturing them here makes the next crash diagnosable from
+		// desktop.log instead of producing an unexplained "闪退".
+		os.Stderr = logFile
 		log.Printf("[desktop] === iCode desktop starting (log redirected to %s) ===", logPath)
 	} else {
 		logFile = nil

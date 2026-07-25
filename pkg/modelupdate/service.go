@@ -9,9 +9,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -72,6 +74,14 @@ func (s *Service) UpdateAll(ctx context.Context) ([]ProviderUpdate, error) {
 		wg.Add(1)
 		go func(pname string, p types.Provider) {
 			defer wg.Done()
+			// A panic inside a fetcher must never take down the whole
+			// desktop process — recover, log the stack, and let the other
+			// providers finish.
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[modelupdate] UpdateAll goroutine panic (%s): %v\n%s", pname, r, debug.Stack())
+				}
+			}()
 
 			update := ProviderUpdate{Name: pname}
 
@@ -319,9 +329,9 @@ func fetchOpenAICompatModels(ctx context.Context, endpoint, providerName string)
 	var models []types.ModelInfo
 	for _, d := range result.Data {
 		models = append(models, types.ModelInfo{
-			ID:          d.ID,
-			Name:        d.ID,
-			Provider:    providerName,
+			ID:       d.ID,
+			Name:     d.ID,
+			Provider: providerName,
 			Capabilities: types.ModelCap{
 				Tools:     true,
 				Streaming: true,

@@ -15,19 +15,20 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/ponygates/icode/internal/config"
-	"github.com/ponygates/icode/internal/desktop"
+	"github.com/ponygates/icode/internal/core/checkpoint"
 	projectcontext "github.com/ponygates/icode/internal/core/context"
 	"github.com/ponygates/icode/internal/core/conversation"
-	"github.com/ponygates/icode/internal/core/skills"
-	"github.com/ponygates/icode/internal/core/checkpoint"
 	"github.com/ponygates/icode/internal/core/permission"
+	"github.com/ponygates/icode/internal/core/skills"
 	"github.com/ponygates/icode/internal/core/todo"
 	"github.com/ponygates/icode/internal/db"
+	"github.com/ponygates/icode/internal/desktop"
 	"github.com/ponygates/icode/internal/llm/provider/openai_compat"
 	"github.com/ponygates/icode/internal/mcp"
 	"github.com/ponygates/icode/internal/types"
@@ -57,15 +58,15 @@ type Server struct {
 
 // Config configures the API server.
 type ServerConfig struct {
-	Config    *config.Config
-	Registry  types.ProviderRegistry
-	Store     types.SessionStore
-	DB        *db.Store
-	Engine    *conversation.Engine
-	Gate      *permission.Gate
-	Updater   *modelupdate.Service
-	Version   string // app version
-	Port      int    // 0 = auto-assign
+	Config   *config.Config
+	Registry types.ProviderRegistry
+	Store    types.SessionStore
+	DB       *db.Store
+	Engine   *conversation.Engine
+	Gate     *permission.Gate
+	Updater  *modelupdate.Service
+	Version  string // app version
+	Port     int    // 0 = auto-assign
 }
 
 // New creates a new API server.
@@ -133,10 +134,10 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 
 	// Skills & Teams (Claude-Code-parity surfaces)
 	mux.HandleFunc("/api/skills", s.handleSkills)
-	mux.HandleFunc("/api/skills/", s.handleSkillEnable) // POST/DELETE /api/skills/{name}/enable
-	mux.HandleFunc("/api/skills/market", s.handleSkillMarket)       // GET built-in market/catalog
-	mux.HandleFunc("/api/skills/market/", s.handleSkillMarketItem)  // POST install / DELETE {name}
-	mux.HandleFunc("/api/skills/import", s.handleSkillImport)       // POST import local path
+	mux.HandleFunc("/api/skills/", s.handleSkillEnable)            // POST/DELETE /api/skills/{name}/enable
+	mux.HandleFunc("/api/skills/market", s.handleSkillMarket)      // GET built-in market/catalog
+	mux.HandleFunc("/api/skills/market/", s.handleSkillMarketItem) // POST install / DELETE {name}
+	mux.HandleFunc("/api/skills/import", s.handleSkillImport)      // POST import local path
 	mux.HandleFunc("/api/teams", s.handleTeams)
 
 	// MCP (Model Context Protocol) server management — Reasonix-style tool integration
@@ -158,8 +159,9 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 	// Static frontend — serve the desktop UI at /
 	mux.HandleFunc("/", s.handleFrontend)
 
-	// CORS middleware
-	handler := s.corsMiddleware(mux)
+	// Recover middleware first: a handler panic becomes a clean 500 + stack
+	// trace in desktop.log instead of crashing the whole desktop process.
+	handler := s.corsMiddleware(recoverMiddleware(mux))
 
 	addr := fmt.Sprintf("127.0.0.1:%d", s.port)
 	listener, err := net.Listen("tcp", addr)
@@ -296,15 +298,15 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 
 	// Convert to frontend-friendly format
 	type modelDTO struct {
-		ID          string `json:"id"`
-		Name        string `json:"name"`
-		Provider    string `json:"provider"`
-		ModelID     string `json:"model_id"`
-		Plan        string `json:"plan"`
-		ContextWin  int    `json:"context_window"`
-		MaxOut      int    `json:"max_output_tokens"`
-		FreeTier    bool   `json:"free_tier"`
-		Custom      bool   `json:"custom"`
+		ID         string `json:"id"`
+		Name       string `json:"name"`
+		Provider   string `json:"provider"`
+		ModelID    string `json:"model_id"`
+		Plan       string `json:"plan"`
+		ContextWin int    `json:"context_window"`
+		MaxOut     int    `json:"max_output_tokens"`
+		FreeTier   bool   `json:"free_tier"`
+		Custom     bool   `json:"custom"`
 	}
 	result := make([]modelDTO, 0, len(models)+len(s.cfg.Models))
 	for _, m := range models {
@@ -426,11 +428,11 @@ func (s *Server) handleConfigProvider(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPut:
 		var req struct {
-			Name      string `json:"name"`
-			APIBase   string `json:"api_base"`
-			APIKey    string `json:"api_key"`
-			TimeoutSec int   `json:"timeout_sec"`
-			Disabled  bool   `json:"disabled"`
+			Name       string `json:"name"`
+			APIBase    string `json:"api_base"`
+			APIKey     string `json:"api_key"`
+			TimeoutSec int    `json:"timeout_sec"`
+			Disabled   bool   `json:"disabled"`
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -537,6 +539,7 @@ func (s *Server) handleRefreshModels(w http.ResponseWriter, r *http.Request) {
 		"results": updates,
 	})
 }
+
 // handleSearch searches message content across all sessions.
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -678,11 +681,11 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		SessionID   string              `json:"session_id"`
-		Content     string              `json:"content"`
-		Model       string              `json:"model"`
-		Provider    string              `json:"provider"`
-		Attachments []types.Attachment  `json:"attachments,omitempty"`
+		SessionID   string             `json:"session_id"`
+		Content     string             `json:"content"`
+		Model       string             `json:"model"`
+		Provider    string             `json:"provider"`
+		Attachments []types.Attachment `json:"attachments,omitempty"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -872,7 +875,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		// Push generation parameters into the live engine.
 		s.engine.SetGenerationParams(s.cfg.Defaults.Temperature, s.cfg.Defaults.MaxTokens)
 		s.engine.SetSystemPrompt(s.cfg.Defaults.SystemPrompt)
-	s.engine.SetFallbackModels(s.cfg.Defaults.FallbackModels)
+		s.engine.SetFallbackModels(s.cfg.Defaults.FallbackModels)
 		// Push tool sandbox settings into the live permission gate so the
 		// desktop "工具与权限" settings take effect without a restart.
 		if s.gate != nil {
@@ -899,11 +902,11 @@ func (s *Server) handleListKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type keyInfo struct {
-		Name    string `json:"name"`
-		KeySet  bool   `json:"key_set"`
-		APIBase string `json:"api_base,omitempty"`
-		Timeout int    `json:"timeout_sec"`
-		Disabled bool  `json:"disabled"`
+		Name     string `json:"name"`
+		KeySet   bool   `json:"key_set"`
+		APIBase  string `json:"api_base,omitempty"`
+		Timeout  int    `json:"timeout_sec"`
+		Disabled bool   `json:"disabled"`
 	}
 	seen := map[string]bool{}
 	var result []keyInfo
@@ -1281,17 +1284,17 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
-		list = append(list, map[string]any{
-			"name":       mc.Name,
-			"type":       mc.Type,
-			"command":    mc.Command,
-			"args":       mc.Args,
-			"url":        mc.URL,
-			"enabled":    mc.Enabled,
-			"trust_mode": mc.TrustMode,
-			"connected":  connected,
-			"tools":      toolCount,
-		})
+			list = append(list, map[string]any{
+				"name":       mc.Name,
+				"type":       mc.Type,
+				"command":    mc.Command,
+				"args":       mc.Args,
+				"url":        mc.URL,
+				"enabled":    mc.Enabled,
+				"trust_mode": mc.TrustMode,
+				"connected":  connected,
+				"tools":      toolCount,
+			})
 		}
 		writeJSON(w, http.StatusOK, list)
 
@@ -1586,6 +1589,24 @@ func (s *Server) handleFrontend(w http.ResponseWriter, r *http.Request) {
 <p>API available at <a href="/api/health" style="color:#89b4fa">/api/health</a></p></body></html>`)
 }
 
+// recoverMiddleware turns any panic in a handler (or a goroutine it spawns
+// that panics before returning) into a clean HTTP 500 and logs the full stack
+// to desktop.log. Without this, a single bad request could crash the whole
+// desktop process. net/http already recovers per-request, but this also
+// captures the stack for diagnosis instead of losing it to a console-less
+// (-H windowsgui) build.
+func recoverMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rv := recover(); rv != nil {
+				log.Printf("[server] PANIC recovered %s %s: %v\n%s", r.Method, r.URL.Path, rv, debug.Stack())
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
@@ -1614,9 +1635,10 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 }
 
 // handleTodos serves the session-scoped todo list at /api/todos/{sessionID}.
-//   GET  → { items: [...], counts: {pending, in_progress, completed, total} }
-//   POST → replaces the list (used by the desktop for manual edits; the
-//          model-driven flow goes through the todo_write tool instead)
+//
+//	GET  → { items: [...], counts: {pending, in_progress, completed, total} }
+//	POST → replaces the list (used by the desktop for manual edits; the
+//	       model-driven flow goes through the todo_write tool instead)
 func (s *Server) handleTodos(w http.ResponseWriter, r *http.Request) {
 	// URL shape: /api/todos/<sessionID>
 	sessionID := strings.TrimPrefix(r.URL.Path, "/api/todos/")
