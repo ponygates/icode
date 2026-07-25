@@ -89,15 +89,31 @@ func bootDesktopBackend() (*desktopBoot, error) {
 	// Log startup diagnostics — these help identify desktop-only failures
 	// (e.g. missing API key, proxy env vars, wrong config path).
 	log.Printf("[desktop] config path: %s", filepath.Join(logDir, "config.yaml"))
-	for _, pn := range a.Reg.List() {
-		p, _ := a.Reg.Get(pn)
-		hasKey := false
-		if p != nil {
-			hErr := p.Health(context.Background())
-			hasKey = hErr == nil
+	// Provider health checks make real network calls. On a restricted network
+	// (e.g. foreign providers behind a firewall) one of them can hang for a
+	// long time; running them on the boot critical path blocked the WebView2
+	// window from ever opening — the classic "startup freeze". Run them in the
+	// background with a short per-call timeout so boot returns promptly and the
+	// window appears; diagnostics still land in desktop.log.
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[desktop] provider-diag panic: %v", r)
+			}
+		}()
+		dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer dcancel()
+		for _, pn := range a.Reg.List() {
+			p, _ := a.Reg.Get(pn)
+			hasKey := false
+			if p != nil {
+				if hErr := p.Health(dctx); hErr == nil {
+					hasKey = true
+				}
+			}
+			log.Printf("[desktop] provider: %s (health=%v)", pn, hasKey)
 		}
-		log.Printf("[desktop] provider: %s (health=%v)", pn, hasKey)
-	}
+	}()
 	if proxy := os.Getenv("HTTPS_PROXY"); proxy != "" {
 		log.Printf("[desktop] WARNING: HTTPS_PROXY=%s (desktop uses system env, CLI uses terminal env)", proxy)
 	}

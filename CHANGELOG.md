@@ -1,5 +1,26 @@
 # 更新日志
 
+## v0.29.0 — 桌面启动卡死修复 + 启动提示 3 秒自动关闭（2026-07-25）
+
+> 第二十五批：用户反馈「桌面版启动时启动提示显示 3 秒自动关闭，但启动卡死故障仍然存在」，并要求「CLI 版鼠标滚轮可以查看当前对话前后的对话输出内容」。
+
+### 🐛 修复：桌面启动卡死（根因在 Go 后端启动阻塞）
+- 根因：`cmd/desktop_common.go` 的 `bootDesktopBackend()` 在打开 WebView2 窗口**之前**，用 `context.Background()`（无超时）顺序对**所有 provider（50+）调用 `p.Health()`** 做诊断日志。在受限网络下（国外 provider 如 OpenAI/Anthropic 被防火墙拦截），任一 `Health()` 的网络调用挂起会阻塞整个启动流程 → WebView2 窗口永远打不开 → 表现为「启动卡死」。此前 v0.25/26/27 的修复都在前端（防抖/超时/ErrorBoundary），未触及这条 Go 启动关键路径，故卡死依旧。
+- 修复：把 provider 健康检查诊断循环改为**后台 goroutine + 每调用 5s 超时**（`context.WithTimeout`），不再阻塞 `bootDesktopBackend` 返回；窗口可及时打开，诊断日志仍写入 `desktop.log`。
+
+### 💡 新增：桌面启动提示 3 秒自动关闭
+- 新增 `desktop/src/components/BootSplash.tsx`：应用挂载即显示全屏启动提示（梅花 LOGO + 旋转 spinner + 「正在启动…」），**固定显示 3 秒后淡出自动关闭**，且**不依赖后端**（即使后端慢/不可达也会准时关闭，露出可离线的 UI）。
+- `desktop/index.html` 的 `#root` 内新增预挂载加载占位（`#boot-screen`），在 WebView2 加载 JS 包、React 尚未挂载期间显示，避免空白帧；React 挂载后自动替换。
+- `desktop/src/styles/global.css` 新增 `.boot-spinner` 旋转动画。
+
+### 🖱️ CLI 鼠标滚轮滚动对话（加固 + 测试）
+- 确认鼠标滚轮已正确映射到 `internal/tui/mouse.go` 的 `handleMouse` → `scrollUpSmall()` / `scrollDownSmall()`（wheel 上滚看更早内容、下滚看更新内容），与方向键/滚动条/PgUp/PgDn 并存，互不冲突。
+- 新增 `internal/tui/tui_test.go` 的 `TestMouseWheelScrollsConversation`，锁定「wheel 上滚 `scrollOffset` 增大、下滚减小回 0」行为，防止回归。
+
+### ✅ 验证
+- `go build -tags nogui ./...`、`go test ./internal/tui/`（含 `TestMouseWheelScrollsConversation`）、`go vet ./cmd/... ./internal/tui/...`、`gofmt -l` 改动文件 全绿。
+- `npx tsc --noEmit`、`NODE_OPTIONS= npm run build`（1818+ modules）全绿；前端重嵌 `internal/embedded/dist`；`go build -H windowsgui` 全绿；`icode version` → `0.29.0`。
+
 ## v0.28.0 — CLI 对话支持 ↑/↓ 方向键滚动（2026-07-25）
 
 > 第二十四批：用户要求「CLI 版侧边可以上下滚动」。会话本身已支持 PgUp/PgDn、鼠标滚轮、点/拖滚动条，但方向键被历史记录占用。本批把 ↑/↓ 改为驱动会话的「侧边」滚动条，每按一次滚一行；历史记录改为 Ctrl+P/Ctrl+N。

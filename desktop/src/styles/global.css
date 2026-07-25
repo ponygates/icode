@@ -222,6 +222,17 @@ input, textarea { font-family: inherit; font-size: var(--text-base); }
   border-radius: var(--r-sm);
 }
 
+/* Boot splash spinner */
+@keyframes bootspin { to { transform: rotate(360deg); } }
+.boot-spinner {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 3px solid var(--border-color);
+  border-top-color: var(--accent);
+  animation: bootspin 0.8s linear infinite;
+}
+
 /* Toast notification — hairline border, minimal */
 .toast {
   position: fixed; bottom: var(--s6); right: var(--s6); z-index: 3000;

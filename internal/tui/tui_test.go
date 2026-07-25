@@ -209,3 +209,33 @@ func TestArrowFallsBackToHistoryWhenNotScrollable(t *testing.T) {
 		t.Errorf("scrollOffset = %d, want 0 (no scroll on short conv)", tu.scrollOffset)
 	}
 }
+
+// TestMouseWheelScrollsConversation confirms that the SGR mouse wheel report
+// (button 64 = wheel up, 65 = wheel down) drives the conversation's side
+// scrollbar the same way the arrow keys do — letting the user scroll through
+// output before/after the current view with the wheel. This is what the user
+// asked for ("CLI 版鼠标滚轮可以查看当前对话前后的对话输出内容").
+func TestMouseWheelScrollsConversation(t *testing.T) {
+	tu := &TUI{width: 80, height: 40, scrollOffset: 0}
+	for i := 0; i < 200; i++ {
+		tu.messages = append(tu.messages, Message{
+			Role:    RoleUser,
+			Content: "line " + strconv.Itoa(i) + " " + strings.Repeat("x", 60),
+		})
+	}
+	if !tu.canScroll() {
+		t.Fatalf("expected canScroll() == true for a tall conversation")
+	}
+
+	// Wheel up (button 64) → scroll toward older content (offset increases).
+	tu.handleMouse(bufio.NewReader(strings.NewReader("64;40;12M")))
+	if tu.scrollOffset <= 0 {
+		t.Errorf("wheel up: scrollOffset = %d, want > 0", tu.scrollOffset)
+	}
+
+	// Wheel down (button 65) → back toward newest (offset decreases to 0).
+	tu.handleMouse(bufio.NewReader(strings.NewReader("65;40;12M")))
+	if tu.scrollOffset != 0 {
+		t.Errorf("wheel down: scrollOffset = %d, want 0", tu.scrollOffset)
+	}
+}

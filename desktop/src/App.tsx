@@ -8,6 +8,7 @@ import SettingsModal from './pages/SettingsPage';
 import AnalyticsPage from './pages/AnalyticsPage';
 import ModelCompare from './pages/ModelCompare';
 import SetupWizard from './components/SetupWizard';
+import BootSplash from './components/BootSplash';
 import { useAppStore } from './stores/appStore';
 
 function hasAnyKey(): boolean {
@@ -149,6 +150,8 @@ const App: React.FC = () => {
 
       {/* Reasonix-style settings modal overlay (Ctrl+,) */}
       <SettingsModal visible={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      {/* Startup prompt — shows for ~3s then auto-closes (see BootSplash). */}
+      <BootSplash />
       {/* First-run setup wizard */}
       {showWizard && (
         <SetupWizard onDone={() => {
