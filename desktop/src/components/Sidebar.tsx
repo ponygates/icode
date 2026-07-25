@@ -3,6 +3,8 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../stores/appStore';
 import { MessageSquare, Cpu, Settings, BarChart, ArrowLeftRight, PanelLeftClose, Github, Plus, Server, Pencil } from 'lucide-react';
+import PlumBlossom from './PlumBlossom';
+import WorkspaceSidebar from './WorkspaceSidebar';
 
 interface Props { onToggle: () => void; }
 
@@ -21,12 +23,13 @@ const Sidebar: React.FC<Props> = ({ onToggle }) => {
   const currentModel = useAppStore((s) => s.models.find((m) => m.id === s.selectedModel));
   const backendConnected = useAppStore((s) => s.backendConnected);
   const backendChecking = useAppStore((s) => s.backendChecking);
+  const backendVersion = useAppStore((s) => s.backendVersion);
 
   const navItems = [
     { path: '/', icon: MessageSquare, label: t('sidebar.chat') },
     { path: '/models', icon: Cpu, label: t('sidebar.models') },
-    { path: '/analytics', icon: BarChart, label: '分析' },
-    { path: '/compare', icon: ArrowLeftRight, label: '对比' },
+    { path: '/analytics', icon: BarChart, label: t('sidebar.analytics') },
+    { path: '/compare', icon: ArrowLeftRight, label: t('sidebar.compare') },
     { action: 'settings', icon: Settings, label: t('sidebar.settings') },
   ];
 
@@ -59,10 +62,14 @@ const Sidebar: React.FC<Props> = ({ onToggle }) => {
         display: 'flex', alignItems: 'center', justifyContent: collapsed ? 'center' : 'space-between',
       }}>
         {!collapsed && (
-          <span style={{ fontSize: 18, fontWeight: 700, color: 'var(--accent)', letterSpacing: '-0.02em' }}>
-            iCode
+          <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <PlumBlossom size={22} style={{ flexShrink: 0 }} />
+            <span style={{ fontSize: 18, fontWeight: 700, color: 'var(--accent)', letterSpacing: '-0.02em' }}>
+              iCode
+            </span>
           </span>
         )}
+        {collapsed && <PlumBlossom size={22} style={{ flexShrink: 0 }} />}
         <button
           onClick={collapsed ? toggleCollapse : onToggle}
           className="interactive"
@@ -94,6 +101,9 @@ const Sidebar: React.FC<Props> = ({ onToggle }) => {
         })}
       </nav>
 
+      {/* Workspaces (v0.12) — project containers grouping sessions */}
+      {!collapsed && <WorkspaceSidebar />}
+
       {/* Session history */}
       <div style={{ flex: 1, overflowY: 'auto', padding: collapsed ? '4px 4px' : '6px 6px' }}>
         {!collapsed && (
@@ -102,7 +112,7 @@ const Sidebar: React.FC<Props> = ({ onToggle }) => {
             padding: '8px 8px 4px', color: 'var(--text-muted)',
             fontSize: 9, letterSpacing: 1, textTransform: 'uppercase', fontWeight: 600,
           }}>
-            <span>会话</span>
+            <span>{t('sidebar.sessions')}</span>
             <button
               onClick={() => createSession(selectedModel, currentModel?.provider || 'openrouter')}
               className="interactive"
@@ -117,7 +127,7 @@ const Sidebar: React.FC<Props> = ({ onToggle }) => {
         )}
         {sessions.length === 0 && !collapsed && (
           <div style={{ padding: '16px 8px', color: 'var(--text-muted)', fontSize: 11, textAlign: 'center' }}>
-            暂无会话
+            {t('sidebar.noSessions')}
           </div>
         )}
         {sessions.slice(-20).reverse().map((s) => {
@@ -177,12 +187,12 @@ const Sidebar: React.FC<Props> = ({ onToggle }) => {
                       flex: 1, overflow: 'hidden', textOverflow: 'ellipsis',
                       whiteSpace: 'nowrap', fontSize: 11.5, lineHeight: 1.3,
                     }}>
-                      {s.title || `会话 ${s.id.slice(0, 6)}`}
+                      {s.title || t('chat.sessionN', { n: s.id.slice(0, 6) })}
                     </div>
                   )}
                   <button className="action-hidden"
                     onClick={(e) => { e.stopPropagation(); setEditingId(s.id); setEditValue(s.title || ''); }}
-                    title="重命名"
+                    title={t('sidebar.rename')}
                     style={{
                       background: 'none', border: 'none', color: 'var(--text-muted)',
                       cursor: 'pointer', padding: 2, display: 'flex',
@@ -192,7 +202,7 @@ const Sidebar: React.FC<Props> = ({ onToggle }) => {
                   ><Pencil size={11} /></button>
                   <button className="action-hidden"
                     onClick={(e) => { e.stopPropagation(); deleteSession(s.id); }}
-                    title="删除"
+                    title={t('sidebar.delete')}
                     style={{
                       background: 'none', border: 'none', color: 'var(--text-muted)',
                       cursor: 'pointer', padding: 2, display: 'flex', fontSize: 10,
@@ -219,12 +229,12 @@ const Sidebar: React.FC<Props> = ({ onToggle }) => {
             flexShrink: 0,
           }} />
           {!collapsed && (
-            <span>{backendChecking ? '连接中…' : backendConnected ? '已连接' : '未连接'}</span>
+            <span>{backendChecking ? t('sidebar.connecting') : backendConnected ? t('settings.connected') : t('settings.disconnected')}</span>
           )}
         </div>
         {!collapsed && (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <span>v0.4.0</span>
+            <span>{backendVersion || 'v0.1.0'}</span>
             <button
               onClick={() => window.icode?.openExternal?.('https://github.com/ponygates/icode')}
               className="interactive"

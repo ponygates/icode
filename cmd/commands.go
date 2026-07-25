@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
@@ -95,6 +96,7 @@ func startChat(provider, model, mode string) error {
 		Provider: provider,
 		Lang:     tuiLang,
 		Theme:    tuiTheme,
+		Version:  appVersion,
 		Callback: cb,
 	})
 
@@ -137,7 +139,18 @@ var execCmd = &cobra.Command{
 			return fmt.Errorf("no prompt provided; use -p or pass as argument")
 		}
 
-		fmt.Printf("[iCode] Executing (%d chars)...\n\n", len(prompt))
+		outputFormat, _ := cmd.Flags().GetString("output-format")
+		switch outputFormat {
+		case "", "text", "json", "stream-json":
+		default:
+			return fmt.Errorf("invalid --output-format %q (want text|json|stream-json)", outputFormat)
+		}
+		jsonMode := outputFormat == "json"
+		streamJSON := outputFormat == "stream-json"
+
+		if !jsonMode && !streamJSON {
+			fmt.Printf("[iCode] Executing (%d chars)...\n\n", len(prompt))
+		}
 
 		a, err := app.Bootstrap()
 		if err != nil {
@@ -177,25 +190,88 @@ var execCmd = &cobra.Command{
 			return fmt.Errorf("engine: %w", err)
 		}
 
+		// stream-json: one NDJSON object per event (CI / pipeline mode,
+		// Claude Code `--output-format stream-json` parity).
+		emitNDJSON := func(v interface{}) {
+			b, err := json.Marshal(v)
+			if err != nil {
+				return
+			}
+			fmt.Println(string(b))
+		}
+
+		startAt := time.Now()
+		var finalText strings.Builder
+		var toolsUsed []string
+		var usage types.TokenUsage
+
 		for event := range eventCh {
 			switch event.Type {
 			case types.EventText:
-				fmt.Print(event.Content)
+				finalText.WriteString(event.Content)
+				if streamJSON {
+					emitNDJSON(map[string]interface{}{"type": "text", "content": event.Content})
+				} else if !jsonMode {
+					fmt.Print(event.Content)
+				}
 			case types.EventToolUse:
-				fmt.Printf("\n[Tool: %s]\n", event.ToolCall.Name)
+				toolsUsed = append(toolsUsed, event.ToolCall.Name)
+				if streamJSON {
+					emitNDJSON(map[string]interface{}{
+						"type": "tool_use", "tool": event.ToolCall.Name,
+						"arguments": json.RawMessage(orEmptyJSON(event.ToolCall.Arguments)),
+					})
+				} else if !jsonMode {
+					fmt.Printf("\n[Tool: %s]\n", event.ToolCall.Name)
+				}
 			case types.EventDone:
-				fmt.Println()
-				fmt.Printf("\n[%d prompt tokens, %d completion tokens]\n",
-					event.Meta.Usage.PromptTokens,
-					event.Meta.Usage.CompletionTokens)
+				if event.Meta.Usage.PromptTokens > 0 || event.Meta.Usage.CompletionTokens > 0 {
+					usage = event.Meta.Usage
+				}
+				result := map[string]interface{}{
+					"type":        "result",
+					"is_error":    false,
+					"result":      finalText.String(),
+					"session_id":  sess.ID,
+					"model":       sess.ModelID,
+					"tools_used":  toolsUsed,
+					"duration_ms": time.Since(startAt).Milliseconds(),
+					"usage": map[string]interface{}{
+						"prompt_tokens":     usage.PromptTokens,
+						"completion_tokens": usage.CompletionTokens,
+					},
+				}
+				if jsonMode || streamJSON {
+					emitNDJSON(result)
+				} else {
+					fmt.Println()
+					fmt.Printf("\n[%d prompt tokens, %d completion tokens]\n",
+						usage.PromptTokens, usage.CompletionTokens)
+				}
 				return nil
 			case types.EventError:
+				if jsonMode || streamJSON {
+					emitNDJSON(map[string]interface{}{
+						"type": "result", "is_error": true,
+						"result": event.Content, "session_id": sess.ID,
+					})
+					return fmt.Errorf("%s", event.Content)
+				}
 				fmt.Fprintf(cmd.ErrOrStderr(), "\n[Error: %s]\n", event.Content)
 				return fmt.Errorf("%s", event.Content)
 			}
 		}
 		return nil
 	},
+}
+
+// orEmptyJSON returns s when it is non-empty, otherwise a valid empty JSON
+// object so json.RawMessage marshalling never fails on blank arguments.
+func orEmptyJSON(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "{}"
+	}
+	return s
 }
 
 var authCmd = &cobra.Command{
@@ -700,6 +776,7 @@ func init() {
 	execCmd.Flags().StringP("prompt", "p", "", "The prompt to execute")
 	execCmd.Flags().StringP("file", "f", "", "Read prompt from file")
 	execCmd.Flags().IntP("max-turns", "t", 10, "Maximum conversation turns")
+	execCmd.Flags().String("output-format", "text", "Output format: text | json | stream-json (NDJSON)")
 
 	chatCmd.Flags().StringP("provider", "p", "", "LLM provider to use")
 	chatCmd.Flags().StringP("model", "m", "", "Model ID to use")
@@ -870,6 +947,9 @@ func (c *chatCallback) OnSend(text string) {
 			} else {
 				c.tui.AppendStream(event.Content)
 			}
+		case types.EventThinking:
+			// Store thinking content for display in the thinking box
+			c.tui.AddMessage(tui.RoleThinking, event.Content)
 		case types.EventToolUse:
 			c.lastTool = event.ToolCall.Name
 			// Strip empty/no-op parameter objects so the conversation
@@ -976,31 +1056,42 @@ func (c *chatCallback) OnSlashCommand(cmd string, args []string) {
 		c.sessionID = ""
 		c.tui.AddMessage(tui.RoleSystem, "Session cleared.")
 	case "/review":
-		edits := searchreplace.StageList()
-		if len(edits) == 0 {
-			c.tui.AddMessage(tui.RoleSystem, "No staged edits. Use the search_replace tool to propose changes first.")
-			break
-		}
-		var b strings.Builder
-		b.WriteString(fmt.Sprintf("Staged edits (%d):\n", len(edits)))
-		for i, ed := range edits {
-			status := "✓ valid"
-			if !ed.Valid {
-				status = "✗ invalid"
-			}
-			searchPreview := strings.ReplaceAll(ed.Search, "\n", "\\n")
-			if len(searchPreview) > 60 {
-				searchPreview = searchPreview[:60] + "..."
-			}
-			b.WriteString(fmt.Sprintf("\n  #%d %s [%s]\n", i, ed.FilePath, status))
-			b.WriteString(fmt.Sprintf("      SEARCH: %q\n", searchPreview))
-			b.WriteString(fmt.Sprintf("      Reason: %s\n", ed.Reason))
-		}
-		b.WriteString("\n/apply   — apply all valid staged edits")
-		b.WriteString("\n/reject  — discard staged edits")
-		c.tui.AddMessage(tui.RoleSystem, b.String())
+	  edits := searchreplace.StageList()
+	  if len(edits) == 0 {
+	   c.tui.AddMessage(tui.RoleSystem, "No staged edits. Use the search_replace tool to propose changes first.")
+	   break
+	  }
+	  var b strings.Builder
+	  b.WriteString(fmt.Sprintf("📋 Staged edits (%d):\n", len(edits)))
+	  for i, ed := range edits {
+	   status := "✓ valid"
+	   if !ed.Valid {
+	    status = "✗ invalid"
+	   }
+	   b.WriteString(fmt.Sprintf("\n── #%d %s [%s] ──\n", i, ed.FilePath, status))
+	   b.WriteString(fmt.Sprintf("   Reason: %s\n", ed.Reason))
+	   if ed.Valid && ed.Diff != "" {
+	    // Show diff with colored markers
+	    for _, line := range strings.Split(ed.Diff, "\n") {
+	     if strings.HasPrefix(line, "---") || strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "@@") {
+	      b.WriteString(fmt.Sprintf("  %s\n", line))
+	     } else if strings.HasPrefix(line, "-") {
+	      b.WriteString(fmt.Sprintf("  \033[31m%s\033[0m\n", line))
+	     } else if strings.HasPrefix(line, "+") {
+	      b.WriteString(fmt.Sprintf("  \033[32m%s\033[0m\n", line))
+	     } else {
+	      b.WriteString(fmt.Sprintf("  %s\n", line))
+	     }
+	    }
+	   } else if !ed.Valid {
+	    b.WriteString(fmt.Sprintf("  (search text not found — cannot generate diff)\n"))
+	   }
+	  }
+	  b.WriteString("\n/apply   — apply all valid staged edits")
+	  b.WriteString("\n/reject  — discard staged edits")
+	  c.tui.AddMessage(tui.RoleSystem, b.String())
 
-		case "/undo":
+	 case "/undo":
 			steps := 1
 			if len(args) > 0 {
 				fmt.Sscanf(args[0], "%d", &steps)
@@ -1026,12 +1117,42 @@ func (c *chatCallback) OnSlashCommand(cmd string, args []string) {
 			c.tui.AddMessage(tui.RoleSystem, "No staged edits to apply.")
 			break
 		}
+
+		// Snapshot files before applying (for atomic rollback)
+		edits := searchreplace.StageList()
+		snapshottedFiles := make(map[string]bool)
+		for _, ed := range edits {
+			if ed.Valid && ed.FilePath != "" && !snapshottedFiles[ed.FilePath] {
+				if checkpoint.DefaultUndo != nil {
+					_, _ = checkpoint.DefaultUndo.SnapshotFile(context.Background(), ed.FilePath)
+				}
+				snapshottedFiles[ed.FilePath] = true
+			}
+		}
+
 		results := searchreplace.StageApplyValid()
+
+		// Check for failures — auto-rollback on any failure
+		hasFailures := false
 		for _, r := range results {
 			c.tui.AddMessage(tui.RoleSystem, r)
+			if strings.HasPrefix(r, "FAILED") {
+				hasFailures = true
+			}
 		}
+
+		applied := countApplied(results)
+		if hasFailures && applied > 0 && checkpoint.DefaultUndo != nil {
+			c.tui.AddMessage(tui.RoleSystem, "⚠️ 编辑失败，自动回滚中...")
+			if restored, err := checkpoint.DefaultUndo.Undo(context.Background(), 1); err != nil {
+				c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("回滚失败: %v — 请手动 /undo 1", err))
+			} else {
+				c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("✅ 已回滚 %d 个文件到编辑前的状态", len(restored)))
+			}
+		}
+
 		c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("Applied %d/%d staged edits. Remaining: %d",
-			countApplied(results), n, searchreplace.StageCount()))
+			applied, n, searchreplace.StageCount()))
 
 	case "/reject":
 		n := searchreplace.StageCount()
@@ -1041,6 +1162,43 @@ func (c *chatCallback) OnSlashCommand(cmd string, args []string) {
 		}
 		searchreplace.StageClear()
 		c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("Rejected %d staged edits.", n))
+
+	case "/search":
+		query := strings.Join(args, " ")
+		if query == "" {
+			c.tui.AddMessage(tui.RoleSystem, "Usage: /search <query> — search past conversations")
+			break
+		}
+		if c.app == nil || c.app.SessStore == nil {
+			c.tui.AddMessage(tui.RoleSystem, "No session store available.")
+			break
+		}
+		results, err := c.app.SessStore.SearchMessages(query, 20)
+		if err != nil {
+			c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("Search error: %v", err))
+			break
+		}
+		if len(results) == 0 {
+			c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("No results for %q.", query))
+			break
+		}
+		var b strings.Builder
+		b.WriteString(fmt.Sprintf("🔍 Found %d results for %q:\n", len(results), query))
+		for _, r := range results {
+			title := r.SessionTitle
+			if title == "" {
+				title = "Untitled"
+			}
+			// Truncate content for display
+			content := strings.ReplaceAll(r.Content, "\n", " ")
+			if len(content) > 120 {
+				content = content[:120] + "..."
+			}
+			b.WriteString(fmt.Sprintf("\n  [%s] %s\n", title, r.Role))
+			b.WriteString(fmt.Sprintf("    %s\n", content))
+		}
+		b.WriteString(fmt.Sprintf("\n/resume <session_id> to load a session"))
+		c.tui.AddMessage(tui.RoleSystem, b.String())
 
 	case "/config":
 		if cfg, cerr := config.LoadOrCreate(); cerr == nil {
@@ -1115,6 +1273,58 @@ func (c *chatCallback) OnStatus() string {
 	return b.String()
 }
 
+// OnTokenStats implements tui.Callback — surfaces iCode's token-saving
+// metrics so the Cache-First Loop is visible, not invisible.
+func (c *chatCallback) OnTokenStats() string {
+	if c.app == nil || c.app.Engine == nil {
+		return "引擎未初始化。"
+	}
+	if c.sessionID == "" {
+		return "没有活跃会话，先发一条消息再查看统计。"
+	}
+	stats := c.app.Engine.SessionStats(c.sessionID)
+	if stats == nil {
+		return "暂无统计数据。"
+	}
+	var b strings.Builder
+	b.WriteString("🪙 iCode Token 节省报告\n\n")
+	b.WriteString(fmt.Sprintf("已节省 Token:   %s\n", formatInt(stats.TokensSaved)))
+	b.WriteString(fmt.Sprintf("缓存命中率:     %.1f%%\n", stats.CacheHitRate*100))
+	b.WriteString(fmt.Sprintf("累计压缩次数:   %d\n", stats.CompactionsDone))
+	b.WriteString(fmt.Sprintf("Prompt Token:   %s\n", formatInt(stats.PromptTokens)))
+	b.WriteString(fmt.Sprintf("Completion:     %s\n", formatInt(stats.CompletionTokens)))
+	b.WriteString(fmt.Sprintf("总 Token:       %s\n", formatInt(stats.TotalTokens)))
+	if stats.CacheHitTokens > 0 {
+		b.WriteString(fmt.Sprintf("缓存命中 Token: %s\n", formatInt(stats.CacheHitTokens)))
+	}
+	if stats.EstimatedCost > 0 {
+		b.WriteString(fmt.Sprintf("预估费用:       ¥%.4f\n", stats.EstimatedCost))
+	}
+	b.WriteString("\n机制: Cache-First Loop（不可变前缀 + 追加日志 + 易失暂存）\n")
+	b.WriteString("5 层压缩: Snip → 去重 → 折叠 → 摘要 → 预算上限")
+	return b.String()
+}
+
+// formatInt renders an integer with thousands separators.
+func formatInt(n int) string {
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	s := fmt.Sprintf("%d", n)
+	var out []byte
+	for i, c := range []byte(s) {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			out = append(out, ',')
+		}
+		out = append(out, c)
+	}
+	if neg {
+		return "-" + string(out)
+	}
+	return string(out)
+}
+
 // estimateCost mirrors core/conversation.calculateCost for the CLI status bar.
 func estimateCost(u types.TokenUsage, mi types.ModelInfo) float64 {
 	if len(mi.Plans) == 0 {
@@ -1180,6 +1390,7 @@ var serverCmd = &cobra.Command{
 			Engine:   a.Engine,
 			Gate:     a.Gate,
 			Updater:  a.Updater,
+			Version:  appVersion,
 			Port:     port,
 		})
 

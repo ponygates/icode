@@ -1,4 +1,5 @@
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../stores/appStore';
 
 /**
@@ -6,6 +7,7 @@ import { useAppStore } from '../stores/appStore';
  * not positioned fixed. This avoids overlapping with the chat stats panel.
  */
 const TodoPanel: React.FC = () => {
+  const { t } = useTranslation();
   const { activeSessionId } = useAppStore();
   const [todos, setTodos] = React.useState<any[]>([]);
 
@@ -45,7 +47,7 @@ const TodoPanel: React.FC = () => {
         fontSize: 11, color: 'var(--text-muted)', marginBottom: 6,
         letterSpacing: 0.5, fontWeight: 500,
       }}>
-        待办 ({todos.filter(t => t.status !== 'completed').length}/{todos.length})
+        {t('todo.title')} ({todos.filter(t => t.status !== 'completed').length}/{todos.length})
       </div>
       {todos.map((t: any, i: number) => (
         <div key={t.id || i} style={{

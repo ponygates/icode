@@ -4,7 +4,7 @@ import { useAppStore } from '../stores/appStore';
 import {
   RefreshCw, Search, Zap, Sparkles, Shield, Cpu, X, Check,
   Key, Globe, Thermometer, Hash, DollarSign, Layers,
-  ChevronRight, Settings, Star,
+  ChevronRight, Settings, Star, Plus, Trash2,
 } from 'lucide-react';
 
 // ── Per-model settings modal ──────────────────────────────────────
@@ -30,6 +30,7 @@ const ModelSettingsModal: React.FC<{
     maxTokens: 4096,
     topP: 0.9,
   });
+  const { t } = useTranslation();
   const [saved, setSaved] = useState(false);
 
   const providerColors: Record<string, string> = {
@@ -108,7 +109,7 @@ const ModelSettingsModal: React.FC<{
           {model.plans && model.plans.length > 0 && (
             <div style={{ marginBottom: 20 }}>
               <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>
-                <DollarSign size={12} style={{ display: 'inline', marginRight: 4 }} /> 定价
+                <DollarSign size={12} style={{ display: 'inline', marginRight: 4 }} /> {t('models.pricing')}
               </div>
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                 {model.plans.map((plan: any, i: number) => (
@@ -119,9 +120,9 @@ const ModelSettingsModal: React.FC<{
                     <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)' }}>{plan.name}</div>
                     {plan.description && <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{plan.description}</div>}
                     <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4 }}>
-                      {plan.inputPrice != null && <div>入: ${plan.inputPrice}/M tok</div>}
-                      {plan.outputPrice != null && <div>出: ${plan.outputPrice}/M tok</div>}
-                      {plan.cachePrice != null && <div style={{ color: 'var(--success)' }}>缓存: ${plan.cachePrice}/M tok</div>}
+                      {plan.inputPrice != null && <div>{t('models.priceIn')} ${plan.inputPrice}/M tok</div>}
+                      {plan.outputPrice != null && <div>{t('models.priceOut')} ${plan.outputPrice}/M tok</div>}
+                      {plan.cachePrice != null && <div style={{ color: 'var(--success)' }}>{t('models.priceCache')} ${plan.cachePrice}/M tok</div>}
                     </div>
                   </div>
                 ))}
@@ -132,7 +133,7 @@ const ModelSettingsModal: React.FC<{
           {/* API Configuration */}
           <div style={{ marginBottom: 20 }}>
             <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>
-              <Key size={12} style={{ display: 'inline', marginRight: 4 }} /> API 配置
+              <Key size={12} style={{ display: 'inline', marginRight: 4 }} /> {t('models.apiConfig')}
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               <div>
@@ -141,7 +142,7 @@ const ModelSettingsModal: React.FC<{
                 </label>
                 <input
                   type="password"
-                  placeholder={`输入 ${model.provider} 的 API Key`}
+                  placeholder={t('models.apiKeyPlaceholder', { provider: model.provider })}
                   value={settings.apiKey}
                   onChange={(e) => setSettings((s) => ({ ...s, apiKey: e.target.value }))}
                   style={inputField}
@@ -150,7 +151,7 @@ const ModelSettingsModal: React.FC<{
               <div>
                 <label style={{ fontSize: 11, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>
                   <Globe size={10} style={{ display: 'inline', marginRight: 4 }} />
-                  Base URL（留空使用默认）
+                  Base URL（{t('models.keepDefault')}）
                 </label>
                 <input
                   placeholder="https://api.example.com/v1"
@@ -165,7 +166,7 @@ const ModelSettingsModal: React.FC<{
           {/* Generation Parameters */}
           <div style={{ marginBottom: 20 }}>
             <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>
-              <Settings size={12} style={{ display: 'inline', marginRight: 4 }} /> 生成参数
+              <Settings size={12} style={{ display: 'inline', marginRight: 4 }} /> {t('models.genParams')}
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               {/* Temperature */}
@@ -173,7 +174,7 @@ const ModelSettingsModal: React.FC<{
                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
                   <label style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
                     <Thermometer size={10} style={{ display: 'inline', marginRight: 4 }} />
-                    温度 (Temperature)
+                    {t('models.temperature')}
                   </label>
                   <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--accent)' }}>{settings.temperature.toFixed(1)}</span>
                 </div>
@@ -184,7 +185,7 @@ const ModelSettingsModal: React.FC<{
                   style={{ width: '100%', accentColor: color }}
                 />
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, color: 'var(--text-muted)' }}>
-                  <span>精确</span><span>平衡</span><span>创意</span>
+                  <span>{t('models.tempPrecise')}</span><span>{t('models.tempBalanced')}</span><span>{t('models.tempCreative')}</span>
                 </div>
               </div>
 
@@ -193,7 +194,7 @@ const ModelSettingsModal: React.FC<{
                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
                   <label style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
                     <Hash size={10} style={{ display: 'inline', marginRight: 4 }} />
-                    最大输出 Token
+                    {t('models.maxOutputTokens')}
                   </label>
                   <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--accent)' }}>{settings.maxTokens >= 1000 ? `${(settings.maxTokens/1000).toFixed(1)}K` : settings.maxTokens}</span>
                 </div>
@@ -237,7 +238,7 @@ const ModelSettingsModal: React.FC<{
               color: 'var(--text-secondary)', fontWeight: 500,
               display: 'flex', alignItems: 'center', gap: 6,
             }}>
-              <Star size={13} /> 设为默认
+              <Star size={13} /> {t('models.setAsDefault')}
             </button>
           )}
           <button onClick={onClose} style={{
@@ -245,7 +246,7 @@ const ModelSettingsModal: React.FC<{
             background: 'var(--bg-primary)', border: '1px solid var(--border-color)',
             color: 'var(--text-secondary)',
           }}>
-            取消
+            {t('settings.cancel')}
           </button>
           <button onClick={() => { onSave(settings); setSaved(true); setTimeout(() => setSaved(false), 2000); }} style={{
             padding: '8px 20px', borderRadius: 8, cursor: 'pointer', fontSize: 12,
@@ -254,7 +255,7 @@ const ModelSettingsModal: React.FC<{
             display: 'flex', alignItems: 'center', gap: 6,
             transition: 'background 0.2s',
           }}>
-            {saved ? <><Check size={13} /> 已保存</> : '保存设置'}
+            {saved ? <><Check size={13} /> {t('models.saved')}</> : t('models.saveSettings')}
           </button>
         </div>
       </div>
@@ -291,11 +292,14 @@ const providerIcons: Record<string, React.ReactNode> = {
 
 const ModelsPage: React.FC = () => {
   const { t } = useTranslation();
-  const { models, selectedModel, setSelectedModel, refreshModels, backendUrl } = useAppStore();
+  const { models, selectedModel, setSelectedModel, refreshModels, backendUrl,
+    customModels, addCustomModel, removeCustomModel } = useAppStore();
   const [search, setSearch] = useState('');
   const [refreshing, setRefreshing] = useState(false);
   const [selectedSettingsModel, setSelectedSettingsModel] = useState<any>(null);
   const [expandedProviders, setExpandedProviders] = useState<Set<string>>(new Set());
+  const [showAddCustom, setShowAddCustom] = useState(false);
+  const [newCustom, setNewCustom] = useState({ name: '', id: '', provider: '', apiBase: '' });
 
   const filtered = models.filter((m) =>
     m.name.toLowerCase().includes(search.toLowerCase()) ||
@@ -365,7 +369,7 @@ const ModelsPage: React.FC = () => {
             {t('models.title')}
           </h2>
           <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
-            {filtered.length} 个可用模型 · {providers.length} 个提供商
+            {t('models.modelsCount', { count: filtered.length })} · {t('models.providerCount', { count: providers.length })}
           </div>
         </div>
         <button onClick={handleRefresh} disabled={refreshing}
@@ -379,6 +383,18 @@ const ModelsPage: React.FC = () => {
         >
           <RefreshCw size={13} style={{ animation: refreshing ? 'spin 1s linear infinite' : 'none' }} />
           {t('models.refresh')}
+        </button>
+        <button onClick={() => setShowAddCustom(true)}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 6,
+            background: 'linear-gradient(135deg, #6366F1, #8B5CF6)',
+            border: 'none', color: '#fff', padding: '7px 14px',
+            borderRadius: 8, cursor: 'pointer', fontSize: 12, fontWeight: 500,
+            transition: 'all 0.15s',
+          }}
+        >
+          <Plus size={13} />
+          {t('models.addCustom')}
         </button>
       </div>
 
@@ -408,6 +424,77 @@ const ModelsPage: React.FC = () => {
           )}
         </div>
       </div>
+
+      {/* Custom Model Modal */}
+      {showAddCustom && (
+        <div onClick={() => setShowAddCustom(false)} style={{
+          position: 'fixed', inset: 0, zIndex: 1000,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(4px)',
+        }}>
+          <div onClick={(e) => e.stopPropagation()} style={{
+            background: 'var(--bg-secondary)', borderRadius: 16,
+            border: '1px solid var(--border-color)', width: 440,
+            boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
+          }}>
+            <div style={{ padding: '20px 24px 16px', borderBottom: '1px solid var(--border-color)' }}>
+              <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-primary)' }}>
+                <Plus size={16} style={{ display: 'inline', marginRight: 8 }} />
+                {t('models.addCustom')}
+              </div>
+            </div>
+            <div style={{ padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div>
+                <label style={{ fontSize: 11, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>{t('models.modelName')} *</label>
+                <input value={newCustom.name} onChange={(e) => setNewCustom({...newCustom, name: e.target.value})}
+                  placeholder={t('models.modelNameExample')} style={inputField} />
+              </div>
+              <div>
+                <label style={{ fontSize: 11, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>{t('models.modelId')} *</label>
+                <input value={newCustom.id} onChange={(e) => setNewCustom({...newCustom, id: e.target.value})}
+                  placeholder={t('models.modelIdExample')} style={inputField} />
+              </div>
+              <div>
+                <label style={{ fontSize: 11, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>{t('models.providerName')} *</label>
+                <input value={newCustom.provider} onChange={(e) => setNewCustom({...newCustom, provider: e.target.value})}
+                  placeholder={t('models.providerNameExample')} style={inputField} />
+              </div>
+              <div>
+                <label style={{ fontSize: 11, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>API Base URL</label>
+                <input value={newCustom.apiBase} onChange={(e) => setNewCustom({...newCustom, apiBase: e.target.value})}
+                  placeholder="https://api.example.com/v1（{t('models.keepDefault')}）" style={inputField} />
+              </div>
+            </div>
+            <div style={{ padding: '16px 24px', borderTop: '1px solid var(--border-color)', display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button onClick={() => setShowAddCustom(false)} style={{
+                padding: '8px 16px', borderRadius: 8, cursor: 'pointer', fontSize: 12,
+                background: 'var(--bg-primary)', border: '1px solid var(--border-color)',
+                color: 'var(--text-secondary)',
+              }}>{t('settings.cancel')}</button>
+              <button onClick={() => {
+                if (!newCustom.name || !newCustom.id || !newCustom.provider) return;
+                const model: any = {
+                  id: newCustom.id,
+                  name: newCustom.name,
+                  provider: newCustom.provider,
+                  plan: 'Custom',
+                  apiBase: newCustom.apiBase || undefined,
+                  capabilities: { tools: true, streaming: true },
+                };
+                addCustomModel(model);
+                setNewCustom({ name: '', id: '', provider: '', apiBase: '' });
+                setShowAddCustom(false);
+              }} style={{
+                padding: '8px 20px', borderRadius: 8, cursor: 'pointer', fontSize: 12,
+                background: '#6366F1', border: 'none', color: '#fff', fontWeight: 600,
+                display: 'flex', alignItems: 'center', gap: 6,
+              }}>
+                <Check size={13} /> {t('models.add')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Model list — Reasonix-style cards grouped by provider */}
       <div style={{ flex: 1, overflowY: 'auto', padding: '0 24px 24px' }}>
@@ -445,7 +532,7 @@ const ModelsPage: React.FC = () => {
                     {provider}
                   </div>
                   <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
-                    {providerModels.length} 模型{hasActiveInProvider ? ' · 活跃' : ''}
+                    {t('models.modelsCount', { count: providerModels.length })}{hasActiveInProvider ? ' · ' + t('models.active') : ''}
                   </div>
                 </div>
                 <ChevronRight
@@ -516,7 +603,7 @@ const ModelsPage: React.FC = () => {
                           )}
                           <button
                             onClick={(e) => { e.stopPropagation(); setSelectedSettingsModel(model); }}
-                            title="自定义设置"
+                            title={t('models.customSettings')}
                             style={{
                               width: 28, height: 28, borderRadius: 6,
                               background: 'transparent', border: '1px solid var(--border-color)',
@@ -537,11 +624,84 @@ const ModelsPage: React.FC = () => {
           );
         })}
 
+        {/* Custom Models Section */}
+        {customModels.length > 0 && !search && (
+          <div style={{ marginTop: 16, marginBottom: 12 }}>
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 10,
+              padding: '10px 14px', borderRadius: 10,
+              background: 'rgba(99,102,241,0.08)',
+              border: '1px solid rgba(99,102,241,0.2)',
+            }}>
+              <div style={{
+                width: 28, height: 28, borderRadius: 7,
+                background: 'rgba(99,102,241,0.18)', border: '1px solid rgba(99,102,241,0.3)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+              }}>
+                <Plus size={14} color="#6366F1" />
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
+                  {t('models.customModels')}
+                </div>
+                <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                  {t('models.customModelCount', { count: customModels.length })}
+                </div>
+              </div>
+            </div>
+            <div style={{ paddingLeft: 4, display: 'flex', flexDirection: 'column', gap: 3, marginTop: 4 }}>
+              {customModels.map((model) => {
+                const isSelected = model.id === selectedModel;
+                return (
+                  <div key={model.id} style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                    padding: '9px 14px 9px 16px', borderRadius: 8,
+                    background: isSelected ? 'rgba(99,102,241,0.14)' : 'var(--bg-secondary)',
+                    border: isSelected ? '1px solid rgba(99,102,241,0.4)' : '1px solid transparent',
+                    borderLeft: isSelected ? '3px solid #6366F1' : '3px solid transparent',
+                  }}>
+                    <div onClick={() => setSelectedModel(model.id)}
+                      style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1, cursor: 'pointer' }}>
+                      <div style={{
+                        width: 16, height: 16, borderRadius: '50%',
+                        border: isSelected ? '2px solid #6366F1' : '2px solid var(--border-color)',
+                        background: isSelected ? '#6366F1' : 'transparent',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      }}>
+                        {isSelected && <Check size={9} color="#fff" />}
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 12.5, fontWeight: isSelected ? 600 : 400, color: 'var(--text-primary)' }}>
+                          {model.name}
+                        </div>
+                        <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                          {model.id} · {model.provider}
+                        </div>
+                      </div>
+                    </div>
+                    <button onClick={() => removeCustomModel(model.id)}
+                      title={t('models.deleteCustom')}
+                      style={{
+                        width: 28, height: 28, borderRadius: 6,
+                        background: 'transparent', border: '1px solid var(--border-color)',
+                        color: 'var(--text-muted)', cursor: 'pointer',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      }}
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         {filtered.length === 0 && (
           <div style={{
             textAlign: 'center', padding: 40, color: 'var(--text-muted)', fontSize: 13,
           }}>
-            未找到匹配的模型。尝试其他搜索词或点击"刷新"获取最新列表。
+            {t('models.noResults')}
           </div>
         )}
       </div>

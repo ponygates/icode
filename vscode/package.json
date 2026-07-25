@@ -1,0 +1,131 @@
+{
+  "name": "icode-vscode",
+  "displayName": "iCode",
+  "description": "在 VS Code 侧栏使用 iCode 多模型 AI 编程助手（复用本机已运行的 iCode 后端）",
+  "version": "0.22.0",
+  "publisher": "ponygates",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "AI",
+    "Chat",
+    "Other"
+  ],
+  "keywords": [
+    "ai",
+    "coding",
+    "llm",
+    "agent",
+    "multimodel"
+  ],
+  "activationEvents": [
+    "onCommand:icode.openSidebar"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "icode.openSidebar",
+        "title": "iCode: 打开聊天侧栏"
+      },
+      {
+        "command": "icode.startServer",
+        "title": "iCode: 启动后端服务"
+      },
+      {
+        "command": "icode.openInTerminal",
+        "title": "iCode: 在终端启动 CLI（完整 TUI）"
+      },
+      {
+        "command": "icode.openSettings",
+        "title": "iCode: 打开设置"
+      },
+      {
+        "command": "icode.askSelection",
+        "title": "iCode: 询问选中代码"
+      },
+      {
+        "command": "icode.explainSelection",
+        "title": "iCode: 解释选中代码"
+      },
+      {
+        "command": "icode.improveSelection",
+        "title": "iCode: 优化选中代码"
+      }
+    ],
+    "configuration": {
+      "title": "iCode",
+      "properties": {
+        "icode.binPath": {
+          "type": "string",
+          "default": "",
+          "description": "icode 可执行文件路径（留空则自动在 PATH 与常见目录中查找）"
+        },
+        "icode.serverPort": {
+          "type": "number",
+          "default": 0,
+          "description": "后端固定端口（0 表示自动发现：端口文件 + 常用端口探测）"
+        },
+        "icode.autoStartBackend": {
+          "type": "boolean",
+          "default": true,
+          "description": "未发现运行中的后端时，自动启动 icode server"
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "icode",
+          "title": "iCode",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "icode": [
+        {
+          "id": "icode.chat",
+          "name": "聊天",
+          "type": "webview",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "icode.askSelection",
+          "group": "9_icode@1",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "icode.explainSelection",
+          "group": "9_icode@2",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "icode.improveSelection",
+          "group": "9_icode@3",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "icode.openInTerminal",
+          "group": "9_icode@4",
+          "when": "editorTextFocus"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  }
+}

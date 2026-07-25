@@ -11,5 +11,9 @@ func fixConsoleCodepage() {}
 // Returns true to keep the CLI dispatch path in Execute.
 func setupConsoleIO() bool { return true }
 
+// allocConsole is a no-op on non-Windows platforms (setupConsoleIO always
+// returns true there, so the double-click branch in Execute is never taken).
+func allocConsole() bool { return false }
+
 // showCLIMessage is a no-op on non-Windows.
 func showCLIMessage() {}

@@ -57,6 +57,10 @@ build-desktop-backend.js
 # Local working memory (project data, not source)
 .workbuddy/
 .reasonix/
+.mimocode/
+
+# Windows reserved-name junk file (accidental `> nul` redirect artifact)
+/nul
 
 # Backup files
 *.bak

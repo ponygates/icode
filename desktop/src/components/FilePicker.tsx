@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../stores/appStore';
 import { X, Folder, File, ChevronRight, ChevronDown } from 'lucide-react';
 
@@ -36,6 +37,7 @@ async function scanDir(dir: string, depth: number): Promise<FileNode[]> {
 }
 
 const FilePicker: React.FC<{ visible: boolean; onClose: () => void; onSelect: (path: string) => void }> = ({ visible, onClose, onSelect }) => {
+  const { t } = useTranslation();
   const [cwd, setCwd] = useState('.');
   const [files, setFiles] = useState<FileNode[]>([]);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -127,7 +129,7 @@ const FilePicker: React.FC<{ visible: boolean; onClose: () => void; onSelect: (p
           {files.map(f => renderNode(f, 0))}
           {files.length === 0 && (
             <div style={{ padding: 20, textAlign: 'center', color: 'var(--text-muted)', fontSize: 11 }}>
-              无法读取目录
+              {t('filePicker.readDirError')}
             </div>
           )}
         </div>

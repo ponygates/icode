@@ -62,6 +62,12 @@ func New(cfg Config) *BaseProvider {
 		cacheSupport: cfg.CacheSupport,
 		httpClient: &http.Client{
 			Timeout: time.Duration(cfg.TimeoutSec) * time.Second,
+			Transport: &http.Transport{
+				// Honor HTTP_PROXY / HTTPS_PROXY / NO_PROXY so users behind a
+				// proxy (e.g. reaching OpenRouter from restricted networks) work.
+				// When no proxy env is set, ProxyFromEnvironment returns nil -> direct.
+				Proxy: http.ProxyFromEnvironment,
+			},
 		},
 	}
 }
@@ -135,6 +141,16 @@ func (p *BaseProvider) SetTimeout(sec int) {
 
 // Health performs a connectivity check.
 func (p *BaseProvider) Health(ctx context.Context) error {
+	p.mu.RLock()
+	hasKey := p.apiKey != ""
+	p.mu.RUnlock()
+
+	// Skip health check when no API key is configured — the provider may
+	// still work for free-tier models once a key is added.
+	if !hasKey {
+		return nil
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.apiBase+"/models", nil)
 	if err != nil {
 		return fmt.Errorf("health check: %w", err)
@@ -224,6 +240,13 @@ func (p *BaseProvider) doRequestWithRetry(ctx context.Context, httpReq *http.Req
 // ============================================================================
 
 func (p *BaseProvider) Chat(ctx context.Context, req types.ChatRequest) (*types.Message, error) {
+	p.mu.RLock()
+	hasKey := p.apiKey != ""
+	p.mu.RUnlock()
+	if !hasKey {
+		return nil, fmt.Errorf("API key not configured for %s — go to Settings (Ctrl+,) to add your API key", p.name)
+	}
+
 	body, err := p.buildRequestBody(req, false)
 	if err != nil {
 		return nil, err
@@ -255,6 +278,13 @@ func (p *BaseProvider) Chat(ctx context.Context, req types.ChatRequest) (*types.
 // ============================================================================
 
 func (p *BaseProvider) ChatStream(ctx context.Context, req types.ChatRequest) (<-chan types.StreamEvent, error) {
+	p.mu.RLock()
+	hasKey := p.apiKey != ""
+	p.mu.RUnlock()
+	if !hasKey {
+		return nil, fmt.Errorf("API key not configured for %s — go to Settings (Ctrl+,) to add your API key", p.name)
+	}
+
 	body, err := p.buildRequestBody(req, true)
 	if err != nil {
 		return nil, err
@@ -364,6 +394,14 @@ func (p *BaseProvider) readStream(body io.ReadCloser, ch chan types.StreamEvent)
 			}
 		}
 
+		// Reasoning / thinking delta (DeepSeek R1, Qwen, etc.)
+		if choice.Delta.ReasoningContent != "" {
+			ch <- types.StreamEvent{
+				Type:    types.EventThinking,
+				Content: choice.Delta.ReasoningContent,
+			}
+		}
+
 		// Tool call delta
 		for _, tc := range choice.Delta.ToolCalls {
 			idx := tc.Index
@@ -428,8 +466,10 @@ func (p *BaseProvider) buildRequestBody(req types.ChatRequest, stream bool) (io.
 
 	for _, msg := range req.Messages {
 		m := map[string]any{
-			"role":    string(msg.Role),
-			"content": msg.Content,
+			"role": string(msg.Role),
+		}
+		if content := openAIContent(msg); content != nil {
+			m["content"] = content
 		}
 
 		if len(msg.ToolCalls) > 0 {
@@ -582,9 +622,10 @@ type chatMessage struct {
 }
 
 type chatDelta struct {
-	Role      string     `json:"role,omitempty"`
-	Content   string     `json:"content,omitempty"`
-	ToolCalls []toolCall `json:"tool_calls,omitempty"`
+	Role             string     `json:"role,omitempty"`
+	Content          string     `json:"content,omitempty"`
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	ToolCalls        []toolCall `json:"tool_calls,omitempty"`
 }
 
 type toolCall struct {
@@ -611,4 +652,38 @@ type usageInfo struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+}
+
+// openAIContent renders a message's content for the OpenAI Chat Completions
+// format. When a message carries image attachments and is a normal (non-tool)
+// message, the content becomes a content-part array: the text (if present)
+// followed by image_url parts. Tool and tool-result messages, and any
+// non-image attachment types, are left as plain text so existing text
+// conversations are never disturbed.
+func openAIContent(msg types.Message) any {
+	if msg.Role == types.RoleTool || len(msg.ToolCalls) > 0 || len(msg.Attachments) == 0 {
+		return msg.Content
+	}
+	var parts []map[string]any
+	if strings.TrimSpace(msg.Content) != "" {
+		parts = append(parts, map[string]any{"type": "text", "text": msg.Content})
+	}
+	for _, att := range msg.Attachments {
+		if att.Type == "image" && att.Data != "" {
+			mime := att.MIMEType
+			if mime == "" {
+				mime = "image/png"
+			}
+			parts = append(parts, map[string]any{
+				"type": "image_url",
+				"image_url": map[string]any{
+					"url": fmt.Sprintf("data:%s;base64,%s", mime, att.Data),
+				},
+			})
+		}
+	}
+	if len(parts) > 0 {
+		return parts
+	}
+	return msg.Content
 }

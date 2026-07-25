@@ -1,9 +1,17 @@
 name: Build & Release
 
+# Multi-platform auto-build CI for iCode.
+#   • Test+Frontend run on every push / PR.
+#   • Desktop GUI binaries are built on NATIVE runners with CGO (systray +
+#     global hotkey need Cocoa on macOS / GTK+appindicator on Linux).
+#   • Headless CLI binaries are pure-Go cross-compiles (CGO_ENABLED=0,
+#     -tags nogui) from a single Linux runner — no CGO, no GUI libs.
+#   • A version tag (v*) triggers a GitHub Release with all assets.
+
 on:
   push:
     tags: ['v*']
-    branches: [master, main, develop]
+    branches: [master, main]
   pull_request:
     branches: [master, main]
 
@@ -12,17 +20,19 @@ permissions:
 
 env:
   GO_VERSION: '1.26'
+  NODE_VERSION: '22'
 
 jobs:
   # ============================================================================
-  # Test + Vet — run on every push/PR (all branches)
+  # Test + Vet — every push / PR (compiles the desktop packages too)
   # ============================================================================
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -32,17 +42,26 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
-      - name: Print Go version
-        run: go version
+      - name: Install Linux desktop deps (CGO systray)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libgtk-3-dev libayatana-appindicator3-dev libayatana-indicator3-dev
 
       - name: Build all packages
         run: go build ./...
+        env:
+          CGO_ENABLED: ${{ runner.os == 'Windows' && '0' || '1' }}
 
       - name: Vet all packages
         run: go vet ./...
+        env:
+          CGO_ENABLED: ${{ runner.os == 'Windows' && '0' || '1' }}
 
       - name: Run all tests
         run: go test -count=1 -timeout=120s ./...
+        env:
+          CGO_ENABLED: ${{ runner.os == 'Windows' && '0' || '1' }}
 
   # ============================================================================
   # Frontend — build desktop frontend for embedding
@@ -56,11 +75,13 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
 
       - name: Build frontend
+        working-directory: desktop
         run: |
-          cd desktop
           npm ci
           npx vite build
 
@@ -71,24 +92,29 @@ jobs:
           path: desktop/dist/
 
   # ============================================================================
-  # Build — cross-platform binary build
+  # Desktop GUI binaries — native runners, CGO for systray / hotkey
   # ============================================================================
-  build:
-    name: Build (${{ matrix.os }})
+  build-desktop:
+    name: Desktop (${{ matrix.os }} / ${{ matrix.goarch }})
     runs-on: ${{ matrix.os }}
     needs: [test, frontend]
     if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             goarch: amd64
-          - os: macos-latest
+            cgo: '1'
+          - os: macos-13
             goarch: amd64
+            cgo: '1'
           - os: macos-14
             goarch: arm64
+            cgo: '1'
           - os: windows-latest
             goarch: amd64
+            cgo: '0'
     steps:
       - uses: actions/checkout@v4
 
@@ -98,21 +124,75 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
+      - name: Install Linux desktop deps (CGO systray)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libgtk-3-dev libayatana-appindicator3-dev libayatana-indicator3-dev
+
       - name: Download frontend dist
         uses: actions/download-artifact@v4
         with:
           name: frontend-dist
           path: internal/embedded/dist/
 
-      - name: Build binary
+      - name: Build desktop binary
+        shell: bash
         run: |
-          GOARCH=${{ matrix.goarch }} go build -ldflags="-s -w -X main.Version=${GITHUB_REF_NAME#v} -X main.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ) -X main.GitCommit=${{ github.sha }}" -o icode${{ matrix.os == 'windows' && '.exe' || '' }} .
+          SUFFIX=""
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then SUFFIX=".exe"; fi
+          LDFLAGS="-s -w -X main.Version=${GITHUB_REF_NAME#v} -X main.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ) -X main.GitCommit=${GITHUB_SHA}"
+          if [ "$SUFFIX" = ".exe" ]; then LDFLAGS="$LDFLAGS -H windowsgui"; fi
+          GOARCH=${{ matrix.goarch }} CGO_ENABLED=${{ matrix.cgo }} go build -ldflags="$LDFLAGS" -o icode-desktop-${{ matrix.os }}-${{ matrix.goarch }}$SUFFIX .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: icode-${{ matrix.os }}
-          path: icode${{ matrix.os == 'windows' && '.exe' || '' }}
+          name: icode-desktop-${{ matrix.os }}-${{ matrix.goarch }}
+          path: icode-desktop-${{ matrix.os }}-${{ matrix.goarch }}*
+
+  # ============================================================================
+  # Headless CLI binaries — pure-Go cross-compile (-tags nogui, no CGO)
+  #   Covers architectures the GUI native-runner matrix does not (linux/arm64,
+  #   windows/arm64, freebsd, …) from a single Linux runner.
+  # ============================================================================
+  build-cli:
+    name: CLI (${{ matrix.goos }} / ${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    needs: [test]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux,   goarch: amd64 }
+          - { goos: linux,   goarch: arm64 }
+          - { goos: darwin,  goarch: amd64 }
+          - { goos: darwin,  goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+          - { goos: windows, goarch: arm64 }
+          - { goos: freebsd, goarch: amd64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Cross-compile headless CLI
+        run: |
+          SUFFIX=""
+          if [ "${{ matrix.goos }}" = "windows" ]; then SUFFIX=".exe"; fi
+          CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -tags nogui \
+            -ldflags="-s -w -X main.Version=${GITHUB_REF_NAME#v} -X main.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ) -X main.GitCommit=${GITHUB_SHA}" \
+            -o icode-cli-${{ matrix.goos }}-${{ matrix.goarch }}$SUFFIX .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: icode-cli-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: icode-cli-${{ matrix.goos }}-${{ matrix.goarch }}*
 
   # ============================================================================
   # Release — create GitHub Release on version tags
@@ -120,7 +200,7 @@ jobs:
   release:
     name: Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build-desktop, build-cli]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -128,20 +208,13 @@ jobs:
           pattern: icode-*
           merge-multiple: true
 
-      - name: Rename artifacts for release
-        run: |
-          mv icode-ubuntu-latest icode-linux-amd64
-          mv icode-macos-latest icode-darwin-amd64
-          mv icode-macos-14 icode-darwin-arm64
-          mv icode-windows-latest icode-windows-amd64.exe
-          chmod +x icode-*
+      - name: Make binaries executable
+        run: chmod +x icode-cli-* icode-desktop-* 2>/dev/null || true
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            icode-linux-amd64
-            icode-darwin-amd64
-            icode-darwin-arm64
-            icode-windows-amd64.exe
+            icode-desktop-*
+            icode-cli-*
           generate_release_notes: true

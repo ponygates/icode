@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -13,10 +14,14 @@ import (
 	projectcontext "github.com/ponygates/icode/internal/core/context"
 	"github.com/ponygates/icode/internal/core/agent"
 	"github.com/ponygates/icode/internal/core/checkpoint"
+	"github.com/ponygates/icode/internal/core/hooks"
 	"github.com/ponygates/icode/internal/core/permission"
 	"github.com/ponygates/icode/internal/core/privacy"
+	"github.com/ponygates/icode/internal/core/router"
+	"github.com/ponygates/icode/internal/core/skills"
 	"github.com/ponygates/icode/internal/core/tool"
 	"github.com/ponygates/icode/internal/llm/tokenopt"
+	"github.com/ponygates/icode/internal/lsp"
 	"github.com/ponygates/icode/internal/types"
 )
 
@@ -54,6 +59,34 @@ type Engine struct {
 	// Doom-loop detector prevents the model from repeating the same tool
 	// call more than N consecutive times (OpenCode parity).
 	doomLoop *DoomLoopDetector
+
+	// Budget enforcer (tokenopt Level 4) caps tool-output size per turn so a
+	// single huge read/grep/bash never blows the context budget. Activated
+	// here so the Cache-First Loop keeps saving tokens even on large repos.
+	budgetEnforcer *tokenopt.BudgetEnforcer
+
+	// Smart model router — selects the most cost-effective model based on
+	// query complexity. When enabled, simple queries use cheap models and
+	// complex tasks use powerful models. Set via SetRouter.
+	modelRouter *router.Router
+
+	// LSP manager for code intelligence and diagnostics. When set, the
+	// engine checks for compilation errors after tool execution and
+	// automatically injects fix hints to the model.
+	lspManager *lsp.Manager
+
+	// Multi-agent team registry — teams defined via TeamDef are registered
+	// here and dispatched by the task tool, just like single agents.
+	teamRegistry map[string]*agent.TeamDef
+
+	// Skill registry — SKILL.md files loaded from .icode/skills (user + project).
+	// When set, the engine injects available skill definitions into the system
+	// prompt so the model can follow them on demand (Claude Code parity).
+	skillReg *skills.Registry
+
+	// Lifecycle hooks runner — fires PreToolUse/PostToolUse/Stop external
+	// commands (Claude Code parity). PreToolUse hooks can block a tool call.
+	hooksRunner *hooks.Runner
 }
 
 // NewEngine creates a conversation engine.
@@ -71,6 +104,8 @@ func NewEngine(
 		stopFns:        make(map[string]context.CancelFunc),
 		permRespChans:  make(map[string]chan permission.Decision),
 		doomLoop:       NewDoomLoopDetector(),
+		teamRegistry:   make(map[string]*agent.TeamDef),
+		budgetEnforcer: tokenopt.NewBudgetEnforcer(tokenopt.DefaultBudgetConfig()),
 	}
 	// Register the Task tool (sub-agent dispatcher).
 	e.toolReg.Register(tool.NewTaskTool(e))
@@ -112,6 +147,129 @@ func (e *Engine) SetFallbackModels(models []string) {
 	e.fallbackModels = models
 }
 
+// SetRouter enables smart model routing. When set, the engine will
+// automatically select the most cost-effective model based on query
+// complexity instead of always using the session's configured model.
+func (e *Engine) SetRouter(r *router.Router) {
+	e.modelRouter = r
+}
+
+// SetLSPManager attaches an LSP manager for code intelligence. When set,
+// the engine checks for diagnostics after tool execution and injects
+// auto-fix hints to the model on compilation errors.
+func (e *Engine) SetLSPManager(m *lsp.Manager) {
+	e.lspManager = m
+}
+
+// RegisterTeam registers a multi-agent team definition. Once registered,
+// the team can be dispatched via the task tool just like a single agent.
+// The team name is prefixed with "team:" to distinguish it from single agents.
+func (e *Engine) RegisterTeam(def *agent.TeamDef) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.teamRegistry == nil {
+		e.teamRegistry = make(map[string]*agent.TeamDef)
+	}
+	e.teamRegistry[def.Name] = def
+}
+
+// SetSkillsRegistry attaches a skill registry (SKILL.md loader). When set,
+// the engine injects the available skill definitions into the system prompt
+// so the model can discover and follow them. Call from app bootstrap.
+func (e *Engine) SetSkillsRegistry(r *skills.Registry) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.skillReg = r
+}
+
+// SetHooksRunner attaches a lifecycle hooks runner (PreToolUse/PostToolUse/
+// Stop). Call from app bootstrap after loading config.
+func (e *Engine) SetHooksRunner(r *hooks.Runner) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.hooksRunner = r
+}
+
+// SetSkillLoader wires the on-demand skill resolver into the use_skill tool so
+// the model can fetch a SKILL.md body without it ever entering the cached
+// system prefix. Call from app bootstrap after SetSkillsRegistry.
+func (e *Engine) SetSkillLoader(fn tool.SkillLoader) {
+	e.toolReg.SetSkillsLoader(fn)
+}
+
+// SkillBody resolves a skill name to its full body + description for the
+// use_skill tool. Returns ok=false when the skill is unknown.
+func (e *Engine) SkillBody(name string) (body, description string, ok bool) {
+	e.mu.Lock()
+	reg := e.skillReg
+	e.mu.Unlock()
+	if reg == nil {
+		return "", "", false
+	}
+	s, found := reg.Get(name)
+	if !found {
+		return "", "", false
+	}
+	return s.Body, s.Description, true
+}
+
+// SetMultimodalOptions injects the image_gen / video_gen backend config.
+// Call from app bootstrap after loading config.
+func (e *Engine) SetMultimodalOptions(opts tool.MultimodalOptions) {
+	e.toolReg.SetMultimodalOptions(opts)
+}
+
+func (e *Engine) getHooksRunner() *hooks.Runner {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.hooksRunner
+}
+
+// ListSkills returns the skills currently registered with the engine
+// (empty slice when no registry is attached). Used by the TUI /api surface.
+func (e *Engine) ListSkills() []skills.Skill {
+	e.mu.Lock()
+	reg := e.skillReg
+	e.mu.Unlock()
+	if reg == nil {
+		return nil
+	}
+	return reg.List()
+}
+
+// EnableSkill turns a skill's user-managed on/off switch on and persists it.
+func (e *Engine) EnableSkill(name string) error {
+	e.mu.Lock()
+	reg := e.skillReg
+	e.mu.Unlock()
+	if reg == nil {
+		return fmt.Errorf("no skill registry attached")
+	}
+	return reg.SetEnabled(name, true)
+}
+
+// DisableSkill turns a skill's user-managed on/off switch off and persists it.
+func (e *Engine) DisableSkill(name string) error {
+	e.mu.Lock()
+	reg := e.skillReg
+	e.mu.Unlock()
+	if reg == nil {
+		return fmt.Errorf("no skill registry attached")
+	}
+	return reg.SetEnabled(name, false)
+}
+
+// ListTeams returns the multi-agent teams registered with the engine.
+func (e *Engine) ListTeams() []agent.TeamDef {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]agent.TeamDef, 0, len(e.teamRegistry))
+	for _, def := range e.teamRegistry {
+		out = append(out, *def)
+	}
+	return out
+}
+
 func (e *Engine) RegisterTool(t types.Tool) {
 	e.toolReg.Register(t)
 }
@@ -149,7 +307,33 @@ func (e *Engine) RunSubAgent(ctx context.Context, name, prompt string) (string, 
 	e.mu.Lock()
 	runner := e.getAgentRunner()
 	reg := e.agentRegistry
+	// Check if the requested name is a multi-agent team
+	teamDef, isTeam := e.teamRegistry[name]
 	e.mu.Unlock()
+
+	if isTeam && teamDef != nil {
+		// Dispatch to team runner
+		teamRunner := agent.NewTeamRunner(runner)
+		result, err := teamRunner.Run(ctx, teamDef, prompt)
+		if err != nil {
+			return "", 0, fmt.Errorf("team %q failed: %w", name, err)
+		}
+		// Format the team result
+		output := result.LeaderOutput
+		if len(result.MemberOutputs) > 0 {
+			output += "\n\n### Team Member Contributions\n"
+			for member, out := range result.MemberOutputs {
+				output += fmt.Sprintf("\n**%s**:\n%s\n", member, out)
+			}
+		}
+		if len(result.Errors) > 0 {
+			output += "\n\n### Errors\n"
+			for _, err := range result.Errors {
+				output += fmt.Sprintf("- %s\n", err)
+			}
+		}
+		return output, result.TotalTokens, nil
+	}
 
 	def, ok := reg.Get(name)
 	if !ok {
@@ -223,6 +407,81 @@ func parseToolArgs(args string) map[string]interface{} {
 	return m
 }
 
+// parallelSafeTools are read-only tools with no side effects — safe to run
+// concurrently within one model turn (Claude Code parallel tool use parity).
+var parallelSafeTools = map[string]bool{
+	"read_file": true, "ls": true, "grep": true, "glob": true,
+	"git_diff": true, "git_status": true, "fetch": true,
+	"disk_usage": true, "code_search": true, "web_search": true,
+	"use_skill": true,
+}
+
+// executeToolBatch runs one model turn's tool calls: read-only tools execute
+// concurrently (bounded at 4), mutating tools execute sequentially in their
+// original order afterwards so permission prompts and writes never interleave.
+// Results are written back into toolCalls and progress events are emitted in
+// the original call order.
+func (e *Engine) executeToolBatch(
+	ctx context.Context,
+	sessionID string,
+	toolCalls []types.ToolCall,
+	out chan types.StreamEvent,
+) {
+	finish := func(i int, result *types.ToolResult) {
+		if result == nil {
+			result = &types.ToolResult{Success: false, Error: "tool produced no result"}
+		}
+		toolCalls[i].Result = result
+	}
+
+	// Reset the per-turn tool-output budget before this model turn's tools
+	// run. The budget caps the combined size of tool outputs so a single
+	// oversized result can't exhaust the context window.
+	e.budgetEnforcer.Reset()
+
+	// Phase 1: read-only tools in parallel (only worth it for 2+).
+	var parallel []int
+	for i := range toolCalls {
+		if parallelSafeTools[toolCalls[i].Name] {
+			parallel = append(parallel, i)
+		}
+	}
+	if len(parallel) >= 2 {
+		sem := make(chan struct{}, 4)
+		var wg sync.WaitGroup
+		for _, i := range parallel {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				finish(i, e.executeTool(ctx, sessionID, toolCalls[i], out))
+			}(i)
+		}
+		wg.Wait()
+	}
+
+	// Phase 2: everything not yet executed, sequentially, in original order.
+	for i := range toolCalls {
+		if toolCalls[i].Result == nil {
+			finish(i, e.executeTool(ctx, sessionID, toolCalls[i], out))
+		}
+	}
+
+	// Emit progress lines in original order for a stable transcript.
+	for i := range toolCalls {
+		res := toolCalls[i].Result
+		summary := res.Error
+		if summary == "" {
+			summary = firstN(res.Content, 200)
+		}
+		out <- types.StreamEvent{
+			Type:    types.EventText,
+			Content: fmt.Sprintf("\n[Tool: %s] %s\n", toolCalls[i].Name, summary),
+		}
+	}
+}
+
 func (e *Engine) executeTool(
 	ctx context.Context,
 	sessionID string,
@@ -238,6 +497,23 @@ func (e *Engine) executeTool(
 		return &types.ToolResult{
 			Success: false,
 			Error:   fmt.Sprintf("检测到 Doom Loop — AI 连续重复调用同一工具。\n%s\n请重新描述你的需求以改变策略。", status),
+		}
+	}
+
+	// PreToolUse lifecycle hooks (Claude Code parity): an external command
+	// exiting with code 2 blocks the tool call; its stderr is fed back to
+	// the model so it can adjust course.
+	if hr := e.getHooksRunner(); hr.HasHooks(hooks.PreToolUse) {
+		res := hr.Fire(ctx, hooks.PreToolUse, hooks.Input{
+			ToolName:  tc.Name,
+			ToolInput: json.RawMessage(tc.Arguments),
+			SessionID: sessionID,
+		})
+		if res.Block {
+			return &types.ToolResult{
+				Success: false,
+				Error:   "PreToolUse hook blocked this call: " + res.Message,
+			}
 		}
 	}
 
@@ -314,7 +590,38 @@ func (e *Engine) runTool(ctx context.Context, tc types.ToolCall) *types.ToolResu
 			res.Content = replacement
 		}
 	}
+	// Level 4 budget enforcement: cap oversized tool outputs (read_file 50K,
+	// bash 30K, grep 20K, global 200K) so the context stays within budget.
+	// Runs after dedup so the dedup placeholder is never truncated.
+	if res.Success && res.Content != "" {
+		if trimmed, truncated := e.budgetEnforcer.Enforce(tc.Name, res.Content); truncated {
+			res.Content = trimmed
+		}
+	}
+	// PostToolUse lifecycle hooks: feedback from the hook (stderr) is
+	// appended to the tool result so the model sees it on the next turn.
+	if hr := e.getHooksRunner(); hr.HasHooks(hooks.PostToolUse) {
+		hres := hr.Fire(ctx, hooks.PostToolUse, hooks.Input{
+			ToolName:   tc.Name,
+			ToolInput:  json.RawMessage(tc.Arguments),
+			ToolOutput: truncateForHook(res.Content),
+			SessionID:  tool.SessionIDFromContext(ctx),
+		})
+		if hres.Message != "" {
+			res.Content += "\n\n[PostToolUse hook feedback]\n" + hres.Message
+		}
+	}
 	return res
+}
+
+// truncateForHook caps tool output passed to hook processes at 32KB so huge
+// outputs don't blow up the hook's stdin pipe.
+func truncateForHook(s string) string {
+	const max = 32 * 1024
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "\n…(truncated)"
 }
 
 // snapshotBeforeTool creates a checkpoint + file-level undo before mutating
@@ -374,9 +681,26 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 		return nil, fmt.Errorf("get session: %w", err)
 	}
 
-	provider, modelInfo, err := e.providerReg.ResolveModel(sess.ModelID)
+	// Smart model routing: only engage when the user has NOT explicitly
+	// chosen a model (session model empty or "auto"). An explicit selection
+	// made in the UI/config (e.g. openrouter/free) is always respected, so
+	// the router can never hijack it with its own default (which may point
+	// to a provider that has no API key configured).
+	modelID := sess.ModelID
+	if e.modelRouter != nil && (sess.ModelID == "" || sess.ModelID == "auto") {
+		route := e.modelRouter.RouteQuery(content, len(sess.Messages))
+		if route.ModelID != "" {
+			modelID = route.ModelID
+		}
+	}
+
+	provider, modelInfo, err := e.providerReg.ResolveModel(modelID)
 	if err != nil {
-		return nil, fmt.Errorf("resolve model: %w", err)
+		// Fallback to the session's configured model
+		provider, modelInfo, err = e.providerReg.ResolveModel(sess.ModelID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve model: %w", err)
+		}
 	}
 
 	// Security level enforcement: block or sanitize based on the user's
@@ -489,6 +813,9 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 			case types.EventText:
 				assistantMsg.Content += event.Content
 				out <- event
+			case types.EventThinking:
+				// Pass through thinking events to the UI for display
+				out <- event
 			case types.EventToolUse:
 				tc := types.ToolCall{
 					ID:        event.ToolCall.ID,
@@ -497,25 +824,18 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 				}
 				toolCalls = append(toolCalls, tc)
 				out <- event
-
-				result := e.executeTool(ctx, sessionID, tc, out)
-				if result == nil {
-					result = &types.ToolResult{Success: false, Error: "tool produced no result"}
-				}
-				tc.Result = result
-				toolContent := result.Content
-				if toolContent == "" && result.Error != "" {
-					toolContent = result.Error
-				}
-				out <- types.StreamEvent{
-					Type:    types.EventText,
-					Content: fmt.Sprintf("\n[Tool: %s] %s\n", tc.Name, toolContent),
-				}
+				// NOTE: execution deferred to EventDone so the whole turn's
+				// tool calls can run through executeToolBatch (read-only tools
+				// in parallel — Claude Code parallel tool use parity).
 			case types.EventDone:
 				if len(toolCalls) > 0 {
 					assistantMsg.ToolCalls = toolCalls
 					opt.AddMessage(assistantMsg)
 					e.sessionSt.AppendMessage(sessionID, assistantMsg)
+
+					// Execute the batch: read-only tools concurrently,
+					// mutating tools sequentially in original order.
+					e.executeToolBatch(ctx, sessionID, toolCalls, out)
 					for _, tc := range toolCalls {
 						if tc.Result != nil {
 							toolMsg := types.Message{
@@ -528,6 +848,21 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 							e.sessionSt.AppendMessage(sessionID, toolMsg)
 						}
 					}
+					// Feed any generated images back into the conversation so
+					// vision-capable models can see them on the next turn.
+					e.ingestToolAttachments(sessionID, toolCalls, opt)
+					// LSP diagnostics: inject compile errors as auto-fix hints,
+					// mirroring the continuation loop.
+					if e.lspManager != nil {
+						if diagnosticsMsg := e.collectDiagnostics(toolCalls); diagnosticsMsg != "" {
+							opt.AddMessage(types.Message{
+								Role:      types.RoleSystem,
+								Content:   diagnosticsMsg,
+								Timestamp: time.Now(),
+							})
+							out <- types.StreamEvent{Type: types.EventText, Content: diagnosticsMsg}
+						}
+					}
 					out <- types.StreamEvent{
 						Type:    types.EventText,
 						Content: "\n[Continuing with tool results...]\n\n",
@@ -538,6 +873,10 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 					opt.AddMessage(assistantMsg)
 					e.sessionSt.AppendMessage(sessionID, assistantMsg)
 					out <- event
+				}
+				// Stop lifecycle hook — the agent has finished responding.
+				if hr := e.getHooksRunner(); hr.HasHooks(hooks.Stop) {
+					hr.Fire(context.Background(), hooks.Stop, hooks.Input{SessionID: sessionID})
 				}
 				out <- types.StreamEvent{
 					Type: types.EventDone,
@@ -608,6 +947,9 @@ func (e *Engine) continueAgentLoop(
 			if delta != "" {
 				out <- types.StreamEvent{Type: types.EventText, Content: delta}
 			}
+		case types.EventThinking:
+			// Pass through thinking events to the UI for display
+			out <- event
 		case types.EventToolUse:
 			tc := types.ToolCall{
 				ID:        event.ToolCall.ID,
@@ -623,32 +965,36 @@ func (e *Engine) continueAgentLoop(
 				opt.AddMessage(assistantMsg)
 				e.sessionSt.AppendMessage(sessionID, assistantMsg)
 
-				// Execute tools sequentially so permission requests don't deadlock.
-				// Claude Code semantics: all tool calls from one model turn are
-				// independent, but we execute them one at a time for safety.
-				for i := range toolCalls {
-					result := e.executeTool(ctx, sessionID, toolCalls[i], out)
-					if result == nil {
-						result = &types.ToolResult{Success: false, Error: "tool produced no result"}
-					}
-					toolCalls[i].Result = result
-					var summary string
-					if result.Error != "" {
-						summary = result.Error
-					} else {
-						summary = firstN(result.Content, 200)
-					}
-					out <- types.StreamEvent{
-						Type:    types.EventText,
-						Content: fmt.Sprintf("\n[Tool: %s] %s\n", toolCalls[i].Name, summary),
-					}
-				}
+				// Execute the batch: read-only tools run concurrently
+				// (Claude Code parallel tool use parity), mutating tools run
+				// sequentially in their original order so permission prompts
+				// and file writes never interleave.
+				e.executeToolBatch(ctx, sessionID, toolCalls, out)
 				for _, tc := range toolCalls {
 					if tc.Result != nil {
 						opt.AddMessage(types.Message{
 							Role: types.RoleTool, Content: tc.Result.Content,
 							ToolID: tc.ID, Timestamp: time.Now(),
 						})
+					}
+				}
+				// Feed any generated images back into the conversation so
+				// vision-capable models can see them on the next turn.
+				e.ingestToolAttachments(sessionID, toolCalls, opt)
+				// LSP diagnostics check: after tool execution, check for
+				// compilation errors and inject auto-fix hints.
+				if e.lspManager != nil {
+					diagnosticsMsg := e.collectDiagnostics(toolCalls)
+					if diagnosticsMsg != "" {
+						opt.AddMessage(types.Message{
+							Role:      types.RoleSystem,
+							Content:   diagnosticsMsg,
+							Timestamp: time.Now(),
+						})
+						out <- types.StreamEvent{
+							Type:    types.EventText,
+							Content: diagnosticsMsg,
+						}
 					}
 				}
 				e.continueAgentLoop(ctx, sessionID, provider, opt, modelInfo, out, depth+1)
@@ -675,6 +1021,98 @@ func (e *Engine) SessionStats(sessionID string) *tokenopt.Stats {
 	}
 	s := opt.Stats()
 	return &s
+}
+
+// checkDiagnosticsAfterTool queries the LSP manager for diagnostics on
+// the given file path. If compilation errors are found, returns a formatted
+// string suitable for injection into the model's context for auto-fix.
+func (e *Engine) checkDiagnosticsAfterTool(filePath string) string {
+	if e.lspManager == nil || filePath == "" {
+		return ""
+	}
+	lang := lsp.DetectLanguage(filePath)
+	if lang == "" {
+		return ""
+	}
+	// Lazily start the language server for this language on first use.
+	// StartLanguageServer is idempotent (no-ops if already running) and
+	// returns an error when the binary is absent, so this stays safe.
+	if err := e.lspManager.StartLanguageServer(context.Background(), lang); err != nil {
+		return ""
+	}
+	client := e.lspManager.GetClient(lang)
+	if client == nil {
+		return ""
+	}
+	absPath, err := filepath.Abs(filePath)
+	if err != nil {
+		return ""
+	}
+	uri := "file://" + filepath.ToSlash(absPath)
+	diags, err := client.Diagnostics(uri)
+	if err != nil || len(diags) == 0 {
+		return ""
+	}
+	// Filter to errors only (severity 1 = error)
+	var errors []string
+	for _, d := range diags {
+		if d.Severity == 1 {
+			line := d.Range.Start.Line + 1
+			msg := strings.TrimRight(d.Message, "\n")
+			errors = append(errors, fmt.Sprintf("  L%d: %s", line, msg))
+		}
+	}
+	if len(errors) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("\n⚠️ LSP diagnostics for %s:\n%s\n",
+		filePath, strings.Join(errors, "\n"))
+}
+
+// collectDiagnostics checks all tool calls for file modifications and
+// queries LSP diagnostics for each modified file. Returns a combined
+// diagnostics message for all files, or "" if no errors found.
+func (e *Engine) collectDiagnostics(toolCalls []types.ToolCall) string {
+	checked := make(map[string]bool)
+	var parts []string
+	for _, tc := range toolCalls {
+		// Extract file path from common editing tools
+		filePath := extractFilePath(tc.Name, tc.Arguments)
+		if filePath == "" || checked[filePath] {
+			continue
+		}
+		checked[filePath] = true
+		msg := e.checkDiagnosticsAfterTool(filePath)
+		if msg != "" {
+			parts = append(parts, msg)
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "🔧 以下文件存在编译错误，请修复:\n" + strings.Join(parts, "")
+}
+
+// extractFilePath extracts the file path from a tool call's arguments.
+func extractFilePath(toolName, args string) string {
+	// Try to parse JSON arguments
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(args), &parsed); err != nil {
+		return ""
+	}
+	switch toolName {
+	case "write_file", "edit", "search_replace", "read_file":
+		if fp, ok := parsed["file_path"].(string); ok {
+			return fp
+		}
+		if fp, ok := parsed["filePath"].(string); ok {
+			return fp
+		}
+	}
+	if fp, ok := parsed["file_path"].(string); ok {
+		return fp
+	}
+	return ""
 }
 
 func (e *Engine) Stop(sessionID string) {
@@ -711,14 +1149,45 @@ func (e *Engine) getOrCreateOptimizer(sessionID string, modelInfo types.ModelInf
 	return opt
 }
 
+// ingestToolAttachments collects inline multimodal output (e.g. images produced
+// by the image_gen tool) from this round's tool results and appends a single
+// user message carrying them, so vision-capable models can reference the
+// generated artifact on the next turn. Tool messages themselves stay
+// text-only because most providers reject image content inside tool messages.
+func (e *Engine) ingestToolAttachments(sessionID string, toolCalls []types.ToolCall, opt *tokenopt.Optimizer) {
+	var imgs []types.Attachment
+	for _, tc := range toolCalls {
+		if tc.Result != nil {
+			imgs = append(imgs, tc.Result.Attachments...)
+		}
+	}
+	if len(imgs) == 0 {
+		return
+	}
+	msg := types.Message{
+		Role:        types.RoleUser,
+		Content:     "（上一步工具生成的可视化结果，见附件）",
+		Attachments: imgs,
+		Timestamp:   time.Now(),
+	}
+	opt.AddMessage(msg)
+	e.sessionSt.AppendMessage(sessionID, msg)
+}
+
 func (e *Engine) buildSystemPrompt(sessionID string) string {
 	// User-configured system prompt takes precedence (from config.Defaults.SystemPrompt).
 	if e.systemPrompt != "" {
 		projectContext := projectcontext.LoadProjectContext()
-		if strings.TrimSpace(projectContext) == "" {
-			return e.systemPrompt
+		projectAnalysis := projectcontext.LoadProjectAnalysis()
+		result := ""
+		if projectAnalysis != "" {
+			result = projectAnalysis + "\n\n"
 		}
-		return projectContext + "\n\n---\n\n" + e.systemPrompt
+		if strings.TrimSpace(projectContext) != "" {
+			result += projectContext + "\n\n---\n\n"
+		}
+		result += e.systemPrompt
+		return result
 	}
 
 	base := fmt.Sprintf(`You are iCode, an AI coding agent that executes tasks directly on the user's machine.
@@ -743,10 +1212,35 @@ CRITICAL RULES:
 Session: %s`, sessionID)
 
 	projectContext := projectcontext.LoadProjectContext()
-	if strings.TrimSpace(projectContext) == "" {
-		return base
+	projectAnalysis := projectcontext.LoadProjectAnalysis()
+	result := ""
+	if projectAnalysis != "" {
+		result = projectAnalysis + "\n\n"
 	}
-	return projectContext + "\n\n---\n\n" + base
+	if strings.TrimSpace(projectContext) != "" {
+		result += projectContext + "\n\n---\n\n"
+	}
+	result += base
+
+	// Inject a COMPACT skill index (name + one-line description) into the
+	// immutable prefix. The full SKILL.md body is NOT embedded here — that
+	// would bloat the prefix and invalidate the provider's KV cache the
+	// moment a skill is added or its body changes. Instead the model loads a
+	// skill on demand via the use_skill tool, keeping the prefix tiny and
+	// cache-stable no matter how many skills are installed. This is the
+	// cornerstone of iCode's token-saving mechanism.
+	if e.skillReg != nil {
+		if all := e.skillReg.List(); len(all) > 0 {
+			ptrs := make([]*skills.Skill, 0, len(all))
+			for i := range all {
+				ptrs = append(ptrs, &all[i])
+			}
+			if skillBlock := skills.FormatIndex(ptrs); skillBlock != "" {
+				result += skillBlock
+			}
+		}
+	}
+	return result
 }
 
 func calculateCost(usage types.TokenUsage, model types.ModelInfo) float64 {

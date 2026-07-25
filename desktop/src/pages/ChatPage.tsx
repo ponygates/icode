@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useAppStore, Message } from '../stores/appStore';
+import i18n from '../i18n';
+import { useAppStore, Message, Attachment } from '../stores/appStore';
 import { Send, Plus, Trash2, MessageSquare, Cpu, Shield, Square, ShieldAlert, GitBranch, FileText, RefreshCw, Folder, Edit3, Download } from 'lucide-react';
 import Markdown from '../components/Markdown';
 import CommandPalette, { useCommandPalette } from '../components/CommandPalette';
@@ -9,6 +10,7 @@ import TokenBar from '../components/TokenBar';
 import TabBar from '../components/TabBar';
 import CheckpointPanel from '../components/CheckpointPanel';
 import FilePicker from '../components/FilePicker';
+import PlumBlossom from '../components/PlumBlossom';
 
 // Shorten a path to its last 2 segments for display.
 function shortDir(p: string): string {
@@ -16,6 +18,47 @@ function shortDir(p: string): string {
   const parts = p.replace(/\\/g, '/').split('/').filter(Boolean);
   if (parts.length <= 2) return parts.join('/');
   return parts.slice(-2).join('/');
+}
+
+// Renders inline multimodal attachments (image thumbnails / file chips) inside a chat bubble.
+function AttachmentView({ items, onZoom }: { items: Attachment[]; onZoom: (src: string) => void }) {
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
+      {items.map((a, i) => {
+        const isImage = a.type === 'image' || (a.mime || '').startsWith('image/');
+        const src = a.data ? `data:${a.mime || 'image/png'};base64,${a.data}` : a.url;
+        if (!src) return null;
+        if (isImage) {
+          return (
+            <img
+              key={i}
+              src={src}
+              alt={a.alt_text || 'image'}
+              onClick={() => onZoom(src)}
+              style={{
+                maxWidth: 240, maxHeight: 240, borderRadius: 8, cursor: 'pointer',
+                border: '1px solid var(--border)', objectFit: 'cover',
+              }}
+            />
+          );
+        }
+        return (
+          <a
+            key={i}
+            href={src}
+            download={a.alt_text || 'file'}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 10px',
+              borderRadius: 8, border: '1px solid var(--border)', color: 'var(--text-primary)',
+              textDecoration: 'none', fontSize: 12,
+            }}
+          >
+            📎 {a.alt_text || a.mime || 'file'}
+          </a>
+        );
+      })}
+    </div>
+  );
 }
 
 const ChatPage: React.FC = () => {
@@ -26,6 +69,8 @@ const ChatPage: React.FC = () => {
   // Interactive permission request pending an answer from the user. When set,
   // the conversation engine is blocked server-side until we respond.
   const [pendingPermission, setPendingPermission] = useState<any>(null);
+  // Zoomed image attachment (lightbox)
+  const [lightbox, setLightbox] = useState<string | null>(null);
   const [attachedImages, setAttachedImages] = useState<{ mime: string; data: string }[]>([]);
   const [gitBranch, setGitBranch] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -39,44 +84,37 @@ const ChatPage: React.FC = () => {
 
   const {
     sessions, activeSessionId, selectedModel,
-    createSession, setActiveSession, deleteSession,
+    createSession, setActiveSession, deleteSession, closeTab,
     addMessage, updateMessage, clearMessages, models,
     updateTokenUsage, tokenUsage, checkBackend, backendUrl, setBackendUrl,
+    openTabIds, activeWorkspaceId, workspaces,
   } = useAppStore();
 
   const abortRef = useRef<AbortController | null>(null);
   const activeSession = sessions.find((s) => s.id === activeSessionId);
 
-  // Multi-tab state: track open tabs in addition to the store's active session
-  const [openTabs, setOpenTabs] = useState<{ id: string; title: string }[]>(() => {
-    if (activeSessionId) return [{ id: activeSessionId, title: activeSession?.title || '会话' }];
-    return [];
-  });
-
-  // Sync tab state when store's active session changes
-  useEffect(() => {
-    if (activeSessionId && !openTabs.find(t => t.id === activeSessionId)) {
-      setOpenTabs(prev => [...prev, { id: activeSessionId, title: activeSession?.title || `会话 ${prev.length + 1}` }]);
-    }
-  }, [activeSessionId]);
+  // Multi-tab state lives in the store (openTabIds) so it survives route
+  // changes and restarts. Filter the open tabs by the active workspace for
+  // deep session↔workspace binding: switching workspace switches the strip.
+  const activeWs = workspaces.find((w) => w.id === activeWorkspaceId);
+  const visibleTabIds = activeWs
+    ? activeWs.session_ids.length > 0
+      ? activeWs.session_ids.filter((id) => openTabIds.includes(id))
+      : openTabIds
+    : openTabIds;
+  const visibleTabs = visibleTabIds
+    .map((id) => {
+      const s = sessions.find((x) => x.id === id);
+      return { id, title: s?.title || t('chat.session') };
+    })
+    .filter((tab) => tab.id);
 
   const handleTabSelect = (id: string) => {
     setActiveSession(id);
   };
 
   const handleTabClose = (id: string) => {
-    setOpenTabs(prev => {
-      const remaining = prev.filter(t => t.id !== id);
-      if (remaining.length === 0) {
-        // Don't close last tab — create a new one instead
-        createSession(selectedModel, currentModel?.provider || 'openrouter');
-        return prev;
-      }
-      if (id === activeSessionId && remaining.length > 0) {
-        setActiveSession(remaining[remaining.length - 1].id);
-      }
-      return remaining;
-    });
+    closeTab(id);
   };
 
   const handleTabNew = () => {
@@ -167,6 +205,35 @@ const ChatPage: React.FC = () => {
   const handleSend = useCallback(async () => {
     if (!input.trim() || isStreaming) return;
 
+    // Handle # memory append (like TUI)
+    if (input.trim().startsWith('#')) {
+      let memoryText = input.trim().slice(1).trim();
+      // `#user: ...` targets the cross-project memory file (~/.icode);
+      // plain `#` targets the project ICODE.md — mirrors the TUI shortcut.
+      let scope = 'project';
+      if (/^user\s*:/i.test(memoryText)) {
+        scope = 'user';
+        memoryText = memoryText.replace(/^user\s*:/i, '').trim();
+      }
+      if (memoryText && backendUrl) {
+        try {
+          await fetch(`${backendUrl}/api/memory`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: memoryText, scope }),
+          });
+          addMessage(activeSessionId || '', {
+            id: Date.now().toString(36),
+            role: 'system',
+            content: `📝 ${t('chat.copied')}: ${memoryText}`,
+            timestamp: Date.now(),
+          });
+        } catch {}
+      }
+      setInput('');
+      return;
+    }
+
     // Ensure we have a session and a backend URL
     let sid = activeSessionId;
     if (!sid) {
@@ -201,6 +268,9 @@ const ChatPage: React.FC = () => {
     const userMsg: Message = {
       id: Date.now().toString(36),
       role: 'user', content: text, timestamp: Date.now(),
+      attachments: attachedImages.length > 0
+        ? attachedImages.map(img => ({ type: 'image', mime: img.mime, data: img.data }))
+        : undefined,
     };
     addMessage(sid, userMsg);
     setInput('');
@@ -248,7 +318,7 @@ const ChatPage: React.FC = () => {
         setPendingPermission(null);
         updateMessage(sid, {
           ...assistantMsg,
-          content: (accumulated || '') + '\n❌ ' + (event.content || '未知错误'),
+          content: (accumulated || '') + '\n❌ ' + (event.content || t('chat.unknownError')),
         });
       }
     };
@@ -262,7 +332,7 @@ const ChatPage: React.FC = () => {
       console.log('[iCode] sending to', url, 'model:', model, 'provider:', provider);
       await streamChat(url, payload, onEvent, abortRef);
     } else {
-      onEvent({ type: 'error', content: '无法连接到后端服务。\n请确保 iCode 后端已启动，或检查网络连接。\n如果后端在运行，请尝试刷新页面。' });
+      onEvent({ type: 'error', content: t('chat.backendError') });
     }
 
     if (!settled) { settled = true; setIsStreaming(false); }
@@ -332,7 +402,7 @@ const ChatPage: React.FC = () => {
           </span>
           <button
             onClick={() => {
-              const title = prompt('会话标题', activeSession?.title || '');
+              const title = prompt(t('chat.sessionTitle'), activeSession?.title || '');
               if (title && activeSessionId) {
                 // Update session title
                 useAppStore.setState(prev => ({
@@ -369,7 +439,7 @@ const ChatPage: React.FC = () => {
 
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           {/* Open folder */}
-          <button className="interactive" title="打开项目目录"
+          <button className="interactive" title={t('chat.openDir')}
             onClick={() => {
               // Use the Electron shell API if available
               const api = window.icode as any;
@@ -385,11 +455,11 @@ const ChatPage: React.FC = () => {
             <Folder size={12} />
           </button>
           {/* Export session */}
-          <button className="interactive" title="导出会话"
+          <button className="interactive" title={t('chat.export')}
             onClick={() => {
               if (!activeSession?.messages?.length) return;
               const md = activeSession.messages.map(m =>
-                `### ${m.role === 'user' ? '👤 用户' : '🤖 iCode'}\n\n${m.content}\n`
+                `### ${m.role === 'user' ? '👤 ' + t('chat.user') : '🤖 iCode'}\n\n${m.content}\n`
               ).join('\n---\n\n');
               const blob = new Blob([md], { type: 'text/markdown' });
               const url = URL.createObjectURL(blob);
@@ -423,7 +493,7 @@ const ChatPage: React.FC = () => {
                 }
               }, 100);
             }}
-              title="分支会话"
+              title={t('chat.fork')}
               className="interactive"
               style={{
                 background: 'none', border: '0.5px solid var(--border-color)',
@@ -431,7 +501,7 @@ const ChatPage: React.FC = () => {
                 borderRadius: 6, display: 'flex',
                 alignItems: 'center', gap: 4, fontSize: 12,
               }}>
-              <GitBranch size={14} /> 分支
+              <GitBranch size={14} /> {t('chat.forkLabel')}
             </button>
           )}
           <button
@@ -466,7 +536,7 @@ const ChatPage: React.FC = () => {
 
       {/* Tab bar for multi-session switching */}
       <TabBar
-        tabs={openTabs}
+        tabs={visibleTabs}
         activeId={activeSessionId}
         onSelect={handleTabSelect}
         onClose={handleTabClose}
@@ -480,27 +550,35 @@ const ChatPage: React.FC = () => {
           flex: 1, overflowY: 'auto', padding: '24px 24px',
           display: 'flex', flexDirection: 'column', gap: 4,
         }}>
-          {/* Welcome — Apple-style large title */}
+          {/* Welcome — Apple-style large title with plum blossom logo */}
           {activeSession?.messages.length === 0 && !isStreaming && (
             <div style={{
               flex: 1, display: 'flex', flexDirection: 'column',
               alignItems: 'center', justifyContent: 'center',
               padding: 60, color: 'var(--text-muted)',
             }}>
-              <div className="page-title" style={{ fontSize: 32, textAlign: 'center', marginBottom: 6, color: 'var(--accent)' }}>
+              {/* Plum blossom brand mark + iCode wordmark (Apple-style) */}
+              <PlumBlossom
+                size={76}
+                style={{ marginBottom: 4, filter: 'drop-shadow(0 4px 12px rgba(230,111,168,0.28))' }}
+              />
+              <div style={{
+                fontSize: 34, fontWeight: 700, letterSpacing: '-0.03em',
+                color: 'var(--text-primary)', lineHeight: 1.1,
+              }}>
                 iCode
               </div>
-              <div className="page-subtitle" style={{ fontSize: 15, marginBottom: 32 }}>
-                你的 AI 编程伙伴
+              <div className="page-subtitle" style={{ fontSize: 15, marginBottom: 32, marginTop: 6 }}>
+                {t('chat.yourPartner')}
               </div>
               <div style={{
                 display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center',
               }}>
                 {[
-                  { label: '写一个 React 组件', icon: '⚛' },
-                  { label: '解释这段代码', icon: '🔍' },
-                  { label: '重构这个函数', icon: '🔄' },
-                  { label: '帮我 Debug', icon: '🐛' },
+                  { label: t('chat.promptReact'), icon: '⚛' },
+                  { label: t('chat.promptExplain'), icon: '🔍' },
+                  { label: t('chat.promptRefactor'), icon: '🔄' },
+                  { label: t('chat.promptDebug'), icon: '🐛' },
                 ].map((s) => (
                   <button
                     key={s.label}
@@ -519,7 +597,7 @@ const ChatPage: React.FC = () => {
                 ))}
               </div>
               <div style={{ marginTop: 32, fontSize: 11, color: 'var(--text-muted)', lineHeight: 2, textAlign: 'center' }}>
-                输入问题开始对话 · /help 查看命令 · Ctrl+K 命令面板 · @ 引用文件
+                {t('chat.inputHint')}
               </div>
             </div>
           )}
@@ -528,7 +606,7 @@ const ChatPage: React.FC = () => {
           {!activeSessionId && sessions.length > 0 && (
             <div style={{ textAlign: 'center', padding: 40 }}>
               <h2 style={{ color: 'var(--text-secondary)', marginBottom: 16, fontSize: 15 }}>
-                选择或新建会话
+                {t('chat.selectSession')}
               </h2>
               {sessions.map((s) => (
                 <button
@@ -595,7 +673,7 @@ const ChatPage: React.FC = () => {
                     msg.content.startsWith('[Tool:') ? (
                       <div style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
                         <div style={{ color: 'var(--accent)', fontWeight: 500, marginBottom: 4 }}>
-                          ⏺ {msg.content.match(/\[Tool: ([^\]]+)\]/)?.[1] || '工具调用'}
+                          ⏺ {msg.content.match(/\[Tool: ([^\]]+)\]/)?.[1] || t('chat.toolCall')}
                         </div>
                         <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{msg.content.replace(/\[Tool: [^\]]+\]\n?/, '')}</pre>
                       </div>
@@ -604,9 +682,9 @@ const ChatPage: React.FC = () => {
                         <Markdown text={msg.content} />
                         {/* Action buttons — hidden until bubble hover */}
                         <div className="action-hidden" style={{ display: 'flex', gap: 6, marginTop: 8 }}>
-                          <ActionBtn icon="📋" label="复制" title="复制回复"
+                          <ActionBtn icon="📋" label={t('chat.copy')} title={t('chat.copyTitle')}
                             onClick={() => navigator.clipboard.writeText(msg.content)} />
-                          <ActionBtn icon="🔄" label="重新生成" title="重新生成此回复"
+                          <ActionBtn icon="🔄" label={t('chat.regenerate')} title={t('chat.regenerateTitle')}
                             onClick={() => {
                               const msgs = activeSession?.messages || [];
                               const idx = msgs.findIndex(m => m.id === msg.id);
@@ -620,11 +698,14 @@ const ChatPage: React.FC = () => {
                     )
                   ) : (isStreaming ? (
                     <span style={{ color: 'var(--text-muted)' }}>
-                      生成中<span style={{ animation: 'pulse 1.5s infinite' }}>...</span>
+                      {t('chat.generatingShort')}<span style={{ animation: 'pulse 1.5s infinite' }}>...</span>
                     </span>
                   ) : '')
                 ) : (
                   <span style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</span>
+                )}
+                {msg.attachments && msg.attachments.length > 0 && (
+                  <AttachmentView items={msg.attachments} onZoom={setLightbox} />
                 )}
               </div>
               {msg.role === 'user' && (
@@ -639,6 +720,20 @@ const ChatPage: React.FC = () => {
           ))}
           <div ref={messagesEndRef} />
         </div>
+
+        {/* Lightbox — zoomed image attachment */}
+        {lightbox && (
+          <div
+            onClick={() => setLightbox(null)}
+            style={{
+              position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.82)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              zIndex: 1000, cursor: 'zoom-out',
+            }}
+          >
+            <img src={lightbox} style={{ maxWidth: '92vw', maxHeight: '92vh', borderRadius: 12, boxShadow: '0 8px 40px rgba(0,0,0,0.5)' }} />
+          </div>
+        )}
 
         {/* Right sidebar — iCode overview panels */}
         <div style={{
@@ -674,7 +769,7 @@ const ChatPage: React.FC = () => {
             return (
               <div className="card" style={{ padding: 12 }}>
                 <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8, fontWeight: 500 }}>
-                  文件操作 · {fileList.length}
+                  {t('chat.fileActions')} · {fileList.length}
                 </div>
                 {fileList.map(([path, action]) => (
                   <div key={path} style={{
@@ -702,7 +797,7 @@ const ChatPage: React.FC = () => {
           {/* Card 1: Context Window */}
           <div className="card" style={{ padding: 14 }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-              <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>上下文窗口</span>
+              <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>{t('chat.contextWindow')}</span>
               <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>200K</span>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -721,11 +816,11 @@ const ChatPage: React.FC = () => {
                 </text>
               </svg>
               <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>已用</div>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{t('chat.used')}</div>
                 <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>
                   {(tokenUsage.input / 1000).toFixed(1)}K
                 </div>
-                <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4 }}>距上限 200K</div>
+                <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4 }}>{t('chat.nearLimit200K')}</div>
               </div>
             </div>
           </div>
@@ -733,11 +828,11 @@ const ChatPage: React.FC = () => {
           {/* Card 2: Session Metrics */}
           <div className="card" style={{ padding: 14 }}>
             <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 10 }}>
-              会话指标
+              {t('chat.sessionMetrics')}
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
               <div>
-                <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>缓存命中</div>
+                <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{t('token.cacheHit')}</div>
                 <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--success)' }}>
                   {tokenUsage.cacheHit > 0
                     ? ((tokenUsage.cacheHit / (tokenUsage.input + tokenUsage.output + 1)) * 100).toFixed(1) + '%'
@@ -745,19 +840,19 @@ const ChatPage: React.FC = () => {
                 </div>
               </div>
               <div>
-                <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>运行时间</div>
+                <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{t('chat.runTime')}</div>
                 <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
                   {Math.floor((Date.now() - (activeSessionId ? 0 : Date.now())) / 1000)}s
                 </div>
               </div>
               <div>
-                <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>累计 Tokens</div>
+                <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{t('chat.totalTokens')}</div>
                 <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
                   {(tokenUsage.input + tokenUsage.output).toLocaleString()}
                 </div>
               </div>
               <div>
-                <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>预估费用</div>
+                <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{t('chat.estCost')}</div>
                 <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--accent)' }}>
                   {tokenUsage.cost}
                 </div>
@@ -768,7 +863,7 @@ const ChatPage: React.FC = () => {
           {/* Card 3: Usage Breakdown */}
           <div className="card" style={{ padding: 14 }}>
             <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 10 }}>
-              用量构成
+              {t('chat.usageBreakdown')}
             </div>
             <div style={{ display: 'flex', gap: 4, height: 6, borderRadius: 3, overflow: 'hidden', marginBottom: 8 }}>
               {(() => {
@@ -787,9 +882,9 @@ const ChatPage: React.FC = () => {
               })()}
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, fontSize: 10, color: 'var(--text-muted)' }}>
-              <div>● <span style={{ color: 'var(--accent)' }}>输入</span> {tokenUsage.input.toLocaleString()}</div>
-              <div>● <span style={{ color: 'var(--success)' }}>缓存</span> {tokenUsage.cacheHit.toLocaleString()}</div>
-              <div>● <span style={{ color: 'var(--warning)' }}>输出</span> {tokenUsage.output.toLocaleString()}</div>
+              <div>● <span style={{ color: 'var(--accent)' }}>{t('token.input')}</span> {tokenUsage.input.toLocaleString()}</div>
+              <div>● <span style={{ color: 'var(--success)' }}>{t('token.cacheHit')}</span> {tokenUsage.cacheHit.toLocaleString()}</div>
+              <div>● <span style={{ color: 'var(--warning)' }}>{t('token.output')}</span> {tokenUsage.output.toLocaleString()}</div>
             </div>
           </div>
 
@@ -847,7 +942,7 @@ const ChatPage: React.FC = () => {
             background: 'var(--bg-primary)', border: '0.5px solid var(--border-color)',
             color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: 4,
           }}>
-            <GitBranch size={12} /> 分叉会话
+            <GitBranch size={12} /> {t('chat.forkSession')}
           </button>
           <button className="interactive" onClick={() => {
               // Compact the session
@@ -858,7 +953,7 @@ const ChatPage: React.FC = () => {
             background: 'var(--bg-primary)', border: '0.5px solid var(--border-color)',
             color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: 4,
           }}>
-            <FileText size={12} /> 总结
+            <FileText size={12} /> {t('chat.summarize')}
           </button>
           <button className="interactive" onClick={() => {
               // Show git diff
@@ -869,7 +964,7 @@ const ChatPage: React.FC = () => {
             background: 'var(--bg-primary)', border: '0.5px solid var(--border-color)',
             color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: 4,
           }}>
-            <RefreshCw size={12} /> 回顾
+            <RefreshCw size={12} /> {t('chat.review')}
           </button>
         </div>
       )}
@@ -947,7 +1042,7 @@ const ChatPage: React.FC = () => {
           {isStreaming ? (
             <button
               onClick={handleStop}
-              title={t('chat.stop') || '停止'}
+              title={t('chat.stop')}
               style={{
                 background: 'var(--error)', border: 'none', color: '#fff',
                 padding: '6px 10px', borderRadius: 8, cursor: 'pointer',
@@ -985,9 +1080,9 @@ const ChatPage: React.FC = () => {
             <Plus size={10} />
           </button>
           {[
-            { v: 'plan', label: '规划' },
-            { v: 'auto', label: '常规' },
-            { v: 'ask',  label: '询问' },
+            { v: 'plan', label: t('chat.modePlan') },
+            { v: 'auto', label: t('chat.modeNormal') },
+            { v: 'ask',  label: t('chat.modeAsk') },
             { v: 'yolo', label: 'Yolo' },
           ].map(m => (
             <button key={m.v} className={mode === m.v ? 'nav-item active' : 'nav-item'} style={{
@@ -1016,7 +1111,7 @@ const ChatPage: React.FC = () => {
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
               <ShieldAlert size={20} style={{ color: 'var(--warning)' }} />
               <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>
-                {t('permission.title') || '权限确认'}
+                {t('permission.title')}
               </div>
             </div>
             <div style={{
@@ -1025,9 +1120,9 @@ const ChatPage: React.FC = () => {
               marginBottom: 16, wordBreak: 'break-word',
             }}>
               <div style={{ color: 'var(--text-muted)', fontSize: 11, marginBottom: 4 }}>
-                {t('permission.tool') || '工具'}: <span style={{ color: 'var(--accent)' }}>{pendingPermission.tool}</span>
+                {t('permission.tool')}: <span style={{ color: 'var(--accent)' }}>{pendingPermission.tool}</span>
               </div>
-              <div>{pendingPermission.prompt || (t('permission.confirm') || '是否允许该操作执行？')}</div>
+              <div>{pendingPermission.prompt || t('permission.confirm')}</div>
             </div>
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
               <button
@@ -1038,7 +1133,7 @@ const ChatPage: React.FC = () => {
                   color: 'var(--text-secondary)',
                 }}
               >
-                {t('permission.deny') || '拒绝'}
+                {t('permission.deny')}
               </button>
               <button
                 onClick={() => respondPermission(pendingPermission.request_id, 'allow_all')}
@@ -1048,7 +1143,7 @@ const ChatPage: React.FC = () => {
                   color: 'var(--text-secondary)',
                 }}
               >
-                {t('permission.allowAll') || '本会话全部允许'}
+                {t('permission.allowAll')}
               </button>
               <button
                 onClick={async () => {
@@ -1069,7 +1164,7 @@ const ChatPage: React.FC = () => {
                   color: 'var(--accent)', fontWeight: 500,
                 }}
               >
-                始终允许此工具
+                {t('permission.allowToolAlways')}
               </button>
               <button
                 onClick={() => respondPermission(pendingPermission.request_id, 'allow')}
@@ -1078,7 +1173,7 @@ const ChatPage: React.FC = () => {
                   border: 'none', background: 'var(--accent)', color: '#000', fontWeight: 500,
                 }}
               >
-                {t('permission.allow') || '允许'}
+                {t('permission.allow')}
               </button>
             </div>
           </div>
@@ -1141,11 +1236,11 @@ async function streamChat(
     }
 
     if (!fired) {
-      onEvent({ type: 'error', content: '后端无响应 — 请在设置中配置 API Key（Ctrl+,）' });
+      onEvent({ type: 'error', content: i18n.t('chat.noResponse') });
     }
   } catch (e: any) {
     if (e?.name === 'AbortError') {
-      onEvent({ type: 'error', content: '请求超时（120s）— 模型响应时间过长' });
+      onEvent({ type: 'error', content: i18n.t('chat.timeoutError') });
     } else {
       onEvent({ type: 'error', content: e?.message || String(e) });
     }
@@ -1176,7 +1271,7 @@ function Pill({ icon, label, onClick }: { icon: React.ReactNode; label: string; 
   return (
     <button
       onClick={onClick}
-      title="点击打开设置"
+      title={i18n.t('chat.openSettings')}
       style={{
         display: 'inline-flex', alignItems: 'center', gap: 5,
         background: 'var(--bg-tertiary)', border: '1px solid var(--border-color)',
@@ -1211,7 +1306,7 @@ function ActionBtn({ icon, label, title, onClick }: { icon: string; label: strin
         fontSize: 11, color: done ? 'var(--success)' : 'var(--text-muted)',
         display: 'flex', alignItems: 'center', gap: 3,
       }}>
-      {done ? '✓' : icon} {done ? '已复制' : label}
+      {done ? '✓' : icon} {done ? i18n.t('chat.copied') : label}
     </button>
   );
 }

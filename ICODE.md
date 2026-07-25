@@ -6,9 +6,47 @@ iCode 是一个多模型 AI 编码助手，可运行于终端和桌面。开箱�
 
 ## 构建命令
 
-- `go build -o icode .` — 构建 CLI 二进制（Linux/macOS）
-- Windows 桌面版（双击无 CMD 黑窗）：`go build -ldflags="-s -w -H windowsgui" -o icode.exe .`，或直接用 `build.bat` / `install.bat`（已默认带该标志）
+- `go build -o icode .` — 构建 CLI + 桌面二进制（Linux/macOS；桌面需先 `cd desktop && npm run build` 把前端嵌入 `internal/embedded/dist`）
+- 无界面纯 CLI（跨平台交叉编译，无需 CGO / GUI 库）：`CGO_ENABLED=0 go build -tags nogui -o icode .`，再 `GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -tags nogui .` 等
+- Windows 增强 TUI（双击 `icode.exe` 启动，带可视滚动条/可点击光标/对标快捷键）：`go build -ldflags="-s -w -H windowsgui" -o icode.exe .`，或直接用 `build.bat` / `install.bat`（已默认带该标志）。桌面版请显式运行 `icode desktop`（或 `desktop_only` 标签构建的 `icode-desktop.exe`）。
+- **多平台自动构建 CI**：`.github/workflows/build.yml` 在 push/PR 跑测试矩阵，打 `v*` tag 时由 native runner 产出桌面 GUI 二进制（CGO）+ 单个 Linux runner 交叉编译无界面 CLI 二进制（11 个资产），自动建 GitHub Release。
+
+## 桌面版功能（v0.12.0 → v0.15.0）
+- **系统托盘 + 全局热键**：`icode desktop` 启动后常驻系统托盘，右键菜单「显示/隐藏/退出」；`Ctrl+Alt+I` 全局唤起或隐藏窗口；关闭窗口默认最小化到托盘（仅托盘退出才真正关闭）。
+- **Token 节省仪表盘**：分析页「会话/全局」双 Tab。全局视图跨会话、跨重启聚合累计节省 Token / 缓存命中 / 花费 / 节省金额，并展示按日趋势（数据落库 `session_stats` 表）。
+- **多标签会话 + 工作区**：聊天页编辑器式标签条（切换/关闭/新建会话）；侧栏新增「工作区」面板，可创建/切换工作区（后端 `workspaces` 表 + `GET/POST/PUT/DELETE /api/workspaces`）。
+- **技能 / MCP / 连接器管理**：设置页「技能」展示真实技能列表并支持启用/禁用（`/api/skills/{name}/enable`）；MCP 信任模式可正常保存（`PUT /api/mcp/trust`）；连接器（WorkBuddy）状态可查看。
+- **技能市场（对标 WorkBuddy 优点）**：设置「技能」页增加「市场」子标签，列出内置 5 个通用技能（代码审查 / 提交信息 / 解释代码 / 单元测试 / 文档生成）与「已安装」状态，一键安装 / 卸载；并支持从本地绝对路径导入社区技能（`POST /api/skills/import`）。技能以内置 catalog 形式（embed 进二进制）随 `icode` 分发。
+
+### v0.13.0 增强
+- **工作区↔会话深度绑定**：新建会话自动归入当前工作区（后端 `AddSessionToWorkspace` + `POST /api/workspaces/{id}/sessions` 支持追加语义）；切换工作区即切换会话标签条。
+- **多标签跨路由持久化**：`openTabs` 迁入全局 `appStore`（`openTabIds`），新增 `closeTab`；`openTabIds`/`activeSessionId`/`activeWorkspaceId` 持久化到 localStorage，重启与切页不丢。
+- **路由默认升级**：`routing.mode` 默认从 `keyword` 改为 `embedding`（本地零 token 语义分类，只增不减），存量空配置也映射为 embedding。
+
+### v0.14.0 增强
+- **技能市场（对标 WorkBuddy 优点）**：内置 `skills/catalog/`（5 个通用技能，embed 进二进制）构成本地市场；后端 `GET /api/skills/market` + `POST /api/skills/market/install` + `DELETE /api/skills/market/{name}` + `POST /api/skills/import`；`Install` 复制进 `~/.icode/skills`，`Uninstall` 仅删用户目录技能，`Import` 从本地路径导入。修复 embed 在 Windows 须用 `path.Join`（正斜杠）的坑。
+- **桌面技能市场 Tab**：设置「技能」改「已安装/市场」双子标签，市场支持一键安装/卸载 + 本地导入；修正侧栏「技能」误显「记忆」的遗留 bug；i18n 补 `skillMarket.*` 三语言。
+
+### v0.16.0 增强
+- **多模态结果回灌上下文（对标 WorkBuddy/Claude 多模态闭环）**：`image_gen` 工具生成图片后，除落盘外，还将图片以 base64 作为 `Attachment` 回传给引擎；引擎在回灌工具结果时，把本轮所有生成的图片合并为一条 `user` 消息追加进对话历史，后续 vision 模型（Anthropic/OpenAI/Kimi/智谱/DeepSeek/火山/昆仑等）能在下一轮「看到」这张图继续对话。
+
+### v0.17.0 增强
+- **前端图片展示（补齐 v0.16 多模态回灌的 UI 缺口）**：桌面前端 `ChatPage` 现在渲染 `message.attachments`——图片类型显示为可点击缩略图（点击放大 lightbox），非图片类型显示为文件卡片；覆盖 bot 消息（v0.16 回灌的生成图，重载会话即可见）与 user 消息（用户上传图即时显示）。`Message` 类型新增 `Attachment` 接口；`loadSessions` 在 IPC/HTTP 两条路径都保留 `attachments` 字段；发送侧把上传图存入 `userMsg.attachments`。纯前端增强，无后端改动（后端 `types.Message.Attachments` 已含 `json:"attachments,omitempty"`）。
+- **Provider 真正消费附件**：`openai_compat`（覆盖 OpenAI 兼容群）与 `anthropic` 在编码请求时，将消息的 `Attachment` 转为 `image_url` / Anthropic `image` 源块；非图片附件、tool/tool-result 消息保持纯文本，不破坏既有文本对话。这也顺带补齐了「用户上传图片」此前未接通模型的数据通路。
+- 视频因体积大且多数 vision 模型暂不支持视频输入，暂不回灌大附件（仅保留文本路径说明），避免上下文膨胀。
+
+### v0.20.0 增强
+- **桌面端设置页（新增「桌面」Tab）**：设置页新增「桌面」分类（lucide `Laptop` 图标），含三项：① 开机自启 iOS 风格开关（写入 `PUT /api/config`，后端按平台落地——Windows 注册表 Run 键、macOS LaunchAgent plist、Linux XDG autostart `.desktop`，纯 Go 无 CGO）；② 后端端口数字输入（校验 0–65535，0=自动，持久化到 `config.yaml`，`bootDesktopBackend` 优先用配置端口、0 回退 `findFreePort`）；③ 全局热键说明卡片（`Ctrl+Shift+Space`，区分 Windows 显隐原生窗口 / macOS·Linux 浏览器唤起）。i18n 补三语 key；`appStore` 增 `autostart/serverPort/setAutostart/setServerPort/loadDesktopSettings`，启动回填当前配置。纯前端改动，tsc + vite build 全绿。
+
+### v0.15.0 增强
+- **VS Code 扩展（对标编辑器内 AI 助手体验）**：新增 `vscode/` 独立扩展工程，活动栏「iCode」图标 + 侧栏 WebView 聊天视图（原生 JS，零框架），命令含打开侧栏 / 启动后端 / 终端启动完整 TUI / 打开设置。后端发现优先读 `%TEMP%/icode/port` 或探测 `57356/8080/3000`，否则自动 `icode server`；WebView 经 `acquireVsCodeApi` 与扩展进程通信，扩展用 Node `http` 代理 `POST /api/chat`（SSE 流式）、`/api/sessions`、`/api/models`、`/api/permission/respond`，绕开跨域 / X-Frame 限制无需后端额外开 CORS。支持流式回复、思考过程、工具调用卡片、交互式权限批准。
+
+### v0.22.0 增强（VS Code 扩展）
+- **编辑器集成**：选中代码右键「询问 / 解释 / 优化选中代码」（`editorHasSelection` 时显示），提示词自动带 `相对路径:起止行号` + 语言代码围栏；「询问」预填输入框可编辑，「解释/优化」自动发送。通道为扩展→webview `insertPrompt` 消息（含 `autoSend`），webview 未就绪时挂起 `pendingPrompt` 待 `attachWebview` 注入。
+- **状态栏**：右侧常驻 `$(zap) iCode :端口`（已连接）/ `$(circle-slash) iCode`（未连接，警示底色），15s 健康轮询，点击打开侧栏。
+- **配置项**：`icode.binPath`（自定义二进制路径）、`icode.serverPort`（固定端口，`ensureBackend` 最优先，配合后端 v0.20 `server.port`）、`icode.autoStartBackend`（默认 true）。扩展版本同步 0.22.0。
 - `go build ./...` — 编译所有包
+- `go vet ./...` — 静态检查
 - `go test ./...` — 运行测试
 - `go run . doctor` — 系统诊断
 - `go run . chat` — 启动交互式会话
@@ -81,13 +119,52 @@ configs/                 默认配置文件
 - 20+ 斜杠命令
 - 成本计算和仪表盘
 - 桌面端 Electron 应用
+- 技能系统（SKILL.md，自动注入 system prompt，模型按需遵循）
+- 智能模型路由（按查询复杂度自动选 cheap/normal/powerful 模型）
+- 多智能体团队（Agent Teams，task 工具以 `team:<name>` 调度，内置 team:review）
+- LSP 代码诊断（文件改后自动启动对应语言服务器并注入编译错误提示）
+- SEARCH/REPLACE 编辑块（search_replace 工具，支持 unified diff 应用）
+- 跨平台磁盘清理（disk_cleanup 支持 Windows / Linux / macOS）
+- 生命周期 Hooks（PreToolUse/PostToolUse/Stop，config.yaml `hooks:` 配置，exit 2 阻断工具调用）
+- Headless JSON 输出（`icode exec -p "..." --output-format json|stream-json`，CI/管道可用）
+- 用户级 + 项目级双层 Memory（`#` 记项目 ICODE.md，`# user:` 记 ~/.icode，TUI/桌面端行为一致）
+- CodeGraph 符号检索（code_search 工具，懒构建索引，模型可直接查"X 在哪定义"）
 
-### 与竞品差距
-1. **SEARCH/REPLACE 编辑块**: 当前 edit 工具直接修改，没有 review+apply 流程
-2. **智能模型路由**: 需要手动指定模型
-3. **技能系统（SKILL.md）**: 未实现
-4. **CodeGraph 源码索引**: 未实现
-5. **多智能体编排**: 有基本子代理，无 Agent Teams
+### 已完成（v0.7 第三批新增）
+- WorkBuddy 技能互通（`~/.workbuddy/skills` + 项目 `.workbuddy/skills` 自动加载，iCode 目录同名优先）
+- WorkBuddy MCP 桥接（启动时自动导入 `~/.workbuddy/mcp.json`，`mcp_import_workbuddy: false` 可关）
+- 并行工具执行（同回合只读工具并发 ≤4，写类工具顺序执行）
+- 后台任务（bash `run_in_background` → `bg-N`，`task_output` 查询/列表/kill）
+- 路由升级（中文关键词 + rune 长度阈值；可选 `routing.mode: llm` LLM 分级，失败回退关键词）
+
+### 已完成（v0.8 第四批新增）
+- 多模态工具 `image_gen` / `video_gen`（OpenAI 兼容 images/videos API，兼容智谱/火山/WorkBuddy 网关；未配置时友好提示）
+- 首回合工具并行（首回合流式路径改走 `executeToolBatch`，只读并发、写类串行，与续轮语义一致）
+- 首回合 LSP 诊断注入（与续轮循环对齐）
+
+### 已完成（v0.9 第五批新增 — Cache-First 加固）
+- **技能懒加载索引**：不可变前缀只放紧凑索引（`name+描述+触发词`），不再嵌入 SKILL.md 完整正文 → 前缀大小与缓存命中率与技能数量解耦。
+- **`use_skill` 工具**：模型按需拉取技能完整正文，正文只进易失暂存区，永不污染缓存前缀。
+- **激活预算层（Level 4）**：`BudgetEnforcer` 正式接入 `runTool`（read 50K / bash 30K / grep 20K / 全局 200K），超长输出头尾保留中间省略；补互斥锁支持并行。
+- **Token 节省可视化**：TUI `/token` 命令 + 桌面端 TokenBar「🪙 已节省」实时指标（轮询 `/api/analytics`）。
+- 5 层压缩管道（Snip→Dedup→Fold→Summary→Budget）现已**全活**。
+
+### 已完成（v0.10 第六批新增 — 本地语义路由）
+- **本地零成本 Embedding 路由**（`internal/core/router/embedding.go`）：纯离线、零 API、零 token 的最近质心余弦分类器（词 token + 中文字 bigram 的 hashing 特征），把简单查询更准地路由到便宜模型 → 省钱省 token，而分类本身不花一个 token。
+- 三档路由：`keyword`（默认）→ `embedding`（推荐，本地零 token）→ `llm`（最高保真但每次分类花一次廉价模型调用）。
+- 只增不减：带置信度阈值，不自信时回退关键词基线，绝不让路由变差。
+
+### 已完成（v0.23 第十九批新增 — Token 节省深化：多模态附件淘汰）
+- **多模态附件淘汰**（`internal/llm/tokenopt/attachment.go`）：v0.16 回灌的 base64 图片此前每轮重复发送、永不淘汰。现在新用户轮开始时只保留最近 2 个附件（可配 `Config.Attachment`），更旧的替换为 ~30 token 占位符（模型此前已阅览并描述过该图，语义由占位符 + 模型自身分析保留）；预算按消息整体计（全留或全淘汰）。
+- **附件感知 token 估算**：`EstimateAttachmentTokens` 按 base64 解码字节数 ÷750（下限 85 / 上限 2000）估算图片 token；`estimateTokensLocked` 纳入附件权重 → `ShouldCompact` 不再低估多模态上下文。
+- **统计**：`Stats.attachments_evicted` 新计数，节省量计入 `tokens_saved`（Token 仪表盘自动体现）。engine 零改动（零值配置自动生效，含 CLI↔桌面历史重放路径）。
+
+### 与竞品差距（剩余）
+> 以下为 2026-07-25 状态（第十九批完成后，含 v0.23.0）。
+
+1. **非 Windows 平台托盘/热键（已补齐）**: v0.18 起 `icode desktop` 在 macOS / Linux 提供系统托盘 + 菜单「在浏览器中打开 / 退出」+ 自动打开默认浏览器；v0.19 起 POSIX 也注册全局热键 `Ctrl+Shift+Space`（用 `golang.design/x/hotkey`，CGO），触发即重新聚焦/打开本机前端，与 Windows 原生热键组合一致。Windows 仍走原生 WebView2 窗口 + 子类化窗口过程（`Ctrl+Shift+Space` 显隐切换）。**已知限制**：① macOS 需授予辅助功能（Accessibility）权限且热键事件需主线程派发，真机待点测；② Linux Wayland 会话不暴露全局热键协议，注册通常失败，回退托盘菜单；③ macOS / Linux 的原生托盘与热键依赖 CGO（Cocoa / libappindicator / ayatana），必须在目标 OS 上以 `CGO_ENABLED=1` + 对应 SDK 构建，本 Windows 开发环境无法交叉编译验证（仅验证 Windows 构建与代码），真机待点测。
+2. **托盘真机验证**: v0.12 原生托盘/热键仅在无头环境验证编译与纯函数单测，真实 Windows 交互待点测（v0.18 未改变此状态）。
+> 已完成：Token 节省深化（v0.23，多模态附件淘汰 + 附件感知估算，多模态会话最大浪费点消除）、VS Code 扩展增强（v0.22，选中代码右键发送 + 状态栏后端状态 + binPath/serverPort/autoStart 配置项）、跨平台自动构建 CI（v0.21，桌面 GUI 原生 CGO 构建 + 无界面 CLI 纯 Go 交叉编译，覆盖 win/linux/darwin amd64+arm64 + freebsd）、跨平台桌面后端启动（v0.18，executil 跨平台编译修复 + 共享 bootDesktopBackend）、桌面端设置增强（v0.20，开机自启 / 后端端口 / 全局热键说明，纯前端可验证）、前端图片展示（v0.17，ChatPage 渲染 message.attachments 缩略图 + lightbox）、多模态结果回灌上下文（v0.16，image_gen 回灌图片 + Provider 编码 image_url/Anthropic 图片块）、技能市场分发（v0.14）、VS Code 扩展（v0.15）、工作区↔会话深度绑定（v0.13）、多标签跨路由持久化（v0.13）、Embedding 路由默认开启（v0.13）、v0.12 桌面四大子系统。
 
 ## 约定
 

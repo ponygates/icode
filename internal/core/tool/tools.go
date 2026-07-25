@@ -39,7 +39,15 @@ func NewRegistry() *Registry {
 	r.Register(&GitCommitTool{})
 	r.Register(&GitStatusTool{})
 	r.Register(&SearchReplaceTool{})
-	r.Register(&WebSearchTool{})
+	r.Register(NewWebSearchTool())
+	// CodeGraph symbol search (Claude Code parity — definition lookup)
+	r.Register(NewCodeSearchTool())
+	r.Register(&TaskOutputTool{})
+	// Multimodal generation (image/video) — backend configured lazily via
+	// SetMultimodalOptions. Registered with nil opts so the tools advertise
+	// themselves and report "not configured" until wired up.
+	r.Register(NewImageGenTool(nil))
+	r.Register(NewVideoGenTool(nil))
 	// Built-in disk management tools (no AI model required)
 	r.Register(&DiskUsageTool{})
 	r.Register(&DiskCleanupTool{})
@@ -48,6 +56,9 @@ func NewRegistry() *Registry {
 	r.Register(NewTaskTool(nil))
 	// Session-scoped scratchpad tool
 	r.Register(NewTodoWriteTool(nil))
+	// On-demand skill loader: returns a SKILL.md body into volatile scratch
+	// instead of bloating the immutable system prefix (token-saving keystone).
+	r.Register(NewUseSkillTool(nil))
 
 	return r
 }
@@ -63,6 +74,34 @@ func (r *Registry) SetTaskRunner(runner SubAgentRunner) {
 	if tt, ok := r.tools["task"]; ok {
 		if task, ok := tt.(*TaskTool); ok {
 			task.runner = runner
+		}
+	}
+}
+
+// SetMultimodalOptions injects the multimodal backend config into the
+// image_gen / video_gen tools. Called during Bootstrap once config is loaded.
+func (r *Registry) SetMultimodalOptions(opts MultimodalOptions) {
+	if it, ok := r.tools["image_gen"]; ok {
+		if img, ok := it.(*ImageGenTool); ok {
+			cp := opts
+			img.opts = &cp
+		}
+	}
+	if vt, ok := r.tools["video_gen"]; ok {
+		if vid, ok := vt.(*VideoGenTool); ok {
+			cp := opts
+			vid.opts = &cp
+		}
+	}
+}
+
+// SetSkillsLoader injects the skill resolver into the use_skill tool. Called
+// during Bootstrap once the engine's skill registry is loaded. The loader
+// fetches a SKILL.md body on demand so it never lives in the cached prefix.
+func (r *Registry) SetSkillsLoader(fn SkillLoader) {
+	if st, ok := r.tools["use_skill"]; ok {
+		if sk, ok := st.(*UseSkillTool); ok {
+			sk.loader = fn
 		}
 	}
 }
@@ -117,6 +156,10 @@ func (t *BashTool) Def() types.ToolDef {
 					"type":        "string",
 					"description": "Working directory for the command. Defaults to project root. Accepts absolute paths like C:\\Users\\... or relative paths.",
 				},
+				"run_in_background": map[string]any{
+					"type":        "boolean",
+					"description": "Run the command in the background and return a task id immediately. Use the task_output tool to poll its output/status later. Use for long-running commands (builds, servers, installs).",
+				},
 			},
 			"required": []string{"command"},
 		},
@@ -129,6 +172,18 @@ func (t *BashTool) Execute(ctx context.Context, args string) (*types.ToolResult,
 		return nil, err
 	}
 	workDir, _ := parseArg(args, "cwd")
+
+	// Background mode: start detached, return the task id immediately.
+	if parseBoolArgWithDefault(args, "run_in_background", false) {
+		id, err := bgTasks.Start(cmdStr, workDir)
+		if err != nil {
+			return &types.ToolResult{Success: false, Error: "failed to start background task: " + err.Error()}, nil
+		}
+		return &types.ToolResult{
+			Success: true,
+			Content: fmt.Sprintf("Started background task %s. Use task_output with task_id=%q to check its output and status.", id, id),
+		}, nil
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()

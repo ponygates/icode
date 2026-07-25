@@ -20,7 +20,10 @@ import (
 	"time"
 
 	"github.com/ponygates/icode/internal/config"
+	"github.com/ponygates/icode/internal/desktop"
+	projectcontext "github.com/ponygates/icode/internal/core/context"
 	"github.com/ponygates/icode/internal/core/conversation"
+	"github.com/ponygates/icode/internal/core/skills"
 	"github.com/ponygates/icode/internal/core/checkpoint"
 	"github.com/ponygates/icode/internal/core/permission"
 	"github.com/ponygates/icode/internal/core/todo"
@@ -40,6 +43,7 @@ type Server struct {
 	engine  *conversation.Engine
 	gate    *permission.Gate
 	updater *modelupdate.Service
+	version string
 
 	mcpPool      *mcp.Pool
 	mcpToolNames map[string]bool // tool names currently registered into the engine
@@ -60,7 +64,8 @@ type ServerConfig struct {
 	Engine    *conversation.Engine
 	Gate      *permission.Gate
 	Updater   *modelupdate.Service
-	Port      int // 0 = auto-assign
+	Version   string // app version
+	Port      int    // 0 = auto-assign
 }
 
 // New creates a new API server.
@@ -73,6 +78,7 @@ func New(cfg ServerConfig) *Server {
 		engine:  cfg.Engine,
 		gate:    cfg.Gate,
 		updater: cfg.Updater,
+		version: cfg.Version,
 		port:    cfg.Port,
 	}
 }
@@ -123,17 +129,31 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 
 	// Memory
 	mux.HandleFunc("/api/memory/icode", s.handleMemory)
+	mux.HandleFunc("/api/memory", s.handleMemory) // alias used by the desktop `#` command
+
+	// Skills & Teams (Claude-Code-parity surfaces)
+	mux.HandleFunc("/api/skills", s.handleSkills)
+	mux.HandleFunc("/api/skills/", s.handleSkillEnable) // POST/DELETE /api/skills/{name}/enable
+	mux.HandleFunc("/api/skills/market", s.handleSkillMarket)       // GET built-in market/catalog
+	mux.HandleFunc("/api/skills/market/", s.handleSkillMarketItem)  // POST install / DELETE {name}
+	mux.HandleFunc("/api/skills/import", s.handleSkillImport)       // POST import local path
+	mux.HandleFunc("/api/teams", s.handleTeams)
 
 	// MCP (Model Context Protocol) server management — Reasonix-style tool integration
 	mux.HandleFunc("/api/mcp", s.handleMCP)
 	mux.HandleFunc("/api/mcp/test", s.handleMCPTest)
 	mux.HandleFunc("/api/mcp/tools", s.handleMCPTools)
+	mux.HandleFunc("/api/mcp/trust", s.handleMCPTrust) // PUT {name, trust_mode}
 
 	// Todo list (session-scoped scratchpad backing the TodoWrite tool)
 	mux.HandleFunc("/api/todos/", s.handleTodos)
 
 	// Analytics: token/cache/cost stats for a session
 	mux.HandleFunc("/api/analytics/", s.handleAnalytics)
+
+	// Workspaces — desktop project containers that group sessions
+	mux.HandleFunc("/api/workspaces", s.handleWorkspaces)
+	mux.HandleFunc("/api/workspaces/", s.handleWorkspaceByID)
 
 	// Static frontend — serve the desktop UI at /
 	mux.HandleFunc("/", s.handleFrontend)
@@ -171,7 +191,18 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 	// the user config and surface its tools to the conversation engine.
 	s.mcpPool = mcp.NewPool()
 	s.mcpToolNames = make(map[string]bool)
-	for _, mc := range s.cfg.MCP {
+	mcpList := s.cfg.MCP
+	// WorkBuddy bridge: auto-import connectors from ~/.workbuddy/mcp.json so
+	// servers configured in WorkBuddy are usable here without re-configuring.
+	if s.cfg.ImportWorkBuddyEnabled() {
+		if imported, err := config.LoadWorkBuddyMCP(config.WorkBuddyMCPPath(), mcpList); err != nil {
+			log.Printf("[iCode MCP] workbuddy import skipped: %v", err)
+		} else if len(imported) > 0 {
+			log.Printf("[iCode MCP] imported %d server(s) from WorkBuddy mcp.json", len(imported))
+			mcpList = append(mcpList, imported...)
+		}
+	}
+	for _, mc := range mcpList {
 		if mc.Enabled {
 			if err := s.mcpPool.Add(context.Background(), toMCPServerConfig(mc)); err != nil {
 				log.Printf("[iCode MCP] failed to connect %q: %v", mc.Name, err)
@@ -214,7 +245,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":  "ok",
-		"version": "0.1.0",
+		"version": s.version,
 		"uptime":  time.Now().Format(time.RFC3339),
 	})
 }
@@ -623,6 +654,24 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
+	// Catch any panic in the chat handler so it gets logged instead of
+	// silently killing the response (the http.Server recovers panics, but
+	// its default recovery log goes to stderr which is redirected to the
+	// log file — this makes the trace explicit and easy to find).
+	defer func() {
+		if rv := recover(); rv != nil {
+			log.Printf("[server] chat: PANIC recovered: %v", rv)
+			errData, _ := json.Marshal(types.StreamEvent{
+				Type:    types.EventError,
+				Content: fmt.Sprintf("内部错误: %v", rv),
+			})
+			fmt.Fprintf(w, "data: %s\n\n", errData)
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		}
+	}()
+
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -678,6 +727,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	log.Printf("[server] chat: session resolved: %s model=%s provider=%s",
+		req.SessionID, sess.ModelID, sess.ProviderName)
+
 	// SSE streaming
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -685,7 +737,13 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Pre-check: resolve the model to verify Provider + credentials exist
+	// Resolve the model to verify Provider + credentials exist.
+	// NOTE: We deliberately do NOT call prov.Health() here. The CLI path
+	// never pre-checks — it just calls engine.Send and lets real errors
+	// surface via the stream. Health() does GET /models which on OpenRouter
+	// returns a multi-MB JSON body; calling it on every chat request risks
+	// rate-limiting or a long blocking timeout that makes the desktop app
+	// appear "stuck" while the CLI works fine.
 	prov, _, resolveErr := s.reg.ResolveModel(sess.ModelID)
 	if resolveErr != nil {
 		log.Printf("[server] chat: resolve model %q failed: %v", sess.ModelID, resolveErr)
@@ -699,19 +757,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 		return
 	}
-	// Quick health check to verify provider connectivity
-	if healthErr := prov.Health(r.Context()); healthErr != nil {
-		log.Printf("[server] chat: provider %s health check failed: %v", sess.ProviderName, healthErr)
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		errData, _ := json.Marshal(types.StreamEvent{
-			Type:    types.EventError,
-			Content: fmt.Sprintf("无法连接 %s: %v。请检查 API Key 和网络设置（Ctrl+, 打开设置）", sess.ProviderName, healthErr),
-		})
-		fmt.Fprintf(w, "data: %s\n\n", errData)
-		flusher.Flush()
-		return
-	}
+	log.Printf("[server] chat: resolved provider=%s, calling engine.Send", prov.Name())
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -733,21 +779,30 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 		return
 	}
+	log.Printf("[server] chat: engine.Send OK, streaming events...")
 
+	firstEvent := true
 	for {
 		select {
 		case event, ok := <-eventCh:
 			if !ok {
+				log.Printf("[server] chat: stream ended (channel closed) session=%s", req.SessionID)
 				return
+			}
+			if firstEvent {
+				log.Printf("[server] chat: first event type=%s session=%s", event.Type, req.SessionID)
+				firstEvent = false
 			}
 			data, _ := json.Marshal(event)
 			fmt.Fprintf(w, "data: %s\n\n", data)
 			flusher.Flush()
 
 			if event.Type == types.EventDone || event.Type == types.EventError {
+				log.Printf("[server] chat: stream end event=%s session=%s", event.Type, req.SessionID)
 				return
 			}
 		case <-r.Context().Done():
+			log.Printf("[server] chat: client disconnected session=%s", req.SessionID)
 			return
 		}
 	}
@@ -806,6 +861,14 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		s.cfg.Update.AutoUpdate = cfg.Update.AutoUpdate
 		s.cfg.Update.Channel = cfg.Update.Channel
 		s.cfg.Update.IntervalH = cfg.Update.IntervalH
+		// Desktop settings: launch-on-login + fixed backend port.
+		s.cfg.Autostart = cfg.Autostart
+		s.cfg.Server.Port = cfg.Server.Port
+		// Apply the launch-on-login preference immediately (best-effort;
+		// platform failures are logged, never fatal to the request).
+		if err := desktop.ApplyAutostart(s.cfg.Autostart); err != nil {
+			log.Printf("[desktop] autostart apply failed: %v", err)
+		}
 		// Push generation parameters into the live engine.
 		s.engine.SetGenerationParams(s.cfg.Defaults.Temperature, s.cfg.Defaults.MaxTokens)
 		s.engine.SetSystemPrompt(s.cfg.Defaults.SystemPrompt)
@@ -1218,16 +1281,17 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
-			list = append(list, map[string]any{
-				"name":      mc.Name,
-				"type":      mc.Type,
-				"command":   mc.Command,
-				"args":      mc.Args,
-				"url":       mc.URL,
-				"enabled":   mc.Enabled,
-				"connected": connected,
-				"tools":     toolCount,
-			})
+		list = append(list, map[string]any{
+			"name":       mc.Name,
+			"type":       mc.Type,
+			"command":    mc.Command,
+			"args":       mc.Args,
+			"url":        mc.URL,
+			"enabled":    mc.Enabled,
+			"trust_mode": mc.TrustMode,
+			"connected":  connected,
+			"tools":      toolCount,
+		})
 		}
 		writeJSON(w, http.StatusOK, list)
 
@@ -1293,6 +1357,46 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// handleMCPTrust updates the trust mode of a single MCP server (ask | readonly | all)
+// without re-establishing the connection — it is a persisted preference only.
+func (s *Server) handleMCPTrust(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Name      string `json:"name"`
+		TrustMode string `json:"trust_mode"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+		_ = r.Body.Close()
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "name is required"})
+		return
+	}
+	if req.TrustMode != "" && req.TrustMode != "ask" && req.TrustMode != "readonly" && req.TrustMode != "all" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "trust_mode must be one of ask|readonly|all"})
+		return
+	}
+	found := false
+	for i := range s.cfg.MCP {
+		if s.cfg.MCP[i].Name == req.Name {
+			s.cfg.MCP[i].TrustMode = req.TrustMode
+			found = true
+			break
+		}
+	}
+	if !found {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "mcp server not found: " + req.Name})
+		return
+	}
+	if err := s.cfg.Save(config.DefaultPath()); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // handleMCPTest connects to a server definition (without persisting it) and
@@ -1559,6 +1663,11 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "sessionID required", http.StatusBadRequest)
 		return
 	}
+	// /api/analytics/global → cross-session aggregate dashboard.
+	if sessionID == "global" {
+		s.handleAnalyticsGlobal(w, r)
+		return
+	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -1572,8 +1681,181 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 404, map[string]any{"error": "no data for session"})
 		return
 	}
+	// Persist a snapshot so the global dashboard aggregates across sessions
+	// and survives restarts. Best-effort: ignore errors when no store is wired.
+	if s.db != nil {
+		_ = s.db.UpsertSessionStats(db.SessionStatSnapshot{
+			SessionID:          sessionID,
+			TokensSaved:        stats.TokensSaved,
+			CacheHitTokens:     stats.CacheHitTokens,
+			EstimatedCost:      stats.EstimatedCost,
+			EstimatedSavedCost: stats.EstimatedSavedCost,
+			CacheHitRate:       stats.CacheHitRate,
+		})
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats)
+}
+
+// handleAnalyticsGlobal returns the cross-session aggregate plus a per-day
+// savings trend. Built from the persisted session_stats table so it works
+// across restarts, not just for the currently-live in-memory sessions.
+func (s *Server) handleAnalyticsGlobal(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.db == nil {
+		writeJSON(w, 503, map[string]any{"error": "store not available"})
+		return
+	}
+	agg, err := s.db.GlobalStats()
+	if err != nil {
+		writeJSON(w, 500, map[string]any{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(agg)
+}
+
+// ── Workspaces ──
+
+// handleWorkspaces lists (GET) or creates (POST) workspaces.
+func (s *Server) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
+	if s.db == nil {
+		writeJSON(w, 503, map[string]any{"error": "store not available"})
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		list, err := s.db.ListWorkspaces()
+		if err != nil {
+			writeJSON(w, 500, map[string]any{"error": err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"workspaces": list})
+	case http.MethodPost:
+		var body struct {
+			Name       string   `json:"name"`
+			Path       string   `json:"path"`
+			SessionIDs []string `json:"session_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			_ = r.Body.Close()
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		ws := db.Workspace{Name: body.Name, Path: body.Path, SessionIDs: body.SessionIDs}
+		if ws.Name == "" {
+			ws.Name = "工作区"
+		}
+		if err := s.db.CreateWorkspace(ws); err != nil {
+			writeJSON(w, 500, map[string]any{"error": err.Error()})
+			return
+		}
+		created, _ := s.db.GetWorkspace(ws.ID)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(created)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleWorkspaceByID handles /api/workspaces/{id} and
+// /api/workspaces/{id}/sessions (POST to set the ordered session membership).
+func (s *Server) handleWorkspaceByID(w http.ResponseWriter, r *http.Request) {
+	if s.db == nil {
+		writeJSON(w, 503, map[string]any{"error": "store not available"})
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/api/workspaces/")
+	// Split into id and optional sub-path.
+	id := rest
+	sub := ""
+	if idx := strings.Index(rest, "/"); idx >= 0 {
+		id = rest[:idx]
+		sub = rest[idx+1:]
+	}
+	if id == "" {
+		http.Error(w, "workspace id required", http.StatusBadRequest)
+		return
+	}
+
+	switch {
+	case sub == "sessions" && r.Method == http.MethodPost:
+		var body struct {
+			// Append a single session (deep binding) when session_id is set.
+			SessionID string `json:"session_id"`
+			// Replace the whole ordered membership when session_ids is set.
+			SessionIDs []string `json:"session_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			_ = r.Body.Close()
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if body.SessionID != "" {
+			if err := s.db.AddSessionToWorkspace(id, body.SessionID); err != nil {
+				writeJSON(w, 500, map[string]any{"error": err.Error()})
+				return
+			}
+			writeJSON(w, 200, map[string]any{"ok": true, "mode": "append"})
+			return
+		}
+		if err := s.db.SetWorkspaceSessions(id, body.SessionIDs); err != nil {
+			writeJSON(w, 500, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "mode": "replace"})
+	case r.Method == http.MethodGet:
+		ws, err := s.db.GetWorkspace(id)
+		if err != nil {
+			writeJSON(w, 404, map[string]any{"error": "workspace not found"})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(ws)
+	case r.Method == http.MethodPut:
+		var body struct {
+			Name       string   `json:"name"`
+			Path       string   `json:"path"`
+			SessionIDs []string `json:"session_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			_ = r.Body.Close()
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		ws, err := s.db.GetWorkspace(id)
+		if err != nil {
+			writeJSON(w, 404, map[string]any{"error": "workspace not found"})
+			return
+		}
+		if body.Name != "" {
+			ws.Name = body.Name
+		}
+		if body.Path != "" {
+			ws.Path = body.Path
+		}
+		if body.SessionIDs != nil {
+			ws.SessionIDs = body.SessionIDs
+		}
+		if err := s.db.UpdateWorkspace(*ws); err != nil {
+			writeJSON(w, 500, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "workspace": ws})
+	case r.Method == http.MethodDelete:
+		if err := s.db.DeleteWorkspace(id); err != nil {
+			writeJSON(w, 500, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // ── Checkpoints ──
@@ -1642,10 +1924,42 @@ func (s *Server) handleRewind(w http.ResponseWriter, r *http.Request) {
 // ── Memory ──
 
 func (s *Server) handleMemory(w http.ResponseWriter, r *http.Request) {
-	// Find ICODE.md in current directory or parent
+	// scope=project (default) targets ./ICODE.md; scope=user targets the
+	// cross-project memory file at ~/.icode/ (Claude Code parity).
 	wd, _ := os.Getwd()
 	icodePath := findICODEPath(wd)
+	if r.URL.Query().Get("scope") == "user" {
+		if p, err := projectcontext.UserMemoryPath(); err == nil {
+			icodePath = p
+		}
+	}
 	switch r.Method {
+	case http.MethodPost:
+		// Quick-append a memory note (the `#` shortcut). Body: {"text": "..."}
+		var body struct {
+			Text  string `json:"text"`
+			Scope string `json:"scope"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
+			http.Error(w, "invalid body", http.StatusBadRequest)
+			return
+		}
+		scope := body.Scope
+		if scope == "" {
+			scope = r.URL.Query().Get("scope")
+		}
+		var err error
+		if scope == "user" {
+			err = projectcontext.AppendUserMemory(body.Text)
+		} else {
+			_, err = projectcontext.AppendProjectMemory(body.Text)
+		}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"ok": "true"})
 	case http.MethodGet:
 		data, err := os.ReadFile(icodePath)
 		if err != nil {
@@ -1659,7 +1973,7 @@ func (s *Server) handleMemory(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Content string `json:"content"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
 			http.Error(w, "invalid body", http.StatusBadRequest)
 			return
 		}
@@ -1682,4 +1996,128 @@ func findICODEPath(wd string) string {
 		}
 	}
 	return filepath.Join(wd, "ICODE.md")
+}
+
+// ── Skills ──
+
+func (s *Server) handleSkills(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"ok": true, "skills": s.engine.ListSkills()})
+}
+
+// handleSkillEnable toggles a skill's enabled state: POST = enable, DELETE = disable.
+// Path: /api/skills/{name}/enable
+func (s *Server) handleSkillEnable(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/api/skills/")
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	if len(parts) < 2 || parts[1] != "enable" {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	name := parts[0]
+	if name == "" {
+		http.Error(w, "skill name required", http.StatusBadRequest)
+		return
+	}
+	var err error
+	switch r.Method {
+	case http.MethodPost:
+		err = s.engine.EnableSkill(name)
+	case http.MethodDelete:
+		err = s.engine.DisableSkill(name)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "enabled": r.Method == http.MethodPost})
+}
+
+// handleSkillMarket lists the built-in skill market (catalog) with install
+// state, so the desktop UI can render a browsable, one-click-install store.
+func (s *Server) handleSkillMarket(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "market": skills.ListCatalog()})
+}
+
+// handleSkillMarketItem handles install (POST .../market/install) and
+// uninstall (DELETE .../market/{name}).
+func (s *Server) handleSkillMarketItem(w http.ResponseWriter, r *http.Request) {
+	sub := strings.TrimPrefix(r.URL.Path, "/api/skills/market/")
+	sub = strings.Trim(sub, "/")
+	switch r.Method {
+	case http.MethodPost:
+		if sub != "install" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		var body struct {
+			Name string `json:"name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" {
+			_ = r.Body.Close()
+			http.Error(w, "skill name required", http.StatusBadRequest)
+			return
+		}
+		if err := skills.Install(body.Name); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "installed": body.Name})
+	case http.MethodDelete:
+		if sub == "" {
+			http.Error(w, "skill name required", http.StatusBadRequest)
+			return
+		}
+		if err := skills.Uninstall(sub); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uninstalled": sub})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleSkillImport installs a skill from a local SKILL.md file or directory
+// (e.g. exported from another machine or downloaded from a community repo).
+func (s *Server) handleSkillImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Path == "" {
+		_ = r.Body.Close()
+		http.Error(w, "path required", http.StatusBadRequest)
+		return
+	}
+	if err := skills.Import(body.Path); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "imported": body.Path})
+}
+
+// ── Teams ──
+
+func (s *Server) handleTeams(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"ok": true, "teams": s.engine.ListTeams()})
 }

@@ -1,4 +1,5 @@
 import React, { useState, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 import hljs from 'highlight.js';
 
 // ── styles ──
@@ -82,6 +83,7 @@ function linkify(text: string, key: string): React.ReactNode[] {
 
 // ── code block with syntax highlighting and copy ──
 const CodeBlock: React.FC<{ code: string; lang: string }> = ({ code, lang }) => {
+  const { t } = useTranslation();
   const [copied, setCopied] = useState(false);
   const handleCopy = () => {
     navigator.clipboard.writeText(code).then(() => {
@@ -104,7 +106,7 @@ const CodeBlock: React.FC<{ code: string; lang: string }> = ({ code, lang }) => 
     <div style={{ margin: '8px 0' }}>
       <div style={codeHead}>
         <span>{lang || hljs.highlightAuto(code).language || 'code'}</span>
-        <button onClick={handleCopy} style={copyBtn}>{copied ? '✓ 已复制' : '复制'}</button>
+        <button onClick={handleCopy} style={copyBtn}>{copied ? `✓ ${t('markdown.copied')}` : t('markdown.copy')}</button>
       </div>
       <pre style={{ ...codeBlock, borderRadius: lang ? '0 0 6px 6px' : 6 }}>
         <code dangerouslySetInnerHTML={{ __html: highlighted }} />

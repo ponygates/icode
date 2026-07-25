@@ -2,6 +2,7 @@
 package cmd
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 
@@ -13,13 +14,38 @@ var (
 	appVersion string
 	appBuild   string
 	appCommit  string
+
+	// weAllocatedConsole is true when Execute() created a fresh console for a
+	// double-clicked GUI-subsystem binary. It lets us keep that console window
+	// open (pause on exit) so the user can read any error instead of the window
+	// vanishing the instant the process ends.
+	weAllocatedConsole bool
 )
 
+// ExecuteDesktop launches the desktop-only build.
+func ExecuteDesktop() error {
+	appVersion = "0.4.0"
+	return runDesktop()
+}
+
 // Execute is the main entry point for the CLI.
-func Execute(version, build, commit string) error {
+func Execute(version, build, commit string) (err error) {
 	appVersion = version
 	appBuild = build
 	appCommit = commit
+
+	// Keep a fresh double-click console window open on a fatal error/panic so
+	// the user can read what went wrong instead of the window flashing away.
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("icode 内部错误: %v", r)
+			fmt.Fprintf(os.Stderr, "\n⚠ 发生了内部错误: %v\n", r)
+		}
+		if err != nil && weAllocatedConsole {
+			fmt.Fprintln(os.Stderr, "\n按 Enter 键退出...")
+			bufio.NewReader(os.Stdin).ReadBytes('\n')
+		}
+	}()
 
 	// The binary is linked as a GUI-subsystem app on Windows so double-clicking
 	// it never flashes a console window. setupConsoleIO restores CLI stdio when
@@ -27,11 +53,17 @@ func Execute(version, build, commit string) error {
 	// console) and reports whether a console is available.
 	consoleReady := setupConsoleIO()
 
-	// No console AND no CLI arguments means a genuine Explorer double-click:
-	// start desktop mode so the binary feels like a proper desktop app. Any
-	// explicit subcommand/flag (e.g. `icode desktop`, `icode chat`) falls
-	// through to the normal Cobra dispatch below.
+	// No console AND no CLI arguments means a genuine Explorer double-click.
+	// Allocate a fresh console and run the enhanced TUI (CLI). The desktop app
+	// stays reachable via `icode desktop` / `icode-desktop.exe` (the
+	// windows+desktop_only build). Only if allocation fails do we fall back to
+	// the desktop app.
 	if !consoleReady && len(os.Args) <= 1 {
+		if allocConsole() {
+			weAllocatedConsole = true
+			fixConsoleCodepage()
+			return rootCmd.Execute()
+		}
 		return runDesktop()
 	}
 
@@ -76,6 +108,7 @@ func init() {
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(doctorCmd)
 	rootCmd.AddCommand(serverCmd)
+	rootCmd.AddCommand(versionCmd)
 
 	// Persistent flags
 	rootCmd.PersistentFlags().StringP("lang", "l", "zh-CN", "Language (zh-CN, zh-TW, en)")

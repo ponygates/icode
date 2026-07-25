@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../stores/appStore';
-import { RotateCcw } from 'lucide-react';
+import { RotateCcw, History } from 'lucide-react';
 
 interface CheckpointEntry {
   Hash: string;
@@ -9,6 +10,7 @@ interface CheckpointEntry {
 }
 
 const CheckpointPanel: React.FC = () => {
+  const { t } = useTranslation();
   const { activeSessionId, backendUrl } = useAppStore();
   const [entries, setEntries] = useState<CheckpointEntry[]>([]);
   const [rewinding, setRewinding] = useState(false);
@@ -32,7 +34,7 @@ const CheckpointPanel: React.FC = () => {
 
   const handleRewind = async (steps: number) => {
     if (!backendUrl || !activeSessionId || rewinding) return;
-    if (!window.confirm(`回退 ${steps} 步？文件将恢复到之前的版本。`)) return;
+    if (!window.confirm(t('checkpoint.confirmRewind', { steps }))) return;
     setRewinding(true);
     try {
       const res = await fetch(`${backendUrl}/api/checkpoints/rewind`, {
@@ -43,8 +45,7 @@ const CheckpointPanel: React.FC = () => {
       if (res.ok) {
         const data = await res.json();
         const files = data.files || [];
-        alert(`已回退 ${steps} 步。\n${files.length > 0 ? '恢复文件: ' + files.join(', ') : ''}`);
-        // Reload entries
+        alert(`${t('checkpoint.rewound', { steps })}\n${files.length > 0 ? t('checkpoint.restoredFiles') + files.join(', ') : ''}`);
         const r2 = await fetch(`${backendUrl}/api/checkpoints/${activeSessionId}`);
         if (r2.ok) setEntries(await r2.json());
       }
@@ -61,25 +62,27 @@ const CheckpointPanel: React.FC = () => {
         letterSpacing: 0.5, fontWeight: 500, display: 'flex',
         justifyContent: 'space-between', alignItems: 'center',
       }}>
-        <span>📸 检查点 ({entries.length})</span>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <History size={11} /> {t('checkpoint.title')} ({entries.length})
+        </span>
         {entries.length > 0 && (
           <button
             onClick={() => handleRewind(1)}
             disabled={rewinding}
-            title="回退一步"
+            title={t('checkpoint.rewindStep')}
             style={{
               background: 'transparent', border: '1px solid var(--border-color)',
               borderRadius: 3, cursor: 'pointer', padding: '0 4px',
               fontSize: 9, color: 'var(--text-muted)',
               display: 'flex', alignItems: 'center', gap: 2,
             }}>
-            <RotateCcw size={9} /> 回退
+            <RotateCcw size={9} /> {t('checkpoint.rewind')}
           </button>
         )}
       </div>
-      {entries.slice(0, 5).map((e, i) => (
+      {entries.slice(0, 8).map((e, i) => (
         <div key={e.Hash} style={{
-          display: 'flex', alignItems: 'flex-start', gap: 4,
+          display: 'flex', alignItems: 'center', gap: 4,
           padding: '2px 0', fontSize: 10,
           color: i === 0 ? 'var(--text-primary)' : 'var(--text-muted)',
           fontFamily: 'var(--font-mono)',
@@ -93,11 +96,27 @@ const CheckpointPanel: React.FC = () => {
           }}>
             {e.Message || e.Hash.slice(0, 7)}
           </span>
+          {i > 0 && (
+            <button
+              onClick={() => handleRewind(i)}
+              disabled={rewinding}
+              title={t('checkpoint.confirmRewind', { steps: i })}
+              style={{
+                background: 'transparent', border: 'none', cursor: 'pointer',
+                color: 'var(--text-muted)', fontSize: 9, padding: '0 2px',
+                flexShrink: 0, opacity: 0.6,
+              }}
+              onMouseEnter={e => (e.currentTarget.style.opacity = '1')}
+              onMouseLeave={e => (e.currentTarget.style.opacity = '0.6')}
+            >
+              <RotateCcw size={9} />
+            </button>
+          )}
         </div>
       ))}
-      {entries.length > 5 && (
+      {entries.length > 8 && (
         <div style={{ fontSize: 9, color: 'var(--text-muted)', textAlign: 'center' }}>
-          +{entries.length - 5} 更多...
+          +{entries.length - 8} {t('checkpoint.more')}
         </div>
       )}
     </div>

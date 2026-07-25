@@ -60,13 +60,13 @@ type CacheStrategy struct {
 // ProviderCacheStrategies maps provider names to their cache strategies.
 var ProviderCacheStrategies = map[string]CacheStrategy{
 	"deepseek": {
-		MarkSystem:    true,
-		StablePrefix:  true,
+		MarkSystem:     true,
+		StablePrefix:   true,
 		MaxCacheTokens: 65536,
 	},
 	"anthropic": {
-		MarkSystem:    true,
-		MarkTools:     true,
+		MarkSystem:     true,
+		MarkTools:      true,
 		MaxCacheTokens: 131072,
 	},
 	"openrouter": {
@@ -76,16 +76,18 @@ var ProviderCacheStrategies = map[string]CacheStrategy{
 
 // Stats tracks token usage over a session.
 type Stats struct {
-	PromptTokens      int     `json:"prompt_tokens"`
-	CompletionTokens  int     `json:"completion_tokens"`
-	TotalTokens       int     `json:"total_tokens"`
-	CacheHitTokens    int     `json:"cache_hit_tokens"`
-	CacheWriteTokens  int     `json:"cache_write_tokens"`
-	CacheHitRate      float64 `json:"cache_hit_rate"`
-	EstimatedCost     float64 `json:"estimated_cost"`
-	CompactionsDone   int     `json:"compactions_done"`
-	TokensSaved       int     `json:"tokens_saved"`
-	Rounds            []RoundStat `json:"rounds,omitempty"`
+	PromptTokens       int         `json:"prompt_tokens"`
+	CompletionTokens   int         `json:"completion_tokens"`
+	TotalTokens        int         `json:"total_tokens"`
+	CacheHitTokens     int         `json:"cache_hit_tokens"`
+	CacheWriteTokens   int         `json:"cache_write_tokens"`
+	CacheHitRate       float64     `json:"cache_hit_rate"`
+	EstimatedCost      float64     `json:"estimated_cost"`
+	EstimatedSavedCost float64     `json:"estimated_saved_cost"`
+	CompactionsDone    int         `json:"compactions_done"`
+	TokensSaved        int         `json:"tokens_saved"`
+	AttachmentsEvicted int         `json:"attachments_evicted,omitempty"`
+	Rounds             []RoundStat `json:"rounds,omitempty"`
 }
 
 type RoundStat struct {
@@ -138,6 +140,11 @@ type Optimizer struct {
 	// higher-level compression is applied. Part of the 5-layer pipeline.
 	snipFilter *SnipFilter
 	snipConfig SnipConfig
+
+	// Attachment eviction — keeps only the most recent N multimodal
+	// attachments in context; older base64 payloads are replaced with
+	// short placeholders (v0.23 token-saving layer).
+	attachCfg AttachmentEvictionConfig
 }
 
 // Config tunes the optimizer behavior.
@@ -156,6 +163,10 @@ type Config struct {
 	// Snip controls zero-cost filtering of useless turns.
 	// Zero value = use defaults (default snip config).
 	Snip SnipConfig
+
+	// Attachment controls multimodal attachment eviction.
+	// Zero value = use defaults (keep the most recent 2 attachments).
+	Attachment AttachmentEvictionConfig
 }
 
 // DefaultConfig returns sensible defaults.
@@ -190,6 +201,11 @@ func New(cfg Config) *Optimizer {
 		snipCfg = DefaultSnipConfig()
 	}
 
+	attachCfg := cfg.Attachment
+	if attachCfg == (AttachmentEvictionConfig{}) {
+		attachCfg = DefaultAttachmentEvictionConfig()
+	}
+
 	return &Optimizer{
 		systemPrompt:     cfg.SystemPrompt,
 		providerName:     cfg.ProviderName,
@@ -200,6 +216,7 @@ func New(cfg Config) *Optimizer {
 		stats:            Stats{},
 		snipConfig:       snipCfg,
 		snipFilter:       NewSnipFilter(snipCfg),
+		attachCfg:        attachCfg,
 	}
 }
 
@@ -221,9 +238,11 @@ func (o *Optimizer) AddMessage(msg types.Message) {
 	defer o.mu.Unlock()
 
 	// When a new user message arrives, fold the previous turn's tool
-	// results into compact placeholders (Volatile Scratch).
+	// results into compact placeholders (Volatile Scratch) and evict
+	// stale multimodal attachments beyond the keep budget.
 	if msg.Role == types.RoleUser {
 		o.foldVolatileLocked()
+		o.evictAttachmentsLocked()
 		o.turnStartIdx = len(o.messageLog)
 	}
 
@@ -533,7 +552,20 @@ func (o *Optimizer) BuildCacheBreakpoints() []int {
 func (o *Optimizer) Stats() Stats {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	return o.stats
+	s := o.stats
+	// EstimatedSavedCost approximates how much would have been spent on the
+	// cache-hit tokens had they NOT been served from the prefix cache. It is
+	// derived from the actual cost and the cache-hit rate so the dashboard can
+	// show a single, consistent "saved amount" figure without re-deriving it
+	// on the client (the old client-side formula was unstable near rate=1).
+	if s.CacheHitRate < 1 {
+		denom := 1 - s.CacheHitRate
+		if denom < 0.01 {
+			denom = 0.01
+		}
+		s.EstimatedSavedCost = s.EstimatedCost * s.CacheHitRate / denom
+	}
+	return s
 }
 
 // CompactionSummary returns the current compaction summary.
@@ -555,6 +587,9 @@ func (o *Optimizer) estimateTokensLocked() int {
 
 	for _, m := range o.messageLog {
 		total += countTokens(m.Content)
+		for _, att := range m.Attachments {
+			total += EstimateAttachmentTokens(att)
+		}
 		for _, tc := range m.ToolCalls {
 			total += countTokens(tc.Arguments)
 			if tc.Result != nil {

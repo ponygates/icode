@@ -35,10 +35,10 @@ type SnipConfig struct {
 // DefaultSnipConfig returns sensible defaults.
 func DefaultSnipConfig() SnipConfig {
 	return SnipConfig{
-		RemoveEmptyAssistant:  true,
-		RemoveRejectedRounds:  true,
-		RemoveBlankMessages:   true,
-		MinContentLength:      3,
+		RemoveEmptyAssistant: true,
+		RemoveRejectedRounds: true,
+		RemoveBlankMessages:  true,
+		MinContentLength:     3,
 	}
 }
 

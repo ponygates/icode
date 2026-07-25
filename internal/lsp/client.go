@@ -41,6 +41,10 @@ type Transport struct {
 	reqID   atomic.Int64
 	pending map[int64]chan<- json.RawMessage
 	cancel  context.CancelFunc
+
+	// notificationHandler is called when the server sends a notification
+	// (e.g. textDocument/publishDiagnostics). Set by the Client.
+	notificationHandler func(method string, params json.RawMessage)
 }
 
 // NewTransport starts a language server process and returns a transport.
@@ -151,6 +155,7 @@ func (t *Transport) readLoop() {
 			Method string           `json:"method,omitempty"`
 			Result json.RawMessage  `json:"result,omitempty"`
 			Error  *json.RawMessage `json:"error,omitempty"`
+			Params json.RawMessage  `json:"params,omitempty"`
 		}
 		if err := json.Unmarshal(content, &base); err != nil {
 			continue
@@ -166,6 +171,9 @@ func (t *Transport) readLoop() {
 				ch <- base.Result
 				close(ch)
 			}
+		} else if base.Method != "" && t.notificationHandler != nil {
+			// Notification from server (e.g. publishDiagnostics)
+			t.notificationHandler(base.Method, base.Params)
 		}
 	}
 }
@@ -204,6 +212,10 @@ func readLSPMessage(reader *bufio.Reader) ([]byte, error) {
 type Client struct {
 	transport *Transport
 	rootURI   string
+
+	// diagnostics stores the latest publishDiagnostics per URI.
+	mu          sync.Mutex
+	diagnostics map[string][]Diagnostic
 }
 
 // ServerCapabilities holds the capabilities of the language server.
@@ -224,9 +236,14 @@ func NewClient(ctx context.Context, rootURI, command string, args ...string) (*C
 	}
 
 	client := &Client{
-		transport: transport,
-		rootURI:   rootURI,
+		transport:   transport,
+		rootURI:     rootURI,
+		diagnostics: make(map[string][]Diagnostic),
 	}
+
+	// Wire notification handler so the transport routes server push
+	// notifications (e.g. textDocument/publishDiagnostics) to the client.
+	transport.notificationHandler = client.HandleNotification
 
 	// Initialize session
 	initParams := map[string]any{
@@ -426,12 +443,37 @@ func (c *Client) WorkspaceSymbols(query string) ([]SymbolInfo, error) {
 
 // Diagnostics requests the current diagnostics for a document.
 func (c *Client) Diagnostics(uri string) ([]Diagnostic, error) {
-	// Force publishDiagnostics by sending a didChange
+	// Force publishDiagnostics by sending a didChange notification
 	params := map[string]any{
 		"textDocument": map[string]any{"uri": uri},
 	}
 	_ = c.transport.SendNotification("textDocument/didChange", params)
-	return nil, fmt.Errorf("diagnostics not implemented")
+
+	// Return the latest cached diagnostics
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if diags, ok := c.diagnostics[uri]; ok {
+		return diags, nil
+	}
+	return nil, nil
+}
+
+// HandleNotification processes incoming LSP notifications from the server.
+// Called by the transport's readLoop for method-based messages.
+func (c *Client) HandleNotification(method string, params json.RawMessage) {
+	switch method {
+	case "textDocument/publishDiagnostics":
+		var notification struct {
+			URI         string       `json:"uri"`
+			Diagnostics []Diagnostic `json:"diagnostics"`
+		}
+		if err := json.Unmarshal(params, &notification); err != nil {
+			return
+		}
+		c.mu.Lock()
+		c.diagnostics[notification.URI] = notification.Diagnostics
+		c.mu.Unlock()
+	}
 }
 
 // SymbolInfo describes a workspace symbol.

@@ -56,6 +56,26 @@ func setupConsoleIO() bool {
 	return false
 }
 
+// allocConsole creates a brand-new console window for a GUI-subsystem process
+// that was launched without one — the case of a genuine Explorer double-click.
+// After it succeeds the process owns a fresh console, so we rebind the standard
+// handles and return true, letting the caller run the enhanced TUI (CLI). If a
+// console cannot be allocated (extremely rare), it returns false so the caller
+// can fall back to the desktop app.
+func allocConsole() bool {
+	kernel32 := syscall.NewLazyDLL("kernel32.dll")
+	alloc := kernel32.NewProc("AllocConsole")
+	if alloc.Find() != nil {
+		return false
+	}
+	r, _, _ := alloc.Call()
+	if r == 0 {
+		return false
+	}
+	rebindStdHandles()
+	return true
+}
+
 // attachParentConsole attaches this GUI-subsystem process to the console of its
 // parent process (the cmd/PowerShell that started it). Returns true on success.
 func attachParentConsole() bool {

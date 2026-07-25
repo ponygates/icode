@@ -369,7 +369,7 @@ func (p *Provider) buildMessagesBody(req types.ChatRequest, stream bool) (io.Rea
 				},
 			}
 		} else {
-			m["content"] = msg.Content
+			m["content"] = anthropicContent(msg)
 		}
 		messages = append(messages, m)
 	}
@@ -434,6 +434,40 @@ func (p *Provider) buildMessagesBody(req types.ChatRequest, stream bool) (io.Rea
 	}
 
 	return bytes.NewReader(data), nil
+}
+
+// anthropicContent renders a message's content for the Anthropic Messages API.
+// Image attachments on a normal message are emitted as image source blocks
+// alongside the text; messages without attachments stay plain text so existing
+// conversations are unaffected.
+func anthropicContent(msg types.Message) any {
+	if len(msg.Attachments) == 0 {
+		return msg.Content
+	}
+	var blocks []map[string]any
+	if msg.Content != "" {
+		blocks = append(blocks, map[string]any{"type": "text", "text": msg.Content})
+	}
+	for _, att := range msg.Attachments {
+		if att.Type == "image" && att.Data != "" {
+			mt := att.MIMEType
+			if mt == "" {
+				mt = "image/png"
+			}
+			blocks = append(blocks, map[string]any{
+				"type": "image",
+				"source": map[string]any{
+					"type":       "base64",
+					"media_type": mt,
+					"data":       att.Data,
+				},
+			})
+		}
+	}
+	if len(blocks) > 0 {
+		return blocks
+	}
+	return msg.Content
 }
 
 func (p *Provider) setHeaders(req *http.Request) {

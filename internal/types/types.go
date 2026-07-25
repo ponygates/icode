@@ -73,6 +73,12 @@ type ToolResult struct {
 	Success bool   `json:"success"`
 	Content string `json:"content"`
 	Error   string `json:"error,omitempty"`
+
+	// Attachments carries inline multimodal output (e.g. an image produced by
+	// the image_gen tool) back into the conversation so vision-capable models
+	// can see the generated artifact in subsequent turns. Only image
+	// attachments are consumed by providers today; other types are ignored.
+	Attachments []Attachment `json:"attachments,omitempty"`
 }
 
 // ============================================================================
@@ -131,6 +137,7 @@ type StreamEventType string
 const (
 	EventText       StreamEventType = "text"
 	EventToolUse    StreamEventType = "tool_use"
+	EventThinking   StreamEventType = "thinking"
 	EventDone       StreamEventType = "done"
 	EventError      StreamEventType = "error"
 	EventPermission StreamEventType = "permission"

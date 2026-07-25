@@ -6,7 +6,9 @@
 package router
 
 import (
+	"context"
 	"strings"
+	"time"
 
 	"github.com/ponygates/icode/internal/types"
 )
@@ -28,6 +30,11 @@ type Route struct {
 	Reason     string
 }
 
+// LLMClassifyFunc asks an LLM to grade a query's complexity. Implementations
+// should use a cheap/fast model. Returning an error falls back to the
+// keyword heuristic, so failures are never fatal.
+type LLMClassifyFunc func(ctx context.Context, query string) (Complexity, error)
+
 // Router selects models based on query complexity.
 type Router struct {
 	defaultModel  string
@@ -36,6 +43,27 @@ type Router struct {
 	cheapProv     string
 	powerfulModel string
 	powerfulProv  string
+
+	// llmClassify, when set, upgrades classification from keyword heuristics
+	// to LLM-based grading (config routing.mode: "llm").
+	llmClassify LLMClassifyFunc
+
+	// embedClassify, when set, refines the keyword baseline with a local,
+	// zero-cost semantic classifier (config routing.mode: "embedding"). It
+	// returns (complexity, confident); when not confident the keyword
+	// verdict is kept. Being fully offline it costs no tokens, so it stays
+	// on the hot path without undermining the token-saving mission.
+	embedClassify func(query string) (Complexity, bool)
+}
+
+// SetLLMClassifier enables LLM-based complexity grading. Pass nil to revert
+// to the zero-cost keyword heuristic.
+func (r *Router) SetLLMClassifier(f LLMClassifyFunc) { r.llmClassify = f }
+
+// SetEmbeddingClassifier enables the local semantic classifier. Pass nil to
+// disable. It refines (never blocks) the keyword baseline at zero token cost.
+func (r *Router) SetEmbeddingClassifier(f func(query string) (Complexity, bool)) {
+	r.embedClassify = f
 }
 
 // Config for the router.
@@ -75,12 +103,18 @@ func New(cfg Config) *Router {
 func Classify(query string) Complexity {
 	q := strings.ToLower(strings.TrimSpace(query))
 
-	if len(q) < 100 {
+	// Note: len() counts bytes; Chinese text is ~3 bytes per rune, so use
+	// rune count for length thresholds to treat zh/en queries equally.
+	runes := len([]rune(q))
+
+	if runes < 60 {
 		// Very short queries are likely simple questions.
-		// Exceptions: if they contain code-like keywords.
+		// Exceptions: if they contain code-like keywords (en + zh).
 		codeKeywords := []string{"implement", "refactor", "create", "write", "build",
 			"fix", "debug", "function", "class", "struct", "interface",
-			"file:", "path:", "import "}
+			"file:", "path:", "import ",
+			"实现", "重构", "创建", "编写", "构建", "修复", "调试", "修改",
+			"函数", "接口", "写一个", "帮我写", "报错", "bug"}
 		for _, kw := range codeKeywords {
 			if strings.Contains(q, kw) {
 				return ComplexityNormal
@@ -90,14 +124,16 @@ func Classify(query string) Complexity {
 	}
 
 	// Longer queries are likely complex.
-	if len(q) > 500 {
+	if runes > 300 {
 		return ComplexityComplex
 	}
 
-	// Check for complex keywords.
+	// Check for complex keywords (en + zh).
 	complexKeywords := []string{"refactor", "redesign", "architecture", "migrate",
 		"multi-step", "test suite", "benchmark", "concurrent",
-		"optimize", "profiling", "deep analysis", "review all"}
+		"optimize", "profiling", "deep analysis", "review all",
+		"重构", "架构", "迁移", "多步骤", "测试套件", "基准测试", "并发",
+		"优化", "性能分析", "深度分析", "全面审查", "全部检查", "整个项目"}
 	for _, kw := range complexKeywords {
 		if strings.Contains(q, kw) {
 			return ComplexityComplex
@@ -110,6 +146,26 @@ func Classify(query string) Complexity {
 // RouteQuery picks the best model for the given query.
 func (r *Router) RouteQuery(query string, historyLen int) Route {
 	c := Classify(query)
+
+	// Local semantic refinement (when enabled): zero-cost, offline. Only
+	// overrides the keyword baseline when it is confident, so it can only
+	// improve accuracy, never regress it.
+	if r.embedClassify != nil {
+		if sc, ok := r.embedClassify(query); ok {
+			c = sc
+		}
+	}
+
+	// LLM grading (when enabled) refines the heuristic. Bounded at 3s so a
+	// slow classifier never blocks the conversation; errors fall back to
+	// the keyword result.
+	if r.llmClassify != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		if lc, err := r.llmClassify(ctx, query); err == nil {
+			c = lc
+		}
+		cancel()
+	}
 
 	// Use simple classification if the conversation is very long.
 	if historyLen > 50 {

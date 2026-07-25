@@ -28,14 +28,48 @@ var logoFont = map[rune][]string{
 
 const logoWord = "ICODE"
 
-// plumBlossom is the 棉花梅花 motif; each row is exactly 11 cells wide so it
-// can be centred over the wordmark.
-var plumBlossom = []string{
-	"   .-~-.   ",
-	"  (     )  ",
-	"  <  o  >  ",
-	"  (     )  ",
-	"   '-.-'   ",
+// blossomRaw is the 棉花梅花 motif: a five-petal plum flower (top) carried on
+// a curved branch with two leaves (bottom) — the classic 梅花 composition.
+// Every row is plain ASCII (no East-Asian Ambiguous glyphs, no Unicode art
+// that vanishes on legacy conhost) so it renders on any terminal, and it is
+// re-coloured per render. Glyph map:
+//   '(' ')' '*' = petal (arc outline + fill)   'o' = pistil   '.' = stamen
+//   '|' '/' '\' = branch                       '~' = leaf
+// Each row is exactly 13 cells wide so the art stays symmetric when centred.
+// Five-petal layout: top petal (row 0), upper-left+upper-right (row 1),
+// lower-left+lower-right (row 3), with stamens ringing the pistil (row 2).
+var blossomRaw = []string{
+	"     (*)     ",
+	"   (*) (*)   ",
+	"    . o .    ",
+	"   (*) (*)   ",
+	"      |      ",
+	"    / | \\    ",
+	"   ~  |  ~   ",
+}
+
+// paintBlossomRow colours one raw blossom row: petals magenta (arc + fill),
+// pistil and stamens yellow, branch dim (grey — palette-safe on both
+// light/dark terminals), leaves green. A plain (no-ANSI) renderer passes a
+// paint func that returns the text unchanged, so `icode version` / pipes
+// still show the ASCII art.
+func paintBlossomRow(paint logoPainter, row string) string {
+	var b strings.Builder
+	for _, r := range row {
+		switch r {
+		case '(', ')', '*':
+			b.WriteString(paint("magenta", string(r)))
+		case 'o', '.':
+			b.WriteString(paint("yellow", string(r)))
+		case '|', '/', '\\':
+			b.WriteString(paint("dim", string(r)))
+		case '~':
+			b.WriteString(paint("green", string(r)))
+		default:
+			b.WriteString(string(r))
+		}
+	}
+	return b.String()
 }
 
 // logoLines renders the LOGO using the TUI's paint() so colours apply.
@@ -82,9 +116,9 @@ func (t *TUI) asciiLogo(width int, paint logoPainter) []string {
 	// Compose the art block (flower, then wordmark, then tagline), each row
 	// padded to exactly wordW cells so terminal-centring stays consistent.
 	tag := paint("dim", "多模型 AI 编程助手")
-	art := make([]string, 0, len(plumBlossom)+len(wordRows)+1)
-	for _, fl := range plumBlossom {
-		art = append(art, padToCenter(paint("magenta", fl), wordW))
+	art := make([]string, 0, len(blossomRaw)+len(wordRows)+1)
+	for _, fl := range blossomRaw {
+		art = append(art, padToCenter(paintBlossomRow(paint, fl), wordW))
 	}
 	art = append(art, wordRows...)
 	art = append(art, padToCenter(tag, wordW))

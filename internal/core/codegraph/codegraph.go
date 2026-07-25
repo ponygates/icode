@@ -78,9 +78,27 @@ func (g *Graph) Build(rootDir string) error {
 	g.byFile = map[string][]Symbol{}
 	g.byName = map[string][]Symbol{}
 
+	// Directories that never contain first-party source — skipping them keeps
+	// the index small and the build fast even in monorepos.
+	skipDirs := map[string]bool{
+		"node_modules": true, ".git": true, "dist": true, "build": true,
+		"vendor": true, ".next": true, "out": true, "coverage": true,
+		".cache": true, "__pycache__": true, ".venv": true, "venv": true,
+	}
+
 	err := filepath.Walk(rootDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
+		if err != nil {
 			return err
+		}
+		if info.IsDir() {
+			if skipDirs[info.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		// Skip minified bundles — symbol extraction is meaningless there.
+		if strings.HasSuffix(path, ".min.js") {
+			return nil
 		}
 		ext := filepath.Ext(path)
 		switch ext {

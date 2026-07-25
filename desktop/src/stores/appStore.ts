@@ -29,11 +29,20 @@ export interface Model {
   tags?: string[];
 }
 
+export interface Attachment {
+  type?: string;       // "image" | "pdf" | ...
+  mime?: string;       // image/png, image/jpeg, ...
+  data?: string;       // base64-encoded content (no data: prefix)
+  url?: string;        // optional external URL
+  alt_text?: string;   // optional description
+}
+
 export interface Message {
   id: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
   timestamp: number;
+  attachments?: Attachment[];
 }
 
 export interface Session {
@@ -43,6 +52,15 @@ export interface Session {
   modelId: string;
   provider: string;
   createdAt: number;
+}
+
+export interface Workspace {
+  id: string;
+  name: string;
+  path: string;
+  session_ids: string[];
+  created_at: string;
+  updated_at: string;
 }
 
 interface AppStore {
@@ -64,8 +82,16 @@ interface AppStore {
   backendUrl: string | null;
   backendConnected: boolean;
   backendChecking: boolean;
+  backendVersion: string;
   setBackendUrl: (url: string | null) => void;
   checkBackend: () => Promise<void>;
+
+  // Desktop settings (launch-on-login + fixed backend port)
+  autostart: boolean;
+  serverPort: number;
+  setAutostart: (enabled: boolean) => void;
+  setServerPort: (port: number) => void;
+  loadDesktopSettings: () => Promise<void>;
 
   // Models
   models: Model[];
@@ -77,11 +103,22 @@ interface AppStore {
   // Sessions
   sessions: Session[];
   activeSessionId: string | null;
+  // Open tabs (multi-session) — kept in the store (not ChatPage local state)
+  // so they survive route changes and restarts.
+  openTabIds: string[];
   createSession: (modelId: string, provider: string) => void;
   setActiveSession: (id: string) => void;
   deleteSession: (id: string) => void;
+  closeTab: (id: string) => void;
   renameSession: (id: string, title: string) => void;
   loadSessions: () => Promise<void>;
+
+  // Workspaces (project containers grouping sessions)
+  workspaces: Workspace[];
+  activeWorkspaceId: string | null;
+  loadWorkspaces: () => Promise<void>;
+  createWorkspace: (name: string, path: string) => Promise<void>;
+  setActiveWorkspace: (id: string) => void;
 
   // Messages
   addMessage: (sessionId: string, msg: Message) => void;
@@ -89,8 +126,13 @@ interface AppStore {
   clearMessages: (sessionId: string) => void;
 
   // Token stats
-  tokenUsage: { input: number; output: number; cacheHit: number; cost: string };
+  tokenUsage: { input: number; output: number; cacheHit: number; cost: string; saved: number };
   updateTokenUsage: (usage: Partial<AppStore['tokenUsage']>) => void;
+
+  // Custom models (user-added providers)
+  customModels: Model[];
+  addCustomModel: (model: Model) => void;
+  removeCustomModel: (modelId: string) => void;
 }
 
 const defaultModels: Model[] = [
@@ -177,7 +219,47 @@ export const useAppStore = create<AppStore>((set, get) => ({
   backendUrl: null,
   backendConnected: false,
   backendChecking: true,
+  backendVersion: '',
   setBackendUrl: (url) => set({ backendUrl: url }),
+
+  // Desktop settings — kept in sync with the backend config (/api/config).
+  autostart: false,
+  serverPort: 0,
+  setAutostart: (enabled) => {
+    set({ autostart: enabled });
+    const url = get().backendUrl;
+    if (url) {
+      fetch(`${url}/api/config`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ autostart: enabled }),
+      }).catch(() => { /* retry on next toggle */ });
+    }
+  },
+  setServerPort: (port) => {
+    set({ serverPort: port });
+    const url = get().backendUrl;
+    if (url) {
+      fetch(`${url}/api/config`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ server: { port } }),
+      }).catch(() => { /* retry on next change */ });
+    }
+  },
+  loadDesktopSettings: async () => {
+    const url = get().backendUrl;
+    if (!url) return;
+    try {
+      const res = await fetch(`${url}/api/config`);
+      if (res.ok) {
+        const cfg = await res.json();
+        if (typeof cfg?.autostart === 'boolean') set({ autostart: cfg.autostart });
+        if (typeof cfg?.server?.port === 'number') set({ serverPort: cfg.server.port });
+      }
+    } catch { /* keep defaults */ }
+  },
+
   checkBackend: async () => {
     set({ backendChecking: true });
     try {
@@ -188,7 +270,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
           set({ backendUrl: url });
           const res = await fetch(`${url}/api/health`, { method: 'GET', cache: 'no-cache' });
           if (res.ok) {
-            set({ backendConnected: true, backendChecking: false });
+            const health = await res.json().catch(() => ({}));
+            set({ backendConnected: true, backendChecking: false, backendVersion: health.version || '' });
             return;
           }
         }
@@ -200,7 +283,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
         try {
           const relRes = await fetch(`${origin}/api/health`, { method: 'GET', cache: 'no-cache' });
           if (relRes.ok) {
-            set({ backendUrl: origin, backendConnected: true, backendChecking: false });
+            const health = await relRes.json().catch(() => ({}));
+            set({ backendUrl: origin, backendConnected: true, backendChecking: false, backendVersion: health.version || '' });
             return;
           }
         } catch { /* not served by same origin */ }
@@ -211,7 +295,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
         try {
           const lr = await fetch(`http://127.0.0.1:${port}/api/health`, { method: 'GET', cache: 'no-cache' });
           if (lr.ok) {
-            set({ backendUrl: `http://127.0.0.1:${port}`, backendConnected: true, backendChecking: false });
+            const health = await lr.json().catch(() => ({}));
+            set({ backendUrl: `http://127.0.0.1:${port}`, backendConnected: true, backendChecking: false, backendVersion: health.version || '' });
             return;
           }
         } catch { /* try next port */ }
@@ -257,6 +342,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   sessions: [],
   activeSessionId: null,
+  openTabIds: loadOpenTabs(),
+
+  workspaces: [],
+  activeWorkspaceId: loadActiveWorkspace(),
 
   loadSessions: async () => {
     try {
@@ -271,13 +360,17 @@ export const useAppStore = create<AppStore>((set, get) => ({
               id: m.id || Math.random().toString(36).slice(2),
               role: m.role || 'assistant',
               content: m.content || '',
+              attachments: m.attachments || [],
               timestamp: m.timestamp ? new Date(m.timestamp).getTime() : Date.now(),
             })),
             modelId: s.model_id || 'openrouter/free',
             provider: s.provider_name || 'openrouter',
             createdAt: s.created_at ? new Date(s.created_at).getTime() : Date.now(),
           }));
-          set({ sessions: loaded });
+          set((state) => ({
+            sessions: loaded,
+            openTabIds: state.openTabIds.length > 0 ? state.openTabIds : loaded.map((s) => s.id),
+          }));
           saveToLocal(loaded);
           if (loaded.length > 0) {
             set({ activeSessionId: loaded[loaded.length - 1].id });
@@ -320,7 +413,11 @@ export const useAppStore = create<AppStore>((set, get) => ({
       // Final fallback — always try localStorage, regardless of IPC/HTTP state
       const local = loadFromLocal();
       if (local.length > 0) {
-        set({ sessions: local, activeSessionId: local[local.length - 1].id });
+        set((state) => ({
+          sessions: local,
+          openTabIds: state.openTabIds.length > 0 ? state.openTabIds : local.map((s) => s.id),
+          activeSessionId: local[local.length - 1].id,
+        }));
       }
     } catch { /* ignore */ }
   },
@@ -335,8 +432,20 @@ export const useAppStore = create<AppStore>((set, get) => ({
       createdAt: Date.now(),
     };
 
+    const { backendUrl, activeWorkspaceId } = get();
+
+    // Deep binding: if a workspace is active, append the new session to it
+    // (fire-and-forget — state update below is synchronous).
+    if (activeWorkspaceId && backendUrl) {
+      const wsId = activeWorkspaceId;
+      fetch(`${backendUrl}/api/workspaces/${wsId}/sessions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: session.id }),
+      }).catch(() => {});
+    }
+
     // Persist to backend (fire-and-forget — don't block state update)
-    const { backendUrl } = get();
     if (window.icode && window.icode.createSession) {
       window.icode.createSession({
         id: session.id,
@@ -361,10 +470,27 @@ export const useAppStore = create<AppStore>((set, get) => ({
     set((state) => ({
       sessions: [...state.sessions, session],
       activeSessionId: session.id,
+      openTabIds: state.openTabIds.includes(session.id)
+        ? state.openTabIds
+        : [...state.openTabIds, session.id],
+      // Optimistic workspace membership update so the sidebar count reflects
+      // the new session immediately (backend is the source of truth).
+      workspaces: activeWorkspaceId
+        ? state.workspaces.map((w) =>
+            w.id === activeWorkspaceId && !w.session_ids.includes(session.id)
+              ? { ...w, session_ids: [...w.session_ids, session.id] }
+              : w
+          )
+        : state.workspaces,
     }));
   },
 
-  setActiveSession: (id) => set({ activeSessionId: id }),
+  setActiveSession: (id) => set((state) => ({
+    activeSessionId: id,
+    openTabIds: state.openTabIds.includes(id)
+      ? state.openTabIds
+      : [...state.openTabIds, id],
+  })),
 
   renameSession: (id, title) => {
     const clean = (title || '').trim();
@@ -393,13 +519,80 @@ export const useAppStore = create<AppStore>((set, get) => ({
       if (nextId === id) {
         nextId = remaining.length > 0 ? remaining[remaining.length - 1].id : null;
       }
-      return { sessions: remaining, activeSessionId: nextId };
+      return {
+        sessions: remaining,
+        activeSessionId: nextId,
+        openTabIds: state.openTabIds.filter((t) => t !== id),
+      };
     });
     // Also delete from backend
     const { backendUrl } = get();
     if (backendUrl) {
       fetch(`${backendUrl}/api/sessions/${id}`, { method: 'DELETE' }).catch(() => {});
     }
+  },
+
+  // closeTab removes a session from the open-tab strip WITHOUT deleting it.
+  // If the last open tab is closed, a fresh session is spawned (which is
+  // auto-bound to the active workspace), so the strip always has ≥1 entry.
+  closeTab: (id) => {
+    const state = get();
+    const remaining = state.openTabIds.filter((t) => t !== id);
+    if (remaining.length === 0) {
+      const active = state.sessions.find((s) => s.id === state.activeSessionId);
+      state.createSession(active?.modelId || state.selectedModel, active?.provider || 'openrouter');
+      return;
+    }
+    set({ openTabIds: remaining });
+    if (state.activeSessionId === id) {
+      set({ activeSessionId: remaining[remaining.length - 1] });
+    }
+  },
+
+  // ── Workspaces ──
+  loadWorkspaces: async () => {
+    const { backendUrl } = get();
+    if (!backendUrl) return;
+    try {
+      const res = await fetch(`${backendUrl}/api/workspaces`, { cache: 'no-cache' });
+      if (res.ok) {
+        const data = await res.json();
+        set({ workspaces: data.workspaces || [] });
+      }
+    } catch { /* ignore */ }
+  },
+
+  createWorkspace: async (name, path) => {
+    const { backendUrl } = get();
+    if (!backendUrl) return;
+    try {
+      const res = await fetch(`${backendUrl}/api/workspaces`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, path }),
+      });
+      if (res.ok) {
+        await get().loadWorkspaces();
+      }
+    } catch { /* ignore */ }
+  },
+
+  setActiveWorkspace: (id) => {
+    set({ activeWorkspaceId: id });
+    const ws = get().workspaces.find((w) => w.id === id);
+    // When switching into a workspace that already holds sessions, jump to
+    // its most recent one (deep session↔workspace binding).
+    if (ws && ws.session_ids.length > 0) {
+      const last = ws.session_ids[ws.session_ids.length - 1];
+      set((state) => ({
+        activeSessionId: last,
+        openTabIds: state.openTabIds.includes(last)
+          ? state.openTabIds
+          : [...state.openTabIds, last],
+      }));
+    }
+    // Empty workspace: keep the current session so the user can start one
+    // (createSession will auto-bind it to this workspace).
   },
 
   addMessage: (sessionId, msg) => {
@@ -435,22 +628,51 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }));
   },
 
-  tokenUsage: { input: 0, output: 0, cacheHit: 0, cost: '¥0.00' },
+  tokenUsage: { input: 0, output: 0, cacheHit: 0, cost: '¥0.00', saved: 0 },
   updateTokenUsage: (usage) => {
     set((state) => ({
       tokenUsage: { ...state.tokenUsage, ...usage },
     }));
   },
+
+  // Custom models (user-added providers)
+  customModels: loadCustomModels(),
+  addCustomModel: (model) => {
+    set((state) => {
+      const updated = [...state.customModels, model];
+      saveCustomModels(updated);
+      return { customModels: updated, models: [...state.models, model] };
+    });
+  },
+  removeCustomModel: (modelId) => {
+    set((state) => {
+      const updated = state.customModels.filter((m) => m.id !== modelId);
+      saveCustomModels(updated);
+      return {
+        customModels: updated,
+        models: state.models.filter((m) => m.id !== modelId),
+      };
+    });
+  },
 }));
 
-// Auto-persist sessions to localStorage on every change
+// Auto-persist sessions + open tabs + active selection to localStorage so
+// they survive route changes and restarts.
 useAppStore.subscribe((state) => {
   saveToLocal(state.sessions || []);
+  try {
+    localStorage.setItem(LS_TABS, JSON.stringify(state.openTabIds || []));
+    if (state.activeSessionId) localStorage.setItem(LS_ACTIVE, state.activeSessionId);
+    if (state.activeWorkspaceId) localStorage.setItem(LS_WORKSPACE, state.activeWorkspaceId);
+  } catch {}
 });
 
 // ── localStorage persistence (fallback when backend is unavailable) ──
 
 const LS_KEY = 'icode.sessions';
+const LS_TABS = 'icode.openTabIds';
+const LS_ACTIVE = 'icode.activeSessionId';
+const LS_WORKSPACE = 'icode.activeWorkspaceId';
 
 function saveToLocal(sessions: Session[]) {
   try {
@@ -461,6 +683,44 @@ function saveToLocal(sessions: Session[]) {
 function loadFromLocal(): Session[] {
   try {
     const raw = localStorage.getItem(LS_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function loadOpenTabs(): string[] {
+  try {
+    const raw = localStorage.getItem(LS_TABS);
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
+function loadActiveWorkspace(): string | null {
+  try {
+    const raw = localStorage.getItem(LS_WORKSPACE);
+    return raw ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+// ── Custom models persistence ──
+
+const CUSTOM_MODELS_KEY = 'icode.customModels';
+
+function saveCustomModels(models: Model[]) {
+  try {
+    localStorage.setItem(CUSTOM_MODELS_KEY, JSON.stringify(models));
+  } catch {}
+}
+
+function loadCustomModels(): Model[] {
+  try {
+    const raw = localStorage.getItem(CUSTOM_MODELS_KEY);
     return raw ? JSON.parse(raw) : [];
   } catch {
     return [];

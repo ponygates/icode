@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../stores/appStore';
 import { PageTools, PageUpdates, PageAbout } from './SettingsPagesExtra';
 import {
-  Settings, X, Key, Globe, Shield, Cpu, Moon, Sun, Monitor,
+  Settings, X, Key, Globe, Shield, Cpu, Moon, Sun, Monitor, Laptop,
   Zap, Wrench, Boxes, DollarSign, ChevronDown, Check, Plus, Trash2,
   Thermometer, Hash, Layers, RefreshCw, Info, ExternalLink, Star, AlertCircle,
 } from 'lucide-react';
@@ -12,7 +12,7 @@ import {
 // Reasonix-style Settings Modal
 // ═══════════════════════════════════════════════════════════════
 
-type PageId = 'general' | 'models' | 'mcp' | 'skills' | 'billing' | 'shortcuts' | 'tools' | 'updates' | 'about';
+type PageId = 'general' | 'models' | 'mcp' | 'skills' | 'billing' | 'shortcuts' | 'tools' | 'updates' | 'about' | 'desktop';
 
 interface PageMeta { id: PageId; icon: React.ElementType; labelKey: string; }
 
@@ -25,6 +25,7 @@ const PAGES: PageMeta[] = [
   { id: 'billing',  icon: DollarSign,  labelKey: 'pageBilling' },
   { id: 'updates',  icon: RefreshCw,   labelKey: 'pageUpdates' },
   { id: 'shortcuts',icon: Boxes,       labelKey: 'pageShortcuts' },
+  { id: 'desktop',  icon: Laptop,      labelKey: 'pageDesktop' },
   { id: 'about',    icon: Info,        labelKey: 'pageAbout' },
 ];
 
@@ -53,7 +54,7 @@ const SettingsPage: React.FC<{ visible: boolean; onClose: () => void }> = ({ vis
         {/* Left nav — Reasonix settings-side pattern */}
         <nav style={sideStyle}>
           <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', padding: '16px 20px 12px' }}>
-            设置
+            {t('settings.title')}
           </div>
           {PAGES.map((p) => {
             const Icon = p.icon;
@@ -101,6 +102,7 @@ const SettingsPage: React.FC<{ visible: boolean; onClose: () => void }> = ({ vis
             {page === 'billing' && <PageBilling store={store} />}
             {page === 'updates' && <PageUpdates store={store} />}
             {page === 'shortcuts' && <PageShortcuts />}
+            {page === 'desktop' && <PageDesktop store={store} />}
             {page === 'about' && <PageAbout store={store} />}
           </div>
         </div>
@@ -114,6 +116,7 @@ const SettingsPage: React.FC<{ visible: boolean; onClose: () => void }> = ({ vis
 // ═══════════════════════════════════════════════════════════════
 
 function PageGeneral({ store }: { store: ReturnType<typeof useAppStore.getState> }) {
+  const { t } = useTranslation();
   const [theme, setTheme] = useState(() =>
     document.documentElement.getAttribute('data-theme') || 'dark');
 
@@ -131,12 +134,12 @@ function PageGeneral({ store }: { store: ReturnType<typeof useAppStore.getState>
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:20 }}>
       {/* Theme */}
-      <Section title="外观">
+      <Section title={t('settings.appearance')}>
         <div style={{ display:'flex', gap:6 }}>
           {[
-            { v:'dark',  icon: Moon, label:'深色' },
-            { v:'light', icon: Sun, label:'浅色' },
-            { v:'auto',  icon: Monitor, label:'自动' },
+            { v:'dark',  icon: Moon, label: t('settings.dark') },
+            { v:'light', icon: Sun, label: t('settings.light') },
+            { v:'auto',  icon: Monitor, label: t('settings.auto') },
           ].map(o => {
             const sel = theme === o.v;
             return (
@@ -155,7 +158,7 @@ function PageGeneral({ store }: { store: ReturnType<typeof useAppStore.getState>
       </Section>
 
       {/* Font Size */}
-      <Section title="界面字号">
+      <Section title={t('settings.fontSize')}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <span style={{ fontSize: 11, color: 'var(--text-muted)', minWidth: 30 }}>12</span>
           <input type="range" min={10} max={20} step={0.5} defaultValue={13}
@@ -170,39 +173,39 @@ function PageGeneral({ store }: { store: ReturnType<typeof useAppStore.getState>
       </Section>
 
       {/* Language */}
-      <Section title="语言">
+      <Section title={t('settings.language')}>
         <select style={selectStyle} defaultValue={store.language}
           onChange={(e) => store.setLanguage(e.target.value)}>
-          <option value="zh-CN">简体中文</option>
-          <option value="zh-TW">繁體中文</option>
-          <option value="en">English</option>
+          <option value="zh-CN">{t('lang.zhCN')}</option>
+          <option value="zh-TW">{t('lang.zhTW')}</option>
+          <option value="en">{t('lang.en')}</option>
         </select>
       </Section>
 
       {/* Security Level */}
-      <Section title="安全等级" desc="控制数据隐私边界。等级越高，对外发送的限制越严格。">
+      <Section title={t('settings.securityLevel')} desc={t('settings.securityDesc')}>
         <select style={selectStyle} value={store.securityLevel}
           onChange={(e) => store.setSecurityLevel(e.target.value)}>
-          <option value="local">🔒 本地 — 所有数据仅本地处理</option>
-          <option value="desensitize">🛡 脱敏 — 隐藏敏感信息后发送</option>
-          <option value="local-llm">💻 本地大模型 — 仅调用本地模型</option>
-          <option value="foreign-llm">🌐 国外大模型 — 允许国外 API</option>
-          <option value="unrestricted">⚠ 无限制</option>
+          <option value="local">🔒 {t('settings.secLocal')}</option>
+          <option value="desensitize">🛡 {t('settings.secDesensitize')}</option>
+          <option value="local-llm">💻 {t('settings.secLocalLLM')}</option>
+          <option value="foreign-llm">🌐 {t('settings.secForeignLLM')}</option>
+          <option value="unrestricted">⚠ {t('settings.secUnrestricted')}</option>
         </select>
         <div style={{ fontSize:11, color:'var(--text-muted)', marginTop:6 }}>
           <Shield size={10} style={{display:'inline',marginRight:4}} />
-          当前: <b>{store.securityLevel === 'local' ? '所有数据仅本地处理，不发送到外部' : store.securityLevel}</b>
+          {t('settings.currentLevel')} <b>{store.securityLevel === 'local' ? t('settings.localOnly') : store.securityLevel}</b>
         </div>
       </Section>
 
       {/* Permission Mode */}
-      <Section title="权限模式" desc="控制工具调用的确认方式。">
+      <Section title={t('settings.permissionMode')} desc={t('settings.permissionDesc')}>
         <div style={{ display:'flex', gap:6 }}>
           {[
-            { v:'plan',  label:'plan — 只读，修改被阻止' },
-            { v:'agent', label:'agent — 每次操作确认' },
-            { v:'auto',  label:'auto — 只读自动，修改询问' },
-            { v:'yolo',  label:'yolo — 全自动，无需确认' },
+            { v:'plan',  label: t('settings.modePlan') },
+            { v:'agent', label: t('settings.modeAgent') },
+            { v:'auto',  label: t('settings.modeAuto') },
+            { v:'yolo',  label: t('settings.modeYolo') },
           ].map(({v, label}) => {
             const sel = store.mode === v || (store.mode === 'plan' && v === 'agent');
             return (
@@ -226,6 +229,7 @@ function PageGeneral({ store }: { store: ReturnType<typeof useAppStore.getState>
 // ═══════════════════════════════════════════════════════════════
 
 function PageModels({ store }: { store: ReturnType<typeof useAppStore.getState> }) {
+  const { t } = useTranslation();
   const models = store.models;
   const providers = Array.from(new Set(models.map(m => m.provider)));
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -323,13 +327,13 @@ function PageModels({ store }: { store: ReturnType<typeof useAppStore.getState> 
                   {provider}
                 </div>
                 <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
-                  {pModels.length} 个模型 · {hasKeyConfigured ? '已配置 API Key' : '点击配置'}
+                  {t('models.modelsCount', { count: pModels.length })} · {hasKeyConfigured ? t('models.configured') : t('models.clickConfig')}
                 </div>
               </div>
               {hasKeyConfigured && <span style={{
                 fontSize: 9, padding: '2px 6px', borderRadius: 4, background: 'rgba(63,185,80,0.12)', color: 'var(--success)',
               }}>
-                <Check size={10} style={{display:'inline',marginRight:2}} />已关联
+                <Check size={10} style={{display:'inline',marginRight:2}} />{t('settings.connected')}
               </span>}
               <ChevronDown size={14} color="var(--text-muted)" style={{
                 transform: isOpen ? 'rotate(180deg)' : 'rotate(0deg)',
@@ -395,23 +399,23 @@ function PageModels({ store }: { store: ReturnType<typeof useAppStore.getState> 
                       {isEditing && (
                         <div style={{ marginTop: 12, display:'flex', flexDirection:'column', gap: 10, animation: 'fadeIn 0.15s ease' }}>
                           <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
-                            <Field label="API Key" type="password" placeholder="sk-..."
+                            <Field label={t('settings.apiKey')} type="password" placeholder="sk-..."
                               value={ed?.apiKey || ''}
                               onChange={v => updateField(model.id, 'apiKey', v)} />
-                            <Field label="Base URL" placeholder="默认端点"
+                            <Field label={t('settings.baseUrl')} placeholder={t('settings.defaultEndpoint')}
                               value={ed?.apiBase || ''}
                               onChange={v => updateField(model.id, 'apiBase', v)} />
                           </div>
                           <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10 }}>
                             <div>
-                              <label style={lbl}>温度 {ed?.temp?.toFixed(1) ?? '0.7'}</label>
+                              <label style={lbl}>{t('settings.temperature')} {ed?.temp?.toFixed(1) ?? '0.7'}</label>
                               <input type="range" min={0} max={2} step={0.1}
                                 value={ed?.temp ?? 0.7}
                                 onChange={e => updateField(model.id, 'temp', parseFloat(e.target.value))}
                                 style={{ width: '100%', accentColor: color }} />
                             </div>
                             <div>
-                              <label style={lbl}>最大 Token {(ed?.maxToks && ed.maxToks >= 1000) ? `${(ed.maxToks/1000).toFixed(1)}K` : ed?.maxToks ?? '4K'}</label>
+                              <label style={lbl}>{t('settings.maxTokens')} {(ed?.maxToks && ed.maxToks >= 1000) ? `${(ed.maxToks/1000).toFixed(1)}K` : ed?.maxToks ?? '4K'}</label>
                               <input type="range" min={256} max={128000} step={256}
                                 value={ed?.maxToks ?? 4096}
                                 onChange={e => updateField(model.id, 'maxToks', parseInt(e.target.value))}
@@ -422,13 +426,13 @@ function PageModels({ store }: { store: ReturnType<typeof useAppStore.getState> 
                           {/* Actions */}
                           <div style={{ display:'flex', gap:6, justifyContent:'flex-end' }}>
                             <button onClick={() => doDeleteKey(model.id)} style={btnGhost}>
-                              <Trash2 size={11} /> 清除
+                              <Trash2 size={11} /> {t('settings.clear')}
                             </button>
-                            <button onClick={() => setEditingModel(null)} style={btnGhost}>取消</button>
+                            <button onClick={() => setEditingModel(null)} style={btnGhost}>{t('settings.cancel')}</button>
                             <button onClick={() => doSave(model.id)} style={{
                               ...btnPrimary, background: isSaved ? 'var(--success)' : color,
                             }}>
-                              {isSaved ? <><Check size={12} /> 已保存</> : '保存'}
+                              {isSaved ? <><Check size={12} /> {t('settings.saved')}</> : t('settings.save')}
                             </button>
                           </div>
                         </div>
@@ -447,7 +451,7 @@ function PageModels({ store }: { store: ReturnType<typeof useAppStore.getState> 
         <button onClick={() => store.refreshModels()} style={{
           ...btnGhost, fontSize: 11, padding: '6px 14px',
         }}>
-          <RefreshCw size={12} /> 刷新模型列表
+          <RefreshCw size={12} /> {t('settings.refreshModels')}
         </button>
       </div>
     </div>
@@ -465,6 +469,7 @@ interface MCPServerView {
 }
 
 function PageMCP({ store }: { store: ReturnType<typeof useAppStore.getState> }) {
+  const { t } = useTranslation();
   const [servers, setServers] = useState<MCPServerView[]>([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<string | null>(null);    // server name being edited
@@ -518,7 +523,7 @@ function PageMCP({ store }: { store: ReturnType<typeof useAppStore.getState> }) 
   };
 
   const doDelete = async (name: string) => {
-    if (!window.confirm(`确定删除 MCP 服务器「${name}」？`)) return;
+    if (!window.confirm(t('settings.deleteMcpConfirm', { name }))) return;
     await api('', { method:'DELETE', body: JSON.stringify({ name }) });
     load(); loadTools();
   };
@@ -538,24 +543,24 @@ function PageMCP({ store }: { store: ReturnType<typeof useAppStore.getState> }) 
   };
 
   if (loading && servers.length === 0) {
-    return <Section title="MCP 服务器"><div style={{padding:16,textAlign:'center',fontSize:12,color:'var(--text-muted)'}}>加载中...</div></Section>;
+    return <Section title={t('settings.mcpTitle')}><div style={{padding:16,textAlign:'center',fontSize:12,color:'var(--text-muted)'}}>{t('settings.loading')}</div></Section>;
   }
 
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
       {/* Toolbar */}
       <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
-        <Section title="MCP 服务器" desc="管理 Model Context Protocol 服务器连接，添加后自动发现工具并注入引擎。">
+        <Section title={t('settings.mcpTitle')} desc={t('settings.mcpDesc')}>
           <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginTop: -4 }}>
-            {servers.length} 台服务器 · {allTools.length} 个工具
+            {t('settings.serverCount', { count: servers.length })} · {t('settings.toolCount', { count: allTools.length })}
           </div>
         </Section>
         <div style={{ display:'flex', gap:6 }}>
           <button onClick={() => { setShowTools(!showTools); if(!showTools) loadTools(); }} style={btnGhost}>
-            <Layers size={12} /> 工具列表
+            <Layers size={12} /> {t('settings.toolList')}
           </button>
           <button onClick={startAdd} style={{ ...btnPrimary, background: 'var(--accent)' }}>
-            <Plus size={12} /> 添加服务器
+            <Plus size={12} /> {t('settings.addServer')}
           </button>
         </div>
       </div>
@@ -563,9 +568,9 @@ function PageMCP({ store }: { store: ReturnType<typeof useAppStore.getState> }) 
       {/* Tools panel */}
       {showTools && (
         <div style={{ padding:12, background:'var(--bg-primary)', borderRadius:8, border:'1px solid var(--border-color)', fontSize:11, maxHeight:160, overflowY:'auto' }}>
-          <div style={{ fontWeight:600, color:'var(--text-primary)', marginBottom:6 }}>已发现 MCP 工具</div>
+          <div style={{ fontWeight:600, color:'var(--text-primary)', marginBottom:6 }}>{t('settings.discoveredTools')}</div>
           {allTools.length === 0
-            ? <div style={{ color:'var(--text-muted)' }}>暂无工具，添加 MCP 服务器后自动发现</div>
+            ? <div style={{ color:'var(--text-muted)' }}>{t('settings.noTools')}</div>
             : allTools.map(t => <div key={t} style={{ padding:'3px 0', color:'var(--text-secondary)', fontFamily:'var(--font-mono)', fontSize:10 }}>{t}</div>)
           }
         </div>
@@ -574,12 +579,12 @@ function PageMCP({ store }: { store: ReturnType<typeof useAppStore.getState> }) 
       {/* Add form */}
       {adding && (
         <div style={{ padding:14, background:'var(--bg-primary)', borderRadius:10, border:'1px solid var(--accent)', animation:'fadeIn 0.12s' }}>
-          <div style={{ fontSize:12, fontWeight:600, color:'var(--accent)', marginBottom:10 }}>+ 新建 MCP 服务器</div>
+          <div style={{ fontSize:12, fontWeight:600, color:'var(--accent)', marginBottom:10 }}>{t('settings.newMcp')}</div>
           <MCPServerForm form={form} setForm={setForm} />
           <div style={{ display:'flex', gap:6, justifyContent:'flex-end', marginTop:10 }}>
-            <button onClick={() => setAdding(false)} style={btnGhost}>取消</button>
+            <button onClick={() => setAdding(false)} style={btnGhost}>{t('settings.cancel')}</button>
             <button onClick={doSave} disabled={!form.name || !form.command} style={{...btnPrimary, background:'var(--accent)', opacity:(!form.name||!form.command)?0.5:1}}>
-              <Check size={12} /> 保存
+              <Check size={12} /> {t('settings.saveMcp')}
             </button>
           </div>
         </div>
@@ -589,8 +594,8 @@ function PageMCP({ store }: { store: ReturnType<typeof useAppStore.getState> }) 
       {servers.length === 0 && !adding && (
         <div style={{ padding:24, textAlign:'center', color:'var(--text-muted)', fontSize:12 }}>
           <Wrench size={24} style={{ marginBottom:8, opacity:0.4 }} />
-          <div>暂无 MCP 服务器</div>
-          <button onClick={startAdd} style={{ ...btnGhost, margin:'10px auto 0' }}><Plus size={12} /> 添加第一个</button>
+          <div>{t('settings.noMcp')}</div>
+          <button onClick={startAdd} style={{ ...btnGhost, margin:'10px auto 0' }}><Plus size={12} /> {t('settings.addFirst')}</button>
         </div>
       )}
 
@@ -618,16 +623,16 @@ function PageMCP({ store }: { store: ReturnType<typeof useAppStore.getState> }) 
                 <div style={{ display:'flex', alignItems:'center', gap:6 }}>
                   <span style={{ fontSize:13, fontWeight:600, color:'var(--text-primary)' }}>{s.name}</span>
                   {s.connected
-                    ? <span style={{ fontSize:9, padding:'1px 6px', borderRadius:4, background:'rgba(63,185,80,0.1)', color:'var(--success)' }}>已连接</span>
-                    : <span style={{ fontSize:9, padding:'1px 6px', borderRadius:4, background:'rgba(239,68,68,0.1)', color:'#EF4444' }}>未连接</span>
+                    ? <span style={{ fontSize:9, padding:'1px 6px', borderRadius:4, background:'rgba(63,185,80,0.1)', color:'var(--success)' }}>{t('settings.connected')}</span>
+                    : <span style={{ fontSize:9, padding:'1px 6px', borderRadius:4, background:'rgba(239,68,68,0.1)', color:'#EF4444' }}>{t('settings.disconnected')}</span>
                   }
-                  {!s.enabled && <span style={{ fontSize:9, padding:'1px 6px', borderRadius:4, background:'rgba(255,159,67,0.1)', color:'#FF9F43' }}>已禁用</span>}
+                  {!s.enabled && <span style={{ fontSize:9, padding:'1px 6px', borderRadius:4, background:'rgba(255,159,67,0.1)', color:'#FF9F43' }}>{t('settings.disabled')}</span>}
                 </div>
                 <div style={{ fontSize:10, color:'var(--text-muted)', marginTop:2, fontFamily:'var(--font-mono)', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
                   {s.command}{s.args?.length ? ' ' + s.args.join(' ') : ''}
                 </div>
                 <div style={{ fontSize:9.5, color:'var(--text-muted)', marginTop:1 }}>
-                  {s.tools} 个工具 · {s.type}
+                  {t('settings.toolCount', { count: s.tools })} · {s.type}
                 </div>
               </div>
               {/* Actions */}
@@ -642,26 +647,26 @@ function PageMCP({ store }: { store: ReturnType<typeof useAppStore.getState> }) 
                       load();
                     } catch {}
                   }}
-                  title="预信任模式"
+                  title={t('settings.trustMode')}
                   style={{
                     fontSize: 10, padding: '1px 4px', borderRadius: 4,
                     border: '1px solid var(--border-color)',
                     background: 'var(--bg-secondary)', color: 'var(--text-muted)',
                     cursor: 'pointer', maxWidth: 80,
                   }}>
-                  <option value="ask">🔒 全部询问</option>
-                  <option value="readonly">📖 只读预信任</option>
-                  <option value="all">🔓 全部预信任</option>
+                  <option value="ask">🔒 {t('settings.trustAll')}</option>
+                  <option value="readonly">📖 {t('settings.trustReadonly')}</option>
+                  <option value="all">🔓 {t('settings.trustFull')}</option>
                 </select>
 
-                <button onClick={() => doTest(s)} title="测试连接" style={{
+                <button onClick={() => doTest(s)} title={t('settings.testConnection')} style={{
                   width:26, height:26, borderRadius:6, border:'1px solid var(--border-color)',
                   background:'transparent', color:'var(--text-muted)', cursor:'pointer',
                   display:'flex', alignItems:'center', justifyContent:'center',
                 }}>
                   <RefreshCw size={11} />
                 </button>
-                <button onClick={() => startEdit(s)} title="编辑" style={{
+                <button onClick={() => startEdit(s)} title={t('settings.edit')} style={{
                   width:26, height:26, borderRadius:6, border:'1px solid var(--border-color)',
                   background: isEditing ? 'var(--accent-soft)' : 'transparent',
                   color: isEditing ? 'var(--accent)' : 'var(--text-muted)', cursor:'pointer',
@@ -669,7 +674,7 @@ function PageMCP({ store }: { store: ReturnType<typeof useAppStore.getState> }) 
                 }}>
                   <Settings size={11} />
                 </button>
-                <button onClick={() => doDelete(s.name)} title="删除" style={{
+                <button onClick={() => doDelete(s.name)} title={t('settings.delete')} style={{
                   width:26, height:26, borderRadius:6, border:'1px solid rgba(239,68,68,0.25)',
                   background:'transparent', color:'#EF4444', cursor:'pointer',
                   display:'flex', alignItems:'center', justifyContent:'center',
@@ -687,8 +692,8 @@ function PageMCP({ store }: { store: ReturnType<typeof useAppStore.getState> }) 
                 color: testResult.ok ? 'var(--success)' : '#EF4444',
               }}>
                 {testResult.ok
-                  ? <>✅ 连接成功 · 发现 {testResult.tools?.length || 0} 个工具：{testResult.tools?.join(', ') || '无'}</>
-                  : <>❌ 连接失败：{testResult.error}</>
+                  ? <>✅ {t('settings.testSuccess')} · {t('settings.toolCount', { count: testResult.tools?.length || 0 })}：{testResult.tools?.join(', ') || t('settings.testNone')}</>
+                  : <>❌ {t('settings.testFailed')}{testResult.error}</>
                 }
                 <span style={{ cursor:'pointer', marginLeft:8, opacity:0.5 }} onClick={() => setTestResult(null)}>✕</span>
               </div>
@@ -700,9 +705,9 @@ function PageMCP({ store }: { store: ReturnType<typeof useAppStore.getState> }) 
                 <div style={{ height:1, background:'var(--border-color)', marginBottom:10 }} />
                 <MCPServerForm form={form} setForm={setForm} />
                 <div style={{ display:'flex', gap:6, justifyContent:'flex-end', marginTop:10 }}>
-                  <button onClick={() => setEditing(null)} style={btnGhost}>取消</button>
+                  <button onClick={() => setEditing(null)} style={btnGhost}>{t('settings.cancel')}</button>
                   <button onClick={doSave} style={{...btnPrimary, background:'var(--accent)'}}>
-                    <Check size={12} /> 更新
+                    <Check size={12} /> {t('settings.update')}
                   </button>
                 </div>
               </div>
@@ -716,23 +721,24 @@ function PageMCP({ store }: { store: ReturnType<typeof useAppStore.getState> }) 
 
 // MCP server form fields (shared by add & edit)
 function MCPServerForm({ form, setForm }: { form: any; setForm: (f: any) => void }) {
+  const { t } = useTranslation();
   const upd = (k: string, v: any) => setForm({ ...form, [k]: v });
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
       <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8 }}>
-        <Field label="名称" placeholder="my-server" value={form.name}
+        <Field label={t('settings.nameLabel')} placeholder="my-server" value={form.name}
           onChange={v => upd('name', v)} />
         <div>
-          <label style={lbl}>类型</label>
+          <label style={lbl}>{t('settings.typeLabel')}</label>
           <select style={selectStyle} value={form.type} onChange={e => upd('type', e.target.value)}>
             <option value="stdio">stdio</option>
             <option value="sse">SSE</option>
           </select>
         </div>
       </div>
-      <Field label="命令" placeholder="npx" value={form.command}
+      <Field label={t('settings.commandLabel')} placeholder="npx" value={form.command}
         onChange={v => upd('command', v)} mono />
-      <Field label="参数（空格分隔）" placeholder="-y @modelcontextprotocol/server-filesystem E:\" value={form.args}
+      <Field label={t('settings.argsLabel')} placeholder="-y @modelcontextprotocol/server-filesystem E:\" value={form.args}
         onChange={v => upd('args', v)} mono />
       {form.type === 'sse' && (
         <Field label="URL" placeholder="http://localhost:3000/mcp" value={form.url}
@@ -741,7 +747,7 @@ function MCPServerForm({ form, setForm }: { form: any; setForm: (f: any) => void
       <label style={{ display:'flex', alignItems:'center', gap:8, cursor:'pointer', fontSize:12 }}>
         <input type="checkbox" checked={form.enabled}
           onChange={e => upd('enabled', e.target.checked)} />
-        启用（启动时自动连接）
+        {t('settings.enableLabel')}
       </label>
     </div>
   );
@@ -752,78 +758,278 @@ function MCPServerForm({ form, setForm }: { form: any; setForm: (f: any) => void
 // ═══════════════════════════════════════════════════════════════
 
 function PageSkills() {
+  const { t } = useTranslation();
   const store = useAppStore();
-  const [content, setContent] = useState('加载中...');
-  const [saved, setSaved] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const [skills, setSkills] = useState<any[]>([]);
+  const [connectors, setConnectors] = useState<any[]>([]);
+  const [mem, setMem] = useState('');
+  const [loadingSkills, setLoadingSkills] = useState(true);
+  const [memSaved, setMemSaved] = useState(false);
+  const [memLoading, setMemLoading] = useState(true);
+
+  // Market state
+  const [tab, setTab] = useState<'installed' | 'market'>('installed');
+  const [market, setMarket] = useState<any[]>([]);
+  const [loadingMarket, setLoadingMarket] = useState(true);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [importPath, setImportPath] = useState('');
+  const [importMsg, setImportMsg] = useState('');
+
+  const loadMarket = async () => {
+    if (!store.backendUrl) return;
+    setLoadingMarket(true);
+    try {
+      const r = await fetch(`${store.backendUrl}/api/skills/market`);
+      if (r.ok) { const d = await r.json(); setMarket(d.market || []); }
+    } catch {}
+    setLoadingMarket(false);
+  };
+
+  const installSkill = async (name: string) => {
+    if (!store.backendUrl) return;
+    setBusy(name);
+    try {
+      const r = await fetch(`${store.backendUrl}/api/skills/market/install`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      if (r.ok) {
+        setMarket((prev) => prev.map((m: any) => m.name === name ? { ...m, installed: true } : m));
+        const sk = await fetch(`${store.backendUrl}/api/skills`);
+        if (sk.ok) { const d = await sk.json(); setSkills(d.skills || []); }
+      }
+    } catch {}
+    setBusy(null);
+  };
+
+  const uninstallSkill = async (name: string) => {
+    if (!store.backendUrl) return;
+    if (!confirm(t('settings.skillMarket.uninstallConfirm'))) return;
+    setBusy(name);
+    try {
+      const r = await fetch(`${store.backendUrl}/api/skills/market/${encodeURIComponent(name)}`, { method: 'DELETE' });
+      if (r.ok) {
+        setMarket((prev) => prev.map((m: any) => m.name === name ? { ...m, installed: false } : m));
+        const sk = await fetch(`${store.backendUrl}/api/skills`);
+        if (sk.ok) { const d = await sk.json(); setSkills(d.skills || []); }
+      }
+    } catch {}
+    setBusy(null);
+  };
+
+  const importSkill = async () => {
+    if (!store.backendUrl || !importPath.trim()) return;
+    setImportMsg('');
+    try {
+      const r = await fetch(`${store.backendUrl}/api/skills/import`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: importPath.trim() }),
+      });
+      const d = await r.json().catch(() => ({} as any));
+      if (r.ok) {
+        setImportMsg(t('settings.skillMarket.importDone'));
+        setImportPath('');
+        const sk = await fetch(`${store.backendUrl}/api/skills`);
+        if (sk.ok) { const d2 = await sk.json(); setSkills(d2.skills || []); }
+        await loadMarket();
+      } else {
+        setImportMsg(t('settings.skillMarket.importFailed') + (d.error || 'unknown'));
+      }
+    } catch (e: any) {
+      setImportMsg(t('settings.skillMarket.importFailed') + (e?.message || 'unknown'));
+    }
+  };
 
   useEffect(() => {
     const load = async () => {
-      setLoading(true);
+      setLoadingSkills(true);
       try {
         if (store.backendUrl) {
-          const res = await fetch(`${store.backendUrl}/api/memory/icode`);
-          if (res.ok) {
-            const data = await res.json();
-            setContent(data.content || data || '');
-          } else {
-            setContent('# iCode 记忆\n\n_暂无内容，用 # 命令在聊天中追加记忆。_');
-          }
+          const r = await fetch(`${store.backendUrl}/api/skills`);
+          if (r.ok) { const d = await r.json(); setSkills(d.skills || []); }
         }
-      } catch {
-        setContent('# iCode 记忆\n\n_无法连接到后端。_');
-      }
-      setLoading(false);
+      } catch {}
+      setLoadingSkills(false);
+      try {
+        if (store.backendUrl) {
+          const r = await fetch(`${store.backendUrl}/api/mcp`);
+          if (r.ok) setConnectors(await r.json());
+        }
+      } catch {}
+      try {
+        if (store.backendUrl) {
+          const r = await fetch(`${store.backendUrl}/api/memory/icode`);
+          if (r.ok) { const d = await r.json(); setMem(d.content || ''); }
+        }
+      } catch {}
+      setMemLoading(false);
+      await loadMarket();
     };
     load();
   }, [store.backendUrl]);
 
-  const handleSave = async () => {
+  const toggleSkill = async (name: string, enable: boolean) => {
     if (!store.backendUrl) return;
+    const method = enable ? 'POST' : 'DELETE';
     try {
-      await fetch(`${store.backendUrl}/api/memory/icode`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content }),
-      });
-      setSaved(true);
-      setTimeout(() => setSaved(false), 1500);
+      await fetch(`${store.backendUrl}/api/skills/${encodeURIComponent(name)}/enable`, { method });
+      setSkills((prev: any[]) => prev.map((s: any) => s.name === name ? { ...s, enabled: enable } : s));
     } catch {}
   };
 
+  const saveMem = async () => {
+    if (!store.backendUrl) return;
+    try {
+      await fetch(`${store.backendUrl}/api/memory/icode`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: mem }),
+      });
+      setMemSaved(true);
+      setTimeout(() => setMemSaved(false), 1500);
+    } catch {}
+  };
+
+  const cardStyle = {
+    display:'flex', alignItems:'center', justifyContent:'space-between', gap:10,
+    background:'var(--bg-primary)', borderRadius:8, border:'1px solid var(--border-color)', padding:'10px 12px',
+  };
+  const chipStyle = {
+    fontSize:11, padding:'4px 10px', borderRadius:6, border:'1px solid var(--border-color)',
+    background:'var(--bg-primary)', color:'var(--text-primary)', display:'inline-flex', alignItems:'center', gap:6,
+  };
+
   return (
-    <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
-      <Section title="结构化记忆" desc="编辑 ICODE.md（项目记忆）。用 # 命令在对话中快速追加，也可在这里手动编辑。">
-        <div style={{ fontSize:10, color:'var(--text-muted)', marginTop:-4 }}>
-          支持 Markdown 格式。内容会作为系统提示的一部分发送给 AI。
+    <div style={{ display:'flex', flexDirection:'column', gap:18 }}>
+      <Section title={t('settings.skillMarket.title')} desc={t('settings.skillMarket.desc')}>
+        <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+          <button onClick={() => setTab('installed')} style={{ padding: '6px 14px', borderRadius: 6, fontSize: 12, cursor: 'pointer', border: '1px solid ' + (tab === 'installed' ? 'var(--accent)' : 'var(--border-color)'), background: tab === 'installed' ? 'var(--accent)' : 'transparent', color: tab === 'installed' ? '#fff' : 'var(--text-primary)' }}>{t('settings.skillMarket.tabInstalled')}</button>
+          <button onClick={() => setTab('market')} style={{ padding: '6px 14px', borderRadius: 6, fontSize: 12, cursor: 'pointer', border: '1px solid ' + (tab === 'market' ? 'var(--accent)' : 'var(--border-color)'), background: tab === 'market' ? 'var(--accent)' : 'transparent', color: tab === 'market' ? '#fff' : 'var(--text-primary)' }}>{t('settings.skillMarket.tabMarket')}</button>
+        </div>
+
+        {tab === 'installed' ? (
+          loadingSkills ? (
+            <div style={{ padding: 16, textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>{t('settings.loading')}</div>
+          ) : skills.length === 0 ? (
+            <div style={{ padding: 16, textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>未安装技能</div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {skills.map((s: any) => (
+                <div key={s.name} style={cardStyle}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{s.name}</div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 1 }}>{s.description || '（无描述）'}</div>
+                    {s.triggers?.length > 0 && (
+                      <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>触发词：{s.triggers.join('、')}</div>
+                    )}
+                  </div>
+                  <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer', flexShrink: 0 }}>
+                    <span style={{ fontSize: 10, color: s.enabled ? 'var(--success)' : 'var(--text-muted)' }}>{s.enabled ? '启用' : '已禁用'}</span>
+                    <input type="checkbox" checked={!!s.enabled} onChange={(e) => toggleSkill(s.name, e.target.checked)} />
+                  </label>
+                </div>
+              ))}
+            </div>
+          )
+        ) : (
+          loadingMarket ? (
+            <div style={{ padding: 16, textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>{t('settings.loading')}</div>
+          ) : market.length === 0 ? (
+            <div style={{ padding: 16, textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>市场为空</div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {market.map((m: any) => (
+                <div key={m.name} style={cardStyle}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{m.name}</div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 1 }}>{m.description || '（无描述）'}</div>
+                    {m.triggers?.length > 0 && (
+                      <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>触发词：{m.triggers.join('、')}</div>
+                    )}
+                  </div>
+                  <button
+                    disabled={busy === m.name}
+                    onClick={() => m.installed ? uninstallSkill(m.name) : installSkill(m.name)}
+                    style={{
+                      flexShrink: 0, padding: '6px 14px', borderRadius: 6, fontSize: 11,
+                      cursor: busy === m.name ? 'default' : 'pointer',
+                      border: '1px solid ' + (m.installed ? 'var(--border-color)' : 'var(--accent)'),
+                      background: m.installed ? 'transparent' : 'var(--accent)',
+                      color: m.installed ? 'var(--text-primary)' : '#fff',
+                    }}
+                  >
+                    {busy === m.name ? t('settings.skillMarket.loading') : m.installed ? t('settings.skillMarket.uninstall') : t('settings.skillMarket.install')}
+                  </button>
+                </div>
+              ))}
+            </div>
+          )
+        )}
+
+        <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid var(--border-color)' }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 6 }}>{t('settings.skillMarket.importTitle')}</div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input
+              value={importPath}
+              onChange={(e) => setImportPath(e.target.value)}
+              placeholder={t('settings.skillMarket.importPlaceholder')}
+              style={{ flex: 1, padding: '7px 10px', borderRadius: 6, border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: 12, outline: 'none' }}
+            />
+            <button onClick={importSkill} style={{ padding: '6px 16px', borderRadius: 6, background: 'var(--accent)', border: 'none', color: '#fff', cursor: 'pointer', fontSize: 11 }}>{t('settings.skillMarket.importBtn')}</button>
+          </div>
+          {importMsg && (
+            <div style={{ fontSize: 11, color: importMsg.startsWith(t('settings.skillMarket.importFailed')) ? '#e5484d' : 'var(--success)', marginTop: 6 }}>{importMsg}</div>
+          )}
         </div>
       </Section>
-      {loading ? (
-        <div style={{padding:16,textAlign:'center',color:'var(--text-muted)',fontSize:12}}>加载中...</div>
-      ) : (
-        <>
-          <textarea
-            value={content}
-            onChange={(e) => setContent(e.target.value)}
-            style={{
-              width:'100%', minHeight:240, padding:12, borderRadius:8,
-              border:'1px solid var(--border-color)',
-              background:'var(--bg-primary)', color:'var(--text-primary)',
-              fontSize:12, fontFamily:'var(--font-mono)',
-              resize:'vertical', outline:'none', lineHeight:1.6,
-            }}
-          />
-          <div style={{ display:'flex', justifyContent:'flex-end' }}>
-            <button onClick={handleSave} style={{
-              padding:'6px 16px', borderRadius:6,
-              background: saved ? 'var(--success)' : 'var(--accent)',
-              border:'none', color:'#fff', cursor:'pointer', fontSize:11, fontWeight:500,
-            }}>
-              {saved ? '✓ 已保存' : '保存记忆'}
-            </button>
+
+      <Section title="连接器 (Connectors)" desc="通过 MCP 接入的外部工具源；WorkBuddy 的 mcp.json 会在启动时自动导入。">
+        {connectors.length === 0 ? (
+          <div style={{padding:16,textAlign:'center',color:'var(--text-muted)',fontSize:12}}>无连接器</div>
+        ) : (
+          <div style={{display:'flex',flexWrap:'wrap',gap:8}}>
+            {connectors.map((c: any) => (
+              <span key={c.name} style={chipStyle}>
+                {c.name}
+                <span style={{fontSize:9,color:c.connected?'var(--success)':'var(--text-muted)'}}>
+                  {c.connected ? '已连接' : '未连接'}
+                </span>
+              </span>
+            ))}
           </div>
-        </>
-      )}
+        )}
+      </Section>
+
+      <Section title={t('settings.memoryTitle')} desc={t('settings.memoryDesc')}>
+        <div style={{ fontSize:10, color:'var(--text-muted)', marginTop:-4 }}>
+          {t('settings.memoryHint')}
+        </div>
+        {memLoading ? (
+          <div style={{padding:16,textAlign:'center',color:'var(--text-muted)',fontSize:12}}>{t('settings.loading')}</div>
+        ) : (
+          <>
+            <textarea
+              value={mem}
+              onChange={(e) => setMem(e.target.value)}
+              style={{
+                width:'100%', minHeight:160, padding:12, borderRadius:8,
+                border:'1px solid var(--border-color)',
+                background:'var(--bg-primary)', color:'var(--text-primary)',
+                fontSize:12, fontFamily:'var(--font-mono)',
+                resize:'vertical', outline:'none', lineHeight:1.6, marginTop:8,
+              }}
+            />
+            <div style={{ display:'flex', justifyContent:'flex-end', marginTop:8 }}>
+              <button onClick={saveMem} style={{
+                padding:'6px 16px', borderRadius:6,
+                background: memSaved ? 'var(--success)' : 'var(--accent)',
+                border:'none', color:'#fff', cursor:'pointer', fontSize:11, fontWeight:500,
+              }}>
+                {memSaved ? '✓ ' + t('settings.saved') : t('settings.saveMemory')}
+              </button>
+            </div>
+          </>
+        )}
+      </Section>
     </div>
   );
 }
@@ -833,14 +1039,15 @@ function PageSkills() {
 // ═══════════════════════════════════════════════════════════════
 
 function PageBilling({ store }: { store: ReturnType<typeof useAppStore.getState> }) {
+  const { t } = useTranslation();
   return (
     <div style={{display:'flex',flexDirection:'column',gap:16}}>
-      <Section title="当前用量">
+      <Section title={t('settings.billingTitle')}>
         <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:10}}>
-          <StatCard label="输入 Token" value={store.tokenUsage.input} />
-          <StatCard label="输出 Token" value={store.tokenUsage.output} />
-          <StatCard label="缓存命中" value={store.tokenUsage.cacheHit} />
-          <StatCard label="预估费用" value={store.tokenUsage.cost} unit="" />
+          <StatCard label={t('settings.inputTokens')} value={store.tokenUsage.input} />
+          <StatCard label={t('settings.outputTokens')} value={store.tokenUsage.output} />
+          <StatCard label={t('settings.cacheHitLabel')} value={store.tokenUsage.cacheHit} />
+          <StatCard label={t('settings.estCost')} value={store.tokenUsage.cost} unit="" />
         </div>
       </Section>
     </div>
@@ -852,18 +1059,19 @@ function PageBilling({ store }: { store: ReturnType<typeof useAppStore.getState>
 // ═══════════════════════════════════════════════════════════════
 
 function PageShortcuts() {
+  const { t } = useTranslation();
   const keys = [
-    ['Ctrl+K','命令面板'],
-    ['Ctrl+N','新建会话'],
-    ['Ctrl+L','聚焦输入'],
-    ['Esc','中断生成'],
-    ['↑↓','浏览历史'],
-    ['Tab','补全命令'],
-    ['Ctrl+C','退出'],
-    ['/, @','命令/文件补全'],
+    ['Ctrl+K',t('shortcuts.commandPalette')],
+    ['Ctrl+N',t('shortcuts.newSession')],
+    ['Ctrl+L',t('shortcuts.focusInput')],
+    ['Esc',t('shortcuts.stopGeneration')],
+    ['↑↓',t('shortcuts.browseHistory')],
+    ['Tab',t('shortcuts.completeCommand')],
+    ['Ctrl+C',t('shortcuts.exit')],
+    ['/, @',t('shortcuts.cmdFileComplete')],
   ];
   return (
-    <Section title="快捷键">
+    <Section title={t('settings.pageShortcuts')}>
       <div style={{display:'flex',flexDirection:'column',gap:2}}>
         {keys.map(([key, desc]) => (
           <div key={key} style={{display:'flex',justifyContent:'space-between',padding:'6px 10px',borderRadius:6,fontSize:12,color:'var(--text-secondary)'}}>
@@ -985,5 +1193,106 @@ const btnPrimary: React.CSSProperties = {
   border: 'none', color: '#fff', fontWeight: 600,
   display: 'flex', alignItems: 'center', gap: 5,
 };
+
+// Small iOS-style switch used by PageDesktop.
+function Toggle({ on, onChange }: { on: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      onClick={() => onChange(!on)}
+      style={{
+        width: 38, height: 22, borderRadius: 11, border: 'none', cursor: 'pointer',
+        background: on ? 'var(--accent)' : 'var(--border-color)', position: 'relative',
+        transition: 'background 0.15s', padding: 0,
+      }}
+    >
+      <span style={{
+        position: 'absolute', top: 2, left: on ? 18 : 2, width: 18, height: 18,
+        borderRadius: '50%', background: '#fff', transition: 'left 0.15s',
+        boxShadow: '0 1px 2px rgba(0,0,0,0.3)',
+      }} />
+    </button>
+  );
+}
+
+const kbdStyle: React.CSSProperties = {
+  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+  minWidth: 24, height: 22, padding: '0 6px', borderRadius: 4,
+  background: 'var(--bg-primary)', border: '1px solid var(--border-color)',
+  fontSize: 11, fontFamily: 'monospace', color: 'var(--text-secondary)',
+};
+const plusStyle: React.CSSProperties = { color: 'var(--text-muted)', fontSize: 12, margin: '0 2px' };
+
+// ═══════════════════════════════════════════════════
+// Page: Desktop — launch-on-login, backend port, hotkey
+// ═══════════════════════════════════════════════════
+
+function PageDesktop({ store }: { store: ReturnType<typeof useAppStore.getState> }) {
+  const { t } = useTranslation();
+  const [portDraft, setPortDraft] = useState<string>(store.serverPort ? String(store.serverPort) : '');
+
+  const applyPort = () => {
+    const trimmed = portDraft.trim();
+    if (trimmed === '') {
+      store.setServerPort(0); // 0 = auto
+      return;
+    }
+    const n = parseInt(trimmed, 10);
+    if (!isNaN(n) && n > 0 && n <= 65535) {
+      store.setServerPort(n);
+    } else {
+      // Invalid — revert to the persisted value.
+      setPortDraft(store.serverPort ? String(store.serverPort) : '');
+    }
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      {/* Launch on login */}
+      <Section title={t('settings.autostart')} desc={t('settings.autostartDesc')}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{t('settings.autostartLabel')}</span>
+          <Toggle on={store.autostart} onChange={(v) => store.setAutostart(v)} />
+        </div>
+      </Section>
+
+      {/* Backend port */}
+      <Section title={t('settings.serverPort')} desc={t('settings.serverPortDesc')}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <input
+            type="number" min={0} max={65535}
+            value={portDraft}
+            placeholder={t('settings.serverPortPlaceholder')}
+            onChange={(e) => setPortDraft(e.target.value)}
+            onBlur={applyPort}
+            onKeyDown={(e) => { if (e.key === 'Enter') applyPort(); }}
+            style={{ ...selectStyle, width: 140 }}
+          />
+          <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{t('settings.serverPortHint')}</span>
+        </div>
+        {store.serverPort > 0 && (
+          <div style={{ fontSize: 11, color: 'var(--success)', marginTop: 6 }}>
+            {t('settings.serverPortActive', { port: store.serverPort })}
+          </div>
+        )}
+      </Section>
+
+      {/* Global hotkey */}
+      <Section title={t('settings.hotkeyTitle')} desc={t('settings.hotkeyDesc')}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 0' }}>
+          <kbd style={kbdStyle}>Ctrl</kbd><span style={plusStyle}>+</span>
+          <kbd style={kbdStyle}>Shift</kbd><span style={plusStyle}>+</span>
+          <kbd style={kbdStyle}>Space</kbd>
+        </div>
+        <ul style={{ margin: '8px 0 0', paddingLeft: 18, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.7 }}>
+          <li>{t('settings.hotkeyWindows')}</li>
+          <li>{t('settings.hotkeyMacLinux')}</li>
+        </ul>
+      </Section>
+    </div>
+  );
+}
 
 export default SettingsPage;

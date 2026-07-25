@@ -16,6 +16,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -62,6 +64,11 @@ type Client struct {
 	reqID   atomic.Int64
 	pending map[int64]chan *jsonrpcResponse
 	notify  chan *jsonrpcNotification
+
+	// SSE transport fields
+	httpClient   *http.Client
+	sseEndpoint  string // session-scoped endpoint URL for POST/GET
+	sseSessionID string
 }
 
 // MCPResource represents a resource exposed by the server.
@@ -155,8 +162,240 @@ func (c *Client) connectStdio(ctx context.Context) error {
 }
 
 func (c *Client) connectSSE(ctx context.Context) error {
-	// Placeholder: SSE transport will be implemented in a future iteration
-	return fmt.Errorf("SSE transport not yet implemented")
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	ctx, c.cancel = context.WithCancel(ctx)
+	c.httpClient = &http.Client{Timeout: 30 * time.Second}
+
+	// Step 1: POST to the server URL to initialize an SSE session
+	initURL := c.config.URL
+	req, err := http.NewRequestWithContext(ctx, "POST", initURL, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"iCode","version":"0.1.0"}}}`))
+	if err != nil {
+		return fmt.Errorf("create init request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	for k, v := range c.config.Headers {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("init request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("init returned status %d", resp.StatusCode)
+	}
+
+	// Step 2: Parse SSE stream to find the endpoint event
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	endpoint := ""
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "event: ") {
+			eventType := strings.TrimPrefix(line, "event: ")
+			if eventType == "endpoint" {
+				// Next data line is the endpoint URL
+				if scanner.Scan() {
+					dataLine := scanner.Text()
+					if strings.HasPrefix(dataLine, "data: ") {
+						endpoint = strings.TrimPrefix(dataLine, "data: ")
+						break
+					}
+				}
+			}
+		}
+	}
+
+	if endpoint == "" {
+		return fmt.Errorf("no endpoint event received from SSE server")
+	}
+
+	// Resolve relative endpoint URLs against the base URL
+	if !strings.HasPrefix(endpoint, "http") {
+		base, err := url.Parse(initURL)
+		if err != nil {
+			return fmt.Errorf("parse base URL: %w", err)
+		}
+		rel, err := url.Parse(endpoint)
+		if err != nil {
+			return fmt.Errorf("parse endpoint URL: %w", err)
+		}
+		endpoint = base.ResolveReference(rel).String()
+	}
+
+	c.sseEndpoint = endpoint
+
+	// Step 3: Start background GET listener for SSE events
+	go c.sseReadLoop(ctx)
+
+	return nil
+}
+
+// sseReadLoop reads SSE events from the GET endpoint and dispatches JSON-RPC messages.
+func (c *Client) sseReadLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		req, err := http.NewRequestWithContext(ctx, "GET", c.sseEndpoint, nil)
+		if err != nil {
+			return
+		}
+		req.Header.Set("Accept", "text/event-stream")
+		for k, v := range c.config.Headers {
+			req.Header.Set(k, v)
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			// Retry after a brief delay
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(2 * time.Second):
+				continue
+			}
+		}
+
+		c.readSSEResponse(resp.Body)
+		resp.Body.Close()
+	}
+}
+
+// readSSEResponse parses an SSE stream and dispatches JSON-RPC messages.
+func (c *Client) readSSEResponse(body io.Reader) {
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	var eventType, data string
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		if strings.HasPrefix(line, "event: ") {
+			eventType = strings.TrimPrefix(line, "event: ")
+		} else if strings.HasPrefix(line, "data: ") {
+			data = strings.TrimPrefix(line, "data: ")
+		} else if line == "" {
+			// End of event — dispatch
+			if eventType == "message" && data != "" {
+				c.dispatchSSEMessage(data)
+			}
+			eventType = ""
+			data = ""
+		}
+	}
+}
+
+// dispatchSSEMessage parses a JSON-RPC message from SSE and routes it.
+func (c *Client) dispatchSSEMessage(raw string) {
+	data := []byte(raw)
+
+	// Check if it's a notification (no "id" field)
+	var peek struct {
+		ID *int64 `json:"id"`
+	}
+	if err := json.Unmarshal(data, &peek); err != nil {
+		return
+	}
+
+	if peek.ID == nil {
+		var notif jsonrpcNotification
+		if err := json.Unmarshal(data, &notif); err == nil {
+			select {
+			case c.notify <- &notif:
+			default:
+			}
+		}
+		return
+	}
+
+	var resp jsonrpcResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return
+	}
+
+	c.mu.RLock()
+	ch, ok := c.pending[resp.ID]
+	c.mu.RUnlock()
+	if ok {
+		ch <- &resp
+	}
+}
+
+// sseCall sends a JSON-RPC request via HTTP POST to the SSE endpoint.
+func (c *Client) sseCall(ctx context.Context, method string, params any) (*jsonrpcResponse, error) {
+	id := c.reqID.Add(1)
+	req := jsonrpcRequest{
+		JSONRPC: "2.0",
+		ID:      id,
+		Method:  method,
+		Params:  params,
+	}
+
+	data, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	ch := make(chan *jsonrpcResponse, 1)
+	c.mu.Lock()
+	c.pending[id] = ch
+	c.mu.Unlock()
+
+	defer func() {
+		c.mu.Lock()
+		delete(c.pending, id)
+		c.mu.Unlock()
+	}()
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.sseEndpoint, strings.NewReader(string(data)))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	for k, v := range c.config.Headers {
+		httpReq.Header.Set(k, v)
+	}
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("post request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// If the server responds directly (non-SSE), parse the JSON-RPC response
+	if ct := resp.Header.Get("Content-Type"); strings.Contains(ct, "application/json") {
+		var directResp jsonrpcResponse
+		if err := json.NewDecoder(resp.Body).Decode(&directResp); err != nil {
+			return nil, fmt.Errorf("decode response: %w", err)
+		}
+		if directResp.Error != nil {
+			return nil, fmt.Errorf("MCP error %d: %s", directResp.Error.Code, directResp.Error.Message)
+		}
+		return &directResp, nil
+	}
+
+	// Otherwise, wait for the response to arrive via the SSE stream
+	select {
+	case r := <-ch:
+		if r.Error != nil {
+			return nil, fmt.Errorf("MCP error %d: %s", r.Error.Code, r.Error.Message)
+		}
+		return r, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(30 * time.Second):
+		return nil, fmt.Errorf("MCP call timeout for %s", method)
+	}
 }
 
 // DiscoverTools fetches the tool list from the server.
@@ -265,7 +504,7 @@ func (c *Client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Cancel the context first — kills the subprocess via CommandContext.
+	// Cancel the context first — kills the subprocess via CommandContext or stops SSE loop.
 	if c.cancel != nil {
 		c.cancel()
 	}
@@ -280,6 +519,12 @@ func (c *Client) Close() error {
 			},
 		}
 		delete(c.pending, id)
+	}
+	if c.config.Type == TransportSSE {
+		if c.httpClient != nil {
+			c.httpClient.CloseIdleConnections()
+		}
+		return nil
 	}
 	if c.stdin != nil {
 		c.stdin.Close()
@@ -320,6 +565,14 @@ type jsonrpcNotification struct {
 }
 
 func (c *Client) call(ctx context.Context, method string, params any) (*jsonrpcResponse, error) {
+	// Dispatch by transport type
+	if c.config.Type == TransportSSE {
+		return c.sseCall(ctx, method, params)
+	}
+	return c.stdioCall(ctx, method, params)
+}
+
+func (c *Client) stdioCall(ctx context.Context, method string, params any) (*jsonrpcResponse, error) {
 	id := c.reqID.Add(1)
 	req := jsonrpcRequest{
 		JSONRPC: "2.0",
@@ -369,6 +622,21 @@ func (c *Client) sendNotification(ctx context.Context, method string, params any
 	}
 	data, _ := json.Marshal(notif)
 	// Notifications have no ID per JSON-RPC 2.0 spec, so no pending cleanup needed.
+	if c.config.Type == TransportSSE && c.sseEndpoint != "" {
+		req, err := http.NewRequestWithContext(ctx, "POST", c.sseEndpoint, strings.NewReader(string(data)))
+		if err != nil {
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		for k, v := range c.config.Headers {
+			req.Header.Set(k, v)
+		}
+		resp, err := c.httpClient.Do(req)
+		if err == nil {
+			resp.Body.Close()
+		}
+		return
+	}
 	c.stdin.Write(append(data, '\n'))
 }
 

@@ -105,6 +105,25 @@ func (s *Store) migrate() error {
 			updated_at TEXT NOT NULL,
 			PRIMARY KEY (provider, model_id)
 		)`,
+		`CREATE TABLE IF NOT EXISTS session_stats (
+			session_id TEXT PRIMARY KEY,
+			tokens_saved INTEGER NOT NULL DEFAULT 0,
+			cache_hit_tokens INTEGER NOT NULL DEFAULT 0,
+			estimated_cost REAL NOT NULL DEFAULT 0,
+			estimated_saved_cost REAL NOT NULL DEFAULT 0,
+			cache_hit_rate REAL NOT NULL DEFAULT 0,
+			day TEXT NOT NULL DEFAULT '',
+			updated_at TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_session_stats_day ON session_stats(day)`,
+		`CREATE TABLE IF NOT EXISTS workspaces (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL DEFAULT '',
+			path TEXT NOT NULL DEFAULT '',
+			session_ids TEXT NOT NULL DEFAULT '[]',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
 		`PRAGMA foreign_keys = ON`,
 		`PRAGMA journal_mode = WAL`,
 	}
@@ -179,13 +198,16 @@ func (s *Store) Get(id string) (*types.Session, error) {
 }
 
 func (s *Store) List(limit, offset int) ([]types.Session, error) {
+	// CRITICAL: With SetMaxOpenConns(1), we cannot call loadMessages()
+	// while the rows cursor is open — the cursor holds the only connection
+	// and loadMessages() would block forever, deadlocking the entire store.
+	// Fix: collect all sessions first, close the cursor, THEN load messages.
 	rows, err := s.db.Query(`SELECT id, title, model_id, provider_name, metadata,
 		total_input_tokens, total_output_tokens, total_cache_hits, created_at, updated_at
 		FROM sessions ORDER BY updated_at DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("list sessions: %w", err)
 	}
-	defer rows.Close()
 
 	var sessions []types.Session
 	for rows.Next() {
@@ -194,6 +216,7 @@ func (s *Store) List(limit, offset int) ([]types.Session, error) {
 		if err := rows.Scan(&sess.ID, &sess.Title, &sess.ModelID, &sess.ProviderName, &metaJSON,
 			&sess.TotalTokens.PromptTokens, &sess.TotalTokens.CompletionTokens,
 			&sess.TotalTokens.CacheHitTokens, &createdAt, &updatedAt); err != nil {
+			rows.Close()
 			return sessions, fmt.Errorf("scan session row: %w", err)
 		}
 
@@ -207,16 +230,20 @@ func (s *Store) List(limit, offset int) ([]types.Session, error) {
 		if err != nil {
 			log.Printf("warning: failed to parse updated_at %q: %v", updatedAt, err)
 		}
-		// Attach messages so the desktop client can restore full history on
-		// reload. Best-effort: a message-loading failure must never break the
-		// session list.
-		if msgs, merr := s.loadMessages(sess.ID); merr == nil {
-			sess.Messages = msgs
-		}
 		sessions = append(sessions, sess)
 	}
+	rows.Close() // Release the connection BEFORE loading messages!
+
 	if err := rows.Err(); err != nil {
 		return sessions, fmt.Errorf("iterate session rows: %w", err)
+	}
+
+	// Now load messages for each session — the cursor is closed and the
+	// connection is free, so loadMessages() can acquire it without deadlocking.
+	for i := range sessions {
+		if msgs, merr := s.loadMessages(sessions[i].ID); merr == nil {
+			sessions[i].Messages = msgs
+		}
 	}
 
 	return sessions, nil
@@ -360,6 +387,95 @@ func (s *Store) TotalTokens() (types.TokenUsage, error) {
 	return usage, err
 }
 
+// SessionStatSnapshot is a flattened, persistable view of one session's
+// token-optimization stats. Keeping it as a plain struct (rather than the
+// raw tokenopt.Stats JSON) lets the store SUM columns directly for the
+// global dashboard without parsing JSON per row.
+type SessionStatSnapshot struct {
+	SessionID         string
+	TokensSaved       int
+	CacheHitTokens    int
+	EstimatedCost     float64
+	EstimatedSavedCost float64
+	CacheHitRate      float64
+}
+
+// UpsertSessionStats persists (or replaces) one session's token stats so the
+// global dashboard survives restarts and aggregates across sessions.
+func (s *Store) UpsertSessionStats(snap SessionStatSnapshot) error {
+	now := time.Now().UTC()
+	day := now.Format("2006-01-02")
+	_, err := s.db.Exec(`INSERT INTO session_stats
+		(session_id, tokens_saved, cache_hit_tokens, estimated_cost, estimated_saved_cost, cache_hit_rate, day, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(session_id) DO UPDATE SET
+			tokens_saved = excluded.tokens_saved,
+			cache_hit_tokens = excluded.cache_hit_tokens,
+			estimated_cost = excluded.estimated_cost,
+			estimated_saved_cost = excluded.estimated_saved_cost,
+			cache_hit_rate = excluded.cache_hit_rate,
+			day = excluded.day,
+			updated_at = excluded.updated_at`,
+		snap.SessionID, snap.TokensSaved, snap.CacheHitTokens,
+		snap.EstimatedCost, snap.EstimatedSavedCost, snap.CacheHitRate, day, now.Format(time.RFC3339),
+	)
+	return err
+}
+
+// DayAgg is one day's slice of the token-savings trend.
+type DayAgg struct {
+	Day         string  `json:"day"`
+	TokensSaved int     `json:"tokens_saved"`
+	SavedCost   float64 `json:"saved_cost"`
+}
+
+// GlobalAgg is the cross-session aggregate shown on the global dashboard tab.
+type GlobalAgg struct {
+	Sessions         int       `json:"sessions"`
+	TotalTokensSaved int       `json:"total_tokens_saved"`
+	TotalCacheHits   int       `json:"total_cache_hit_tokens"`
+	TotalCost        float64   `json:"total_cost"`
+	TotalSavedCost   float64   `json:"total_saved_cost"`
+	AvgCacheHitRate  float64   `json:"avg_cache_hit_rate"`
+	Trend            []DayAgg  `json:"trend"`
+}
+
+// GlobalStats aggregates all persisted session stats into a single summary
+// plus a per-day savings trend for the dashboard chart.
+func (s *Store) GlobalStats() (GlobalAgg, error) {
+	var agg GlobalAgg
+	row := s.db.QueryRow(`SELECT
+		COUNT(*),
+		COALESCE(SUM(tokens_saved), 0),
+		COALESCE(SUM(cache_hit_tokens), 0),
+		COALESCE(SUM(estimated_cost), 0),
+		COALESCE(SUM(estimated_saved_cost), 0),
+		COALESCE(AVG(cache_hit_rate), 0)
+		FROM session_stats`)
+	if err := row.Scan(&agg.Sessions, &agg.TotalTokensSaved, &agg.TotalCacheHits,
+		&agg.TotalCost, &agg.TotalSavedCost, &agg.AvgCacheHitRate); err != nil {
+		return agg, err
+	}
+
+	rows, err := s.db.Query(`SELECT day,
+		COALESCE(SUM(tokens_saved), 0),
+		COALESCE(SUM(estimated_saved_cost), 0)
+		FROM session_stats
+		GROUP BY day ORDER BY day ASC`)
+	if err != nil {
+		return agg, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var d DayAgg
+		if err := rows.Scan(&d.Day, &d.TokensSaved, &d.SavedCost); err != nil {
+			return agg, err
+		}
+		agg.Trend = append(agg.Trend, d)
+	}
+	return agg, rows.Err()
+}
+
 // ============================================================================
 // Config storage
 // ============================================================================
@@ -385,4 +501,127 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// ============================================================================
+// Workspaces
+// ============================================================================
+
+// Workspace groups related sessions under a named, path-scoped container —
+// the desktop analogue of an IDE project window. session_ids is a JSON array
+// so the (ordered) membership survives restarts.
+type Workspace struct {
+	ID         string   `json:"id"`
+	Name       string   `json:"name"`
+	Path       string   `json:"path"`
+	SessionIDs []string `json:"session_ids"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+func (s *Store) CreateWorkspace(w Workspace) error {
+	now := time.Now().UTC()
+	if w.ID == "" {
+		w.ID = fmt.Sprintf("ws_%x", now.UnixNano())
+	}
+	if w.SessionIDs == nil {
+		w.SessionIDs = []string{}
+	}
+	ids, err := json.Marshal(w.SessionIDs)
+	if err != nil {
+		return fmt.Errorf("marshal session_ids: %w", err)
+	}
+	_, err = s.db.Exec(`INSERT INTO workspaces (id, name, path, session_ids, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		w.ID, w.Name, w.Path, string(ids), now.Format(time.RFC3339), now.Format(time.RFC3339))
+	return err
+}
+
+func (s *Store) ListWorkspaces() ([]Workspace, error) {
+	rows, err := s.db.Query(`SELECT id, name, path, session_ids, created_at, updated_at
+		FROM workspaces ORDER BY updated_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Workspace
+	for rows.Next() {
+		var w Workspace
+		var idsJSON, createdAt, updatedAt string
+		if err := rows.Scan(&w.ID, &w.Name, &w.Path, &idsJSON, &createdAt, &updatedAt); err != nil {
+			return out, err
+		}
+		_ = json.Unmarshal([]byte(idsJSON), &w.SessionIDs)
+		w.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+		w.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+		out = append(out, w)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetWorkspace(id string) (*Workspace, error) {
+	row := s.db.QueryRow(`SELECT id, name, path, session_ids, created_at, updated_at
+		FROM workspaces WHERE id = ?`, id)
+	var w Workspace
+	var idsJSON, createdAt, updatedAt string
+	if err := row.Scan(&w.ID, &w.Name, &w.Path, &idsJSON, &createdAt, &updatedAt); err != nil {
+		return nil, err
+	}
+	_ = json.Unmarshal([]byte(idsJSON), &w.SessionIDs)
+	w.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+	w.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+	return &w, nil
+}
+
+func (s *Store) UpdateWorkspace(w Workspace) error {
+	ids, err := json.Marshal(w.SessionIDs)
+	if err != nil {
+		return fmt.Errorf("marshal session_ids: %w", err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err = s.db.Exec(`UPDATE workspaces SET name = ?, path = ?, session_ids = ?, updated_at = ?
+		WHERE id = ?`, w.Name, w.Path, string(ids), now, w.ID)
+	return err
+}
+
+func (s *Store) DeleteWorkspace(id string) error {
+	_, err := s.db.Exec(`DELETE FROM workspaces WHERE id = ?`, id)
+	return err
+}
+
+// SetWorkspaceSessions replaces the ordered session membership of a workspace.
+func (s *Store) SetWorkspaceSessions(id string, sessionIDs []string) error {
+	ids, err := json.Marshal(sessionIDs)
+	if err != nil {
+		return fmt.Errorf("marshal session_ids: %w", err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err = s.db.Exec(`UPDATE workspaces SET session_ids = ?, updated_at = ? WHERE id = ?`,
+		string(ids), now, id)
+	return err
+}
+
+// AddSessionToWorkspace appends a single session to a workspace's membership
+// without clobbering existing sessions. Used when a new session is created
+// under the active workspace (deep session↔workspace binding). Dedupes so
+// repeated calls are idempotent.
+func (s *Store) AddSessionToWorkspace(id string, sessionID string) error {
+	ws, err := s.GetWorkspace(id)
+	if err != nil {
+		return err
+	}
+	for _, sid := range ws.SessionIDs {
+		if sid == sessionID {
+			return nil // already a member — idempotent
+		}
+	}
+	ws.SessionIDs = append(ws.SessionIDs, sessionID)
+	ids, err := json.Marshal(ws.SessionIDs)
+	if err != nil {
+		return fmt.Errorf("marshal session_ids: %w", err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err = s.db.Exec(`UPDATE workspaces SET session_ids = ?, updated_at = ? WHERE id = ?`,
+		string(ids), now, id)
+	return err
 }

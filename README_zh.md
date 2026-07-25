@@ -2,7 +2,7 @@
 
 > **多模型 AI 编程 Agent** — 终端原生、多厂商支持的编程助手。
 
-iCode 是一款开源的 AI 编程代理，支持在终端和桌面端双平台运行。开箱即用 **9 家大模型厂商、21 个模型**，配备一键更新系统，始终同步最新模型列表。基于 **Cache-First Token 优化** 架构，在支持的厂商上可实现最高 94% 的 Token 节省。
+iCode 是一款开源的 AI 编程代理，支持在终端和桌面端双平台运行。开箱即用 **9 家大模型厂商、60+ 个模型**，配备一键更新系统（可扩展到 50+ 厂商），始终同步最新模型列表。基于 **Cache-First Token 优化** 架构，在支持的厂商上可实现最高 94% 的 Token 节省。
 
 ## 为什么选择 iCode？
 
@@ -24,7 +24,7 @@ iCode 是一款开源的 AI 编程代理，支持在终端和桌面端双平台�
 git clone https://github.com/ponygates/icode.git
 cd icode
 go build -o icode .                                          # Linux / macOS
-go build -ldflags="-s -w -H windowsgui" -o icode.exe .       # Windows：双击无黑窗闪现
+go build -ldflags="-s -w -H windowsgui" -o icode.exe .       # Windows：双击启动增强 TUI（加强版 CLI，带滚动条/鼠标/快捷键）；桌面版用 icode desktop
 
 # 配置 API 密钥
 ./icode auth set --provider deepseek --key sk-你的密钥
@@ -106,6 +106,17 @@ iCode 的 Token 优化器借鉴 Reasonix 的 Prefix-Cache 设计，并扩展为�
 4. **智能压缩** — 上下文溢出时自动将早期消息摘要注入前缀
 5. **分厂商策略** — DeepSeek 用字节稳定前缀，Anthropic 用 `cache_control` 标记
 
+> **前缀绝不膨胀**：技能（SKILL.md）的完整正文**不会**进入不可变前缀——前缀只放紧凑索引，模型按需用 `use_skill` 拉取正文（正文落在易失草稿区）。无论安装多少技能，前缀大小与缓存命中率都稳定。
+
+### 五层压缩管道（全活）
+1. **Snip** — 零成本滤掉空轮、被拒轮
+2. **Dedup** — 工具输出内容去重（相同 `工具+参数` 第二次起替换为占位符）
+3. **Microcompact** — 轮次间把工具结果折叠为占位符
+4. **Context Fold** — 超阈值时把早期多轮摘要注入上下文
+5. **Budget** — 硬性大小上限（read 50K / bash 30K / grep 20K / 全局 200K），超长输出头尾保留、中间省略
+
+运行 `/token`（TUI）或查看桌面端 TokenBar 的「🪙 已节省」即可看到本会话的实时节省量。
+
 ### 实时面板
 ```
 Model: deepseek-chat  |  Mode: agent
@@ -133,6 +144,7 @@ icode server --port 0          # 启动 HTTP API 服务（桌面版使用）
 /session   管理会话
 /clear     清空对话历史
 /exit      退出 iCode
+/token     查看本会话 Token 节省报告（已省/缓存命中率/压缩次数/费用）
 ```
 
 ## 权限模式
@@ -222,7 +234,7 @@ brew install ponygates/icode/icode
 ```bash
 # 编译
 go build -o icode .                                          # Linux / macOS
-go build -ldflags="-s -w -H windowsgui" -o icode.exe .       # Windows：双击无黑窗闪现
+go build -ldflags="-s -w -H windowsgui" -o icode.exe .       # Windows：双击启动增强 TUI（加强版 CLI，带滚动条/鼠标/快捷键）；桌面版用 icode desktop
 
 # 测试
 go test ./...
@@ -240,7 +252,13 @@ go run . server --port 9090
 - [x] **P2**: LLM 流式集成、9 大 Provider、SQLite 持久化、权限系统
 - [x] **P3**: Token 优化器、TUI 终端界面、MCP 协议
 - [x] **P4**: Electron 桌面版联调、HTTP API 服务、CI/CD
-- [ ] **v0.2**: VS Code 扩展、更多 Provider、工具沙箱隔离
+- [x] **v0.5**: 技能系统（SKILL.md）、多智能体团队、LSP 诊断、智能路由、跨平台磁盘清理、/api/skills 与 /api/teams
+- [x] **v0.6**: 生命周期 Hooks（PreToolUse/PostToolUse/Stop）、Headless JSON 输出（`--output-format json|stream-json`）、双层 Memory（项目级 + 用户级）、`code_search` 符号索引工具
+- [x] **v0.7**: WorkBuddy 技能/MCP 桥接（自动导入 `~/.workbuddy/mcp.json` + 技能目录互通）、并行工具执行（只读并发）、后台任务（`run_in_background` + `task_output`）、LLM 分级路由（`routing.mode: llm`）+ 中英文关键词升级
+- [x] **v0.8**: 多模态工具（`image_gen` / `video_gen`，走 OpenAI 兼容后端）、首回合并行工具执行 + LSP 诊断
+- [x] **v0.9**: Cache-First 加固——技能懒加载索引 + `use_skill` 工具 + 激活预算层(Level 4) + Token 节省可视化(`/token`、桌面「🪙 已节省」)
+- [x] **v0.10**: 本地零成本 Embedding 语义路由（`routing.mode: embedding`，纯离线/零 token，比关键词更准）
+- [ ] **v0.11**: 技能市场分发、VS Code 扩展、多模态结果回灌
 
 ## 许可证
 

@@ -2,7 +2,7 @@
 
 > **Multi-Model AI Coding Agent** — Your terminal-native, multi-provider coding companion.
 
-iCode is an open-source AI coding agent that works in your terminal and on your desktop. It supports **9 LLM providers and 21 models** out of the box, with a one-click update system that keeps model lists fresh. Built on a **cache-first token optimization** architecture, it delivers up to 94% token savings on supported providers.
+iCode is an open-source AI coding agent that works in your terminal and on your desktop. It supports **9 LLM providers and 60+ models** out of the box, with a one-click update system that keeps model lists fresh (and can pull from 50+ providers). Built on a **cache-first token optimization** architecture, it delivers up to 94% token savings on supported providers.
 
 ## Why iCode?
 
@@ -106,6 +106,17 @@ iCode's token optimizer is inspired by Reasonix's prefix-cache design and extend
 3. **Volatile Scratch** — tool results are ephemeral and discarded after each turn
 4. **Smart Compaction** — when context overflows, old messages are summarized and folded into the prefix
 5. **Per-Provider Strategies** — DeepSeek gets byte-stable prefixes, Anthropic gets `cache_control` markers
+
+> **The prefix never bloats**: full SKILL.md bodies are NOT embedded in the immutable prefix — only a compact skill index lives there. The model loads a skill's full instructions on demand via the `use_skill` tool (the body lands in the volatile scratch zone). No matter how many skills you install, the prefix size and cache hit rate stay stable.
+
+### Five-Layer Compression Pipeline (all active)
+1. **Snip** — zero-cost removal of empty / rejected turns
+2. **Dedup** — tool-output content deduplication (identical `tool+args` collapses to a placeholder)
+3. **Microcompact** — folds inter-turn tool results into placeholders
+4. **Context Fold** — summarizes early turns into context when over threshold
+5. **Budget** — hard size caps (read 50K / bash 30K / grep 20K / global 200K), head+tail kept, middle elided
+
+Run `/token` (TUI) or watch the desktop TokenBar's "🪙 Saved" chip to see live savings for the session.
 
 ### Real-time Dashboard
 ```
@@ -236,7 +247,13 @@ go run . server --port 9090
 - [x] **P2**: LLM streaming, 9 providers, SQLite, permission system
 - [x] **P3**: Token optimizer, TUI, MCP protocol
 - [x] **P4**: Electron backend integration, HTTP API, CI/CD
-- [ ] **v0.2**: VS Code extension, more providers, tool sandbox
+- [x] **v0.5**: Skills (SKILL.md), Agent Teams, LSP diagnostics, smart routing, cross-platform disk cleanup, /api/skills & /api/teams
+- [x] **v0.6**: Lifecycle Hooks (PreToolUse/PostToolUse/Stop), headless JSON output (`--output-format json|stream-json`), dual-layer Memory (project + user), `code_search` symbol index tool
+- [x] **v0.7**: WorkBuddy skill/MCP bridge (auto-import `~/.workbuddy/mcp.json` + shared skill dirs), parallel tool execution (read-only concurrency), background tasks (`run_in_background` + `task_output`), LLM-graded routing (`routing.mode: llm`) with zh/en keyword upgrade
+- [x] **v0.8**: Multimodal tools (`image_gen` / `video_gen` via OpenAI-compatible backends), first-turn parallel tool execution + LSP diagnostics
+- [x] **v0.9**: Cache-First hardening — lazy skill index + `use_skill` tool + activated budget layer (Level 4) + token-savings visibility (`/token`, desktop "🪙 Saved" chip)
+- [x] **v0.10**: Local zero-cost embedding routing (`routing.mode: embedding`, fully offline / zero-token, more accurate than keywords)
+- [ ] **v0.11**: Skill marketplace distribution, VS Code extension, multimodal result feedback
 
 ## License
 

@@ -9,15 +9,15 @@
 // SysProcAttr.HideWindow (plus CREATE_NO_WINDOW) suppresses that window so the
 // desktop experience stays console-free.
 //
-// On non-Windows platforms these helpers are identical to the standard
-// os/exec constructors.
+// The HideWindow / CreationFlags fields of syscall.SysProcAttr only exist on
+// Windows, so the platform-specific assignment lives in executil_windows.go;
+// on every other platform hide() is a no-op (see executil_posix.go) and these
+// helpers behave exactly like the standard os/exec constructors.
 package executil
 
 import (
 	"context"
 	"os/exec"
-	"runtime"
-	"syscall"
 )
 
 // CommandContext is like exec.CommandContext but hides the child's console
@@ -33,13 +33,4 @@ func Command(name string, args ...string) *exec.Cmd {
 	cmd := exec.Command(name, args...)
 	hide(cmd)
 	return cmd
-}
-
-func hide(cmd *exec.Cmd) {
-	if runtime.GOOS == "windows" {
-		cmd.SysProcAttr = &syscall.SysProcAttr{
-			HideWindow:    true,
-			CreationFlags: 0x08000000, // CREATE_NO_WINDOW
-		}
-	}
 }

@@ -88,6 +88,79 @@ func runeLastIndex(s string, target rune) int {
 	return -1
 }
 
+// lastBorderCol returns the visible column of the LAST '│' in s. We measure
+// by visible width (rune + ANSI stripped) rather than raw rune index because
+// box content can contain East-Asian-Wide glyphs (— █ ░ etc.) that occupy two
+// cells each — those push the right border in by one cell if you only count
+// runes, and that was the source of the "right border jutting out past the
+// corners" bug. ANSI escapes are counted as zero width.
+func lastBorderCol(s string) int {
+	col := 0
+	last := -1
+	inEsc := false
+	for _, r := range s {
+		if inEsc {
+			if r == 'm' {
+				inEsc = false
+			}
+			continue
+		}
+		if r == '\x1b' {
+			inEsc = true
+			continue
+		}
+		if r == '│' {
+			last = col
+		}
+		col += runeWidth(r)
+	}
+	return last
+}
+
+func topRightCol(s string) int {
+	col := 0
+	inEsc := false
+	for _, r := range s {
+		if inEsc {
+			if r == 'm' {
+				inEsc = false
+			}
+			continue
+		}
+		if r == '\x1b' {
+			inEsc = true
+			continue
+		}
+		if r == '╮' {
+			return col
+		}
+		col += runeWidth(r)
+	}
+	return -1
+}
+
+func botRightCol(s string) int {
+	col := 0
+	inEsc := false
+	for _, r := range s {
+		if inEsc {
+			if r == 'm' {
+				inEsc = false
+			}
+			continue
+		}
+		if r == '\x1b' {
+			inEsc = true
+			continue
+		}
+		if r == '╯' {
+			return col
+		}
+		col += runeWidth(r)
+	}
+	return -1
+}
+
 // TestWelcomeBoxRightBorderAligned guards the two startup panels: the right
 // `│` border of each panel must sit at the same column on every row, and must
 // match the `╮` / `╯` corners of the top/bottom bar. This regresses the bug
@@ -110,8 +183,8 @@ func TestWelcomeBoxRightBorderAligned(t *testing.T) {
 		}
 		top := box[0]
 		bot := box[len(box)-1]
-		topRight := runeIndex(top, '╮')
-		botRight := runeIndex(bot, '╯')
+		topRight := topRightCol(top)
+		botRight := botRightCol(bot)
 		if topRight < 0 || botRight < 0 {
 			t.Fatalf("%s missing corners: top=%q bot=%q", name, top, bot)
 		}
@@ -119,7 +192,7 @@ func TestWelcomeBoxRightBorderAligned(t *testing.T) {
 			t.Fatalf("%s top/bottom right corners misaligned: top col %d, bot col %d", name, topRight, botRight)
 		}
 		for i, ln := range box[1 : len(box)-1] {
-			c := runeLastIndex(ln, '│')
+			c := lastBorderCol(ln)
 			if c < 0 {
 				t.Fatalf("%s row %d missing right border: %q", name, i, ln)
 			}

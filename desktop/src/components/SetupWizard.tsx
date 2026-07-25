@@ -1,15 +1,24 @@
 import React, { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../stores/appStore';
 import { Key, ArrowRight, Cpu } from 'lucide-react';
 
+const PROVIDER_DESC_KEYS: Record<string, string> = {
+  openrouter: 'setup.multiModel',
+  deepseek: 'setup.deepseekDesc',
+  zhipu: 'setup.zhipuDesc',
+  kimi: 'setup.kimiDesc',
+};
+
 const providers = [
-  { id: 'openrouter', name: 'OpenRouter', desc: '支持 Claude/GPT/Gemini 等 200+ 模型', baseUrl: 'https://openrouter.ai/api/v1', keyUrl: 'https://openrouter.ai/keys' },
-  { id: 'deepseek', name: 'DeepSeek', desc: '国产最强，V4 Flash 性价比之王', baseUrl: 'https://api.deepseek.com', keyUrl: 'https://platform.deepseek.com/api_keys' },
-  { id: 'zhipu', name: '智谱 GLM', desc: 'GLM-5 系列，中文理解优秀', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', keyUrl: 'https://open.bigmodel.cn/usercenter/apikeys' },
-  { id: 'kimi', name: 'Kimi (月之暗面)', desc: 'K2.7 Code 专为编程优化', baseUrl: 'https://api.moonshot.cn/v1', keyUrl: 'https://platform.moonshot.cn/console/api-keys' },
+  { id: 'openrouter', name: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', keyUrl: 'https://openrouter.ai/keys' },
+  { id: 'deepseek', name: 'DeepSeek', baseUrl: 'https://api.deepseek.com', keyUrl: 'https://platform.deepseek.com/api_keys' },
+  { id: 'zhipu', name: '智谱 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', keyUrl: 'https://open.bigmodel.cn/usercenter/apikeys' },
+  { id: 'kimi', name: 'Kimi (月之暗面)', baseUrl: 'https://api.moonshot.cn/v1', keyUrl: 'https://platform.moonshot.cn/console/api-keys' },
 ];
 
 const SetupWizard: React.FC<{ onDone: () => void }> = ({ onDone }) => {
+  const { t } = useTranslation();
   const { backendUrl } = useAppStore();
   const [step, setStep] = useState(0);
   const [provider, setProvider] = useState('openrouter');
@@ -30,13 +39,13 @@ const SetupWizard: React.FC<{ onDone: () => void }> = ({ onDone }) => {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ provider, api_key: apiKey.trim(), api_base: current.baseUrl }),
         });
-        if (!res.ok) throw new Error('保存失败');
+        if (!res.ok) throw new Error(t('setup.saveFailed'));
       }
       // Also save in localStorage
       localStorage.setItem(`icode.key.${provider}`, apiKey.trim());
       onDone();
     } catch (e: any) {
-      setError(e?.message || '保存失败，请检查后端是否在运行');
+      setError(e?.message || t('setup.saveFailedBackend'));
     } finally {
       setSaving(false);
     }
@@ -63,10 +72,10 @@ const SetupWizard: React.FC<{ onDone: () => void }> = ({ onDone }) => {
         }}>
           <div style={{ fontSize: 24, marginBottom: 4 }}>👋</div>
           <div style={{ fontSize: 16, fontWeight: 600, color: 'var(--text-primary)' }}>
-            {step === 0 ? '欢迎使用 iCode' : '配置 API Key'}
+            {step === 0 ? t('setup.welcome') : t('setup.configKey')}
           </div>
           <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
-            {step === 0 ? '选择一个 AI 提供商开始使用' : '填入你的 API Key 即可开始'}
+            {step === 0 ? t('setup.selectProvider') : t('setup.fillKey')}
           </div>
         </div>
 
@@ -115,7 +124,7 @@ const SetupWizard: React.FC<{ onDone: () => void }> = ({ onDone }) => {
                         {p.name}
                       </div>
                       <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                        {p.desc}
+                        {t(PROVIDER_DESC_KEYS[p.id])}
                       </div>
                     </div>
                     <ArrowRight size={14} color="var(--text-muted)" />
@@ -138,12 +147,12 @@ const SetupWizard: React.FC<{ onDone: () => void }> = ({ onDone }) => {
                   </span>
                   <a href={current.keyUrl} target="_blank" rel="noopener noreferrer"
                     style={{ color: 'var(--accent)', fontSize: 11, textDecoration: 'underline' }}>
-                    获取 Key →
+                    {t('setup.getKey')} →
                   </a>
                 </div>
                 <input
                   type="password"
-                  placeholder={`粘贴你的 ${current.name} API Key...`}
+                  placeholder={t('setup.keyPlaceholder', { name: current.name })}
                   value={apiKey}
                   onChange={e => setApiKey(e.target.value)}
                   onKeyDown={e => e.key === 'Enter' && handleSave()}
@@ -167,7 +176,7 @@ const SetupWizard: React.FC<{ onDone: () => void }> = ({ onDone }) => {
                     background: 'transparent', border: '1px solid var(--border-color)',
                     color: 'var(--text-muted)', cursor: 'pointer', fontSize: 12,
                   }}>
-                    返回
+                    {t('setup.back')}
                   </button>
                   <button onClick={handleSave} disabled={!apiKey.trim() || saving} style={{
                     padding: '8px 20px', borderRadius: 8,
@@ -176,7 +185,7 @@ const SetupWizard: React.FC<{ onDone: () => void }> = ({ onDone }) => {
                     cursor: apiKey.trim() ? 'pointer' : 'not-allowed',
                     fontSize: 12, fontWeight: 500,
                   }}>
-                    {saving ? '保存中...' : '保存并开始'}
+                    {saving ? t('setup.saving') : t('setup.saveAndStart')}
                   </button>
                 </div>
               </div>
@@ -193,7 +202,7 @@ const SetupWizard: React.FC<{ onDone: () => void }> = ({ onDone }) => {
             background: 'transparent', border: 'none',
             color: 'var(--text-muted)', cursor: 'pointer', fontSize: 11,
           }}>
-            跳过，使用默认配置
+            {t('setup.skip')}
           </button>
         </div>
       </div>

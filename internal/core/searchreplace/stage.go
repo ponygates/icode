@@ -2,8 +2,8 @@
 //
 // Workflow:
 //  1. LLM calls search_replace tool → edits are staged, not applied
-//  2. User runs /review to inspect pending changes
-//  3. User runs /apply  to commit all staged edits
+//  2. User runs /review to inspect pending changes (shows unified diff)
+//  3. User runs /apply  to commit all staged edits (with git checkpoint rollback)
 //  4. User runs /reject to discard staged edits
 package searchreplace
 
@@ -21,6 +21,7 @@ type StagedEdit struct {
 	Replace  string
 	Valid    bool   // true if search text was found in the file
 	Reason   string // validation message
+	Diff     string // unified diff preview (empty if invalid)
 }
 
 // StagingArea holds pending edits per session.
@@ -72,13 +73,16 @@ func (s *StagingArea) Add(filePath, search, replace string) (int, bool, string) 
 		ed.Reason = fmt.Sprintf("cannot read %s: %v", filePath, err)
 		ed.Valid = false
 	} else {
-		c := strings.Count(string(content), search)
+		text := string(content)
+		c := strings.Count(text, search)
 		if c == 0 {
 			ed.Reason = fmt.Sprintf("search text not found in %s", filePath)
 			ed.Valid = false
 		} else {
+			newText := strings.ReplaceAll(text, search, replace)
 			ed.Valid = true
 			ed.Reason = fmt.Sprintf("%d occurrence(s) will be replaced", c)
+			ed.Diff = unifiedDiff(filePath, text, newText, search, replace)
 		}
 	}
 
@@ -144,4 +148,95 @@ func (s *StagingArea) ApplyValid() []string {
 
 	s.edits = remaining
 	return results
+}
+
+// unifiedDiff generates a compact context diff between old and new text,
+// focused on the SEARCH/REPLACE region. Only lines around the changed area
+// are shown, making it easy for the user to review.
+func unifiedDiff(path, oldText, newText, search, replace string) string {
+	oldLines := strings.Split(oldText, "\n")
+	newLines := strings.Split(newText, "\n")
+
+	// Find the first line where old and new diverge
+	var startLine int
+	for startLine < len(oldLines) && startLine < len(newLines) {
+		if oldLines[startLine] != newLines[startLine] {
+			break
+		}
+		startLine++
+	}
+	if startLine >= len(oldLines) && startLine >= len(newLines) {
+		return "(no changes)"
+	}
+
+	// Find the last line where old and new diverge
+	endOld := len(oldLines) - 1
+	endNew := len(newLines) - 1
+	for endOld >= startLine && endNew >= startLine {
+		if oldLines[endOld] != newLines[endNew] {
+			break
+		}
+		endOld--
+		endNew--
+	}
+
+	// Build focused diff with 2 lines of context
+	ctxStart := startLine - 2
+	if ctxStart < 0 {
+		ctxStart = 0
+	}
+	ctxEndOld := endOld + 2
+	if ctxEndOld >= len(oldLines) {
+		ctxEndOld = len(oldLines) - 1
+	}
+	ctxEndNew := endNew + 2
+	if ctxEndNew >= len(newLines) {
+		ctxEndNew = len(newLines) - 1
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("--- %s\n+++ %s\n", path, path))
+	b.WriteString(fmt.Sprintf("@@ -%d,%d +%d,%d @@\n",
+		ctxStart+1, ctxEndOld-ctxStart+1,
+		ctxStart+1, ctxEndNew-ctxStart+1))
+
+	lineOld := ctxStart
+	lineNew := ctxStart
+	for lineOld <= ctxEndOld || lineNew <= ctxEndNew {
+		oldLine := ""
+		newLine := ""
+		if lineOld <= ctxEndOld {
+			oldLine = oldLines[lineOld]
+		}
+		if lineNew <= ctxEndNew {
+			newLine = newLines[lineNew]
+		}
+		switch {
+		case oldLine == newLine && oldLine != "":
+			b.WriteString(fmt.Sprintf(" %s\n", oldLine))
+			lineOld++
+			lineNew++
+		case lineOld <= ctxEndOld && (lineNew > ctxEndNew || oldLine != newLine):
+			// Check if this line is part of the SEARCH block
+			if lineOld <= endOld {
+				b.WriteString(fmt.Sprintf("-%s\n", oldLine))
+				lineOld++
+			}
+			if lineNew <= endNew {
+				b.WriteString(fmt.Sprintf("+%s\n", newLine))
+				lineNew++
+			}
+		default:
+			if lineNew <= ctxEndNew {
+				b.WriteString(fmt.Sprintf("+%s\n", newLine))
+				lineNew++
+			}
+			if lineOld <= ctxEndOld {
+				b.WriteString(fmt.Sprintf("-%s\n", oldLine))
+				lineOld++
+			}
+		}
+	}
+
+	return b.String()
 }

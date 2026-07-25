@@ -43,10 +43,10 @@ type ToolCallRepairConfig struct {
 // DefaultToolCallRepairConfig returns sensible defaults for DeepSeek models.
 func DefaultToolCallRepairConfig() ToolCallRepairConfig {
 	return ToolCallRepairConfig{
-		MaxNestDepth: 10,
-		MaxParams:    10,
-		StormWindow:  5,
-		MaxSameCall:  3,
+		MaxNestDepth:  10,
+		MaxParams:     10,
+		StormWindow:   5,
+		MaxSameCall:   3,
 		EnabledStages: []string{"flatten", "scavenge", "truncation", "storm"},
 	}
 }
@@ -56,8 +56,8 @@ type RepairedCall struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	Arguments string `json:"arguments"`
-	Repaired  bool   `json:"repaired"`   // true if this call was modified
-	Stage     string `json:"stage"`      // which stage repaired it
+	Repaired  bool   `json:"repaired"`           // true if this call was modified
+	Stage     string `json:"stage"`              // which stage repaired it
 	Original  string `json:"original,omitempty"` // original arguments before repair
 }
 
@@ -69,11 +69,11 @@ type callKey struct {
 
 // RepairReport summarizes what the pipeline did.
 type RepairReport struct {
-	TotalCalls   int            `json:"total_calls"`
-	Repaired     int            `json:"repaired"`
-	Suppressed   int            `json:"suppressed"`
-	Recovered    int            `json:"recovered"` // calls recovered from reasoning_content
-	StageStats   map[string]int `json:"stage_stats"`
+	TotalCalls int            `json:"total_calls"`
+	Repaired   int            `json:"repaired"`
+	Suppressed int            `json:"suppressed"`
+	Recovered  int            `json:"recovered"` // calls recovered from reasoning_content
+	StageStats map[string]int `json:"stage_stats"`
 }
 
 // ToolCallRepairPipeline implements the 4-stage repair pipeline.

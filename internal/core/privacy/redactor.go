@@ -34,7 +34,7 @@ var (
 	internalIPPattern = regexp.MustCompile(`(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})`)
 
 	// API keys (common patterns)
-	apiKeyPattern = regexp.MustCompile(`(sk-[a-zA-Z0-9]{20,}|api[_-]?key[=:]\s*['"]?[a-zA-Z0-9]{16,}|token[=:]\s*['"]?[a-zA-Z0-9]{16,})`)
+	apiKeyPattern = regexp.MustCompile(`(sk-[a-zA-Z0-9]{20,}|api[_-]?key[=:]\s*['"]?[a-zA-Z0-9_\-]{16,}|token[=:]\s*['"]?[a-zA-Z0-9_\-]{16,})`)
 )
 
 // Redact strips PII from the given text. Returns the sanitized version.

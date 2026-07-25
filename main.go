@@ -1,3 +1,5 @@
+//go:build !desktop_only
+
 package main
 
 import (

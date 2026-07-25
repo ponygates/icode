@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/BurntSushi/toml"
 	"gopkg.in/yaml.v3"
 )
 
@@ -54,7 +55,32 @@ type Config struct {
 	Tools         ToolsCfg            `yaml:"tools" json:"tools"`
 	Server        ServerCfg           `yaml:"server" json:"server"`
 	Update        UpdateCfg           `yaml:"update" json:"update"`
+	LSP           LSPCfg              `yaml:"lsp" json:"lsp"`
 	MCP           []MCPServerCfg      `yaml:"mcp" json:"mcp"`
+	// MCPImportWorkBuddy controls whether MCP servers configured in
+	// WorkBuddy's ~/.workbuddy/mcp.json are auto-imported at startup
+	// (explicit iCode entries always win on name conflicts). Default: true.
+	MCPImportWorkBuddy *bool `yaml:"mcp_import_workbuddy,omitempty" json:"mcp_import_workbuddy,omitempty"`
+	// Routing configures the "auto" model router.
+	Routing RoutingCfg `yaml:"routing" json:"routing"`
+	// Multimodal configures the image/video generation backend used by the
+	// image_gen and video_gen tools.
+	Multimodal MultimodalCfg `yaml:"multimodal" json:"multimodal"`
+	// Hooks maps lifecycle event names (PreToolUse/PostToolUse/Stop) to
+	// hook rules — external commands fired during the agent loop.
+	Hooks map[string][]HookRule `yaml:"hooks" json:"hooks"`
+	// Autostart, when true, registers iCode to launch in desktop mode on OS
+	// login (Windows: HKCU Run key; macOS: LaunchAgent; Linux: autostart
+	// desktop file). Default false — iCode never auto-starts without an
+	// explicit opt-in from the user.
+	Autostart bool `yaml:"autostart,omitempty" json:"autostart,omitempty"`
+}
+
+// HookRule mirrors hooks.Rule but lives here so config stays dependency-free.
+type HookRule struct {
+	Matcher string `yaml:"matcher" json:"matcher"`
+	Command string `yaml:"command" json:"command"`
+	Timeout int    `yaml:"timeout" json:"timeout"`
 }
 
 // MCPServerCfg describes a single Model Context Protocol server connection.
@@ -67,7 +93,8 @@ type MCPServerCfg struct {
 	Env     []string          `yaml:"env,omitempty" json:"env,omitempty"`
 	URL     string            `yaml:"url,omitempty" json:"url,omitempty"`
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
-	Enabled bool              `yaml:"enabled" json:"enabled"`
+	Enabled   bool   `yaml:"enabled" json:"enabled"`
+	TrustMode string `yaml:"trust_mode,omitempty" json:"trust_mode,omitempty"` // ask | readonly | all
 }
 
 // DefaultCfg holds the user's preferred model / provider / permission mode,
@@ -81,6 +108,11 @@ type DefaultCfg struct {
 	Cache          bool     `yaml:"cache" json:"cache"`
 	SystemPrompt   string   `yaml:"system_prompt,omitempty" json:"system_prompt,omitempty"`
 	FallbackModels []string `yaml:"fallback_models,omitempty" json:"fallback_models,omitempty"`
+	// Smart model routing: cheap model for simple queries, powerful for complex
+	CheapModel    string `yaml:"cheap_model,omitempty" json:"cheap_model,omitempty"`
+	CheapProv     string `yaml:"cheap_provider,omitempty" json:"cheap_provider,omitempty"`
+	PowerfulModel string `yaml:"powerful_model,omitempty" json:"powerful_model,omitempty"`
+	PowerfulProv  string `yaml:"powerful_provider,omitempty" json:"powerful_provider,omitempty"`
 }
 
 type ProviderCfg struct {
@@ -134,6 +166,51 @@ type UpdateCfg struct {
 	IntervalH  int    `yaml:"interval_hours" json:"interval_hours"`
 }
 
+// LSPCfg controls language-server-backed code intelligence (diagnostics
+// injected after tool execution). When Enabled, the engine lazily starts the
+// matching language server (gopls/pyright/...) on first file edit.
+type LSPCfg struct {
+	Enabled  bool     `yaml:"enabled" json:"enabled"`
+	AutoStart []string `yaml:"auto_start" json:"auto_start"` // language IDs to start eagerly (e.g. ["go","python"])
+}
+
+// RoutingCfg configures the "auto" model router.
+//   - Mode "embedding" (DEFAULT): local, offline, zero-token semantic classifier
+//     (nearest-centroid cosine over hashed features) that refines the
+//     keyword baseline only when confident — smarter routing without spending
+//     any tokens on classification. An empty mode also maps to embedding.
+//   - Mode "keyword": zero-cost keyword/length heuristic only (legacy/fallback).
+//   - Mode "llm": grade complexity with a cheap LLM call (3s budget,
+//     falls back to keyword heuristic on error/timeout).
+type RoutingCfg struct {
+	Mode            string `yaml:"mode" json:"mode"`                                             // keyword | embedding | llm (default: embedding)
+	ClassifierModel string `yaml:"classifier_model,omitempty" json:"classifier_model,omitempty"` // model for llm mode; defaults to cheap model
+}
+
+// MultimodalCfg configures the backend for the image_gen / video_gen tools.
+// The default backend speaks the OpenAI-compatible images API, which most
+// providers (OpenAI, Zhipu, volcengine, and WorkBuddy's multimodal gateway)
+// expose. When unset the tools return a friendly "not configured" hint rather
+// than an error, so the model can gracefully explain the missing setup.
+type MultimodalCfg struct {
+	// ImageBaseURL is the OpenAI-compatible images endpoint base
+	// (e.g. https://api.openai.com/v1). The tool POSTs to {base}/images/generations.
+	ImageBaseURL string `yaml:"image_base_url,omitempty" json:"image_base_url,omitempty"`
+	// ImageModel is the image model id (e.g. "dall-e-3", "cogview-3").
+	ImageModel string `yaml:"image_model,omitempty" json:"image_model,omitempty"`
+	// VideoBaseURL is the video generation endpoint base. The tool POSTs to
+	// {base}/videos/generations and, when the response is async, polls the
+	// returned task id.
+	VideoBaseURL string `yaml:"video_base_url,omitempty" json:"video_base_url,omitempty"`
+	// VideoModel is the video model id (e.g. "cogvideox", "sora").
+	VideoModel string `yaml:"video_model,omitempty" json:"video_model,omitempty"`
+	// APIKey authenticates both endpoints (Bearer). Falls back to the
+	// ICODE_MULTIMODAL_API_KEY / OPENAI_API_KEY environment variables.
+	APIKey string `yaml:"api_key,omitempty" json:"api_key,omitempty"`
+	// OutputDir is where generated media is saved. Defaults to ./.icode/generated.
+	OutputDir string `yaml:"output_dir,omitempty" json:"output_dir,omitempty"`
+}
+
 // Default returns a Config populated with sensible defaults.
 // The default security level is "local" — iCode NEVER sends data externally
 // without explicit user consent. No telemetry, no tracking, no phone-home.
@@ -164,14 +241,21 @@ func Default() *Config {
 		Tools: ToolsCfg{
 			BashTimeout: 120,
 		},
+		Routing: RoutingCfg{
+			Mode: "embedding", // local, zero-token semantic routing by default
+		},
 		Server: ServerCfg{
 			Port: 0,
 			Host: "127.0.0.1",
 		},
+		Autostart: false,
 		Update: UpdateCfg{
 			AutoUpdate: true,
 			Channel:    "github",
 			IntervalH:  24,
+		},
+		LSP: LSPCfg{
+			Enabled: true,
 		},
 	}
 }
@@ -201,15 +285,29 @@ func LoadOrCreate() (*Config, error) {
 func Load() (*Config, error) {
 	cfg := Default()
 
-	// 1. Try local project config
-	paths := []string{
+	// 1. Try local project config (YAML and TOML)
+	yamlPaths := []string{
 		".icoderc.yaml",
 		".icoderc.yml",
 		".icode/config.yaml",
+		".icode/config.yml",
+		"icode.yaml",
+		"icode.yml",
 	}
 
-	for _, p := range paths {
+	for _, p := range yamlPaths {
 		if err := mergeFile(cfg, p); err != nil && !os.IsNotExist(err) {
+			return nil, fmt.Errorf("load %s: %w", p, err)
+		}
+	}
+
+	tomlPaths := []string{
+		".icoderc.toml",
+		"icode.toml",
+	}
+
+	for _, p := range tomlPaths {
+		if err := mergeTomlFile(cfg, p); err != nil && !os.IsNotExist(err) {
 			return nil, fmt.Errorf("load %s: %w", p, err)
 		}
 	}
@@ -241,6 +339,14 @@ func mergeFile(cfg *Config, path string) error {
 		return err
 	}
 	return yaml.Unmarshal(data, cfg)
+}
+
+func mergeTomlFile(cfg *Config, path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	return toml.Unmarshal(data, cfg)
 }
 
 func applyEnvOverrides(cfg *Config) {

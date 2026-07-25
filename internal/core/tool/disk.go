@@ -86,10 +86,6 @@ func (t *DiskCleanupTool) Execute(ctx context.Context, args string) (*types.Tool
 	target := parseStrArg(args, "target", "all")
 	dryRun := parseBoolArgWithDefault(args, "dry_run", false)
 
-	if runtime.GOOS != "windows" {
-		return &types.ToolResult{Success: false, Error: "disk_cleanup is currently Windows-only. Use bash on Linux/macOS."}, nil
-	}
-
 	var output strings.Builder
 	var totalCleaned int64
 
@@ -146,27 +142,61 @@ func (t *DiskCleanupTool) Execute(ctx context.Context, args string) (*types.Tool
 		output.WriteString("\n")
 	}
 
-	if target == "temp" || target == "all" {
+	if runtime.GOOS == "windows" {
 		totalCleaned += cleanPath("Windows Temp", filepath.Join(systemRoot, "Temp"))
 		totalCleaned += cleanPath("User Temp", filepath.Join(localAppData, "Temp"))
 		totalCleaned += cleanPath("Prefetch", filepath.Join(systemRoot, "Prefetch"))
-	}
 
-	if target == "recycle" || target == "all" {
-		totalCleaned += cleanPath("Recycle Bin", `C:\$Recycle.Bin`)
-	}
+		if target == "recycle" || target == "all" {
+			totalCleaned += cleanPath("Recycle Bin", `C:\$Recycle.Bin`)
+		}
 
-	if target == "browser" || target == "all" {
-		totalCleaned += cleanPath("Chrome Cache", filepath.Join(localAppData, "Google", "Chrome", "User Data", "Default", "Cache", "Cache_Data"))
-		totalCleaned += cleanPath("Edge Cache", filepath.Join(localAppData, "Microsoft", "Edge", "User Data", "Default", "Cache", "Cache_Data"))
-	}
+		if target == "browser" || target == "all" {
+			totalCleaned += cleanPath("Chrome Cache", filepath.Join(localAppData, "Google", "Chrome", "User Data", "Default", "Cache", "Cache_Data"))
+			totalCleaned += cleanPath("Edge Cache", filepath.Join(localAppData, "Microsoft", "Edge", "User Data", "Default", "Cache", "Cache_Data"))
+		}
 
-	if target == "windows_update" || target == "all" {
-		totalCleaned += cleanPath("Win Update Downloads", filepath.Join(systemRoot, "SoftwareDistribution", "Download"))
-		if !dryRun {
-			cmd := executil.CommandContext(ctx, "dism", "/online", "/cleanup-image", "/startcomponentcleanup", "/resetbase", "/quiet")
-			cmd.Run() // best-effort, ignore errors
-			output.WriteString("  DISM component cleanup: completed (best-effort)\n")
+		if target == "windows_update" || target == "all" {
+			totalCleaned += cleanPath("Win Update Downloads", filepath.Join(systemRoot, "SoftwareDistribution", "Download"))
+			if !dryRun {
+				cmd := executil.CommandContext(ctx, "dism", "/online", "/cleanup-image", "/startcomponentcleanup", "/resetbase", "/quiet")
+				cmd.Run() // best-effort, ignore errors
+				output.WriteString("  DISM component cleanup: completed (best-effort)\n")
+			}
+		}
+	} else {
+		// Linux / macOS — clean only user-owned, disposable locations.
+		home, _ := os.UserHomeDir()
+		var trash string
+		if runtime.GOOS == "darwin" {
+			trash = filepath.Join(home, ".Trash")
+		} else {
+			trash = filepath.Join(home, ".local", "share", "Trash", "files")
+		}
+
+		if target == "temp" || target == "all" {
+			totalCleaned += cleanPath("User Temp", filepath.Join(os.TempDir()))
+			if home != "" {
+				totalCleaned += cleanPath("User Cache", filepath.Join(home, ".cache"))
+				if runtime.GOOS == "darwin" {
+					totalCleaned += cleanPath("macOS Caches", filepath.Join(home, "Library", "Caches"))
+				}
+			}
+		}
+
+		if target == "recycle" || target == "all" {
+			totalCleaned += cleanPath("Trash", trash)
+		}
+
+		if (target == "browser" || target == "all") && home != "" {
+			totalCleaned += cleanPath("Chrome Cache", filepath.Join(home, ".cache", "google-chrome", "Default", "Cache"))
+			totalCleaned += cleanPath("Chrome Cache2", filepath.Join(home, ".cache", "google-chrome", "Default", "Cache2"))
+			totalCleaned += cleanPath("Firefox Cache", filepath.Join(home, ".cache", "mozilla", "firefox"))
+			totalCleaned += cleanPath("Edge Cache", filepath.Join(home, ".cache", "microsoft-edge", "Default", "Cache"))
+			if runtime.GOOS == "darwin" {
+				totalCleaned += cleanPath("Safari Cache", filepath.Join(home, "Library", "Caches", "com.apple.Safari"))
+				totalCleaned += cleanPath("Chrome mac Cache", filepath.Join(home, "Library", "Caches", "Google", "Chrome"))
+			}
 		}
 	}
 

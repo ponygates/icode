@@ -409,6 +409,11 @@ func (g *Gate) isReadOnly(action Action) bool {
 		"git_status": true,
 		"fetch":      true,
 		"disk_usage": true,
+		// code_search only reads the in-memory symbol index.
+		"code_search": true,
+		// task_output only inspects the user's own background tasks
+		// (kill included — the task was started via an approved bash call).
+		"task_output": true,
 		// todo_write only mutates in-process session state, never the
 		// filesystem or external systems — safe to auto-approve.
 		"todo_write": true,

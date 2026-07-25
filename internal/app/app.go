@@ -8,12 +8,19 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/ponygates/icode/internal/config"
+	"github.com/ponygates/icode/internal/core/agent"
 	"github.com/ponygates/icode/internal/core/checkpoint"
 	"github.com/ponygates/icode/internal/core/conversation"
+	"github.com/ponygates/icode/internal/core/hooks"
 	"github.com/ponygates/icode/internal/core/permission"
+	"github.com/ponygates/icode/internal/lsp"
+	"github.com/ponygates/icode/internal/core/router"
 	"github.com/ponygates/icode/internal/core/session"
+	"github.com/ponygates/icode/internal/core/skills"
+	"github.com/ponygates/icode/internal/core/tool"
 	"github.com/ponygates/icode/internal/db"
 	"github.com/ponygates/icode/internal/llm/provider"
 	"github.com/ponygates/icode/internal/llm/provider/anthropic"
@@ -39,6 +46,7 @@ type App struct {
 	Engine    *conversation.Engine
 	Gate      *permission.Gate
 	Updater   *modelupdate.Service
+	LSPManager *lsp.Manager // nil when LSP disabled
 }
 
 // Bootstrap initializes all subsystems and returns a ready-to-use App.
@@ -88,8 +96,126 @@ func Bootstrap() (*App, error) {
 	app.Engine.SetGenerationParams(cfg.Defaults.Temperature, cfg.Defaults.MaxTokens)
 	app.Engine.SetSystemPrompt(cfg.Defaults.SystemPrompt)
 	app.Engine.SetFallbackModels(cfg.Defaults.FallbackModels)
+
+	// 5b. Wire smart model router (simple → cheap, complex → powerful)
+	defaultModel := cfg.Defaults.Model
+	if defaultModel == "" {
+		defaultModel = "deepseek-chat"
+	}
+	defaultProv := cfg.Defaults.Provider
+	if defaultProv == "" {
+		defaultProv = "deepseek"
+	}
+	modelRouter := router.New(router.Config{
+		DefaultModel:  defaultModel,
+		DefaultProv:   defaultProv,
+		CheapModel:    cfg.Defaults.CheapModel,
+		CheapProv:     cfg.Defaults.CheapProv,
+		PowerfulModel: cfg.Defaults.PowerfulModel,
+		PowerfulProv:  cfg.Defaults.PowerfulProv,
+	})
+	// Local semantic routing (config routing.mode: "embedding", now the
+	// DEFAULT) — a fully offline, zero-token classifier that refines the
+	// keyword baseline. It only upgrades the result when confident, falling
+	// back to keyword otherwise, so it can never make routing worse. An empty
+	// mode (legacy configs) also maps to embedding.
+	if cfg.Routing.Mode == "embedding" || cfg.Routing.Mode == "" {
+		modelRouter.SetEmbeddingClassifier(router.NewSemanticClassifier().Classify)
+	}
+	// Optional LLM-graded routing (config routing.mode: "llm") — uses a cheap
+	// model to classify query complexity; falls back to keyword heuristics on
+	// any error, so it can never break the conversation.
+	if cfg.Routing.Mode == "llm" {
+		clsModel := cfg.Routing.ClassifierModel
+		if clsModel == "" {
+			clsModel = cfg.Defaults.CheapModel
+		}
+		if clsModel == "" {
+			clsModel = defaultModel
+		}
+		if p, mi, err := app.Reg.ResolveModel(clsModel); err == nil {
+			modelRouter.SetLLMClassifier(func(ctx context.Context, query string) (router.Complexity, error) {
+				msg, err := p.Chat(ctx, types.ChatRequest{
+					Messages: []types.Message{{
+						Role:    types.RoleUser,
+						Content: "Classify the coding-assistant query below as exactly one word: simple, normal, or complex.\nsimple = quick Q&A, no code changes; normal = standard coding task; complex = multi-step / large refactor / deep analysis.\nAnswer with the single word only.\n\nQuery:\n" + query,
+					}},
+					Model:        mi.ID,
+					ProviderName: mi.Provider,
+					MaxTokens:    8,
+				})
+				if err != nil {
+					return router.ComplexityNormal, err
+				}
+				switch {
+				case strings.Contains(strings.ToLower(msg.Content), "simple"):
+					return router.ComplexitySimple, nil
+				case strings.Contains(strings.ToLower(msg.Content), "complex"):
+					return router.ComplexityComplex, nil
+				default:
+					return router.ComplexityNormal, nil
+				}
+			})
+		}
+	}
+	app.Engine.SetRouter(modelRouter)
+
 	// Wire sub-agent runner into the tool registry (Claude Code task tool parity)
 	app.Engine.WireTaskRunner()
+
+	// 5c. Load skills (SKILL.md) and inject them into the engine system prompt
+	// so the model can discover and follow them on demand (Claude Code parity).
+	app.Engine.SetSkillsRegistry(skills.Load(skills.DefaultDirs()...))
+	// Wire the on-demand skill loader so the use_skill tool can fetch a skill's
+	// full body without it ever bloating the immutable (cached) system prefix.
+	app.Engine.SetSkillLoader(app.Engine.SkillBody)
+
+	// 5d. Load multi-agent teams (built-in + user/project .icode/teams/*.yaml)
+	// and register them so the task tool can dispatch `team:<name>`.
+	for _, td := range agent.DefaultTeamDefs() {
+		app.Engine.RegisterTeam(td)
+	}
+	for _, td := range agent.LoadTeams(agent.TeamDefaultDirs()...) {
+		app.Engine.RegisterTeam(td)
+	}
+
+	// 5e. Activate LSP code intelligence. The engine lazily starts the matching
+	// language server on first file edit and injects compile errors as hints.
+	if cfg.LSP.Enabled {
+		if cwd, err := os.Getwd(); err == nil {
+			app.LSPManager = lsp.NewManager(cwd)
+			app.Engine.SetLSPManager(app.LSPManager)
+			// Eagerly start language servers the user pinned in config.
+			for _, lang := range cfg.LSP.AutoStart {
+				if err := app.LSPManager.StartLanguageServer(context.Background(), lang); err != nil {
+					log.Printf("[iCode LSP] auto-start %s skipped: %v", lang, err)
+				}
+			}
+		}
+	}
+
+	// 5f. Lifecycle hooks (PreToolUse/PostToolUse/Stop) — Claude Code parity.
+	if len(cfg.Hooks) > 0 {
+		rules := make(map[string][]hooks.Rule, len(cfg.Hooks))
+		for ev, list := range cfg.Hooks {
+			for _, hr := range list {
+				rules[ev] = append(rules[ev], hooks.Rule{Matcher: hr.Matcher, Command: hr.Command, Timeout: hr.Timeout})
+			}
+		}
+		wd, _ := os.Getwd()
+		app.Engine.SetHooksRunner(hooks.NewRunner(rules, wd))
+	}
+
+	// 5g. Multimodal generation backend (image_gen/video_gen). Injected even
+	// when unset so the tools can report a friendly "not configured" hint.
+	app.Engine.SetMultimodalOptions(tool.MultimodalOptions{
+		ImageBaseURL: cfg.Multimodal.ImageBaseURL,
+		ImageModel:   cfg.Multimodal.ImageModel,
+		VideoBaseURL: cfg.Multimodal.VideoBaseURL,
+		VideoModel:   cfg.Multimodal.VideoModel,
+		APIKey:       cfg.Multimodal.APIKey,
+		OutputDir:    cfg.Multimodal.OutputDir,
+	})
 
 	// 6. Initialize undo system (file-level snapshot /undo)
 	if err := checkpoint.InitUndo(""); err != nil {
@@ -166,6 +292,9 @@ func hasExternalKeys(cfg *config.Config) bool {
 
 // Close shuts down all subsystems gracefully.
 func (app *App) Close() error {
+	if app.LSPManager != nil {
+		app.LSPManager.CloseAll()
+	}
 	if app.DB != nil {
 		return app.DB.Close()
 	}

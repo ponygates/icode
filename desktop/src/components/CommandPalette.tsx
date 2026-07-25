@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { useAppStore, Model, Session } from '../stores/appStore';
 
 interface Action {
@@ -11,6 +12,7 @@ interface Action {
 }
 
 const CommandPalette: React.FC<{ onClose: () => void }> = ({ onClose }) => {
+  const { t } = useTranslation();
   const [query, setQuery] = useState('');
   const [selectedIdx, setSelectedIdx] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -22,22 +24,22 @@ const CommandPalette: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   const actions: Action[] = [
     {
       id: 'settings',
-      label: '打开设置',
-      description: '配置 API 密钥、模型、主题等',
+      label: t('commandPalette.openSettings'),
+      description: t('commandPalette.openSettingsDesc'),
       icon: '⚙',
       action: () => { onClose(); window.dispatchEvent(new CustomEvent('icode:open-settings')); },
     },
     {
       id: 'clear',
-      label: '清空对话',
-      description: '清除当前会话的所有消息',
+      label: t('commandPalette.clearChat'),
+      description: t('commandPalette.clearChatDesc'),
       icon: '🗑',
       action: () => { const sid = useAppStore.getState().activeSessionId; if (sid) clearMessages(sid); onClose(); },
     },
     {
       id: 'new-session',
-      label: '新建会话',
-      description: '创建一个新的空白会话',
+      label: t('commandPalette.newSession'),
+      description: t('commandPalette.newSessionDesc'),
       icon: '✚',
       action: () => {
         const st = useAppStore.getState();
@@ -48,8 +50,8 @@ const CommandPalette: React.FC<{ onClose: () => void }> = ({ onClose }) => {
     },
     {
       id: 'export',
-      label: '导出对话',
-      description: '以 Markdown 格式导出当前会话',
+      label: t('commandPalette.exportChat'),
+      description: t('commandPalette.exportChatDesc'),
       icon: '⬇',
       action: () => {
         const sess = sessions.find(s => s.id === useAppStore.getState().activeSessionId);
@@ -66,7 +68,7 @@ const CommandPalette: React.FC<{ onClose: () => void }> = ({ onClose }) => {
     },
     ...models.map((m: Model) => ({
       id: `model:${m.id}`,
-      label: `切换到 ${m.name || m.id}`,
+      label: t('commandPalette.switchModel', { name: m.name || m.id }),
       description: `${m.provider} — ${m.id}`,
       icon: '🧠',
       action: () => { setSelectedModel(m.id); onClose(); },
@@ -74,7 +76,7 @@ const CommandPalette: React.FC<{ onClose: () => void }> = ({ onClose }) => {
     ...sessions.slice(0, 10).map((s: Session) => ({
       id: `session:${s.id}`,
       label: s.title || s.id.slice(0, 8),
-      description: `${s.messages.length} 条消息`,
+      description: t('commandPalette.sessionMessages', { count: s.messages.length }),
       icon: '💬',
       action: () => { setActiveSession(s.id); onClose(); },
     })),
@@ -125,7 +127,7 @@ const CommandPalette: React.FC<{ onClose: () => void }> = ({ onClose }) => {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="搜索命令、模型、会话…"
+          placeholder={t('commandPalette.placeholder')}
           style={{
             width: '100%', boxSizing: 'border-box',
             padding: '14px 16px', fontSize: 14,
@@ -137,7 +139,7 @@ const CommandPalette: React.FC<{ onClose: () => void }> = ({ onClose }) => {
         <div style={{ overflowY: 'auto', flex: 1 }}>
           {filtered.length === 0 && (
             <div style={{ padding: '20px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>
-              无匹配结果
+              {t('commandPalette.noMatch')}
             </div>
           )}
           {filtered.map((item, i) => (

@@ -1,4 +1,5 @@
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 import { X, Plus } from 'lucide-react';
 
 interface Tab {
@@ -15,6 +16,7 @@ interface TabBarProps {
 }
 
 const TabBar: React.FC<TabBarProps> = ({ tabs, activeId, onSelect, onClose, onNew }) => {
+  const { t } = useTranslation();
   if (tabs.length === 0) return null;
 
   return (
@@ -41,7 +43,7 @@ const TabBar: React.FC<TabBarProps> = ({ tabs, activeId, onSelect, onClose, onNe
             }}
           >
             <span style={{ maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-              {tab.title || '新会话'}
+              {tab.title || t('tab.newTab')}
             </span>
             <button
               onClick={(e) => { e.stopPropagation(); onClose(tab.id); }}
@@ -60,7 +62,7 @@ const TabBar: React.FC<TabBarProps> = ({ tabs, activeId, onSelect, onClose, onNe
       })}
       <button
         onClick={onNew}
-        title="新建标签"
+        title={t('tab.newTabTitle')}
         style={{
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           width: 30, height: 30, background: 'transparent', border: 'none',

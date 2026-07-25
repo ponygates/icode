@@ -12,7 +12,8 @@ REM  输出:
 REM    icode.exe              — 单二进制（CLI + 桌面二合一）
 REM      → icode desktop     启动桌面版（原生 WebView2 窗口）
 REM      → icode             启动 CLI
-REM      → 双击 icode.exe    自动进入桌面模式
+REM      → 双击 icode.exe    启动增强 TUI（加强版 CLI，带滚动条/鼠标/快捷键）
+REM      → 桌面版请显式用 icode desktop 或 icode-desktop.exe
 REM
 REM  2026-07-14: 合并桌面启动器到主 CLI，不再生成独立的 desktop-launcher.exe
 REM ============================================================
@@ -98,7 +99,7 @@ echo   使用方式:
 echo     icode                   — 启动 CLI
 echo     icode desktop           — 启动桌面版
 echo     icode exec -p "..."    — 单次执行
-echo     双击 icode.exe          — 自动进入桌面模式
+echo     双击 icode.exe          — 启动增强 TUI（加强版 CLI）
 echo.
 echo   之前的 desktop-launcher.exe 已废弃
 echo   （桌面功能已合并到 icode.exe 中）

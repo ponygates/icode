@@ -20,11 +20,11 @@ import (
 
 // dedupEntry holds one cached tool output.
 type dedupEntry struct {
-	ContentHash string    // sha256 of the output content
-	Content     string    // full output (first occurrence)
-	SizeBytes   int       // bytes of Content
+	ContentHash string // sha256 of the output content
+	Content     string // full output (first occurrence)
+	SizeBytes   int    // bytes of Content
 	LastSeen    time.Time
-	RefCount    int       // how many times this identical result was seen
+	RefCount    int // how many times this identical result was seen
 }
 
 // OutputCache deduplicates identical tool call results.

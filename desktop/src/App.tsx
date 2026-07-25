@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import Sidebar from './components/Sidebar';
 import ChatPage from './pages/ChatPage';
@@ -20,14 +21,17 @@ function hasAnyKey(): boolean {
 }
 
 const App: React.FC = () => {
+  const { t } = useTranslation();
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [showWizard, setShowWizard] = useState(false);
   const loadSecurityLevel = useAppStore((s) => s.loadSecurityLevel);
   const loadSessions = useAppStore((s) => s.loadSessions);
+  const loadWorkspaces = useAppStore((s) => s.loadWorkspaces);
   const refreshModels = useAppStore((s) => s.refreshModels);
   const checkBackend = useAppStore((s) => s.checkBackend);
   const fetchMode = useAppStore((s) => s.fetchMode);
+  const loadDesktopSettings = useAppStore((s) => s.loadDesktopSettings);
   const backendConnected = useAppStore((s) => s.backendConnected);
   const backendChecking = useAppStore((s) => s.backendChecking);
 
@@ -35,9 +39,11 @@ const App: React.FC = () => {
   useEffect(() => {
     loadSecurityLevel();
     loadSessions();
+    loadWorkspaces();
     refreshModels();
     checkBackend();
     fetchMode();
+    loadDesktopSettings();
     // Font size from localStorage
     const savedFontSize = localStorage.getItem('icode.fontSize');
     if (savedFontSize) {
@@ -92,11 +98,11 @@ const App: React.FC = () => {
             background: 'var(--yellow)', color: '#000',
             borderBottom: '1px solid rgba(0,0,0,0.1)', flexShrink: 0,
           }}>
-            <span>⚡ 后端未连接 — 请启动 iCode 服务</span>
+            <span>⚡ {t('chat.noResponse')}</span>
             <button onClick={() => checkBackend()} style={{
               background: 'rgba(0,0,0,0.1)', border: 'none', color: '#000',
               padding: '3px 10px', borderRadius: 4, cursor: 'pointer', fontSize: 11,
-            }}>重试</button>
+            }}>{t('settings.refreshModels')}</button>
           </div>
         )}
 

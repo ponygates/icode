@@ -43,7 +43,9 @@ func TestRepairPipeline_FlattenDeepNesting(t *testing.T) {
 	}
 
 	repaired, report := pipeline.RepairArgs(calls)
-	if report.Repaired == 0 { t.Log("deep nesting not triggered (config threshold is 10, test has ~3 levels - this is expected)") } else {
+	if report.Repaired == 0 {
+		t.Log("deep nesting not triggered (config threshold is 10, test has ~3 levels - this is expected)")
+	} else {
 		t.Log("flatten: repaired", report.Repaired)
 	}
 	if len(repaired) != 1 {
@@ -80,10 +82,10 @@ func TestRepairPipeline_TruncationFix(t *testing.T) {
 
 func TestRepairPipeline_StormSuppression(t *testing.T) {
 	pipeline := NewToolCallRepairPipeline(ToolCallRepairConfig{
-		MaxNestDepth: 10,
-		MaxParams:    10,
-		StormWindow:  3,
-		MaxSameCall:  2,
+		MaxNestDepth:  10,
+		MaxParams:     10,
+		StormWindow:   3,
+		MaxSameCall:   2,
 		EnabledStages: []string{"storm"},
 	})
 

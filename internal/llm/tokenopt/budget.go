@@ -18,6 +18,7 @@ package tokenopt
 import (
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/ponygates/icode/internal/types"
 )
@@ -53,6 +54,7 @@ func DefaultBudgetConfig() BudgetConfig {
 
 // BudgetEnforcer applies size limits to tool outputs.
 type BudgetEnforcer struct {
+	mu     sync.Mutex
 	config BudgetConfig
 	total  int // running total across all tools in this turn
 }
@@ -65,6 +67,8 @@ func NewBudgetEnforcer(cfg BudgetConfig) *BudgetEnforcer {
 // Enforce applies the budget limit to a tool result.
 // Returns the trimmed content and whether it was truncated.
 func (b *BudgetEnforcer) Enforce(toolName, content string) (trimmed string, truncated bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if content == "" {
 		return "", false
 	}
@@ -120,6 +124,8 @@ func (b *BudgetEnforcer) Enforce(toolName, content string) (trimmed string, trun
 
 // Reset resets the running total for a new turn.
 func (b *BudgetEnforcer) Reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.total = 0
 }
 

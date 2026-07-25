@@ -19,8 +19,10 @@
 package skills
 
 import (
+	"embed"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -35,17 +37,19 @@ type Skill struct {
 	Triggers    []string `yaml:"triggers,omitempty"`
 	Source      string   // absolute path of the SKILL.md
 	Body        string   // markdown body after frontmatter
+	Enabled     bool     `yaml:"enabled" json:"enabled"` // user-managed on/off switch
 }
 
 // Registry holds all loaded skills.
 type Registry struct {
-	skills []Skill
-	byName map[string]*Skill
+	skills   []Skill
+	byName   map[string]*Skill
+	disabled map[string]bool // names explicitly disabled by the user
 }
 
 // NewRegistry returns an empty skill registry.
 func NewRegistry() *Registry {
-	return &Registry{byName: map[string]*Skill{}}
+	return &Registry{byName: map[string]*Skill{}, disabled: map[string]bool{}}
 }
 
 // Load walks directories and loads all SKILL.md files.
@@ -82,6 +86,11 @@ func Load(dirs ...string) *Registry {
 	sort.Slice(r.skills, func(i, j int) bool {
 		return r.skills[i].Name < r.skills[j].Name
 	})
+	// Apply persistent user on/off switches.
+	r.loadDisabledState()
+	for i := range r.skills {
+		r.skills[i].Enabled = !r.disabled[r.skills[i].Name]
+	}
 	return r
 }
 
@@ -124,6 +133,9 @@ func (r *Registry) Find(query string) []*Skill {
 	q := strings.ToLower(query)
 	var hits []*Skill
 	for _, s := range r.skills {
+		if !s.Enabled {
+			continue
+		}
 		for _, t := range s.Triggers {
 			if strings.Contains(q, strings.ToLower(t)) {
 				hits = append(hits, &s)
@@ -147,7 +159,80 @@ func (r *Registry) List() []Skill {
 	return out
 }
 
+// SetEnabled toggles a skill's user-managed on/off switch and persists it to
+// ~/.icode/skills_state.yaml. Disabled skills are excluded from Find results
+// and from the skill index offered to the model.
+func (r *Registry) SetEnabled(name string, enabled bool) error {
+	if r.disabled == nil {
+		r.disabled = map[string]bool{}
+	}
+	if enabled {
+		delete(r.disabled, name)
+	} else {
+		r.disabled[name] = true
+	}
+	for i := range r.skills {
+		if r.skills[i].Name == name {
+			r.skills[i].Enabled = enabled
+		}
+	}
+	if s, ok := r.byName[name]; ok {
+		s.Enabled = enabled
+	}
+	return r.saveDisabledState()
+}
+
+// loadDisabledState reads the persistent disabled-skill set (best-effort).
+func (r *Registry) loadDisabledState() {
+	r.disabled = map[string]bool{}
+	path := statePath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var names []string
+	if err := yaml.Unmarshal(data, &names); err != nil {
+		return
+	}
+	for _, n := range names {
+		r.disabled[n] = true
+	}
+}
+
+// saveDisabledState writes the disabled-skill set back to disk.
+func (r *Registry) saveDisabledState() error {
+	path := statePath()
+	names := make([]string, 0, len(r.disabled))
+	for n := range r.disabled {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	data, err := yaml.Marshal(names)
+	if err != nil {
+		return err
+	}
+	if dir := filepath.Dir(path); dir != "" {
+		_ = os.MkdirAll(dir, 0o755)
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
+// statePath returns the disabled-skill state file location.
+func statePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".icode", "skills_state.yaml")
+}
+
 // FormatSystemPrompt renders matching skills into a system prompt fragment.
+// NOTE: this dumps every skill's full body into the prompt. It is kept for
+// backward compatibility and tests, but the engine should prefer
+// FormatIndex — dumping full bodies into the immutable prefix defeats the
+// Cache-First Loop once many skills are installed (the prefix grows on every
+// skill and invalidates the provider's KV cache). Use FormatIndex + the
+// use_skill tool for token-efficient, cache-stable skill discovery.
 func FormatSystemPrompt(skills []*Skill) string {
 	if len(skills) == 0 {
 		return ""
@@ -160,14 +245,188 @@ func FormatSystemPrompt(skills []*Skill) string {
 	return b.String()
 }
 
-// DefaultDirs returns standard load paths.
+// FormatIndex renders a compact, cache-stable index of available skills.
+// Unlike FormatSystemPrompt it only emits the name + one-line description +
+// trigger keywords — never the full body. This keeps the immutable system
+// prefix tiny and stable regardless of how many skills are installed, which
+// is what preserves the provider's prefix-cache hit rate (the core of iCode's
+// token-saving mechanism). The model loads a skill's full instructions on
+// demand via the use_skill tool.
+func FormatIndex(skills []*Skill) string {
+	if len(skills) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n\n## Available Skills\n")
+	b.WriteString("Skills are optional workflows you may follow when relevant. To load a skill's full instructions, call the `use_skill` tool with its name. Do not invent skill names — only use those listed here.\n")
+	for _, s := range skills {
+		trig := ""
+		if len(s.Triggers) > 0 {
+			trig = " [triggers: " + strings.Join(s.Triggers, ", ") + "]"
+		}
+		desc := s.Description
+		if desc == "" {
+			desc = "(no description)"
+		}
+		b.WriteString(fmt.Sprintf("\n- **%s**: %s%s", s.Name, desc, trig))
+	}
+	return b.String()
+}
+
+// catalogFS embeds the built-in skill market shipped with iCode. These skills
+// form a local "market" the user can browse and install with one click. The
+// format is identical to project/user SKILL.md, so installing just copies the
+// file into the user's skills directory. (A future remote manifest URL can
+// extend this catalog without changing the install path.)
+//
+//go:embed catalog
+var catalogFS embed.FS
+
+// CatalogSkill describes a skill available in the built-in market.
+type CatalogSkill struct {
+	Name        string   `json:"name" yaml:"name"`
+	Description string   `json:"description" yaml:"description"`
+	Triggers    []string `json:"triggers,omitempty" yaml:"triggers,omitempty"`
+	Installed   bool     `json:"installed"`
+}
+
+// userSkillsDir returns ~/.icode/skills, where user-installed and imported
+// skills live. Returns "" if the home dir cannot be resolved.
+func userSkillsDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".icode", "skills")
+}
+
+// ListCatalog returns every skill bundled in the built-in market, annotated
+// with whether it is already installed into the user's skills directory.
+func ListCatalog() []CatalogSkill {
+	entries, err := catalogFS.ReadDir("catalog")
+	if err != nil {
+		return nil
+	}
+	out := make([]CatalogSkill, 0, len(entries))
+	for _, ent := range entries {
+		if !ent.IsDir() {
+			continue
+		}
+		data, err := catalogFS.ReadFile(path.Join("catalog", ent.Name(), "SKILL.md"))
+		if err != nil {
+			continue
+		}
+		s := parseSkill(ent.Name(), "catalog/"+ent.Name(), string(data))
+		if s == nil {
+			continue
+		}
+		out = append(out, CatalogSkill{
+			Name:        s.Name,
+			Description: s.Description,
+			Triggers:    s.Triggers,
+			Installed:   IsInstalled(s.Name),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// IsInstalled reports whether a skill with the given name is present in the
+// user's skills directory (installed from the market or imported locally).
+func IsInstalled(name string) bool {
+	dir := userSkillsDir()
+	if dir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(dir, name, "SKILL.md"))
+	return err == nil
+}
+
+// Install copies a built-in market skill into the user's skills directory so
+// it becomes active on the next registry load. Returns an error if the named
+// skill is not present in the embedded catalog.
+func Install(name string) error {
+	data, err := catalogFS.ReadFile(path.Join("catalog", name, "SKILL.md"))
+	if err != nil {
+		return fmt.Errorf("skill %q not found in market", name)
+	}
+	dir := userSkillsDir()
+	if dir == "" {
+		return fmt.Errorf("cannot resolve user skills dir")
+	}
+	dest := filepath.Join(dir, name, "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(dest, data, 0o644)
+}
+
+// Uninstall removes a skill from the user's skills directory. It only deletes
+// user-installed skills (never the embedded catalog, which is read-only, nor
+// WorkBuddy skills that live in a different directory).
+func Uninstall(name string) error {
+	dir := userSkillsDir()
+	if dir == "" {
+		return fmt.Errorf("cannot resolve user skills dir")
+	}
+	target := filepath.Join(dir, name)
+	if _, err := os.Stat(filepath.Join(target, "SKILL.md")); err != nil {
+		return fmt.Errorf("skill %q is not installed in user dir", name)
+	}
+	return os.RemoveAll(target)
+}
+
+// Import installs a skill from a local SKILL.md file (or a directory
+// containing SKILL.md) into the user's skills directory. The skill name is
+// taken from the file's frontmatter, falling back to the directory name.
+func Import(src string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	skillPath := src
+	if info.IsDir() {
+		skillPath = filepath.Join(src, "SKILL.md")
+	}
+	data, err := os.ReadFile(skillPath)
+	if err != nil {
+		return err
+	}
+	base := filepath.Base(filepath.Dir(skillPath))
+	s := parseSkill(base, skillPath, string(data))
+	if s == nil || s.Name == "" {
+		return fmt.Errorf("invalid skill: missing name in frontmatter")
+	}
+	dir := userSkillsDir()
+	if dir == "" {
+		return fmt.Errorf("cannot resolve user skills dir")
+	}
+	dest := filepath.Join(dir, s.Name, "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(dest, data, 0o644)
+}
+
+// DefaultDirs returns standard load paths. Besides iCode's own directories,
+// WorkBuddy skill directories are included as well — the SKILL.md format
+// (YAML frontmatter with name/description + Markdown body) is compatible,
+// so skills installed via WorkBuddy are immediately usable in iCode.
 func DefaultDirs() []string {
 	var out []string
+	// Order matters: later dirs override earlier ones, so WorkBuddy dirs come
+	// first and iCode's own dirs win on name conflicts.
 	if home, err := os.UserHomeDir(); err == nil {
-		out = append(out, filepath.Join(home, ".icode", "skills"))
+		out = append(out,
+			filepath.Join(home, ".workbuddy", "skills"), // WorkBuddy user-level skills
+			filepath.Join(home, ".icode", "skills"),
+		)
 	}
 	if cwd, err := os.Getwd(); err == nil {
-		out = append(out, filepath.Join(cwd, ".icode", "skills"))
+		out = append(out,
+			filepath.Join(cwd, ".workbuddy", "skills"), // WorkBuddy project-level skills
+			filepath.Join(cwd, ".icode", "skills"),
+		)
 	}
 	return out
 }

@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useAppStore, Model } from '../stores/appStore';
 import { ArrowLeftRight, Zap, DollarSign, Brain, Eye, Maximize2 } from 'lucide-react';
 
@@ -22,6 +23,7 @@ const value: React.CSSProperties = {
 };
 
 const ModelCompare: React.FC = () => {
+  const { t } = useTranslation();
   const { models } = useAppStore();
   const [left, setLeft] = useState<string>(models[0]?.id || '');
   const [right, setRight] = useState<string>(models[1]?.id || '');
@@ -30,8 +32,8 @@ const ModelCompare: React.FC = () => {
   const rightModel = models.find((m) => m.id === right);
 
   const features: { key: string; icon: React.ReactNode; label: string; get: (m: Model) => string }[] = [
-    { key: 'provider', icon: <Zap size={14} />, label: '提供商', get: (m) => m.provider },
-    { key: 'plan', icon: <DollarSign size={14} />, label: '方案', get: (m) => {
+    { key: 'provider', icon: <Zap size={14} />, label: t('models.provider'), get: (m) => m.provider },
+    { key: 'plan', icon: <DollarSign size={14} />, label: t('models.plan'), get: (m) => {
       const plans = m.plans || [];
       const inputP = plans.find((p: any) => p.type === 'input' || (p.name && /input|prompt/i.test(p.name)));
       const outputP = plans.find((p: any) => p.type === 'output' || (p.name && /output|completion/i.test(p.name)));
@@ -42,19 +44,19 @@ const ModelCompare: React.FC = () => {
       }
       return m.plan;
     }},
-    { key: 'capabilities', icon: <Brain size={14} />, label: '能力', get: (m) => {
+    { key: 'capabilities', icon: <Brain size={14} />, label: t('compare.capability'), get: (m) => {
       const names = (Array.isArray(m.plans) ? m.plans.map((p: any) => p.name || '').join(' ') : '') + ' ' + (m.name || '');
       const lower = names.toLowerCase();
-      if (lower.includes('reasoning') || lower.includes('pro')) return '推理';
-      if (lower.includes('flash') || lower.includes('turbo')) return '快速';
-      return '通用';
+      if (lower.includes('reasoning') || lower.includes('pro')) return t('compare.reasoning');
+      if (lower.includes('flash') || lower.includes('turbo')) return t('compare.fast');
+      return t('compare.general');
     }},
-    { key: 'vision', icon: <Eye size={14} />, label: '视觉', get: (m) => {
+    { key: 'vision', icon: <Eye size={14} />, label: t('compare.vision'), get: (m) => {
       const id = (m.id || '').toLowerCase();
       return (id.includes('vision') || id.includes('4o') || id.includes('gemini') || id.includes('claude'))
         ? '✅' : '—';
     }},
-    { key: 'ctx', icon: <Maximize2 size={14} />, label: '上下文', get: (m) => {
+    { key: 'ctx', icon: <Maximize2 size={14} />, label: t('compare.context'), get: (m) => {
       const id = (m.id || '').toLowerCase();
       if (id.includes('1m') || id.includes('1000k')) return '1M';
       if (id.includes('200k')) return '200K';
@@ -76,7 +78,7 @@ const ModelCompare: React.FC = () => {
       }}>
         <ArrowLeftRight size={16} />
         <span style={{ fontSize: 15, fontWeight: 500, color: 'var(--text-primary)' }}>
-          模型对比
+          {t('compare.title')}
         </span>
       </div>
 
@@ -84,7 +86,7 @@ const ModelCompare: React.FC = () => {
         {/* Model selectors */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr', gap: 16, marginBottom: 20, alignItems: 'center' }}>
           <div style={card}>
-            <div style={label}>左侧模型</div>
+            <div style={label}>{t('compare.leftModel')}</div>
             <select
               value={left}
               onChange={(e) => setLeft(e.target.value)}
@@ -107,7 +109,7 @@ const ModelCompare: React.FC = () => {
           <div style={{ fontSize: 20, color: 'var(--text-muted)' }}>VS</div>
 
           <div style={card}>
-            <div style={label}>右侧模型</div>
+            <div style={label}>{t('compare.rightModel')}</div>
             <select
               value={right}
               onChange={(e) => setRight(e.target.value)}
@@ -182,7 +184,7 @@ const ModelCompare: React.FC = () => {
         {/* Model list overview */}
         <div style={card}>
           <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--text-primary)', marginBottom: 12 }}>
-            全部模型 ({models.length})
+            {t('compare.allModels', { count: models.length })}
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 8 }}>
             {models.map((m) => (
