@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { subscribeWithSelector } from 'zustand/middleware';
 import i18n from '../i18n';
 
 export interface Model {
@@ -159,7 +160,8 @@ const defaultModels: Model[] = [
   { id: 'google/gemini-2.0-flash-exp:free', name: 'Gemini 2.0 Flash', provider: 'openrouter', plan: 'Free Tier' },
 ];
 
-export const useAppStore = create<AppStore>((set, get) => ({
+export const useAppStore = create<AppStore>()(
+  subscribeWithSelector((set, get) => ({
   language: 'zh-CN',
   setLanguage: (lang) => {
     set({ language: lang });
@@ -654,18 +656,50 @@ export const useAppStore = create<AppStore>((set, get) => ({
       };
     });
   },
-}));
+})));
 
-// Auto-persist sessions + open tabs + active selection to localStorage so
-// they survive route changes and restarts.
-useAppStore.subscribe((state) => {
+// ── Persistence (localStorage fallback) ──
+// Debounced + selector-scoped so it NEVER blocks the UI thread. The previous
+// implementation subscribed to EVERY state change and ran a synchronous
+// JSON.stringify of up to 50 full sessions on each one — that serialization on
+// the critical path (every startup action AND every streaming frame) is what
+// made the desktop "freeze" at launch and while generating.
+let persistTimer: ReturnType<typeof setTimeout> | null = null;
+
+function flushPersist() {
+  if (persistTimer != null) {
+    clearTimeout(persistTimer);
+    persistTimer = null;
+  }
+  const state = useAppStore.getState();
   saveToLocal(state.sessions || []);
   try {
     localStorage.setItem(LS_TABS, JSON.stringify(state.openTabIds || []));
     if (state.activeSessionId) localStorage.setItem(LS_ACTIVE, state.activeSessionId);
     if (state.activeWorkspaceId) localStorage.setItem(LS_WORKSPACE, state.activeWorkspaceId);
-  } catch {}
-});
+  } catch { /* quota / serialization error — ignore */ }
+}
+
+function schedulePersist() {
+  if (persistTimer != null) return;
+  persistTimer = setTimeout(flushPersist, 800);
+}
+
+// Only persist when the actually-persisted slices change (not on backend
+// connection state, models, token usage, etc.).
+useAppStore.subscribe(
+  (s) => [s.sessions, s.openTabIds, s.activeSessionId, s.activeWorkspaceId] as const,
+  () => schedulePersist(),
+  {
+    equalityFn: (a, b) =>
+      a[0] === b[0] && a[1] === b[1] && a[2] === b[2] && a[3] === b[3],
+  }
+);
+
+// Flush any pending write on real exit (tray "退出" terminates the process).
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeunload', flushPersist);
+}
 
 // ── localStorage persistence (fallback when backend is unavailable) ──
 

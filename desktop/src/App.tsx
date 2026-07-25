@@ -35,33 +35,42 @@ const App: React.FC = () => {
   const backendConnected = useAppStore((s) => s.backendConnected);
   const backendChecking = useAppStore((s) => s.backendChecking);
 
-  // Startup: load config, apply theme, show setup wizard if first run
+  // Startup: connect to the backend FIRST, then load config/sessions/models.
+  // Connecting first lets session/model loads use the HTTP path (the backend
+  // already holds everything in SQLite) instead of the heavy localStorage
+  // fallback — this avoids a large synchronous parse/serialize at launch.
   useEffect(() => {
-    loadSecurityLevel();
-    loadSessions();
-    loadWorkspaces();
-    refreshModels();
-    checkBackend();
-    fetchMode();
-    loadDesktopSettings();
-    // Font size from localStorage
-    const savedFontSize = localStorage.getItem('icode.fontSize');
-    if (savedFontSize) {
-      document.documentElement.style.fontSize = savedFontSize + 'px';
-    }
-    // Theme from local config
-    const theme = localStorage.getItem('icode.theme') || 'dark';
-    const root = document.documentElement;
-    if (theme === 'auto') {
-      root.setAttribute('data-theme', window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
-    } else {
-      root.setAttribute('data-theme', theme);
-    }
-    // Show setup wizard on first run (no API key configured)
-    const seen = localStorage.getItem('icode.wizard.seen');
-    if (!seen && !hasAnyKey()) {
-      setShowWizard(true);
-    }
+    let cancelled = false;
+    const init = async () => {
+      await checkBackend();
+      await fetchMode();
+      if (cancelled) return;
+      loadSecurityLevel();
+      await loadSessions();
+      await loadWorkspaces();
+      await refreshModels();
+      await loadDesktopSettings();
+      if (cancelled) return;
+      // Font size from localStorage
+      const savedFontSize = localStorage.getItem('icode.fontSize');
+      if (savedFontSize) {
+        document.documentElement.style.fontSize = savedFontSize + 'px';
+      }
+      // Theme from local config
+      const theme = localStorage.getItem('icode.theme') || 'dark';
+      const root = document.documentElement;
+      if (theme === 'auto') {
+        root.setAttribute('data-theme', window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+      } else {
+        root.setAttribute('data-theme', theme);
+      }
+      // Show setup wizard on first run (no API key configured)
+      const seen = localStorage.getItem('icode.wizard.seen');
+      if (!seen && !hasAnyKey()) {
+        setShowWizard(true);
+      }
+    };
+    init();
     // Listen for settings shortcut
     const handler = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === ',') {
@@ -74,6 +83,7 @@ const App: React.FC = () => {
     const openSettings = () => setSettingsOpen(true);
     window.addEventListener('icode:open-settings', openSettings);
     return () => {
+      cancelled = true;
       window.removeEventListener('keydown', handler);
       window.removeEventListener('icode:open-settings', openSettings);
     };

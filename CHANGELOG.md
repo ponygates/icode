@@ -1,5 +1,41 @@
 # 更新日志
 
+## v0.25.0 — 桌面启动卡死修复：持久化防抖 + 启动顺序校正（2026-07-25）
+
+> 第二十一批：修复「桌面版启动时卡死」。v0.24.0 解决了运行期流式卡顿，但冷启动仍会冻结——根因在 store 的模块级订阅。
+
+### 🐛 启动冻结根因（`desktop/src/stores/appStore.ts`）
+- **原实现**：模块级 `useAppStore.subscribe((state) => { saveToLocal(state.sessions || []); ... })` 在**每一次** state 变更时同步 `JSON.stringify` 至多 50 个完整会话写入 localStorage。
+- 这串序列化落在关键路径上：6 个启动动作（backend/sessions/workspaces/models/settings/security）+ 每个流式 token 都会触发 → 主线程阻塞 → 启动冻结 + 运行期偶发卡顿。
+
+### 🔧 修复
+- **防抖 + 选择性持久化**：改用 `subscribeWithSelector` 中间件，只对真正需要持久化的切片（`sessions / openTabIds / activeSessionId / activeWorkspaceId`）做 `equalityFn` 比较；变更后经 800ms 防抖 `setTimeout` 才写入，避开每次流式帧。
+- **退出兜底**：`window.addEventListener('beforeunload', flushPersist)` 在进程退出前强制 flush 一次未决写入（托盘「退出」直接终止进程也能落盘）。
+- **启动顺序校正**（`desktop/src/App.tsx`）：启动 `useEffect` 先 `await checkBackend()` + `await fetchMode()`，**再** `loadSessions / loadWorkspaces / refreshModels / loadDesktopSettings`——确保会话/模型走后端 SQLite/HTTP 路径，而非在后端未连时回退到重 localStorage 解析。
+
+### ✅ 验证
+- `npx tsc --noEmit` 全绿（修复了 curried `create<AppStore>()(subscribeWithSelector(...))` 少一个右括号导致的 TS1005）。
+- `cd desktop && npm run build` 全绿（1817 modules transformed）。
+- `go build -ldflags="-s -w -H windowsgui" -o icode.exe .` 全绿，前端已重新嵌入 `internal/embedded/dist`。
+
+### 已知限制
+- 启动仍需等待后端健康探测（30s 超时/300ms 轮询）；后端不可用时回退 localStorage，首次解析大会话仍有一次性开销（已非每帧触发，不再冻结）。
+
+## v0.24.0 — 桌面运行性能优化 + CLI 梅花 LOGO 左移美化（2026-07-25）
+
+> 第二十批：解决「桌面版运行时有点卡」+ CLI LOGO 不像梅花。
+
+### ⚡ 运行时卡顿修复（6 处根因）
+- 删除每 token `console.log` 刷控制台。
+- 每 token 全量 `updateMessage` 触发全列表重渲染 → `requestAnimationFrame` 批量合并（每帧最多一次 store 写）。
+- 每 token `scrollIntoView({behavior:'smooth'})` → rAF 节流 + `auto` + stick-to-bottom（距底 ≤80px 判定）。
+- `Markdown`/`CodeBlock` 未 memo → 加 `React.memo`。
+- `CodeBlock` header 每 render 重复 `hljs.highlightAuto` → `useMemo` 复用已算结果（`highlighted.language`）。
+- 右侧 sidebar 4 正则扫全 messages → `useMemo` 包裹（`fileActions`）。
+
+### 🌸 CLI LOGO
+- `internal/tui/logo.go` 重设计梅花造型（`@` 圆润花瓣环绕 `*` 花蕊 + `~\|~` 枝叶），`asciiLogo` 改为「左梅花 + 右 ICODE 字标」并排布局（`blossomW=11`）。
+
 ## v0.23.0 — Token 节省深化：多模态附件淘汰 + 附件感知估算（2026-07-25）
 
 > 第十九批：深化 Cache-First Loop。v0.16 起工具生成的 base64 图片会回灌进对话历史，但从不淘汰——一张图 100KB–1MB base64，此后**每一轮请求都重复发送**，是多模态会话中最大的 token/带宽浪费点；且 token 估算把附件当 0 算，导致压缩触发过晚。
