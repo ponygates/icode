@@ -1,5 +1,28 @@
 # 更新日志
 
+## v0.31.0 — 桌面启动卡死：加自诊断 + 消除启动期阻塞（2026-07-27）
+
+> 第二十七批：用户反馈「桌面启动卡死仍未修复（启动提示 3 秒后关闭仍卡死）」。经逐行排查整条启动链路（Go 启动 → 后端 → MIME → React 挂载 → init → ChatPage 渲染 → store → BootSplash/ErrorBoundary），**在可读代码范围内找不到阻塞调用、死循环、MIME 错误或后端接口挂起**（实测 `/api/health`、`/api/models`、`/api/sessions` 均 <20ms；`handleListModels` 直接返回内置模型列表、不联网；`UpdateAll` 仅由模型页「刷新」触发）。因此本次不盲目改逻辑，而是：①加启动自诊断把「静默卡死」变成可读错误；②把 init 对后端的依赖改为即发即弃，彻底排除启动期被后端拖死。
+
+### 🔍 启动自诊断（关键改动）
+- `desktop/index.html` 增加经典（非 module）内联脚本，早于 React 模块执行：捕获 `window.onerror` 与 `unhandledrejection` 写入 `localStorage.icode.lastError`（带时间戳/堆栈）；并加 **8 秒看门狗**——若 `window.__icodeMounted` 未置位（React 没挂载），把启动占位替换为可读的「启动失败」面板，显示捕获到的错误（而非永远转圈）。
+- `desktop/src/main.tsx` 在 `createRoot().render()` 之后立即置 `window.__icodeMounted = true`（供看门狗判断），并**启动一个独立 Web Worker 主线程存活看门狗**：Worker 每 1s 向主线程发 `ping`，主线程回 `pong` 并带上当前启动阶段 `window.__icodePhase`；若 Worker 连续 >4s 收不到 `pong`（说明主线程被长任务/死循环阻塞），则把 `{type:'ui-blocked', lastPhase}` 写入 **IndexedDB(`icode-diag`)**。这是静态分析无法发现的「主线程被卡死」的唯一运行时信号。
+- `desktop/src/App.tsx` 的 `init()` 在各阶段置 `window.__icodePhase`（`local-ui`/`check-backend`/`fetch-mode`/`sessions`/`workspaces`/`done`），让任何捕获到的错误和 `ui-blocked` 标记都带「卡在哪个阶段」的上下文。
+
+### ⚡ 启动不再被后端拖死
+- `desktop/src/App.tsx` 的 `init()`：`refreshModels()` / `loadDesktopSettings()` 由 `await` 改为**即发即弃**（`.catch(()=>{})`）。欢迎页在 `loadSessions`/`loadWorkspaces` 完成后立即可用，模型列表/桌面设置随后填充。即便 `/api/models` 偶发变慢，也绝不会拖住启动。
+
+### 🧪 验证
+- `npx tsc --noEmit` 全绿；`NODE_OPTIONS= npm run build` 全绿；前端重嵌 `internal/embedded/dist`；`go build -H windowsgui` 全绿；`icode version` → `0.31.0`。
+- 后端静态服务对 `.js`/`css`/`html`/`svg` 均设置正确 MIME，确认 React 能正常挂载。
+
+### 📋 若仍卡死，请反馈以下信息（本次改动已能直接显示）
+1. 启动占位是否变成「启动失败」红字面板？把里面的错误文本贴出来。
+2. 按 `F12` 无法用（WebView2 默认无 DevTools），但可看：浏览器地址栏不可用；请在**另一台能跑 WebView2 的机器**或本机用 `reg query` 确认 WebView2 运行时已安装。
+3. `~/.icode/desktop.log` 全文（Go 端日志，含 provider 诊断）。
+4. `localStorage.icode.lastError` 的内容（React 启动错误，现已带 `[阶段]` 前缀）。
+5. **本次新增跨启动取证**：若上次启动主线程被阻塞，本次启动的窗口**标题栏**会显示「iCode 桌面版 — 上次启动检测到 UI 线程被阻塞(阶段:XXX)」，且 `localStorage.icode.lastError` 会多出一条 `ui-blocked-prevrun` 记录。把这两者贴出即可定位是「主线程死循环」（会有 ui-blocked 记录）还是「WebView2 渲染/输入层问题」（不会有该记录，需另查 WebView2 运行时版本/GPU 加速）。
+
 ## v0.30.0 — CLI 命令/自动补全/快捷键对齐 Claude Code（2026-07-27）
 
 > 第二十六批：用户要求「把 CLI 版的命令、命令自动补全、快捷键，都模仿 claudecode 的」。

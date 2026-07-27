@@ -43,6 +43,7 @@ const App: React.FC = () => {
   useEffect(() => {
     let cancelled = false;
     const init = async () => {
+      (window as any).__icodePhase = 'local-ui';
       // 1) Local UI setup first — never touches the network, so it can't hang
       //    and the welcome screen is always fully styled and interactive.
       const savedFontSize = localStorage.getItem('icode.fontSize');
@@ -67,14 +68,23 @@ const App: React.FC = () => {
       try {
         await Promise.race([
           (async () => {
+            (window as any).__icodePhase = 'check-backend';
             await checkBackend();
             if (cancelled) return;
+            (window as any).__icodePhase = 'fetch-mode';
             await fetchMode();
             loadSecurityLevel();
+            (window as any).__icodePhase = 'sessions';
             await loadSessions();
+            (window as any).__icodePhase = 'workspaces';
             await loadWorkspaces();
-            await refreshModels();
-            await loadDesktopSettings();
+            (window as any).__icodePhase = 'done';
+            // Don't block the welcome screen on model/settings refresh — they
+            // populate when ready. This guarantees the UI is interactive the
+            // moment sessions load, so a slow /api/models can never stall
+            // startup.
+            refreshModels().catch(() => {});
+            loadDesktopSettings().catch(() => {});
           })(),
           new Promise<void>((resolve) => setTimeout(resolve, 12000)),
         ]);

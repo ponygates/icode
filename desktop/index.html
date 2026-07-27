@@ -91,7 +91,69 @@ code { font-family: "Cascadia Code", "JetBrains Mono", "Fira Code", monospace; f
 #boot-screen .boot-logo { font-size: 56px; line-height: 1; color: var(--accent); }
 #boot-screen .boot-name { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; color: var(--accent); }
 #boot-screen .boot-sub { font-size: 13px; color: var(--text-muted); }
+/* ── startup self-diagnostic (classic script, runs even if modules fail) ── */
 </style>
+<script>
+  // WebView2 has no visible DevTools by default, so a silent frozen splash is
+  // impossible to diagnose. Capture ANY early error (module eval / async /
+  // unhandled promise) to localStorage, and if React never mounts within 8s,
+  // replace the boot screen with a readable failure message instead of a
+  // spinner that spins forever.
+  (function () {
+    function save(kind, msg, stack) {
+      try {
+        var phase = window.__icodePhase || 'unknown';
+        var prev = localStorage.getItem('icode.lastError');
+        localStorage.setItem('icode.lastError', JSON.stringify({
+          kind: kind, message: '[' + phase + '] ' + msg, stack: stack || '', at: Date.now(), prev: prev
+        }));
+      } catch (e) {}
+    }
+    // On startup, check if a PREVIOUS run froze with a blocked UI thread. The
+    // liveness worker records that to IndexedDB; here we surface it so the user
+    // (and the next diagnostic pass) knows the freeze was a main-thread stall
+    // rather than a crash or failed mount.
+    try {
+      var idb = indexedDB.open('icode-diag', 1);
+      idb.onsuccess = function () {
+        try {
+          var db = idb.result;
+          var tx = db.transaction('diag', 'readonly');
+          var greq = tx.objectStore('diag').get('last');
+          greq.onsuccess = function () {
+            var rec = greq.result;
+            if (rec && rec.type === 'ui-blocked' && (Date.now() - rec.at) < 10 * 60 * 1000) {
+              save('ui-blocked-prevrun', 'lastPhase=' + (rec.lastPhase || 'unknown'), '');
+              try { document.title = 'iCode 桌面版 — 上次启动检测到 UI 线程被阻塞(阶段:' + (rec.lastPhase || 'unknown') + ')'; } catch (e) {}
+            }
+            db.close();
+          };
+        } catch (e) {}
+      };
+    } catch (e) {}
+    window.__icodeBootError = save;
+    window.addEventListener('error', function (e) {
+      save('error', e.message || String(e.error), e.error && e.error.stack);
+    });
+    window.addEventListener('unhandledrejection', function (e) {
+      var r = e.reason || {};
+      save('unhandledrejection', r.message || String(r), r.stack);
+    });
+    setTimeout(function () {
+      if (!window.__icodeMounted) {
+        var el = document.getElementById('boot-screen');
+        if (el) {
+          var err = localStorage.getItem('icode.lastError');
+          el.innerHTML = '<div style="max-width:680px;text-align:center;padding:24px">'
+            + '<div style="font-size:20px;font-weight:700;color:#e5484d;margin-bottom:12px">启动失败</div>'
+            + '<div style="font-size:13px;color:var(--text-muted);line-height:1.7">前端脚本未能加载或挂载（WebView2 运行时可能版本过旧、或资源加载失败）。请把下方内容反馈。</div>'
+            + '<pre style="white-space:pre-wrap;word-break:break-word;text-align:left;font-size:12px;background:var(--bg-primary);border:1px solid var(--border-color);border-radius:8px;padding:12px;margin-top:14px;max-height:300px;overflow:auto;color:var(--text-muted)">'
+            + (err ? err : '（未捕获到错误：可能是 WebView2 运行时缺失或版本过旧）') + '</pre></div>';
+        }
+      }
+    }, 8000);
+  })();
+</script>
 </head>
 <body>
 <div id="root">
