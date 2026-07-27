@@ -81,6 +81,15 @@ function linkify(text: string, key: string): React.ReactNode[] {
   return parts;
 }
 
+// HTML-escape for the safe plain-text fallback used when we skip expensive
+// syntax highlighting on large code blocks.
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 // ── code block with syntax highlighting and copy ──
 const CodeBlock = React.memo(({ code, lang }: { code: string; lang: string }) => {
   const { t } = useTranslation();
@@ -91,16 +100,34 @@ const CodeBlock = React.memo(({ code, lang }: { code: string; lang: string }) =>
     }).catch(() => {});
   };
 
+  // Bound the input for pathological sizes: a multi-MB paste shouldn't blow up
+  // the DOM or the highlighter. The copy action still uses the full `code`.
+  const safeCode = code.length > 300000
+    ? code.slice(0, 300000) + '\n\n…(内容过长，已截断显示)'
+    : code;
+
   const highlighted = useMemo(() => {
+    // Cap highlight work. Large blocks make hljs.highlightAuto scan every
+    // grammar and can freeze the WebView2 UI for seconds — that freeze is the
+    // classic "typing / switching conversation hangs" bug. Never run
+    // highlightAuto (the slow path); only highlight when a language is given,
+    // and skip entirely past the cap (cheap escaped plain text instead).
+    const MAX_HL = 50000;
+    if (safeCode.length > MAX_HL) {
+      return { value: escapeHtml(safeCode), language: lang || '' };
+    }
     try {
       if (lang && hljs.getLanguage(lang)) {
-        return hljs.highlight(code, { language: lang });
+        return hljs.highlight(safeCode, { language: lang });
       }
-      return hljs.highlightAuto(code);
+      if (safeCode.length < 8000) {
+        return hljs.highlightAuto(safeCode);
+      }
+      return { value: escapeHtml(safeCode), language: '' };
     } catch {
-      return { value: code, language: '' };
+      return { value: escapeHtml(safeCode), language: '' };
     }
-  }, [code, lang]);
+  }, [safeCode, lang]);
 
   return (
     <div style={{ margin: '8px 0' }}>

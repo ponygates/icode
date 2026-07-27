@@ -61,6 +61,90 @@ function AttachmentView({ items, onZoom }: { items: Attachment[]; onZoom: (src: 
   );
 }
 
+// Memoized message list. Isolates message rendering from ChatPage's local
+// state (typing) and from unrelated store updates (backend health pings,
+// token usage, …) so the list only re-renders when messages actually change.
+const MessageList = React.memo(({ messages, isStreaming, onRegenerate, onZoom }: {
+  messages: Message[];
+  isStreaming: boolean;
+  onRegenerate: (id: string) => void;
+  onZoom: (src: string) => void;
+}) => {
+  const { t } = useTranslation();
+  return (
+    <>
+      {messages.map((msg) => (
+        <div
+          key={msg.id}
+          style={{
+            display: 'flex', gap: 10, padding: '6px 24px',
+            justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
+            alignItems: 'flex-start',
+          }}
+        >
+          {msg.role === 'assistant' && (
+            <div style={{
+              width: 30, height: 30, borderRadius: '50%', background: 'var(--accent)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 13, fontWeight: 600, color: '#fff', flexShrink: 0,
+            }}>i</div>
+          )}
+          <div className={msg.role === 'assistant' ? 'msg-bubble' : ''} style={{
+            maxWidth: '75%', padding: '12px 16px',
+            background: msg.role === 'user' ? 'var(--accent-soft)' : undefined,
+            border: msg.role === 'user' ? '0.5px solid var(--accent)' : undefined,
+            borderRadius: msg.role === 'user' ? 'var(--r-xl)' : undefined,
+            color: 'var(--text-primary)', fontSize: 13,
+            lineHeight: 1.7, wordBreak: 'break-word',
+            position: 'relative',
+          }}>
+            {msg.role === 'assistant' ? (
+              msg.content ? (
+                msg.content.startsWith('[Tool:') ? (
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                    <div style={{ color: 'var(--accent)', fontWeight: 500, marginBottom: 4 }}>
+                      ⏺ {msg.content.match(/\[Tool: ([^\]]+)\]/)?.[1] || t('chat.toolCall')}
+                    </div>
+                    <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{msg.content.replace(/\[Tool: [^\]]+\]\n?/, '')}</pre>
+                  </div>
+                ) : (
+                  <>
+                    <Markdown text={msg.content} />
+                    {/* Action buttons — hidden until bubble hover */}
+                    <div className="action-hidden" style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+                      <ActionBtn icon="📋" label={t('chat.copy')} title={t('chat.copyTitle')}
+                        onClick={() => navigator.clipboard.writeText(msg.content)} />
+                      <ActionBtn icon="🔄" label={t('chat.regenerate')} title={t('chat.regenerateTitle')}
+                        onClick={() => onRegenerate(msg.id)} />
+                    </div>
+                  </>
+                )
+              ) : (isStreaming ? (
+                <span style={{ color: 'var(--text-muted)' }}>
+                  {t('chat.generatingShort')}<span style={{ animation: 'pulse 1.5s infinite' }}>...</span>
+                </span>
+              ) : '')
+            ) : (
+              <span style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</span>
+            )}
+            {msg.attachments && msg.attachments.length > 0 && (
+              <AttachmentView items={msg.attachments} onZoom={onZoom} />
+            )}
+          </div>
+          {msg.role === 'user' && (
+            <div style={{
+              width: 30, height: 30, borderRadius: '50%',
+              background: 'var(--warning)', display: 'flex',
+              alignItems: 'center', justifyContent: 'center',
+              fontSize: 13, fontWeight: 600, color: '#fff', flexShrink: 0,
+            }}>U</div>
+          )}
+        </div>
+      ))}
+    </>
+  );
+});
+
 const ChatPage: React.FC = () => {
   const palette = useCommandPalette();
   const { t } = useTranslation();
@@ -96,6 +180,17 @@ const ChatPage: React.FC = () => {
   const abortRef = useRef<AbortController | null>(null);
   const activeSession = sessions.find((s) => s.id === activeSessionId);
 
+  // Stable handler so the memoized <MessageList> doesn't re-render on every
+  // keystroke or unrelated store update.
+  const handleRegenerate = useCallback((id: string) => {
+    const msgs = activeSession?.messages || [];
+    const idx = msgs.findIndex((m) => m.id === id);
+    if (idx > 0) {
+      const userMsg = msgs[idx - 1];
+      if (userMsg.role === 'user') setInput(userMsg.content);
+    }
+  }, [activeSession, setInput]);
+
   // Multi-tab state lives in the store (openTabIds) so it survives route
   // changes and restarts. Filter the open tabs by the active workspace for
   // deep session↔workspace binding: switching workspace switches the strip.
@@ -116,26 +211,31 @@ const ChatPage: React.FC = () => {
   // (was an inline IIFE re-running every render → expensive during streaming).
   const fileActions = useMemo(() => {
     const files = new Map<string, string>();
-    (activeSession?.messages || []).forEach((msg) => {
-      if (!msg.content) return;
-      const patterns = [
-        /read_file\b.*?["'`]([^"'`\n]+?)["'`]/g,
-        /write_file\b.*?["'`]([^"'`\n]+?)["'`]/g,
-        /\b(?:edit|bash)\b.*?["'`]([^"'`\n]+?)["'`]/g,
-        /\b([\w\/\\\.\-]+\.(?:tsx?|jsx?|go|py|rs|java|rb|html|css|json|yaml|yml|md|toml))\b/g,
-      ];
+    const patterns = [
+      /read_file\b.*?["'`]([^"'`\n]+?)["'`]/g,
+      /write_file\b.*?["'`]([^"'`\n]+?)["'`]/g,
+      /\b(?:edit|bash)\b.*?["'`]([^"'`\n]+?)["'`]/g,
+      /\b([\w\/\\\.\-]+\.(?:tsx?|jsx?|go|py|rs|java|rb|html|css|json|yaml|yml|md|toml))\b/g,
+    ];
+    const scan = (content: string) => {
+      // Cheap pre-filter so we don't run 4 regexes over every (often huge)
+      // message on every streaming chunk: skip anything that can't reference a
+      // file path.
+      if (!/[.]\w{1,6}$|read_file|write_file|\bedit\b|\bbash\b/.test(content)) return;
+      const capped = content.length > 20000 ? content.slice(0, 20000) : content;
       patterns.forEach((re) => {
         let m: RegExpExecArray | null;
-        while ((m = re.exec(msg.content)) !== null) {
+        while ((m = re.exec(capped)) !== null) {
           const path = m[1].replace(/\\/g, '/');
           if (path.length > 2 && !path.startsWith('http') && !files.has(path)) {
-            const action = msg.content.includes('write_file') ? 'write'
-              : msg.content.includes('edit') ? 'edit' : 'read';
+            const action = capped.includes('write_file') ? 'write'
+              : capped.includes('edit') ? 'edit' : 'read';
             files.set(path, action);
           }
         }
       });
-    });
+    };
+    (activeSession?.messages || []).forEach((msg) => { if (msg.content) scan(msg.content); });
     return Array.from(files.entries());
   }, [activeSession?.messages]);
 
@@ -702,81 +802,12 @@ const ChatPage: React.FC = () => {
           )}
 
           {/* Chat messages */}
-          {activeSession?.messages.map((msg) => (
-            <div
-              key={msg.id}
-              style={{
-                display: 'flex', gap: 10, padding: '6px 24px',
-                justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
-                alignItems: 'flex-start',
-              }}
-            >
-              {msg.role === 'assistant' && (
-                <div style={{
-                  width: 30, height: 30, borderRadius: '50%', background: 'var(--accent)',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  fontSize: 13, fontWeight: 600, color: '#fff', flexShrink: 0,
-                }}>i</div>
-              )}
-              <div className={msg.role === 'assistant' ? 'msg-bubble' : ''} style={{
-                maxWidth: '75%', padding: '12px 16px',
-                background: msg.role === 'user' ? 'var(--accent-soft)' : undefined,
-                border: msg.role === 'user' ? '0.5px solid var(--accent)' : undefined,
-                borderRadius: msg.role === 'user' ? 'var(--r-xl)' : undefined,
-                color: 'var(--text-primary)', fontSize: 13,
-                lineHeight: 1.7, wordBreak: 'break-word',
-                position: 'relative',
-              }}>
-                {msg.role === 'assistant' ? (
-                  msg.content ? (
-                    msg.content.startsWith('[Tool:') ? (
-                      <div style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
-                        <div style={{ color: 'var(--accent)', fontWeight: 500, marginBottom: 4 }}>
-                          ⏺ {msg.content.match(/\[Tool: ([^\]]+)\]/)?.[1] || t('chat.toolCall')}
-                        </div>
-                        <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{msg.content.replace(/\[Tool: [^\]]+\]\n?/, '')}</pre>
-                      </div>
-                    ) : (
-                      <>
-                        <Markdown text={msg.content} />
-                        {/* Action buttons — hidden until bubble hover */}
-                        <div className="action-hidden" style={{ display: 'flex', gap: 6, marginTop: 8 }}>
-                          <ActionBtn icon="📋" label={t('chat.copy')} title={t('chat.copyTitle')}
-                            onClick={() => navigator.clipboard.writeText(msg.content)} />
-                          <ActionBtn icon="🔄" label={t('chat.regenerate')} title={t('chat.regenerateTitle')}
-                            onClick={() => {
-                              const msgs = activeSession?.messages || [];
-                              const idx = msgs.findIndex(m => m.id === msg.id);
-                              if (idx > 0) {
-                                const userMsg = msgs[idx - 1];
-                                if (userMsg.role === 'user') setInput(userMsg.content);
-                              }
-                            }} />
-                        </div>
-                      </>
-                    )
-                  ) : (isStreaming ? (
-                    <span style={{ color: 'var(--text-muted)' }}>
-                      {t('chat.generatingShort')}<span style={{ animation: 'pulse 1.5s infinite' }}>...</span>
-                    </span>
-                  ) : '')
-                ) : (
-                  <span style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</span>
-                )}
-                {msg.attachments && msg.attachments.length > 0 && (
-                  <AttachmentView items={msg.attachments} onZoom={setLightbox} />
-                )}
-              </div>
-              {msg.role === 'user' && (
-                <div style={{
-                  width: 30, height: 30, borderRadius: '50%',
-                  background: 'var(--warning)', display: 'flex',
-                  alignItems: 'center', justifyContent: 'center',
-                  fontSize: 13, fontWeight: 600, color: '#fff', flexShrink: 0,
-                }}>U</div>
-              )}
-            </div>
-          ))}
+          <MessageList
+            messages={activeSession?.messages || []}
+            isStreaming={isStreaming}
+            onRegenerate={handleRegenerate}
+            onZoom={setLightbox}
+          />
           <div ref={messagesEndRef} />
         </div>
 

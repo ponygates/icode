@@ -1,5 +1,24 @@
 # 更新日志
 
+## v0.32.0 — 运行时卡死修复：代码块高亮 + 消息列表隔离（2026-07-27）
+
+> 第二十八批：用户反馈「有时输入文字、有时切换对话，还是会卡」。此症状已不在启动期，而是**交互期**主线程被同步重活阻塞。排查锁定两处根因并修复：
+
+### 🐞 根因 1：大代码块语法高亮（`hljs.highlightAuto`）把主线程卡死
+- `desktop/src/components/Markdown.tsx` 的 `CodeBlock` 对**不带语言标注的 ``` 围栏**调用 `hljs.highlightAuto(code)`——它会扫描全部 ~190 种语言语法，O(代码长度 × 语言数)，大代码块（文件内容/日志/构建输出）可同步卡数秒，正是「打字（流式回复边渲染大代码块）/切换对话（渲染含大代码块的会话）卡死」的经典真凶。
+- 修复：
+  - 新增 `escapeHtml()`；`CodeBlock` 先对输入做**封顶**（`safeCode`）：超过 300KB 截断显示（复制仍用完整内容），避免 DOM 爆炸。
+  - 高亮 `useMemo` 改为：**有语言标注才高亮**；无标注且 <8KB 才走 `highlightAuto`，否则直接转义纯文本。超过 50KB 一律跳过高亮走纯文本。**彻底移除大输入的 `highlightAuto` 慢路径**。
+
+### 🐞 根因 2：消息列表未隔离，每次按键/无关 store 更新都重渲染
+- `desktop/src/pages/ChatPage.tsx` 原先在组件内联 `activeSession?.messages.map(...)`。由于 `useAppStore()` 订阅了整个 store（后端 10s 健康探测、token 用量、流式 chunk 都会触发），**每次打字（本地 input 变化）和每次 store 变更都会重跑整条消息列表渲染**。
+- 修复：抽出 `React.memo` 组件 `MessageList`，props 为 `messages / isStreaming / onRegenerate / onZoom`；`handleRegenerate` 用 `useCallback` 稳定引用。现在**打字和无关 store 更新不再重渲染消息列表**，仅当消息真正变化（流式 chunk）时才重渲染，且单条消息的 `<Markdown>` 已 memo，只重渲染变化那条。
+- 附带优化：`fileActions` 的 4 条正则改为「先 cheap 预过滤再扫描、单条内容封顶 20KB」，降低流式期每个 chunk 的扫描开销。
+
+### 🧪 验证
+- `npx tsc --noEmit` 全绿；`NODE_OPTIONS= npm run build` 全绿（新 hash `index-JxMjFPWq.js`）；前端重嵌 `internal/embedded/dist`；`go build -H windowsgui` 全绿；`icode version` → `0.32.0`。
+- 注：v0.31.0 的启动自诊断（Web Worker 主线程看门狗 + 跨启动 `ui-blocked` 取证）仍保留，若仍有异常它会给出「主线程被阻塞(阶段)」标题与 `localStorage.icode.lastError` 记录。
+
 ## v0.31.0 — 桌面启动卡死：加自诊断 + 消除启动期阻塞（2026-07-27）
 
 > 第二十七批：用户反馈「桌面启动卡死仍未修复（启动提示 3 秒后关闭仍卡死）」。经逐行排查整条启动链路（Go 启动 → 后端 → MIME → React 挂载 → init → ChatPage 渲染 → store → BootSplash/ErrorBoundary），**在可读代码范围内找不到阻塞调用、死循环、MIME 错误或后端接口挂起**（实测 `/api/health`、`/api/models`、`/api/sessions` 均 <20ms；`handleListModels` 直接返回内置模型列表、不联网；`UpdateAll` 仅由模型页「刷新」触发）。因此本次不盲目改逻辑，而是：①加启动自诊断把「静默卡死」变成可读错误；②把 init 对后端的依赖改为即发即弃，彻底排除启动期被后端拖死。
