@@ -445,6 +445,60 @@ case "/multiline":
 			t.render() // hidden
 		}
 
+	case "/doctor":
+		t.doctor()
+
+	case "/whoami":
+		cwd, _ := os.Getwd()
+		t.add(RoleSystem, fmt.Sprintf("iCode %s\n  Model:     %s\n  Provider:  %s\n  Security:  %s\n  CWD:       %s",
+			t.version, t.model, t.provider,
+			permission.SecurityLabel(config.SecurityLevel(t.securityLevel)), shortDir(cwd)))
+
+	case "/context":
+		if t.contextWindow > 0 {
+			pct := float64(t.contextTokens) * 100 / float64(t.contextWindow)
+			t.add(RoleSystem, fmt.Sprintf("上下文窗口: %d / %d tokens (%.0f%%)", t.contextTokens, t.contextWindow, pct))
+		} else {
+			t.add(RoleSystem, fmt.Sprintf("上下文用量: %d tokens（窗口大小未知）", t.contextTokens))
+		}
+
+	case "/permissions":
+		t.add(RoleSystem, fmt.Sprintf("当前权限/安全等级: %s",
+			permission.SecurityLabel(config.SecurityLevel(t.securityLevel))))
+
+	case "/verbose":
+		t.verbose = !t.verbose
+		if t.verbose {
+			t.add(RoleSystem, "[x] 详细输出已开启（完整工具参数 / 原始 diff）")
+		} else {
+			t.add(RoleSystem, "[ ] 详细输出已关闭")
+		}
+
+	case "/memory":
+		proj := t.projectMemoryPath()
+		user, _ := projectcontext.UserMemoryPath()
+		t.add(RoleSystem, fmt.Sprintf("记忆文件:\n  项目级: %s\n  用户级: %s", proj, user))
+
+	case "/feedback":
+		t.add(RoleSystem, "反馈渠道:\n  · GitHub Issues: https://github.com/ponygates/icode/issues\n  · 对话中输入 `# <建议>` 可写入记忆文件")
+
+	case "/wipe":
+		t.mu.Lock()
+		t.messages = nil
+		t.promptTokens = 0
+		t.completionTokens = 0
+		t.cost = ""
+		t.cacheHitRate = 0
+		t.scrollOffset = 0
+		t.mu.Unlock()
+		t.add(RoleSystem, "对话已清空并重置。")
+
+	case "/login":
+		t.add(RoleSystem, "配置 API 凭据:\n  · CLI: icode config key <provider> <apikey>\n  · 桌面端: 设置 → 提供商 → 填入 Key\n配置完成后用 /doctor 验证连通性。")
+
+	case "/logout":
+		t.add(RoleSystem, "清除凭据:\n  · CLI: icode config key <provider> \"\"\n  · 桌面端: 设置 → 提供商 → 删除 Key\n（CLI 不在此命令中直接清除凭据，避免误删。）")
+
 	default:
 		// User-defined slash command? Look it up in .icode/commands/*.md
 		// (user + project scope) and expand it into a normal chat message.
@@ -455,6 +509,47 @@ case "/multiline":
 			t.callback.OnSlashCommand(cmd, args)
 		}
 	}
+}
+
+// projectMemoryPath returns the project-level memory file (ICODE.md) path.
+func (t *TUI) projectMemoryPath() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "ICODE.md"
+	}
+	return filepath.Join(cwd, "ICODE.md")
+}
+
+// doctor runs a quick, non-blocking system diagnostic (Claude Code's /doctor).
+// It reports config sanity, configured providers, and memory file paths. No
+// network calls are made so it can never hang on a restricted network.
+func (t *TUI) doctor() {
+	var b strings.Builder
+	b.WriteString("iCode 诊断:\n")
+	b.WriteString(fmt.Sprintf("  版本:       %s\n", t.version))
+	b.WriteString(fmt.Sprintf("  模型:       %s\n", t.model))
+	b.WriteString(fmt.Sprintf("  提供商:     %s\n", t.provider))
+	b.WriteString(fmt.Sprintf("  安全等级:   %s\n",
+		permission.SecurityLabel(config.SecurityLevel(t.securityLevel))))
+	cfg, err := config.Load()
+	if err != nil {
+		b.WriteString("  配置:       读取失败 " + err.Error() + "\n")
+	} else {
+		configured := 0
+		for _, pc := range cfg.Providers {
+			if pc.APIKey != "" {
+				configured++
+			}
+		}
+		b.WriteString(fmt.Sprintf("  已配置 Key: %d 个提供商\n", configured))
+	}
+	if proj := t.projectMemoryPath(); proj != "" {
+		b.WriteString("  项目记忆:   " + proj + "\n")
+	}
+	if user, err := projectcontext.UserMemoryPath(); err == nil {
+		b.WriteString("  用户记忆:   " + user + "\n")
+	}
+	t.add(RoleSystem, b.String())
 }
 
 // tryCustomSlash resolves `cmd` (e.g. "/changelog") against the user- and

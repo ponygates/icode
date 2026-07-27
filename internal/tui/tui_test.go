@@ -139,10 +139,10 @@ func TestScrollToRow(t *testing.T) {
 	}
 }
 
-// TestArrowScrollsConversation verifies that ↑/↓ drive the conversation's side
-// scrollbar (one display line per press) while Ctrl+P/Ctrl+N keep history
-// navigation. This is the behavior the user asked for ("CLI 版侧边可以上下滚动").
-func TestArrowScrollsConversation(t *testing.T) {
+// TestArrowNavigatesHistory mirrors Claude Code: ↑/↓ move through input
+// history (not the conversation scrollbar). A tall, scrollable conversation is
+// used to prove the arrow keys do NOT scroll it — they drive history instead.
+func TestArrowNavigatesHistory(t *testing.T) {
 	// Build a tall conversation so it overflows and canScroll() is true.
 	tu := &TUI{width: 80, height: 40}
 	for i := 0; i < 200; i++ {
@@ -155,58 +155,107 @@ func TestArrowScrollsConversation(t *testing.T) {
 		t.Fatalf("expected canScroll() == true for a tall conversation")
 	}
 
-	// ↑ should scroll the viewport up by one display line.
-	rd := bufio.NewReader(strings.NewReader("\x1b[A"))
-	tu.reader = rd
-	r, _, _ := rd.ReadRune() // consume the leading ESC
-	if !tu.handleKey(r) {
-		t.Fatalf("handleKey(↑) returned false")
-	}
-	if tu.scrollOffset != 1 {
-		t.Errorf("after ↑: scrollOffset = %d, want 1", tu.scrollOffset)
-	}
-	if tu.inputBuf != "" {
-		t.Errorf("↑ changed inputBuf = %q, want empty", tu.inputBuf)
+	// Seed history so ↑/↓ have something to navigate.
+	tu.pushHistory("first command")
+	tu.pushHistory("second command")
+
+	// sendArrow feeds a full CSI arrow sequence (ESC [ A/B) into handleKey,
+	// mimicking what the terminal delivers on each key press.
+	sendArrow := func(seq string) {
+		rd := bufio.NewReader(strings.NewReader(seq))
+		tu.reader = rd
+		r, _, _ := rd.ReadRune() // leading ESC
+		if !tu.handleKey(r) {
+			t.Fatalf("handleKey(%q) returned false", seq)
+		}
 	}
 
-	// ↓ while scrolled up should scroll back down one line (to 0), not touch
-	// history (history is empty, so inputBuf must stay empty).
-	rd2 := bufio.NewReader(strings.NewReader("\x1b[B"))
-	tu.reader = rd2
-	r2, _, _ := rd2.ReadRune()
-	if !tu.handleKey(r2) {
-		t.Fatalf("handleKey(↓) returned false")
+	// ↑ should load the most recent history entry, NOT scroll the conversation.
+	sendArrow("\x1b[A")
+	if tu.inputBuf != "second command" {
+		t.Errorf("after ↑: inputBuf = %q, want %q (history prev)", tu.inputBuf, "second command")
 	}
 	if tu.scrollOffset != 0 {
-		t.Errorf("after ↓: scrollOffset = %d, want 0", tu.scrollOffset)
-	}
-	if tu.inputBuf != "" {
-		t.Errorf("↓ at bottom changed inputBuf = %q, want empty (history)", tu.inputBuf)
+		t.Errorf("after ↑: scrollOffset = %d, want 0 (arrows never scroll)", tu.scrollOffset)
 	}
 
-	// At the very bottom with no overflow left, ↓ must fall through to history
-	// navigation without panicking.
-	if !tu.handleKey(r2) {
-		t.Fatalf("handleKey(↓) at bottom returned false")
+	// A second ↑ loads the older entry.
+	sendArrow("\x1b[A")
+	if tu.inputBuf != "first command" {
+		t.Errorf("after ↑ #2: inputBuf = %q, want %q", tu.inputBuf, "first command")
+	}
+
+	// ↓ returns toward the newest entry, then to an empty input at the end.
+	sendArrow("\x1b[B")
+	if tu.inputBuf != "second command" {
+		t.Errorf("after ↓: inputBuf = %q, want %q", tu.inputBuf, "second command")
+	}
+	sendArrow("\x1b[B")
+	if tu.inputBuf != "" {
+		t.Errorf("after ↓ at end: inputBuf = %q, want empty", tu.inputBuf)
 	}
 }
 
-// TestArrowFallsBackToHistoryWhenNotScrollable confirms that on a short
-// conversation (nothing to scroll) ↑ keeps its original job: history prev.
-func TestArrowFallsBackToHistoryWhenNotScrollable(t *testing.T) {
-	tu := &TUI{width: 120, height: 60}
-	tu.messages = append(tu.messages, Message{Role: RoleUser, Content: "hi"})
-	if tu.canScroll() {
-		t.Fatalf("short conversation should NOT be scrollable")
+// TestCtrlRReverseSearch exercises the Claude Code-style Ctrl+R isearch:
+// open with Ctrl+R, type a query, accept the match into the input line.
+func TestCtrlRReverseSearch(t *testing.T) {
+	tu := &TUI{width: 80, height: 40}
+	tu.pushHistory("build the project")
+	tu.pushHistory("fix the parser bug")
+	tu.pushHistory("write tests for parser")
+
+	// Ctrl+R opens the search overlay.
+	if !tu.handleKey(0x12) {
+		t.Fatalf("handleKey(Ctrl+R) returned false")
 	}
-	rd := bufio.NewReader(strings.NewReader("\x1b[A"))
-	tu.reader = rd
-	r, _, _ := rd.ReadRune()
-	if !tu.handleKey(r) {
-		t.Fatalf("handleKey(↑) returned false")
+	if !tu.searchMode {
+		t.Fatalf("searchMode expected true after Ctrl+R")
 	}
-	if tu.scrollOffset != 0 {
-		t.Errorf("scrollOffset = %d, want 0 (no scroll on short conv)", tu.scrollOffset)
+
+	// Type "parser" — should match 2 entries (most recent first).
+	for _, ch := range "parser" {
+		if !tu.handleKey(ch) {
+			t.Fatalf("handleKey(%q) returned false", ch)
+		}
+	}
+	if len(tu.searchMatches) != 2 {
+		t.Fatalf("searchMatches = %d, want 2", len(tu.searchMatches))
+	}
+	// Most recent match is "write tests for parser".
+	if tu.searchMatches[0] != "write tests for parser" {
+		t.Errorf("match[0] = %q, want %q", tu.searchMatches[0], "write tests for parser")
+	}
+
+	// Enter accepts the highlighted match into the input buffer.
+	if !tu.handleKey('\r') {
+		t.Fatalf("handleKey(Enter) returned false")
+	}
+	if tu.searchMode {
+		t.Errorf("searchMode should be false after accepting")
+	}
+	if tu.inputBuf != "write tests for parser" {
+		t.Errorf("inputBuf = %q, want %q", tu.inputBuf, "write tests for parser")
+	}
+}
+
+// TestCtrlREscCancel confirms Esc/Ctrl+G cancels the search and restores the
+// prior input buffer.
+func TestCtrlREscCancel(t *testing.T) {
+	tu := &TUI{width: 80, height: 40}
+	tu.pushHistory("alpha command")
+	tu.inputBuf = "draft text"
+	tu.cursor = len([]rune(tu.inputBuf))
+
+	tu.handleKey(0x12) // open search
+	if !tu.searchMode {
+		t.Fatalf("searchMode expected true")
+	}
+	tu.handleKey(0x1b) // Esc cancels
+	if tu.searchMode {
+		t.Errorf("searchMode should be false after Esc")
+	}
+	if tu.inputBuf != "draft text" {
+		t.Errorf("inputBuf = %q, want restored %q", tu.inputBuf, "draft text")
 	}
 }
 

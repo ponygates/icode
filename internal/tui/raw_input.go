@@ -142,6 +142,11 @@ func (t *TUI) dismissWelcome() bool {
 // handleKey processes a single input rune in raw mode.
 // Returns false to signal the loop should exit.
 func (t *TUI) handleKey(r rune) bool {
+	// While the reverse-history-search overlay (Ctrl+R) is active, every key
+	// is routed to the search handler — mirroring Claude Code's isearch.
+	if t.searchMode {
+		return t.handleSearchKey(r)
+	}
 	switch r {
 	case 0x03: // Ctrl+C
 		if t.streaming {
@@ -208,6 +213,9 @@ func (t *TUI) handleKey(r rune) bool {
 		}
 		t.historyNext()
 		return true
+	case 0x12: // Ctrl+R — reverse history search (Claude Code style)
+		t.startSearch()
+		return true
 	case 0x09: // Tab — accept suggestion OR cycle model
 		if t.acOpen && len(t.acItems) > 0 {
 			t.acceptSuggestion()
@@ -250,30 +258,23 @@ func (t *TUI) handleKey(r rune) bool {
 					return true
 				}
 				switch c1 {
-				case 'A': // ↑ scroll conversation up, else history prev
+				case 'A': // ↑ history prev OR move suggestion cursor up (Claude Code)
 					if t.acOpen && len(t.acItems) > 0 {
 						if t.acIdx > 0 {
 							t.acIdx--
 						}
-					} else if !t.welcomeVisible && (t.scrollOffset > 0 || t.canScroll()) {
-						// ↑ / ↓ now drive the conversation's side scrollbar so
-						// the user can scroll with the arrow keys; Ctrl+P / Ctrl+N
-						// keep history navigation.
-						t.scrollUp(1)
-					} else {
-						t.historyPrev()
+						return true
 					}
+					t.historyPrev()
 					return true
-				case 'B': // ↓ scroll conversation down, else history next
+				case 'B': // ↓ history next OR move suggestion cursor down (Claude Code)
 					if t.acOpen && len(t.acItems) > 0 {
 						if t.acIdx < len(t.acItems)-1 {
 							t.acIdx++
 						}
-					} else if !t.welcomeVisible && t.scrollOffset > 0 {
-						t.scrollDown(1)
-					} else {
-						t.historyNext()
+						return true
 					}
+					t.historyNext()
 					return true
 				case 'C': // → cursor right
 					runes := []rune(t.inputBuf)
@@ -526,4 +527,130 @@ func (t *TUI) submit(text string) {
 func (t *TUI) drainStream() {
 	<-t.streamDone
 	t.streaming = false
+}
+
+// ── Reverse history search (Ctrl+R, Claude Code style) ───────────
+
+// handleSearchKey routes every key while the reverse-search overlay is open.
+func (t *TUI) handleSearchKey(r rune) bool {
+	switch r {
+	case 0x03, 0x07, 0x1b: // Ctrl+C / Ctrl+G / Esc — cancel search
+		t.cancelSearch()
+		return true
+	case 0x0c: // Ctrl+L — clear screen and cancel search
+		t.cancelSearch()
+		fmt.Fprint(t.writer, "\x1b[2J\x1b[H")
+		return true
+	case 0x12: // Ctrl+R again — cycle to the next match (bash isearch)
+		t.cycleSearch()
+		return true
+	case '\r', '\n', 0x09: // Enter / Tab — accept the current match into input
+		t.acceptSearch()
+		return true
+	case 0x7f, 0x08: // Backspace / DEL — delete last query char
+		if len([]rune(t.searchBuf)) > 0 {
+			t.searchBuf = string([]rune(t.searchBuf)[:len([]rune(t.searchBuf))-1])
+			t.updateSearchMatches()
+			t.searchIdx = 0
+		} else {
+			t.cancelSearch()
+			return true
+		}
+		t.render()
+		return true
+	}
+	if r < 0x20 {
+		return true // ignore other control characters
+	}
+	// Printable rune — append to the search query and re-filter.
+	t.searchBuf += string(r)
+	t.updateSearchMatches()
+	t.searchIdx = 0
+	t.render()
+	return true
+}
+
+// startSearch opens the reverse-history-search overlay.
+func (t *TUI) startSearch() {
+	if len(t.history) == 0 {
+		return
+	}
+	t.mu.Lock()
+	t.searchMode = true
+	t.searchBuf = ""
+	t.restoreInput = t.inputBuf
+	t.inputBuf = ""
+	t.cursor = 0
+	t.acOpen = false
+	t.acItems = nil
+	t.searchIdx = 0
+	t.mu.Unlock()
+	t.updateSearchMatches()
+	t.render()
+}
+
+// updateSearchMatches recomputes matches (most-recent-first) filtered by the
+// current query. Safe to call from any goroutine that already holds t.mu is
+// NOT assumed — it locks internally.
+func (t *TUI) updateSearchMatches() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	q := strings.ToLower(t.searchBuf)
+	matches := make([]string, 0, len(t.history))
+	for i := len(t.history) - 1; i >= 0; i-- {
+		if q == "" || strings.Contains(strings.ToLower(t.history[i]), q) {
+			matches = append(matches, t.history[i])
+		}
+	}
+	t.searchMatches = matches
+	if t.searchIdx >= len(matches) {
+		t.searchIdx = len(matches) - 1
+	}
+	if t.searchIdx < 0 {
+		t.searchIdx = 0
+	}
+}
+
+// cycleSearch moves to the next match (Ctrl+R pressed again).
+func (t *TUI) cycleSearch() {
+	t.mu.Lock()
+	if len(t.searchMatches) <= 1 {
+		t.mu.Unlock()
+		return
+	}
+	t.searchIdx = (t.searchIdx + 1) % len(t.searchMatches)
+	t.mu.Unlock()
+	t.render()
+}
+
+// acceptSearch loads the highlighted match into the input line and closes the
+// overlay. The match is NOT submitted — the user can edit or press Enter.
+func (t *TUI) acceptSearch() {
+	t.mu.Lock()
+	var chosen string
+	if t.searchIdx >= 0 && t.searchIdx < len(t.searchMatches) {
+		chosen = t.searchMatches[t.searchIdx]
+	}
+	t.searchMode = false
+	t.searchBuf = ""
+	t.searchMatches = nil
+	t.searchIdx = 0
+	t.inputBuf = chosen
+	t.cursor = len([]rune(chosen))
+	t.mu.Unlock()
+	t.render()
+}
+
+// cancelSearch closes the overlay and restores the input buffer.
+func (t *TUI) cancelSearch() {
+	t.mu.Lock()
+	t.searchMode = false
+	t.searchBuf = ""
+	t.searchMatches = nil
+	t.searchIdx = 0
+	t.inputBuf = t.restoreInput
+	t.cursor = len([]rune(t.restoreInput))
+	t.restoreInput = ""
+	t.mu.Unlock()
+	t.render()
 }

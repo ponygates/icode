@@ -1,5 +1,30 @@
 # 更新日志
 
+## v0.30.0 — CLI 命令/自动补全/快捷键对齐 Claude Code（2026-07-27）
+
+> 第二十六批：用户要求「把 CLI 版的命令、命令自动补全、快捷键，都模仿 claudecode 的」。
+
+### 🎯 交互模型对齐 Claude Code
+- **方向键改回翻历史**：撤销 v0.28.0 的「↑/↓ 滚动对话」，恢复为 Claude Code 原生的「↑/↓ = 历史记录上/下」。对话滚动仍保留在 **鼠标滚轮 / PgUp / PgDn / 右侧滚动条**（与 Claude Code 一致，不占用方向键）。
+- **新增 Ctrl+R 反向历史搜索**：按下 `Ctrl+R` 进入 `(reverse-i-search)` 覆盖层，输入即过滤历史；`↑/↓` 或再次 `Ctrl+R` 在匹配项间循环，`Enter`/`Tab` 把选中项载入输入框（不直接发送），`Esc`/`Ctrl+G`/`Ctrl+C` 取消并恢复原输入。完全复刻 Claude Code 的 isearch 手感。
+- **自动补全体验对齐**：`/` 触发命令补全面板，`↑/↓` 在面板内移动高亮，`Tab` 接受选中项，`Esc` 关闭；帮助面板与提示文案同步更新。
+
+### 🧩 新增 Claude Code 风格斜杠命令
+- `/doctor` 系统诊断（版本/模型/提供商/已配置 Key/记忆文件路径，无网络调用不卡顿）
+- `/whoami` 显示当前身份（模型/提供商/安全等级/工作目录）
+- `/context` 显示上下文窗口用量
+- `/permissions` 显示当前权限/安全等级
+- `/verbose` 切换详细输出
+- `/memory` 显示记忆文件路径
+- `/feedback` 显示反馈渠道
+- `/wipe` 清空对话并重置（不可恢复）
+- `/login` `/logout` 凭据配置指引
+- 以上均进入 `slashDefs`，在 `/help` 与 Tab 补全面板中可见，并附中/英/繁三语描述。
+
+### ✅ 验证
+- `go build -tags nogui ./...`、`go vet ./internal/tui/...`、`gofmt`、`go test ./internal/tui/`（新增 `TestArrowNavigatesHistory`/`TestCtrlRReverseSearch`/`TestCtrlREscCancel`，原 v0.28 滚动测试已按新模型改写）全绿。
+- 帮助面板（`?`）已同步：↑/↓ 历史、Ctrl+R 反向搜索、PgUp/PgDn 与滚轮滚动会话。
+
 ## v0.29.0 — 桌面启动卡死修复 + 启动提示 3 秒自动关闭（2026-07-25）
 
 > 第二十五批：用户反馈「桌面版启动时启动提示显示 3 秒自动关闭，但启动卡死故障仍然存在」，并要求「CLI 版鼠标滚轮可以查看当前对话前后的对话输出内容」。

@@ -173,6 +173,19 @@ type TUI struct {
 	// on an empty input, dismissed with any key).
 	helpVisible bool
 
+	// verbose toggles verbose output (full tool args, raw diffs). Mirrors
+	// Claude Code's /verbose command.
+	verbose bool
+
+	// searchMode enables the Ctrl+R reverse-history-search overlay (Claude
+	// Code-style). While active, printable keys filter history, ↑/↓ cycle
+	// matches, Enter/Tab accepts, Esc/Ctrl+G cancels.
+	searchMode    bool
+	searchBuf     string
+	searchIdx     int
+	searchMatches []string
+	restoreInput  string // input buffer to restore when search is cancelled
+
 	// scrollbar geometry cached from the last render so mouse handlers can map
 	// a click/drag to a scroll offset without recomputing the conversation.
 	sbMaxOff int

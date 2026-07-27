@@ -64,6 +64,12 @@ func (t *TUI) render() {
 	permPending := t.permPending
 	permPrompt := t.permPrompt
 	welcomeVisible := t.welcomeVisible
+	searchMode := t.searchMode
+	searchBuf := t.searchBuf
+	var searchCur string
+	if t.searchMode && t.searchIdx >= 0 && t.searchIdx < len(t.searchMatches) {
+		searchCur = t.searchMatches[t.searchIdx]
+	}
 	W := t.width
 	H := t.height
 	t.mu.Unlock()
@@ -308,7 +314,11 @@ func (t *TUI) render() {
 		buf.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", row))
 	}
 	fmt.Fprint(t.writer, buf.String())
-	t.drawInputBox(contentW, H, inputBuf, cursor, streaming)
+	if searchMode {
+		t.drawSearchBox(contentW, H, searchBuf, searchCur, streaming)
+	} else {
+		t.drawInputBox(contentW, H, inputBuf, cursor, streaming)
+	}
 }
 
 // headerLine renders the compact top bar: app name (orange "iCode" wordmark),
@@ -441,7 +451,8 @@ func (t *TUI) helpBox(W, bodyH int) []string {
 	rows := []row{
 		{"Enter", "发送消息"},
 		{"Shift+Tab", "切换模式 auto → plan → agent → yolo"},
-		{"↑ / ↓", "滚动会话（上 / 下）"},
+		{"↑ / ↓", "历史记录上 / 下（Claude Code）"},
+		{"Ctrl+R", "反向搜索历史（isearch）"},
 		{"← / →", "光标左右移动"},
 		{"Home / End", "行首 / 行尾（或 Ctrl+A / Ctrl+E）"},
 		{"Ctrl+W / Ctrl+U", "删除前一个词 / 删除到行首"},
@@ -1244,6 +1255,46 @@ func (t *TUI) drawInputBox(W, H int, inputBuf string, cursor int, streaming bool
 	} else {
 		b.WriteString("\x1b[?25h")
 	}
+	fmt.Fprint(t.writer, b.String())
+}
+
+// drawSearchBox renders the Claude Code-style reverse-history-search overlay
+// shown while Ctrl+R is active. It replaces the normal input prompt.
+func (t *TUI) drawSearchBox(W, H int, searchBuf, current string, streaming bool) {
+	const inputRows = 3
+	topRow := H - inputRows + 1
+	if topRow < 1 {
+		topRow = 1
+	}
+	innerW := W - 4
+	if innerW < 4 {
+		innerW = 4
+	}
+
+	prompt := t.paint("yellow", "(reverse-i-search)")
+	display := current
+	if visibleWidth(display) > innerW-30 {
+		display = truncVisible(display, innerW-30)
+	}
+	line := prompt + "`" + t.paint("cyan", display) + "'"
+	if visibleWidth(line) > W {
+		line = truncVisible(line, W)
+	}
+
+	query := t.paint("dim", "  i-search: "+searchBuf)
+	pad := W - visibleWidth(query) - 2
+	if pad < 0 {
+		pad = 0
+	}
+	statusPadded := strings.Repeat(" ", pad) + query
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", topRow))
+	b.WriteString(line)
+	b.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", topRow+2))
+	b.WriteString(statusPadded)
+	b.WriteString(fmt.Sprintf("\x1b[%d;%dH", topRow, 2))
+	b.WriteString("\x1b[?25h")
 	fmt.Fprint(t.writer, b.String())
 }
 
