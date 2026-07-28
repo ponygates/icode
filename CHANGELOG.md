@@ -1,5 +1,28 @@
 # 更新日志
 
+## v0.34.0 — CLI 闪退兜底 + 真正的交互式 /model 选择器（2026-07-28）
+
+> 第三十批：用户反馈「CLI 版大模型显示出来了，但不能上下选择切换，并且会闪退」「桌面版还是有点卡」。
+
+### 🐞 根因与修复（CLI 闪退）
+- **引擎流式 goroutine 无 `recover()`**：`internal/core/conversation/engine.go` 的 `Send()` 内部 `go func(){...}`（line 802）流式/工具执行若 panic 会**直接杀死整个 CLI 进程**（典型静默「闪退」）。已加 `defer recover()`：panic 时写 stderr 堆栈并向 TUI 推送 `EventError`，会话存活。
+- **`runRaw` 主循环无顶层兜底**：`internal/tui/raw_input.go` 的按键循环原先无 `recover`，任一 `handleKey` 异常即崩。已用匿名函数 + `recover` 包裹每轮（render + ReadRune + handleKey），panic 仅写 `~/.icode/cli.log` 并继续运行。
+
+### ✨ 交互式 /model 选择器（真正可上下选择）
+- `slash_commands.go` 将 `showModelPicker` 升级为 `openModelPicker` + `buildModelPicker` + `updateModelPicker` + `movePicker` + `selectModelAt` + `closeModelPicker`。
+- 行为：输入 `/model` 打开面板，**↑/↓ 移动高亮、Enter 确认、Esc 取消、直接输入编号跳转**；选中后关闭面板并提示 `Model -> <id>`。面板消息实时就地更新（不无限追加）。
+- `raw_input.go` 的 `handleKey`：在 `↑/↓` 分支与 Enter/Esc/数字键处接入选择器；空模型列表不打开面板。
+
+### 🐞 桌面残留卡顿（轻量优化）
+- `desktop/src/pages/ChatPage.tsx` 的 `fileActions` 原依赖整个 `messages` 数组（流式每 chunk 数组引用都变）→ 每次 token 都重扫全部消息。改为依赖 `[activeSession?.id, activeSession?.messages?.length]`，流式期间不再重扫，仅会话切换/增删消息时重算。
+
+### 🔧 构建 / 验证
+- 三份二进制同步重编：`icode.exe`、`bin/icode-cli.exe`（控制台子系统）、`icode-desktop.exe`（windowsgui，PE 子系统已校验）。
+- 桌面前端重构建 + 重嵌 `internal/embedded/dist`（`fileActions` 改动）。
+- 新增单测 `TestModelPickerInteractive` / `TestModelPickerEscCancel`（模拟 ESC[A/B 序列 + Enter/Esc），全绿。
+
+---
+
 ## v0.33.0 — CLI 修复：/model 交互面板 + 上下键历史（2026-07-28）
 
 > 第二十九批：用户反馈「CLI 版 /model 没出现切换面板、上下键不能显示历史对话」。全面排查后定位为两处真实代码缺口 + 一处构建配置根因（非旧二进制问题——`which icode` 解析到当前 v0.32.0）。

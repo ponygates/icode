@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -802,6 +804,19 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 	go func() {
 		defer close(out)
 		defer cancel()
+		// A panic in streaming/tool execution must never kill the whole CLI
+		// process (the classic silent "flash close" / 闪退). Recover here, log
+		// the stack, and surface a user-visible error event so the session
+		// survives.
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(os.Stderr, "[engine] stream goroutine panic: %v\n%s\n", r, debug.Stack())
+				select {
+				case out <- types.StreamEvent{Type: types.EventError, Content: fmt.Sprintf("引擎内部错误（已自动恢复）: %v", r)}:
+				default:
+				}
+			}
+		}()
 
 		var assistantMsg types.Message
 		assistantMsg.Role = types.RoleAssistant

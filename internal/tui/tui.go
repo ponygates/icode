@@ -186,6 +186,15 @@ type TUI struct {
 	searchMatches []string
 	restoreInput  string // input buffer to restore when search is cancelled
 
+	// modelPickerOpen enables the interactive /model selector (Claude Code
+	// style): ↑/↓ move the highlight, Enter confirms, Esc cancels, a digit
+	// jumps to that line. modelPickerIdx is the highlighted row;
+	// modelPickerMsgIdx is the index of the live picker panel in messages so
+	// navigation can update it in place instead of appending a new message.
+	modelPickerOpen   bool
+	modelPickerIdx    int
+	modelPickerMsgIdx int
+
 	// scrollbar geometry cached from the last render so mouse handlers can map
 	// a click/drag to a scroll offset without recomputing the conversation.
 	sbMaxOff int
@@ -235,6 +244,8 @@ func New(cfg Config) *TUI {
 		dirEntries:     listCwd(),
 
 		welcomeVisible: true, // show the startup banner on a fresh session
+
+		modelPickerMsgIdx: -1,
 	}
 }
 

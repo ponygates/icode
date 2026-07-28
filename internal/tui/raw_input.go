@@ -69,18 +69,30 @@ func (t *TUI) runRaw() error {
 	t.reader = bufio.NewReader(t.reader)
 
 	for t.running {
-		t.render()
-		r, _, err := t.reader.(*bufio.Reader).ReadRune()
-		if err != nil {
-			if err == io.EOF {
-				return nil
+		// A single bad keystroke must never crash the whole session. Recover
+		// here so a panic in handleKey/render-context is logged to cli.log and
+		// the TUI keeps running instead of "flash closing" (闪退).
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Fprint(t.writer, "\x1b[?25h")
+					writeCliLog(fmt.Sprintf("[tui] raw loop panic: %v\n%s", r, debug.Stack()))
+				}
+			}()
+			t.render()
+			rr, _, err := t.reader.(*bufio.Reader).ReadRune()
+			if err != nil {
+				if err == io.EOF {
+					t.running = false
+					return
+				}
+				time.Sleep(100 * time.Millisecond)
+				return
 			}
-			time.Sleep(100 * time.Millisecond)
-			continue
-		}
-		if !t.handleKey(r) {
-			break
-		}
+			if !t.handleKey(rr) {
+				t.running = false
+			}
+		}()
 	}
 	return nil
 }
@@ -238,44 +250,62 @@ func (t *TUI) handleKey(r rune) bool {
 		if br, ok := t.reader.(*bufio.Reader); ok {
 			ur, _, err := br.ReadRune()
 			if err != nil {
-				return true
-			}
-			// Alt+Enter (or Alt+Return): submit current input.
-			if ur == '\r' || ur == '\n' {
-				text := strings.TrimSpace(t.inputBuf)
-				t.inputBuf = ""
-				t.cursor = 0
-				if text != "" {
-					t.pushHistory(text)
-					t.submit(text)
+				// Lone Esc (no follow-up byte): cancel the model picker if
+				// open, otherwise just swallow it.
+				if t.modelPickerOpen {
+					t.closeModelPicker()
 				}
 				return true
 			}
-			if ur == '[' {
+			// Alt+Enter (or Alt+Return): submit current input.
+		if ur == '\r' || ur == '\n' {
+			text := strings.TrimSpace(t.inputBuf)
+			t.inputBuf = ""
+			t.cursor = 0
+			if text != "" {
+				t.pushHistory(text)
+				t.submit(text)
+			}
+			return true
+		}
+		// Plain Esc (or any non-CSI key) cancels the model picker.
+		if t.modelPickerOpen && ur != '[' {
+			t.closeModelPicker()
+			return true
+		}
+		if ur == '[' {
 				// CSI sequence: read the parameter/command byte.
 				c1, _, e2 := br.ReadRune()
 				if e2 != nil {
 					return true
 				}
-				switch c1 {
-				case 'A': // ↑ history prev OR move suggestion cursor up (Claude Code)
-					if t.acOpen && len(t.acItems) > 0 {
-						if t.acIdx > 0 {
-							t.acIdx--
-						}
-						return true
-					}
-					t.historyPrev()
+			switch c1 {
+			case 'A': // ↑ history prev OR move suggestion cursor up (Claude Code)
+				if t.modelPickerOpen {
+					t.movePicker(-1)
 					return true
-				case 'B': // ↓ history next OR move suggestion cursor down (Claude Code)
-					if t.acOpen && len(t.acItems) > 0 {
-						if t.acIdx < len(t.acItems)-1 {
-							t.acIdx++
-						}
-						return true
+				}
+				if t.acOpen && len(t.acItems) > 0 {
+					if t.acIdx > 0 {
+						t.acIdx--
 					}
-					t.historyNext()
 					return true
+				}
+				t.historyPrev()
+				return true
+			case 'B': // ↓ history next OR move suggestion cursor down (Claude Code)
+				if t.modelPickerOpen {
+					t.movePicker(1)
+					return true
+				}
+				if t.acOpen && len(t.acItems) > 0 {
+					if t.acIdx < len(t.acItems)-1 {
+						t.acIdx++
+					}
+					return true
+				}
+				t.historyNext()
+				return true
 				case 'C': // → cursor right
 					runes := []rune(t.inputBuf)
 					if t.cursor < len(runes) {
@@ -372,6 +402,10 @@ func (t *TUI) handleKey(r rune) bool {
 		}
 		return true
 	case '\r', '\n':
+		if t.modelPickerOpen {
+			t.selectModelAt(t.modelPickerIdx)
+			return true
+		}
 		if t.multiline {
 			// In multi-line mode, Enter inserts a newline. Submit with Alt+Enter.
 			t.inputBuf += "\n"
@@ -398,6 +432,22 @@ func (t *TUI) handleKey(r rune) bool {
 
 	if r < 0x20 {
 		// Ignore other control characters.
+		return true
+	}
+
+	// While the model picker is open, a digit jumps to that line and any
+	// other printable key cancels the picker (mirrors Claude Code, where
+	// typing filters/exits the panel).
+	if t.modelPickerOpen {
+		if r >= '1' && r <= '9' {
+			n := int(r - '1')
+			if n < len(t.models) {
+				t.modelPickerIdx = n
+				t.updateModelPicker()
+			}
+			return true
+		}
+		t.closeModelPicker()
 		return true
 	}
 

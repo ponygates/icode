@@ -74,10 +74,9 @@ func (t *TUI) handleSlash(text string) {
 
 	case "/model":
 		if len(args) == 0 {
-			// No argument → show an interactive-style picker that works in
-			// both raw and line mode (it's just a system message listing the
-			// available models). This is the Claude-Code-style "/model" panel.
-			t.showModelPicker()
+			// No argument → open the interactive model picker (Claude Code
+			// style): ↑/↓ move, Enter confirms, Esc cancels, a digit jumps.
+			t.openModelPicker()
 			return
 		}
 		// Accept /model <n> (1-based index into the picker) or /model <id>.
@@ -767,16 +766,107 @@ func (t *TUI) showModelPicker() {
 		t.add(RoleSystem, "暂无可用模型列表。\n  请先配置 API Key：icode auth set --provider <provider> --key <YOUR_KEY>\n  或直接切换：/model <模型ID>（如 /model openrouter/free）")
 		return
 	}
+	t.openModelPicker()
+}
+
+// buildModelPicker renders the interactive /model panel. The row at
+// t.modelPickerIdx is marked with ▶; a hint line explains the keys.
+func (t *TUI) buildModelPicker() string {
 	var b strings.Builder
-	b.WriteString("可用模型（输入 /model <编号> 或 /model <ID> 切换）：\n")
+	b.WriteString("选择模型（↑/↓ 移动，Enter 确认，Esc 取消；也可直接输入编号）：\n")
 	for i, m := range t.models {
 		mark := "  "
-		if m == t.model {
+		if i == t.modelPickerIdx {
 			mark = "▶ "
+		} else if m == t.model {
+			mark = "  " // current but not highlighted
 		}
 		b.WriteString(fmt.Sprintf("  %s%-3d %s\n", mark, i+1, m))
 	}
-	t.add(RoleSystem, b.String())
+	if t.modelPickerIdx >= 0 && t.modelPickerIdx < len(t.models) {
+		b.WriteString(fmt.Sprintf("\n  当前高亮：%s\n", t.models[t.modelPickerIdx]))
+	}
+	return b.String()
+}
+
+// openModelPicker appends a live picker panel and enters selection mode.
+func (t *TUI) openModelPicker() {
+	if len(t.models) == 0 {
+		t.add(RoleSystem, "暂无可用模型列表。\n  请先配置 API Key：icode auth set --provider <provider> --key <YOUR_KEY>\n  或直接切换：/model <模型ID>（如 /model openrouter/free）")
+		return
+	}
+	t.modelPickerOpen = true
+	if t.modelIdx < 0 || t.modelIdx >= len(t.models) {
+		t.modelIdx = 0
+	}
+	t.modelPickerIdx = t.modelIdx
+	t.mu.Lock()
+	t.messages = append(t.messages, Message{Role: RoleSystem, Content: t.buildModelPicker()})
+	t.modelPickerMsgIdx = len(t.messages) - 1
+	t.mu.Unlock()
+	if t.rawMode {
+		t.render()
+	}
+}
+
+// updateModelPicker rewrites the live picker panel in place (navigation).
+func (t *TUI) updateModelPicker() {
+	if t.modelPickerMsgIdx < 0 {
+		return
+	}
+	content := t.buildModelPicker()
+	t.mu.Lock()
+	if t.modelPickerMsgIdx < len(t.messages) {
+		t.messages[t.modelPickerMsgIdx] = Message{Role: RoleSystem, Content: content}
+	}
+	t.mu.Unlock()
+	if t.rawMode {
+		t.render()
+	}
+}
+
+// movePicker shifts the highlight by delta and refreshes the panel.
+func (t *TUI) movePicker(delta int) {
+	if len(t.models) == 0 {
+		return
+	}
+	t.modelPickerIdx += delta
+	if t.modelPickerIdx < 0 {
+		t.modelPickerIdx = 0
+	}
+	if t.modelPickerIdx >= len(t.models) {
+		t.modelPickerIdx = len(t.models) - 1
+	}
+	t.updateModelPicker()
+}
+
+// selectModelAt confirms the model at index i and closes the picker.
+func (t *TUI) selectModelAt(i int) {
+	if i < 0 || i >= len(t.models) {
+		t.closeModelPicker()
+		return
+	}
+	t.model = t.models[i]
+	t.modelIdx = i
+	t.closeModelPicker()
+	t.add(RoleSystem, t.tstr("mode.set")+" -> "+t.model)
+}
+
+// closeModelPicker exits selection mode and removes the live panel message.
+func (t *TUI) closeModelPicker() {
+	wasOpen := t.modelPickerOpen
+	t.modelPickerOpen = false
+	if t.modelPickerMsgIdx >= 0 {
+		t.mu.Lock()
+		if t.modelPickerMsgIdx < len(t.messages) {
+			t.messages = append(t.messages[:t.modelPickerMsgIdx], t.messages[t.modelPickerMsgIdx+1:]...)
+		}
+		t.mu.Unlock()
+		t.modelPickerMsgIdx = -1
+	}
+	if wasOpen && t.rawMode {
+		t.render()
+	}
 }
 
 func indexOfString(s []string, v string) int {

@@ -237,7 +237,11 @@ const ChatPage: React.FC = () => {
     };
     (activeSession?.messages || []).forEach((msg) => { if (msg.content) scan(msg.content); });
     return Array.from(files.entries());
-  }, [activeSession?.messages]);
+    // Memoize on session id + message COUNT, not the whole messages array:
+    // during streaming the array reference changes every chunk, so keying on
+    // it would re-scan every message on every token. File chips only change
+    // when messages are added/removed (tool calls), not as text streams in.
+  }, [activeSession?.id, activeSession?.messages?.length]);
 
   const handleTabSelect = (id: string) => {
     setActiveSession(id);
