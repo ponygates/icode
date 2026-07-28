@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -72,11 +73,22 @@ func (t *TUI) handleSlash(text string) {
 		}
 
 	case "/model":
-		if len(args) > 0 {
-			t.model = args[0]
-			t.notice("Model -> " + args[0])
-			t.add(RoleSystem, t.tstr("mode.set")+" -> "+args[0])
+		if len(args) == 0 {
+			// No argument → show an interactive-style picker that works in
+			// both raw and line mode (it's just a system message listing the
+			// available models). This is the Claude-Code-style "/model" panel.
+			t.showModelPicker()
+			return
 		}
+		// Accept /model <n> (1-based index into the picker) or /model <id>.
+		if n, err := strconv.Atoi(args[0]); err == nil && n >= 1 && n <= len(t.models) {
+			t.model = t.models[n-1]
+		} else {
+			t.model = args[0]
+		}
+		t.modelIdx = indexOfString(t.models, t.model)
+		t.notice("Model -> " + t.model)
+		t.add(RoleSystem, t.tstr("mode.set")+" -> "+t.model)
 
 	case "/mode":
 		if len(args) > 0 {
@@ -745,4 +757,33 @@ func (t *TUI) showGitDiff() {
 		return
 	}
 	t.AddToolMessage("git_diff", "", t.colorizeDiffStr(strings.TrimRight(string(output), "\n")))
+}
+
+// showModelPicker lists the available models with a 1-based index and marks
+// the active one, so the user can switch via `/model <n>` or `/model <id>`.
+// It works in both raw and line mode (it just appends a system message).
+func (t *TUI) showModelPicker() {
+	if len(t.models) == 0 {
+		t.add(RoleSystem, "暂无可用模型列表。\n  请先配置 API Key：icode auth set --provider <provider> --key <YOUR_KEY>\n  或直接切换：/model <模型ID>（如 /model openrouter/free）")
+		return
+	}
+	var b strings.Builder
+	b.WriteString("可用模型（输入 /model <编号> 或 /model <ID> 切换）：\n")
+	for i, m := range t.models {
+		mark := "  "
+		if m == t.model {
+			mark = "▶ "
+		}
+		b.WriteString(fmt.Sprintf("  %s%-3d %s\n", mark, i+1, m))
+	}
+	t.add(RoleSystem, b.String())
+}
+
+func indexOfString(s []string, v string) int {
+	for i, x := range s {
+		if x == v {
+			return i
+		}
+	}
+	return -1
 }

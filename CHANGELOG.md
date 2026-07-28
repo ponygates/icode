@@ -1,5 +1,31 @@
 # 更新日志
 
+## v0.33.0 — CLI 修复：/model 交互面板 + 上下键历史（2026-07-28）
+
+> 第二十九批：用户反馈「CLI 版 /model 没出现切换面板、上下键不能显示历史对话」。全面排查后定位为两处真实代码缺口 + 一处构建配置根因（非旧二进制问题——`which icode` 解析到当前 v0.32.0）。
+
+### 🐞 根因 1：`/model` 无参数静默 + 模型列表从未填充
+- `internal/tui/slash_commands.go` 的 `case "/model"` 仅在带参数时 `t.model = args[0]`，**无参数时 `if len(args) > 0` 为假 → 什么都不做**，所以输入 `/model` 没有任何面板。
+- `internal/tui/tui.go` 的 `SetModels()` **在 `cmd` 中从未被调用** → `t.models` 永远为空 → 不仅 `/model` 无数据可列，**Tab 切模型也因 `len(t.models) > 1` 恒为假而失效**。
+- 修复：
+  - `cmd/commands.go` 的 `startChat()` 里 `t.SetModels(a.Reg.ListAllModels())` 填充模型列表。
+  - `slash_commands.go` 的 `/model` 无参数时调用新增 `showModelPicker()` —— 列出全部可选模型（编号 + 当前项 `▶` 标记），并支持 `/model <编号>`（1-based）与 `/model <ID>` 两种切换方式（Claude Code 风格）。
+
+### 🐞 根因 2：上下键历史只在 raw 模式生效，而 CLI 旧构建进不了 raw 模式
+- 方向键历史（`historyPrev/Next`）只在 `runRaw()`（完整 TUI）里路由；`runLine()`（降级行模式）既不处理箭头键、提交时也不调 `pushHistory`，历史根本不会被记录。
+- `icode.exe` / `bin/icode-cli.exe` 此前用 `-H windowsgui` 构建，从某些终端启动时 `term.IsTerminal(fd)` 为假 → 降级进 `runLine` → 方向键失效、历史为空。
+- 修复：**CLI 两个二进制改为默认控制台子系统**（去掉 `-H windowsgui`），使 `IsTerminal` 为真、进入 `runRaw` → 方向键历史 / Tab 切模型 / 完整 TUI 全部生效。桌面 `icode-desktop.exe` 保持 `-H windowsgui` 不变（PE 子系统已校验：CLI=3 console，desktop=2 GUI）。
+- 附带：`runLine()` 提交时补 `pushHistory()`，管道/降级模式下 `/history` 也能查到记录。
+
+### ✅ 验证
+- 单测 `TestModelPicker`（无参列表面板 + ▶ 标记 + `/model 2`/`/model <id>` 切换）、`TestHistoryRecall`（上/下导航）全绿。
+- 三份二进制重建：CLI 两个 PE 子系统=3（console），桌面=2（GUI）。
+- 实跑 `icode.exe`：`/model` 无参正确输出「可用模型（输入 /model <编号> 或 /model <ID> 切换）」面板。
+
+### ⚠️ 已知
+- CLI 改为控制台子系统后，双击 `icode.exe` 会打开一个控制台窗口（CLI 工具的正常行为）；桌面仍无控制台窗口。
+- 若你之前是用旧 `bin/icode-cli.exe`(Jul 25) 或别的副本，请改用 `E:\icode\icode.exe`（已重编 v0.33.0，console 子系统）。
+
 ## v0.32.0 — 运行时卡死修复：代码块高亮 + 消息列表隔离（2026-07-27）
 
 > 第二十八批：用户反馈「有时输入文字、有时切换对话，还是会卡」。此症状已不在启动期，而是**交互期**主线程被同步重活阻塞。排查锁定两处根因并修复：

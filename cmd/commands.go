@@ -103,6 +103,19 @@ func startChat(provider, model, mode string) error {
 	// Wire TUI stream writer back to callback
 	cb.tui = t
 
+	// Populate the available model list so the /model picker and Tab model
+	// switching work. Without this t.models stays empty and both features
+	// silently no-op.
+	if a != nil && a.Reg != nil {
+		if all := a.Reg.ListAllModels(); len(all) > 0 {
+			ids := make([]string, 0, len(all))
+			for _, m := range all {
+				ids = append(ids, m.ID)
+			}
+			t.SetModels(ids)
+		}
+	}
+
 	// In the CLI, permission approvals are resolved interactively by the
 	// TUI prompt (agent mode). The engine calls this handler from the
 	// streaming goroutine while the main loop is parked awaiting the stream.

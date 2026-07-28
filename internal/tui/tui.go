@@ -291,6 +291,7 @@ func (t *TUI) runLine() error {
 			continue
 		}
 		t.printUser(text)
+		t.pushHistory(text)
 		if t.callback != nil {
 			t.mu.Lock()
 			t.streaming = true

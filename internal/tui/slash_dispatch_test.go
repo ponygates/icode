@@ -115,3 +115,61 @@ func TestRawKeyInputSlash(t *testing.T) {
 	}
 }
 
+// TestModelPicker verifies /model with no argument shows the picker and that
+// /model <n> (index) and /model <id> both switch the active model. This is
+// the regression test for the "typed /model but no switcher appeared" report.
+func TestModelPicker(t *testing.T) {
+	tu := newTestTUI()
+	tu.SetModels([]string{"openrouter/free", "claude-3-opus", "gpt-4"})
+	tu.model = "openrouter/free"
+	tu.modelIdx = 0
+
+	tu.submit("/model")
+	joined := strings.Join(messagesText(tu), "\n")
+	if !strings.Contains(joined, "openrouter/free") || !strings.Contains(joined, "gpt-4") {
+		t.Errorf("/model picker missing models:\n%s", joined)
+	}
+	if !strings.Contains(joined, "▶") {
+		t.Errorf("/model picker missing current-model marker:\n%s", joined)
+	}
+
+	tu.submit("/model 2")
+	if tu.model != "claude-3-opus" {
+		t.Errorf("/model 2 did not switch to 2nd model: got %q", tu.model)
+	}
+
+	tu.submit("/model gpt-4")
+	if tu.model != "gpt-4" {
+		t.Errorf("/model gpt-4 did not switch by id: got %q", tu.model)
+	}
+}
+
+// TestHistoryRecall verifies the up/down arrow history navigation logic used
+// by raw mode (and now also recorded in line mode). Regression for the
+// "arrow keys don't show history" report.
+func TestHistoryRecall(t *testing.T) {
+	tu := newTestTUI()
+	tu.pushHistory("first")
+	tu.pushHistory("second")
+	tu.pushHistory("third")
+	if len(tu.history) != 3 {
+		t.Fatalf("history len = %d, want 3", len(tu.history))
+	}
+	tu.historyPrev()
+	if tu.inputBuf != "third" {
+		t.Errorf("historyPrev#1 = %q, want third", tu.inputBuf)
+	}
+	tu.historyPrev()
+	if tu.inputBuf != "second" {
+		t.Errorf("historyPrev#2 = %q, want second", tu.inputBuf)
+	}
+	tu.historyNext()
+	if tu.inputBuf != "third" {
+		t.Errorf("historyNext = %q, want third", tu.inputBuf)
+	}
+	tu.historyNext()
+	if tu.inputBuf != "" {
+		t.Errorf("historyNext past end = %q, want empty", tu.inputBuf)
+	}
+}
+
