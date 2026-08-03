@@ -137,6 +137,13 @@ func (t *TUI) handleSlash(text string) {
 			t.add(RoleSystem, "Usage: /resume <session-id>")
 		}
 
+	case "/fork":
+		if len(args) > 0 && t.callback != nil {
+			t.callback.OnSlashCommand("/fork", args)
+		} else {
+			t.add(RoleSystem, "Usage: /fork <session-id>[@<n>] — 从历史会话分支出一个独立会话")
+		}
+
 	case "/clear":
 		t.mu.Lock()
 		t.messages = nil

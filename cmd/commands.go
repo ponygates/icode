@@ -1063,6 +1063,29 @@ func (c *chatCallback) OnSlashCommand(cmd string, args []string) {
 		} else {
 			c.tui.AddMessage(tui.RoleSystem, "No active session. Start typing to create one.")
 		}
+	case "/resume":
+		if len(args) > 0 && c.app != nil && c.app.SessStore != nil {
+			c.tui.AddMessage(tui.RoleSystem, c.OnResume(args[0]))
+		}
+	case "/fork":
+		if len(args) > 0 && c.app != nil && c.app.SessStore != nil {
+			spec := args[0]
+			srcID := spec
+			n := 0
+			if at := strings.LastIndex(spec, "@"); at > 0 {
+				srcID = spec[:at]
+				fmt.Sscanf(spec[at+1:], "%d", &n)
+			}
+			forked, err := sessionum.Fork(c.app.SessStore, srcID, n)
+			if err != nil {
+				c.tui.AddMessage(tui.RoleSystem, "分叉失败: "+err.Error())
+			} else {
+				c.tui.AddMessage(tui.RoleSystem, c.OnResume(forked.ID))
+				c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("已从 %s 分叉出独立会话 %s — %d 条消息", srcID, forked.ID, len(forked.Messages)))
+			}
+		} else {
+			c.tui.AddMessage(tui.RoleSystem, "Usage: /fork <session-id>[@<n>]")
+		}
 	case "/clear":
 		if c.sessionID != "" && c.app != nil && c.app.SessStore != nil {
 			c.app.SessStore.Delete(c.sessionID)

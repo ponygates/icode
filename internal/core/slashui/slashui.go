@@ -65,6 +65,10 @@ type Result struct {
 	Security     string `json:"security,omitempty"`
 	ClearSession bool   `json:"clear_session,omitempty"`
 	NewSession   bool   `json:"new_session,omitempty"`
+
+	// SessionID tells the caller which session became active (e.g. after
+	// /resume or /fork) so it can reload and display that session's messages.
+	SessionID string `json:"session_id,omitempty"`
 }
 
 func ok(msg string) Result { return Result{Output: msg} }
@@ -104,6 +108,8 @@ func Execute(ctx context.Context, b *Backend, st *State, text string) Result {
 		return cmdSessions(b, st, args)
 	case "/resume":
 		return cmdResume(b, st, args)
+	case "/fork":
+		return cmdFork(b, st, args)
 	case "/new", "/newsession":
 		archiveSession(b, st)
 		return ok("新会话已创建。").withNewSession()
@@ -260,7 +266,7 @@ func helpDefs() []helpItem {
 		{"/model [id]", "切换模型"}, {"/provider [名]", "切换提供商"},
 		{"/mode [agent|plan|yolo|auto|ask]", "切换模式"}, {"/models", "列出自定义模型"},
 		{"/session", "显示当前会话"}, {"/sessions", "列出已保存会话"},
-		{"/resume <id>", "载入历史会话"}, {"/new", "开启新会话"},
+		{"/resume <id>", "载入历史会话"}, {"/fork <id>[@n]", "从历史会话分支出独立会话"}, {"/new", "开启新会话"},
 		{"/clear", "清空当前会话"}, {"/wipe", "清空会话上下文"},
 		{"/undo [N]", "回滚 N 步文件更改"}, {"/rewind [N]", "同上（检查点回滚）"},
 		{"/diff", "显示 git 工作区差异"}, {"/review [file]", "审查 diff 或指定文件"},
@@ -534,9 +540,47 @@ func cmdResume(b *Backend, st *State, args []string) Result {
 	}
 	st.SessionID = sess.ID
 	return Result{
-		Output:   fmt.Sprintf("已载入会话 %s — %d 条消息", sess.ID, len(sess.Messages)),
-		Model:    sess.ModelID,
-		Provider: sess.ProviderName,
+		Output:    fmt.Sprintf("已载入会话 %s — %d 条消息", sess.ID, len(sess.Messages)),
+		Model:     sess.ModelID,
+		Provider:  sess.ProviderName,
+		SessionID: sess.ID,
+	}
+}
+
+// cmdFork branches a new independent session from a source session (or a
+// prefix of it): /fork <session-id>[@<n>]. The fork shares history up to
+// message n (or the whole session when n is omitted) but diverges from there.
+func cmdFork(b *Backend, st *State, args []string) Result {
+	if len(args) == 0 {
+		return ok("用法: /fork <session-id>[@<消息数>] — 从历史会话分支出一个独立会话")
+	}
+	if b == nil || b.SessStore == nil {
+		return ok("无会话存储可用。")
+	}
+	spec := args[0]
+	srcID := spec
+	n := 0
+	if at := strings.LastIndex(spec, "@"); at > 0 {
+		srcID = spec[:at]
+		if v, err := strconv.Atoi(spec[at+1:]); err == nil {
+			n = v
+		} else {
+			return errf("用法: /fork <session-id>[@<消息数>]（消息数应为数字）")
+		}
+	}
+	if st.SessionID != "" && st.SessionID != srcID {
+		archiveSession(b, st)
+	}
+	forked, err := sessionum.Fork(b.SessStore, srcID, n)
+	if err != nil {
+		return errf("分叉失败: %v", err)
+	}
+	st.SessionID = forked.ID
+	return Result{
+		Output:    fmt.Sprintf("已从 %s 分叉出独立会话 %s — %d 条消息（后续互不影响）", srcID, forked.ID, len(forked.Messages)),
+		Model:     forked.ModelID,
+		Provider:  forked.ProviderName,
+		SessionID: forked.ID,
 	}
 }
 
