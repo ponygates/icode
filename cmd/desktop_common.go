@@ -8,6 +8,7 @@ import (
 	"image"
 	"image/color"
 	"image/draw"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -19,18 +20,20 @@ import (
 	"github.com/ponygates/icode/internal/app"
 	"github.com/ponygates/icode/internal/embedded"
 	"github.com/ponygates/icode/internal/server"
+	"github.com/ponygates/icode/internal/xgo"
 	"os/exec"
 )
 
 // desktopBoot holds a running desktop backend (embedded HTTP server + app) so
 // the platform-specific window / tray layer can later shut it down cleanly.
 type desktopBoot struct {
-	app     *app.App
-	srv     *server.Server
-	port    int
-	url     string
-	cancel  context.CancelFunc
-	logFile *os.File
+	app        *app.App
+	srv        *server.Server
+	port       int
+	url        string
+	cancel     context.CancelFunc
+	logFile    io.Closer // rotating writer for the log package
+	stderrFile io.Closer // plain *os.File for os.Stderr (runtime panics)
 }
 
 // shutdown stops the HTTP server and releases the app resources. It uses a
@@ -40,7 +43,11 @@ type desktopBoot struct {
 // captured for the whole desktop session.
 func (b *desktopBoot) shutdown() {
 	if b.srv != nil {
-		_ = b.srv.Shutdown(context.Background())
+		// Bound graceful shutdown so a hung in-flight request can't make the
+		// desktop process hang on exit waiting forever.
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer shutdownCancel()
+		_ = b.srv.Shutdown(shutdownCtx)
 	}
 	if b.cancel != nil {
 		b.cancel()
@@ -50,6 +57,9 @@ func (b *desktopBoot) shutdown() {
 	}
 	if b.logFile != nil {
 		_ = b.logFile.Close()
+	}
+	if b.stderrFile != nil {
+		_ = b.stderrFile.Close()
 	}
 }
 
@@ -62,29 +72,43 @@ func bootDesktopBackend() (*desktopBoot, error) {
 	logDir := filepath.Join(homeDir, ".icode")
 	_ = os.MkdirAll(logDir, 0755)
 	logPath := filepath.Join(logDir, "desktop.log")
-	logFile, logErr := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	// Cap desktop.log at 5 MB (rotate to desktop.log.1) so it can't grow
+	// unbounded across long-running sessions — previously an O_APPEND log
+	// swallowed disk over weeks of use. os.Stderr must stay a *os.File (Go
+	// runtime writes panics to it directly), so it gets a plain append file;
+	// the log package (the high-volume path) gets the rotating writer.
+	rw, logErr := xgo.NewRotatingWriter(logPath, 5*1024*1024)
+	stderrFile, _ := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if logErr == nil {
-		log.SetOutput(logFile)
+		log.SetOutput(rw)
+		if stderrFile != nil {
+			os.Stderr = stderrFile
+		}
 		// Redirect os.Stderr into the same log file. Under -H windowsgui the
 		// process has no console, so Go panics / fatal errors (which write to
 		// os.Stderr and bypass the log package) would otherwise be lost
 		// silently. Capturing them here makes the next crash diagnosable from
 		// desktop.log instead of producing an unexplained "闪退".
-		os.Stderr = logFile
 		log.Printf("[desktop] === iCode desktop starting (log redirected to %s) ===", logPath)
 	} else {
-		logFile = nil
+		rw = nil
 	}
 
 	exePath, _ := os.Executable()
 	rootDir := filepath.Dir(exePath)
 	_ = os.Chdir(rootDir)
 
+	// Boot-stage timing: each stage logs its elapsed time so the NEXT freeze
+	// can be pinpointed by the last stage line in desktop.log (no more blind
+	// "卡死" reports — we will know exactly where it stalls).
+	bootT0 := time.Now()
+	log.Printf("[desktop] stage: app.Bootstrap starting")
 	a, err := app.Bootstrap()
 	if err != nil {
 		showDesktopError("iCode", "启动失败: "+err.Error())
 		return nil, err
 	}
+	log.Printf("[desktop] stage: app.Bootstrap done (t=%dms)", time.Since(bootT0).Milliseconds())
 
 	// Log startup diagnostics — these help identify desktop-only failures
 	// (e.g. missing API key, proxy env vars, wrong config path).
@@ -156,6 +180,7 @@ func bootDesktopBackend() (*desktopBoot, error) {
 		a.Close()
 		return nil, err
 	}
+	log.Printf("[desktop] stage: server.Start done on :%d (t=%dms)", actualPort, time.Since(bootT0).Milliseconds())
 
 	healthURL := fmt.Sprintf("http://127.0.0.1:%d/api/health", actualPort)
 	client := &http.Client{Timeout: 2 * time.Second}
@@ -179,9 +204,10 @@ func bootDesktopBackend() (*desktopBoot, error) {
 		a.Close()
 		return nil, fmt.Errorf("server not ready")
 	}
+	log.Printf("[desktop] stage: backend healthy, opening window (t=%dms)", time.Since(bootT0).Milliseconds())
 
 	appURL := fmt.Sprintf("http://127.0.0.1:%d", actualPort)
-	return &desktopBoot{app: a, srv: srv, port: actualPort, url: appURL, cancel: cancel, logFile: logFile}, nil
+	return &desktopBoot{app: a, srv: srv, port: actualPort, url: appURL, cancel: cancel, logFile: rw, stderrFile: stderrFile}, nil
 }
 
 // findFreePort grabs an ephemeral localhost port for the embedded backend.

@@ -228,6 +228,9 @@ func (t *TUI) handleKey(r rune) bool {
 	case 0x12: // Ctrl+R — reverse history search (Claude Code style)
 		t.startSearch()
 		return true
+	case 0x19: // Ctrl+Y — copy last assistant reply to clipboard
+		t.copyLastReply()
+		return true
 	case 0x09: // Tab — accept suggestion OR cycle model
 		if t.acOpen && len(t.acItems) > 0 {
 			t.acceptSuggestion()

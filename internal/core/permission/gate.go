@@ -271,6 +271,16 @@ func (g *Gate) SetSessionToolAllow(sessionID, toolName string) {
 	g.sessionToolAllows[sessionID][toolName] = true
 }
 
+// ClearSession drops all per-session allow state (allow-all + per-tool allows)
+// for a session. Called when a session is deleted so long-lived servers don't
+// leak one entry per session.
+func (g *Gate) ClearSession(sessionID string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.sessionAllows, sessionID)
+	delete(g.sessionToolAllows, sessionID)
+}
+
 // SetToolRule sets a persistent rule for a tool: "allow", "deny", or "" to clear.
 func (g *Gate) SetToolRule(toolName, rule string) {
 	g.mu.Lock()
@@ -421,7 +431,46 @@ func (g *Gate) isReadOnly(action Action) bool {
 	return readOnlyTools[action.Tool]
 }
 
+// outsideAllowedPaths reports whether a path-bearing tool targets a location
+// outside the configured AllowedPaths sandbox. An empty allowlist means no
+// restriction. Containment is enforced for every file tool — not just bash —
+// so an agent cannot escape the workspace with write_file/edit/read_file/ls/
+// grep/glob in YOLO mode (see isDenied).
+func (g *Gate) outsideAllowedPaths(action Action) bool {
+	if len(g.AllowedPaths) == 0 || action.Path == "" {
+		return false
+	}
+
+	switch action.Tool {
+	case "bash", "read_file", "write_file", "edit", "search_replace", "ls", "grep", "glob":
+	default:
+		return false
+	}
+
+	abs, err := filepath.Abs(action.Path)
+	if err != nil {
+		return true
+	}
+	for _, ap := range g.AllowedPaths {
+		apAbs, err := filepath.Abs(ap)
+		if err != nil {
+			continue
+		}
+		// Match on a path-boundary so allowlist /home/u/proj does not also
+		// permit /home/u/project2.
+		if abs == apAbs || strings.HasPrefix(abs, apAbs+string(os.PathSeparator)) {
+			return false
+		}
+	}
+	return true
+}
+
 func (g *Gate) isDenied(action Action) bool {
+	// Sandbox containment applies to all file tools, not just bash.
+	if g.outsideAllowedPaths(action) {
+		return true
+	}
+
 	if action.Tool != "bash" {
 		return false
 	}
@@ -444,24 +493,6 @@ func (g *Gate) isDenied(action Action) bool {
 	violations := CheckBashCommand(action.Command)
 	for _, v := range violations {
 		if v.Severity == SeverityBlock {
-			return true
-		}
-	}
-
-	// Also block commands operating outside allowed paths
-	if action.Path != "" && len(g.AllowedPaths) > 0 {
-		abs, err := filepath.Abs(action.Path)
-		if err != nil {
-			return true
-		}
-		allowed := false
-		for _, ap := range g.AllowedPaths {
-			if strings.HasPrefix(abs, ap) {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
 			return true
 		}
 	}

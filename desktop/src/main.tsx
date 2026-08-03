@@ -20,8 +20,8 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
 // Signal the index.html startup watchdog that the React module evaluated and
 // mounting has begun. If this flag is never set, the watchdog surfaces the
 // captured boot error instead of leaving a spinner spinning forever.
-(window as any).__icodeMounted = true;
-(window as any).__icodePhase = 'mounted';
+window.__icodeMounted = true;
+window.__icodePhase = 'mounted';
 
 // Main-thread liveness watchdog (runs on a SEPARATE Web Worker thread). If the
 // UI thread ever gets stuck in a long/infinite synchronous task, the worker
@@ -56,7 +56,7 @@ try {
   const worker = new Worker(URL.createObjectURL(blob));
   worker.onmessage = (e: MessageEvent) => {
     if (e.data && e.data.type === 'ping') {
-      worker.postMessage({ type: 'pong', phase: (window as any).__icodePhase || 'unknown' });
+      worker.postMessage({ type: 'pong', phase: window.__icodePhase || 'unknown' });
     }
   };
 } catch (e) {

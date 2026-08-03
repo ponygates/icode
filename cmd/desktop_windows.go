@@ -4,8 +4,10 @@
 package cmd
 
 import (
+	"os"
 	"unsafe"
 
+	"github.com/ponygates/icode/internal/xgo"
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
 )
@@ -29,22 +31,22 @@ var desktopCmd = &cobra.Command{
 
 // runDesktop boots the backend and opens the native desktop window.
 func runDesktop() error {
-	// Note: the binary is linked with -H windowsgui, so a standalone launch
-	// (double-click / shortcut) never allocates a console window in the first
-	// place — there is nothing to hide here.
+	release, err := acquireSingleInstance()
+	if err != nil {
+		showDesktopError("iCode", "iCode 已在运行。\n\n本机已有一个 iCode 窗口，请勿重复启动（避免 WebView2 数据目录被占用导致卡死）。")
+		return nil
+	}
+	defer release()
 
 	boot, err := bootDesktopBackend()
 	if err != nil {
 		return err
 	}
-	// Expose the cancel func so the tray's "退出" can terminate the backend
-	// loop from its own exit callback.
 	trayCancel = boot.cancel
 	openDesktopWindow(boot.url)
 
-	// openDesktopWindow 会阻塞直到托盘退出；此时用全新 context 关闭后端，
-	// 避免复用已被托盘退出取消的 ctx。
 	boot.shutdown()
+	os.Exit(0)
 	return nil
 }
 
@@ -53,7 +55,7 @@ func openDesktopWindow(url string) {
 	// 的 runWebView）；当前（主）goroutine 运行系统托盘消息泵（runTray）。
 	// 两个消息泵分处不同线程。关闭按钮经子类化窗口过程改为"隐藏到托盘"，
 	// 只有托盘菜单的"退出"才会真正销毁窗口并结束进程。
-	go runWebView(url)
+	xgo.GoSafe("desktop.runWebView", func() { runWebView(url) })
 	runTray()
 }
 

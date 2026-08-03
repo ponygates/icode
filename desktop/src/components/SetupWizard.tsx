@@ -19,7 +19,7 @@ const providers = [
 
 const SetupWizard: React.FC<{ onDone: () => void }> = ({ onDone }) => {
   const { t } = useTranslation();
-  const { backendUrl } = useAppStore();
+  const backendUrl = useAppStore(s => s.backendUrl);
   const [step, setStep] = useState(0);
   const [provider, setProvider] = useState('openrouter');
   const [apiKey, setApiKey] = useState('');
@@ -44,8 +44,8 @@ const SetupWizard: React.FC<{ onDone: () => void }> = ({ onDone }) => {
       // Also save in localStorage
       localStorage.setItem(`icode.key.${provider}`, apiKey.trim());
       onDone();
-    } catch (e: any) {
-      setError(e?.message || t('setup.saveFailedBackend'));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : t('setup.saveFailedBackend'));
     } finally {
       setSaving(false);
     }

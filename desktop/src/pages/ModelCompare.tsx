@@ -35,8 +35,8 @@ const ModelCompare: React.FC = () => {
     { key: 'provider', icon: <Zap size={14} />, label: t('models.provider'), get: (m) => m.provider },
     { key: 'plan', icon: <DollarSign size={14} />, label: t('models.plan'), get: (m) => {
       const plans = m.plans || [];
-      const inputP = plans.find((p: any) => p.type === 'input' || (p.name && /input|prompt/i.test(p.name)));
-      const outputP = plans.find((p: any) => p.type === 'output' || (p.name && /output|completion/i.test(p.name)));
+      const inputP = plans.find((p) => p.type === 'input' || (p.name && /input|prompt/i.test(p.name)));
+      const outputP = plans.find((p) => p.type === 'output' || (p.name && /output|completion/i.test(p.name)));
       const ip = inputP?.inputPrice || 0;
       const op = outputP?.outputPrice || 0;
       if (ip || op) {
@@ -45,7 +45,7 @@ const ModelCompare: React.FC = () => {
       return m.plan;
     }},
     { key: 'capabilities', icon: <Brain size={14} />, label: t('compare.capability'), get: (m) => {
-      const names = (Array.isArray(m.plans) ? m.plans.map((p: any) => p.name || '').join(' ') : '') + ' ' + (m.name || '');
+      const names = (Array.isArray(m.plans) ? m.plans.map((p) => p.name || '').join(' ') : '') + ' ' + (m.name || '');
       const lower = names.toLowerCase();
       if (lower.includes('reasoning') || lower.includes('pro')) return t('compare.reasoning');
       if (lower.includes('flash') || lower.includes('turbo')) return t('compare.fast');

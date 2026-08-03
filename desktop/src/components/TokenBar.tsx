@@ -15,7 +15,14 @@ const getSecurityLabel = (t: (key: string) => string, level: string): string => 
 
 const TokenBar: React.FC = () => {
   const { t } = useTranslation();
-  const { tokenUsage, securityLevel, activeSessionId, backendUrl, updateTokenUsage } = useAppStore();
+  // Precise selectors: this component only renders the token bar, so it
+  // should only re-render when these slices change — not on every message
+  // append or session switch.
+  const tokenUsage = useAppStore(s => s.tokenUsage);
+  const securityLevel = useAppStore(s => s.securityLevel);
+  const activeSessionId = useAppStore(s => s.activeSessionId);
+  const backendUrl = useAppStore(s => s.backendUrl);
+  const updateTokenUsage = useAppStore(s => s.updateTokenUsage);
 
   // Poll the backend's analytics endpoint so the user can SEE iCode's
   // token-saving mechanism at work (tokens_saved from the 5-layer pipeline:

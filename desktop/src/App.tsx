@@ -9,7 +9,9 @@ import AnalyticsPage from './pages/AnalyticsPage';
 import ModelCompare from './pages/ModelCompare';
 import SetupWizard from './components/SetupWizard';
 import BootSplash from './components/BootSplash';
+import ShortcutPanel from './components/ShortcutPanel';
 import { useAppStore } from './stores/appStore';
+import ErrorBoundary from './components/ErrorBoundary';
 
 function hasAnyKey(): boolean {
   try {
@@ -25,6 +27,7 @@ const App: React.FC = () => {
   const { t } = useTranslation();
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [showWizard, setShowWizard] = useState(false);
   const loadSecurityLevel = useAppStore((s) => s.loadSecurityLevel);
   const loadSessions = useAppStore((s) => s.loadSessions);
@@ -43,7 +46,7 @@ const App: React.FC = () => {
   useEffect(() => {
     let cancelled = false;
     const init = async () => {
-      (window as any).__icodePhase = 'local-ui';
+      window.__icodePhase = 'local-ui';
       // 1) Local UI setup first — never touches the network, so it can't hang
       //    and the welcome screen is always fully styled and interactive.
       const savedFontSize = localStorage.getItem('icode.fontSize');
@@ -68,17 +71,17 @@ const App: React.FC = () => {
       try {
         await Promise.race([
           (async () => {
-            (window as any).__icodePhase = 'check-backend';
+            window.__icodePhase = 'check-backend';
             await checkBackend();
             if (cancelled) return;
-            (window as any).__icodePhase = 'fetch-mode';
+            window.__icodePhase = 'fetch-mode';
             await fetchMode();
             loadSecurityLevel();
-            (window as any).__icodePhase = 'sessions';
+            window.__icodePhase = 'sessions';
             await loadSessions();
-            (window as any).__icodePhase = 'workspaces';
+            window.__icodePhase = 'workspaces';
             await loadWorkspaces();
-            (window as any).__icodePhase = 'done';
+            window.__icodePhase = 'done';
             // Don't block the welcome screen on model/settings refresh — they
             // populate when ready. This guarantees the UI is interactive the
             // moment sessions load, so a slow /api/models can never stall
@@ -99,6 +102,18 @@ const App: React.FC = () => {
       if ((e.metaKey || e.ctrlKey) && e.key === ',') {
         e.preventDefault();
         setSettingsOpen(v => !v);
+        return;
+      }
+      // "?" toggles the shortcut panel — but never while the user is typing in
+      // an input / textarea / contentEditable (where "?" is legitimate text).
+      if (e.key === '?' || e.key === '？') {
+        const el = e.target as HTMLElement | null;
+        const tag = el?.tagName;
+        const editable = tag === 'INPUT' || tag === 'TEXTAREA' || el?.isContentEditable;
+        if (!editable) {
+          e.preventDefault();
+          setShortcutsOpen(v => !v);
+        }
       }
     };
     window.addEventListener('keydown', handler);
@@ -120,6 +135,7 @@ const App: React.FC = () => {
 
   return (
     <div style={{ display: 'flex', height: '100vh', background: 'var(--bg-primary)', color: 'var(--text-primary)' }}>
+      <ErrorBoundary>
       {sidebarOpen && <Sidebar onToggle={() => setSidebarOpen(false)} />}
 
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
@@ -160,6 +176,8 @@ const App: React.FC = () => {
 
       {/* Reasonix-style settings modal overlay (Ctrl+,) */}
       <SettingsModal visible={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      {/* Keyboard shortcut reference overlay (?) */}
+      <ShortcutPanel visible={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
       {/* Startup prompt — shows for ~3s then auto-closes (see BootSplash). */}
       <BootSplash />
       {/* First-run setup wizard */}
@@ -167,9 +185,14 @@ const App: React.FC = () => {
         <SetupWizard onDone={() => {
           setShowWizard(false);
           localStorage.setItem('icode.wizard.seen', '1');
-          refreshModels();
+          // Model refresh is already fire-and-forget in the init useEffect;
+          // defer by 100ms to avoid a fetch-state update colliding with the
+          // React render cycle that unmounts the wizard and mounts the main UI
+          // for the first time (that collision could freeze on slow machines).
+          setTimeout(() => refreshModels().catch(() => {}), 100);
         }} />
       )}
+      </ErrorBoundary>
     </div>
   );
 };

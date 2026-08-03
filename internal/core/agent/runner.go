@@ -3,11 +3,13 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/ponygates/icode/internal/core/permission"
 	"github.com/ponygates/icode/internal/core/tool"
 	"github.com/ponygates/icode/internal/llm/tokenopt"
 	"github.com/ponygates/icode/internal/types"
@@ -19,19 +21,24 @@ import (
 type Runner struct {
 	providerReg types.ProviderRegistry
 	toolReg     *tool.Registry
+	gate        *permission.Gate
 	mu          sync.Mutex
 
-	// sessionID is passed through to the sub-agent's Execute path so
-	// session-scoped tools (TodoWrite, checkpoint hooks) still work.
 	sessionID string
 }
 
-// NewRunner creates a sub-agent runner bound to a provider registry and tool
-// registry (both typically shared with the main Engine).
 func NewRunner(reg types.ProviderRegistry, tr *tool.Registry) *Runner {
 	return &Runner{
 		providerReg: reg,
 		toolReg:     tr,
+	}
+}
+
+func NewRunnerWithGate(reg types.ProviderRegistry, tr *tool.Registry, gate *permission.Gate) *Runner {
+	return &Runner{
+		providerReg: reg,
+		toolReg:     tr,
+		gate:        gate,
 	}
 }
 
@@ -96,6 +103,9 @@ func (r *Runner) Run(ctx context.Context, def *AgentDef, input string) (string, 
 		depth = maxRounds
 	}
 
+	doomCounter := make(map[string]int)
+	const doomThreshold = 4
+
 	for round := 0; round < depth; round++ {
 		select {
 		case <-subCtx.Done():
@@ -148,14 +158,21 @@ func (r *Runner) Run(ctx context.Context, def *AgentDef, input string) (string, 
 					return finalText.String(), stats.TotalTokens, nil
 				}
 
-				// Record assistant message with tool calls
 				assistantMsg.ToolCalls = toolCalls
 				opt.AddMessage(assistantMsg)
 
-				// Execute tool calls
 				for i, tc := range toolCalls {
-					tc.Result = r.executeTool(subCtx, tc)
-					toolCalls[i] = tc
+					doomCounter[tc.Name]++
+					if doomCounter[tc.Name] >= doomThreshold {
+						tc.Result = &types.ToolResult{
+							Success: false,
+							Error:   fmt.Sprintf("doom loop detected: tool %q called %d times consecutively, stopping", tc.Name, doomCounter[tc.Name]),
+						}
+						toolCalls[i] = tc
+					} else {
+						tc.Result = r.executeTool(subCtx, tc)
+						toolCalls[i] = tc
+					}
 					if tc.Result != nil {
 						opt.AddMessage(types.Message{
 							Role:      types.RoleTool,
@@ -174,6 +191,18 @@ func (r *Runner) Run(ctx context.Context, def *AgentDef, input string) (string, 
 				return finalText.String(), 0, nil
 			}
 		}
+
+		allDoomed := true
+		for _, c := range doomCounter {
+			if c < doomThreshold {
+				allDoomed = false
+				break
+			}
+		}
+		if allDoomed && len(doomCounter) > 0 {
+			finalText.WriteString(fmt.Sprintf("\n[sub-agent %q stopped: doom loop detected]", def.Name))
+			break
+		}
 	}
 
 	return finalText.String(), 0, nil
@@ -181,10 +210,40 @@ func (r *Runner) Run(ctx context.Context, def *AgentDef, input string) (string, 
 
 // executeTool runs a single tool call for the sub-agent.
 func (r *Runner) executeTool(ctx context.Context, tc types.ToolCall) *types.ToolResult {
+	if r.gate != nil {
+		action := permission.Action{
+			Tool:      tc.Name,
+			Arguments: tc.Arguments,
+		}
+		if cmd := extractCmdFromArgs(tc.Arguments); cmd != "" {
+			action.Command = cmd
+		}
+		res := r.gate.Check(r.sessionID, action)
+		switch res.Decision {
+		case permission.DecisionDeny:
+			return &types.ToolResult{Success: false, Error: "Permission denied (sub-agent): " + res.Reason}
+		case permission.DecisionAsk:
+			return &types.ToolResult{Success: false, Error: "Sub-agent tool calls require auto-approve or YOLO mode"}
+		}
+	}
 	toolCtx := tool.WithSessionID(ctx, r.sessionID)
 	res, err := r.toolReg.Execute(toolCtx, tc.Name, tc.Arguments)
 	if err != nil {
 		return &types.ToolResult{Success: false, Error: err.Error()}
 	}
 	return res
+}
+
+func extractCmdFromArgs(args string) string {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(args), &m); err != nil {
+		return ""
+	}
+	if raw, ok := m["command"]; ok {
+		var s string
+		if err := json.Unmarshal(raw, &s); err == nil {
+			return s
+		}
+	}
+	return ""
 }

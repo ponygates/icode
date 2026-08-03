@@ -17,3 +17,7 @@ func allocConsole() bool { return false }
 
 // showCLIMessage is a no-op on non-Windows.
 func showCLIMessage() {}
+
+// isFreshConsole is always false on non-Windows: there is no Explorer
+// double-click console-detection concept, so the CLI TUI always runs.
+func isFreshConsole() bool { return false }

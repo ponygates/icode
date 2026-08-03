@@ -18,7 +18,16 @@ const CommandPalette: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   const inputRef = useRef<HTMLInputElement>(null);
   const navigate = useNavigate();
 
-  const { models, sessions, selectedModel, setSelectedModel, createSession, setActiveSession, deleteSession, clearMessages } = useAppStore();
+  // Precise selectors: the palette re-renders only when its data sources
+  // (models list, sessions list, current selection) change.
+  const models = useAppStore(s => s.models);
+  const sessions = useAppStore(s => s.sessions);
+  const selectedModel = useAppStore(s => s.selectedModel);
+  const setSelectedModel = useAppStore(s => s.setSelectedModel);
+  const createSession = useAppStore(s => s.createSession);
+  const setActiveSession = useAppStore(s => s.setActiveSession);
+  const deleteSession = useAppStore(s => s.deleteSession);
+  const clearMessages = useAppStore(s => s.clearMessages);
 
   // Build actions list
   const actions: Action[] = [
@@ -43,7 +52,7 @@ const CommandPalette: React.FC<{ onClose: () => void }> = ({ onClose }) => {
       icon: '✚',
       action: () => {
         const st = useAppStore.getState();
-        const m = st.models?.find((x: any) => x.id === st.selectedModel);
+        const m = st.models?.find((x) => x.id === st.selectedModel);
         createSession(selectedModel, m?.provider || 'openrouter');
         onClose();
       },

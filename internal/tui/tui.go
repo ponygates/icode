@@ -65,6 +65,15 @@ type Callback interface {
 	// cache hit rate, compactions, total tokens, estimated cost). Surfaces
 	// iCode's core "super token-saving" mechanism so users can see it working.
 	OnTokenStats() string
+	// OnOutputStyle applies a new answer style (concise|normal|verbose) live
+	// and persists it. Returns a status line.
+	OnOutputStyle(style string) string
+	// OnAddDir registers an extra working directory (/add-dir), persists it,
+	// and re-applies the composed system prompt. Returns a status line.
+	OnAddDir(dir string) string
+	// OnUpdateModels refreshes provider model catalogs (/update) and returns a
+	// per-provider report. The TUI model list is refreshed as a side effect.
+	OnUpdateModels() string
 }
 
 // StreamWriter is the surface the backend uses to push data into the UI.
@@ -177,6 +186,12 @@ type TUI struct {
 	// Claude Code's /verbose command.
 	verbose bool
 
+	// vimMode toggles vi-style key bindings in the input (Claude Code /vim).
+	vimMode bool
+
+	// statusVisible toggles the bottom status bar (Claude Code /statusline).
+	statusVisible bool
+
 	// searchMode enables the Ctrl+R reverse-history-search overlay (Claude
 	// Code-style). While active, printable keys filter history, ↑/↓ cycle
 	// matches, Enter/Tab accepts, Esc/Ctrl+G cancels.
@@ -188,12 +203,15 @@ type TUI struct {
 
 	// modelPickerOpen enables the interactive /model selector (Claude Code
 	// style): ↑/↓ move the highlight, Enter confirms, Esc cancels, a digit
-	// jumps to that line. modelPickerIdx is the highlighted row;
-	// modelPickerMsgIdx is the index of the live picker panel in messages so
-	// navigation can update it in place instead of appending a new message.
-	modelPickerOpen   bool
-	modelPickerIdx    int
-	modelPickerMsgIdx int
+	// jumps to that line. The picker is rendered as a FIXED overlay (like the
+	// help / permission boxes) so it is always fully visible regardless of the
+	// conversation scroll position or how many models there are. modelPickerIdx
+	// is the highlighted row; modelPickerTop is the first visible row of the
+	// model list (an internal scroll window that keeps the highlight on screen
+	// when the list is taller than the viewport).
+	modelPickerOpen bool
+	modelPickerIdx  int
+	modelPickerTop  int
 
 	// scrollbar geometry cached from the last render so mouse handlers can map
 	// a click/drag to a scroll offset without recomputing the conversation.
@@ -221,8 +239,16 @@ func New(cfg Config) *TUI {
 		tuiVersion = cfg.Version
 	}
 	secLvl := "local"
-	if c, err := config.Load(); err == nil && c.SecurityLevel != "" {
-		secLvl = string(c.SecurityLevel)
+	vimMode := false
+	statusVisible := true
+	if c, err := config.Load(); err == nil {
+		if c.SecurityLevel != "" {
+			secLvl = string(c.SecurityLevel)
+		}
+		vimMode = c.TUI.Vim
+		if c.TUI.ShowStatusLine != nil {
+			statusVisible = *c.TUI.ShowStatusLine
+		}
 	}
 	return &TUI{
 		mode:           cfg.Mode,
@@ -244,8 +270,8 @@ func New(cfg Config) *TUI {
 		dirEntries:     listCwd(),
 
 		welcomeVisible: true, // show the startup banner on a fresh session
-
-		modelPickerMsgIdx: -1,
+		vimMode:        vimMode,
+		statusVisible:  statusVisible,
 	}
 }
 

@@ -5,9 +5,11 @@
   "description": "iCode Desktop UI — React frontend for the native WebView2 desktop app",
   "scripts": {
     "dev": "vite",
-    "build": "vite build"
+    "build": "vite build",
+    "test": "vitest run"
   },
   "dependencies": {
+    "@tanstack/react-virtual": "^3.14.9",
     "highlight.js": "^11.11.1",
     "i18next": "^23.12.0",
     "lucide-react": "^0.441.0",
@@ -22,6 +24,7 @@
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",
     "typescript": "^5.5.0",
-    "vite": "^5.4.0"
+    "vite": "^5.4.0",
+    "vitest": "^4.1.10"
   }
 }

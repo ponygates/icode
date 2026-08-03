@@ -12,7 +12,7 @@ import (
 )
 
 func main() {
-	if err := cmd.ExecuteDesktop(); err != nil {
+	if err := cmd.ExecuteDesktop(Version, BuildTime, GitCommit); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}

@@ -96,8 +96,8 @@ MEMBER: <member_name> | TASK: <detailed instructions>`,
 	// Step 2: Parse plan into member tasks.
 	memberTasks := parsePlan(plan, def.Members)
 	if len(memberTasks) == 0 {
-		// If parsing fails, just return the leader's output.
 		result.Duration = time.Since(start)
+		result.Errors = append(result.Errors, "team plan parsing yielded no tasks; returning leader output only")
 		return result, nil
 	}
 
@@ -114,6 +114,14 @@ MEMBER: <member_name> | TASK: <detailed instructions>`,
 		wg.Add(1)
 		go func(name, tsk string, ad *AgentDef) {
 			defer wg.Done()
+			// A panic in a member agent must not hang wg.Wait.
+			defer func() {
+				if r := recover(); r != nil {
+					mu.Lock()
+					errs = append(errs, fmt.Sprintf("%s: agent panic（已恢复）: %v", name, r))
+					mu.Unlock()
+				}
+			}()
 			output, _, err := tr.runner.Run(ctx, ad, tsk)
 			mu.Lock()
 			if err != nil {
@@ -172,21 +180,53 @@ func parsePlan(plan string, members []TeamMember) map[string]string {
 	lines := strings.Split(plan, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "MEMBER:") {
+		origLine := line
+
+		if strings.HasPrefix(line, "MEMBER:") {
+			rest := line[len("MEMBER:"):]
+			parts := strings.SplitN(rest, "|", 2)
+			if len(parts) < 2 {
+				parts = strings.SplitN(rest, ":", 2)
+			}
+			if len(parts) < 2 {
+				continue
+			}
+			name := strings.TrimSpace(parts[0])
+			task := strings.TrimSpace(parts[1])
+			if strings.HasPrefix(task, "TASK:") {
+				task = strings.TrimSpace(task[5:])
+			}
+			if name != "" && task != "" {
+				tasks[name] = task
+			}
 			continue
 		}
-		rest := line[len("MEMBER:"):]
-		parts := strings.SplitN(rest, "|", 2)
-		if len(parts) < 2 {
-			continue
+
+		if strings.HasPrefix(line, "- ") || strings.HasPrefix(line, "* ") {
+			content := strings.TrimPrefix(origLine, "- ")
+			content = strings.TrimPrefix(content, "* ")
+			for _, m := range members {
+				if strings.Contains(content, m.Name) {
+					taskPart := content
+					if idx := strings.Index(content, ":"); idx >= 0 {
+						taskPart = strings.TrimSpace(content[idx+1:])
+					}
+					if taskPart != "" {
+						tasks[m.Name] = taskPart
+					}
+					break
+				}
+			}
 		}
-		name := strings.TrimSpace(parts[0])
-		task := strings.TrimSpace(parts[1])
-		if strings.HasPrefix(task, "TASK:") {
-			task = strings.TrimSpace(task[5:])
-		}
-		if name != "" && task != "" {
-			tasks[name] = task
+
+		for _, m := range members {
+			prefix := m.Name + ":"
+			if strings.HasPrefix(line, prefix) {
+				task := strings.TrimSpace(line[len(prefix):])
+				if task != "" {
+					tasks[m.Name] = task
+				}
+			}
 		}
 	}
 	return tasks

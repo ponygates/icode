@@ -108,14 +108,21 @@ body {
 
 html { scroll-behavior: smooth; }
 
-/* --- Scrollbar — thin, minimal --- */
+/* --- Scrollbar — thin, minimal; widens on hover for easier grabbing --- */
 ::-webkit-scrollbar { width: 4px; height: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: var(--r-full); }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+::-webkit-scrollbar:hover { width: 8px; height: 8px; }
 
 button { font-family: inherit; cursor: pointer; }
 input, textarea { font-family: inherit; font-size: var(--text-base); }
+
+/* Placeholder text follows the muted color in both themes */
+::placeholder { color: var(--text-muted); opacity: 1; }
+
+/* Horizontal rules render as a hairline, matching the border system */
+hr { border: none; border-top: 0.5px solid var(--border-color); margin: var(--s3) 0; }
 
 ::selection { background: var(--accent-soft); color: var(--accent); }
 
@@ -148,6 +155,10 @@ input, textarea { font-family: inherit; font-size: var(--text-base); }
 @keyframes spin {
   from { transform: rotate(0deg); }
   to   { transform: rotate(360deg); }
+}
+@keyframes slideIn {
+  from { opacity: 0; transform: translateX(20px); }
+  to   { opacity: 1; transform: translateX(0); }
 }
 
 /* ═══════════════════════════════════════════════════════════════════════

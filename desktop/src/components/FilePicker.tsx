@@ -15,15 +15,15 @@ const IGNORE = new Set(['node_modules', '.git', 'dist', '.next', 'target', '__py
 async function scanDir(dir: string, depth: number): Promise<FileNode[]> {
   if (depth > 3) return [];
   // Use Electron IPC if available, otherwise return empty
-  if ((window as any).icode?.readDir) {
+  if (window.icode?.readDir) {
     try {
       const result: FileNode[] = [];
-      const entries = await (window.icode as any).readDir(dir) || [];
-      for (const e of (Array.isArray(entries) ? entries : [])) {
-        const name = typeof e === 'string' ? e : e.name || e;
-        if (IGNORE.has(name) || name.startsWith('.')) continue;
+      const entries = (await window.icode.readDir(dir)) || [];
+      for (const e of entries) {
+        const name = typeof e === 'string' ? e : e.name || '';
+        if (!name || IGNORE.has(name) || name.startsWith('.')) continue;
         const fullPath = dir + '/' + name;
-        const isDir = (typeof e === 'object' && (e as any).is_dir) || !name.includes('.');
+        const isDir = typeof e === 'object' ? !!e.is_dir : !name.includes('.');
         result.push({ name, path: fullPath, isDir });
       }
       result.sort((a, b) => {
@@ -46,8 +46,8 @@ const FilePicker: React.FC<{ visible: boolean; onClose: () => void; onSelect: (p
     if (!visible) return;
     (async () => {
       let dir = '.';
-      if ((window.icode as any)?.getCwd) {
-        try { dir = await (window.icode as any).getCwd(); } catch {}
+      if (window.icode?.getCwd) {
+        try { dir = await window.icode.getCwd(); } catch {}
       }
       setCwd(dir);
       const f = await scanDir(dir, 0);

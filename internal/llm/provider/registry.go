@@ -175,13 +175,19 @@ func (r *Impl) ListAllModels() []types.ModelInfo {
 	return all
 }
 
-// RefreshAll triggers every provider to refresh its model list.
+// RefreshAll checks the health of every provider and returns any errors.
+// For providers that implement ModelSetter, their internal model list is
+// preserved (the actual model refresh is handled by modelupdate.Service).
 func (r *Impl) RefreshAll(ctx context.Context) []error {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
+	providers := make(map[string]types.Provider)
+	for k, v := range r.providers {
+		providers[k] = v
+	}
+	r.mu.RUnlock()
 
 	var errs []error
-	for _, p := range r.providers {
+	for _, p := range providers {
 		if err := p.Health(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", p.Name(), err))
 		}

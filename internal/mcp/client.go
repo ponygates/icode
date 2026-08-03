@@ -27,6 +27,7 @@ import (
 
 	"github.com/ponygates/icode/internal/executil"
 	"github.com/ponygates/icode/internal/types"
+	"github.com/ponygates/icode/internal/xgo"
 )
 
 // Transport defines how the client communicates with an MCP server.
@@ -129,7 +130,7 @@ func (c *Client) connectStdio(ctx context.Context) error {
 	}
 
 	// Start the JSON-RPC reader — it exits when ctx is cancelled or the pipe closes
-	go c.readLoop()
+	xgo.GoSafe("mcp.readLoop", c.readLoop)
 
 	// Initialize the MCP session
 	resp, err := c.call(ctx, "initialize", map[string]any{
@@ -232,7 +233,7 @@ func (c *Client) connectSSE(ctx context.Context) error {
 	c.sseEndpoint = endpoint
 
 	// Step 3: Start background GET listener for SSE events
-	go c.sseReadLoop(ctx)
+	xgo.GoSafe("mcp.sseReadLoop", func() { c.sseReadLoop(ctx) })
 
 	return nil
 }

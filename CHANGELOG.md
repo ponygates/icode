@@ -1,5 +1,173 @@
 # 更新日志
 
+## v0.36.0 — 一键自动更新模型：新增检测 + 下架标记 + 文档富化（2026-08-02）
+
+> 第三十二批：实现一键自动更新模型功能——点击刷新按钮后，自动从各 provider API + 官网文档获取最新模型列表，对比内置列表，新增新模型、标记下架模型，并持久化到磁盘缓存。
+
+### ✨ 模型自动更新核心管线
+- **API ID 列表 + 内置元数据富化 + 文档页补充**三阶段管线：先从 `/v1/models` 获取当前可用模型 ID 列表，再用 provider .go 文件中的丰富元数据（上下文/能力/定价）填充 API 返回的骨架，最后从 llms.txt 文档页补充新增模型的信息。
+- **Diff 检测**：`compareModels()` 对比 API 返回 ID 集合 vs 内置列表——API 有但内置没有为「新增」，内置有但 API 没有为「下架」。
+- **连续 2 次确认下架**：下架模型不立即标记 `Deprecated`，需连续 2 次刷新 API 都无该模型才标记（避免单次 API 抖动误判）。下架模型保留在列表中（灰显 + ⚠ 图标 + "已下架"标签），历史会话仍可引用。
+- **文档页抓取**：`fetchDocModels()` 从各 provider 的 llms.txt 或 API 文档页抓取补充元数据（上下文长度、视觉能力、推理能力等）。404/超时优雅降级，不影响主流程。
+- **富化合并**：`mergeModelInfo()` 将 API 骨架 + 内置元数据 + 文档补充三层信息合并，优先级：内置 > 文档 > API。
+- **持久化**：`writeUpdateHistory()` 将每次刷新的 diff 结果写入 `~/.icode/cache/update-history.json`（保留最近 50 条）；模型列表写入 `~/.icode/cache/{provider}.json` 缓存（含 `Deprecated`/`DeprecatedCount` 字段）。
+
+### ✨ 10 个 provider 文档 URL 配置
+- 为 `knownFetchers` 中每个 fetcher 添加 `docURL` 字段：
+  - OpenRouter: `https://openrouter.ai/llms.txt`
+  - DeepSeek: `https://api-docs.deepseek.com/llms.txt`
+  - 智谱: `https://open.bigmodel.cn/llms.txt`
+  - Kimi: `https://platform.moonshot.cn/llms.txt`
+  - Anthropic: `https://docs.anthropic.com/llms.txt`
+  - NVIDIA: `https://build.nvidia.com/llms.txt`
+  - 腾讯: `https://cloud.tencent.com/llms.txt`
+  - 火山引擎/华为/SCNET: 无 llms.txt（全 JS 渲染或无公开文档页），跳过文档补充
+
+### ✨ Desktop UI 增强
+- **刷新摘要 Toast**：ModelsPage 刷新后显示 8 秒浮动通知，内容如"✅ +3 新模型 | ⚠ 2 已下架"，展开显示每个 provider 的具体变更和新模型名称。
+- **下架模型展示**：模型列表中下架模型灰显 + ⚠ AlertTriangle 图标 + 黄色"已下架"标签 + 半透明背景，仍可手动选择使用。
+- **`RefreshSummary` 类型**：appStore 新增 `refreshSummary` / `clearRefreshSummary` 状态，`refreshModels()` 解析 `POST /api/models/refresh` 返回的 `results[].added/removed`。
+- **i18n**：三语（zh-CN/zh-TW/en）新增 `models.refreshResult` / `models.newModels` / `models.deprecatedModels` / `models.deprecated`。
+- **CSS**：`global.css` 新增 `@keyframes slideIn` 动画（Toast 滑入效果）。
+
+### ✨ SimpleUI 增强
+- **刷新摘要**：`RefreshModelsUI()` 返回更详细的 diff 信息，包含每个 provider 的新增模型名称和下架模型 ID，以及汇总行"📋 变更: ➕N 新增, ⚠️M 下架"。
+- **下架模型标记**：`Models()` 返回的模型 ID 中，下架模型加 "⚠ " 前缀；`SetModel()` 自动去除前缀。
+
+### 🔧 类型增强
+- `ModelInfo` 新增 `Deprecated bool` + `DeprecatedCount int` 字段（`json:"deprecated,omitempty"` / `json:"deprecated_count,omitempty"`，向后兼容）。
+- `ProviderUpdate` 新增 `Added []types.ModelInfo` + `Removed []string` 字段，供前端解析 diff 结果。
+
+### 🔧 内部重构
+- `UpdateAll()` 重构为 `updateProvider()` 子方法，统一处理单个 provider 的 API 抓取→文档补充→富化合并→Diff 检测→下架标记→缓存写入→推送 SetModels 全流程。
+- `UpdateOne()` 同步重构，复用 `updateProvider()`。
+- 新增 `loadPreviousCache()` 读取过期缓存（用于 `DeprecatedCount` 跨次累计）。
+- 新增 `applyDeprecatedLogic()` 实现连续 2 次确认逻辑。
+
+### 📁 改动文件
+| 文件 | 改动 |
+|---|---|
+| `internal/types/types.go` | ModelInfo 添加 `Deprecated` + `DeprecatedCount` |
+| `pkg/modelupdate/service.go` | ProviderUpdate 添加 `Added`/`Removed`；modelFetcher 添加 `docURL`；10 个 fetcher 配置 llms.txt URL；新增 `fetchDocModels()`/`parseDocModelEntries()`/`extractModelID()`/`extractContextWindow()`/`mergeModelInfo()`/`compareModels()`/`applyDeprecatedLogic()`/`writeUpdateHistory()`/`loadPreviousCache()`；UpdateAll/UpdateOne 重构为富化+diff 管线 |
+| `desktop/src/stores/appStore.ts` | Model 接口添加 `deprecated`/`deprecatedCount`；新增 `RefreshSummary` 类型；`refreshModels()` 解析 added/removed；新增 `refreshSummary`/`clearRefreshSummary` |
+| `desktop/src/pages/ModelsPage.tsx` | 刷新摘要 Toast；下架模型灰显+⚠+"已下架"；导入 AlertTriangle |
+| `desktop/src/styles/global.css` | 添加 `slideIn` keyframes |
+| `desktop/src/i18n/index.ts` | 三语添加 refreshResult/newModels/deprecatedModels/deprecated |
+| `cmd/simpleui_windows.go` | RefreshModelsUI 显示 diff 摘要；Models() 下架加⚠前缀；SetModel() 去前缀 |
+
+## v0.35.0 — /model 视口跟随 + 双击 CLI 打开 WebView2 简易 UI（2026-07-29）
+
+> 第三十一批：用户反馈「上下键选择大模型时屏幕没同步滚动」「双击 icode-cli.exe 想打开带滚动条的简易 UI，比 CMD/PowerShell 功能多一些」「CLI 还有没有类似问题」。
+
+### ✨ /model 选择器视口跟随（修复高亮滚出屏幕）
+- **根因**：`/model` 面板是作为「会话消息」追加到 `t.messages` 的，导航只改写该消息文本、**不调整 `scrollOffset`**。长会话或模型列表高于一屏时，高亮项会落到视口之外，用户看不到当前选中谁。
+- **修复**：把 `/model` 从「会话消息」改为**固定覆盖层**（与 `helpBox` / 权限框同范式），在 `render()` 中作为独立覆盖层渲染（优先级高于欢迎横幅），始终完整可见、不受会话滚动影响。
+- 列表高于一屏时，覆盖层内置滚动窗口 `modelPickerTop` 始终让高亮行 `modelPickerIdx` 落在可视区内（与 autocomplete 的窗口算法一致）；并用 `↑ N 更多 / ↓ N 更多 (共 N)` 提示还有更多项。
+- 行模式（非 raw）下 `/model` 退化为打印静态列表（无覆盖层），保持旧行为。
+- 新增单测 `TestModelPickerOverlayWindowing`（100 模型 / 17 行视口，验证高亮恒在窗口内且面板不超 bodyH）；既有 `TestModelPickerInteractive` / `TestModelPickerEscCancel` 同步更新（移除已废弃的 `modelPickerMsgIdx` 断言），全绿。
+
+### ✨ 双击 CLI 二进制打开 WebView2 简易 UI
+- **行为**：双击 `icode.exe` / `bin/icode-cli.exe`（控制台子系统）时，检测到「Windows 为进程新建了独立控制台、无父终端」（`GetConsoleProcessList` 仅含自身）→ 隐藏该黑框，打开原生 WebView2 窗口的**简易聊天界面**：带原生滚动条 + 鼠标滚轮滚动的会话区、模型下拉选择、清空按钮、输入框（Enter 发送 / Shift+Enter 换行）。
+- **复用**：直接驱动同一套引擎（`app.Bootstrap` + `Engine.Send` 事件流），经 `webview2.Bind` 暴露 `send/models/setModel/clear`，Go 侧用 `w.Dispatch`+`w.Eval` 把流式 token / 工具调用实时推到 DOM。工具调用自动批准（该界面无终端可弹权限框）。比 CMD/PowerShell「功能多一些」——它就是 iCode 聊天本身。
+- 新增 `cmd/simpleui_windows.go`（构建标签 `windows && !nogui`）+ `cmd/simpleui_stub.go`（非 Windows / nogui 回退到桌面）；`cmd/codepage_windows.go` 新增 `isFreshConsole()` / `hideConsoleWindow()`；`cmd/root.go` 的 `Execute()` 接入双击分支。
+- 依赖项目已有的 `github.com/jchv/go-webview2`，无需新增第三方库；需目标机装有 WebView2 运行时（Win10/11 通常内置）。
+
+### 🔍 CLI 类似问题排查（Task #103）
+- 全面复核 raw TUI 的同类「高亮滚出视口」缺陷：autocomplete 覆盖层（`autocompleteLines`）已实现 `from = acIdx - maxShow + 1` 窗口算法，高亮恒可见；help / 权限框为固定覆盖层恒可见。结论：**唯一实例就是 `/model` 面板，已修复**。
+
+### 🐞 斜杠命令 `/keys` 输入不生效（Task #106/#107）
+- **根因**：`/keys`（查看 API 密钥状态）在 `slashDefs`（帮助列表）里有登记，但 `handleSlash` 的 `switch` 里**没有对应 `case`**。运行时落到 `default` 分支 → `tryCustomSlash` 找不到自定义命令 → `callback.OnSlashCommand` 对其无作为，等于「输入了但什么都没发生」。
+- **误并入 `/multiline`**：本应属于 `/keys` 的「API 密钥状态」输出块，被错误地塞进了 `case "/multiline"`，导致 `/multiline` 开关行模式后还打印一堆密钥状态，输出张冠李戴。
+- **修复**：新增独立 `case "/keys"` 承载密钥状态输出；`/multiline` 仅做开关（不再泄漏密钥块）。分发路径本身正确（`runLine` 与 raw 模式都把 `/` 路由到 `handleSlash`）。
+- 新增单测 `TestSubmitSlashKeys`（验证 `/keys` 输出「API 密钥状态」）与 `TestSubmitSlashMultiline`（验证 `/multiline` 不再打印密钥块），全绿。
+
+### 🐞 桌面启动卡死根因修复（MCP 连接阻塞 boot 关键路径）
+- **根因（真正的卡死源）**：`internal/server/server.go` 的 `Start()` 在 boot 关键路径上**同步**调用 `s.mcpPool.Add(context.Background(), …)` 连接每一个 enabled 的 MCP 服务器——包括从 `~/.workbuddy/mcp.json` 自动导入的一大堆连接器。单个不可达/无响应的 MCP 服务器会让 `Add` 阻塞 30s+（`client.call` 内部 30s 超时，且 `context.Background()` 无截止），多个连接器串行叠加 = 数分钟。**这发生在 WebView2 窗口创建之前**，于是 `bootDesktopBackend` 永远到不了开窗口那一步 → 桌面「启动卡死」（无错误弹窗、无窗口，纯卡住）。这正是历次（v0.29 把 provider Health 挪后台、v0.31 前端看门狗）都没解决的真因：它们都没碰到 MCP 这条同步阻塞。
+- **修复**：把 MCP 连接整体挪到**后台 goroutine**，用 `context.WithTimeout(20s)` 封顶；并对每个 enabled 服务器**并发** `Add`（各自受同一 20s 上下文约束），`wg.Wait` 后统一 `refreshMCPTools`。boot 路径不再等待任何 MCP 连接 → 服务立刻起来、WebView2 窗口立刻出现；MCP 工具在后台连好后自动生效。
+- 影响面：仅桌面（`server.Start`）启动；CLI 不经此路径。`app.Bootstrap` 本身全程离线（配置/SQLite/注册 provider/引擎装配），非阻塞，已确认。
+
+### 🐞 快速删除历史会话卡死（localStorage 同步序列化，与 v0.25 同源）
+- **根因**：前端 `appStore.ts` 的 `Session` 类型携带完整 `messages`；后端 `GET /api/sessions` 列表会为**每条会话 `loadMessages()`**，把完整消息灌进前端 store。而删除（及任意会话状态变更）都触发订阅的持久化 `saveToLocal(sessions.slice(-50))` → **同步 `JSON.stringify` 至多 50 条会话的全部消息**。v0.25 只加了「800ms 防抖 + selector 限定」、**没剥离 messages**，于是会话多/消息多时每次持久化仍是一次数百 ms～数秒的同步主线程阻塞——「点快了」多次删除叠加即卡死。后端 `DELETE` 仅删单行、`deleteSession` 是 fire-and-forget，**后端不是卡死元凶**。
+- **修复**：
+  1. `saveToLocal` 只持久化会话**元数据**（id/title/modelId/provider/createdAt），**不再序列化 message 正文**（消息本就由后端 DB 持有，localStorage 仅作列表离线回退）。单次持久化从「数十 MB」降为「几 KB」，彻底消除该路径同步阻塞。
+  2. `loadFromLocal` 恢复时补 `messages: []`（打开会话时由后端 `GET /api/sessions/{id}` 重载），类型安全、无回归。
+  3. `deleteSession` 加 500ms 去抖：同一会话删除按钮快速重击只生效一次，避免冗余乐观更新 + DELETE 风暴。
+- 验证：前端 `vite build` 通过（1819 模块）；三份二进制重编；`go test`/`go vet` 全绿。
+
+### ✨ 简易 UI 升级：右侧可拖拽滑块 + 全 CLI 命令（Task #112）
+- **右侧命令面板**：新增 `#side` 面板，按分组列出全部斜杠命令，点击即执行；中间 `#grip` **可拖拽滑块**（鼠标拖动调整右侧宽度，区间 180px～60% 视口），带折叠按钮。窗口放大到 1100×680。
+- **具备 CLI 全部功能**：`RunCommand(text)` 路由 `/...` 到 `runSlash`，其余走 `Engine.Send` 聊天流。`runSlash` 大 switch 覆盖 `/clear /wipe /help /whoami /model /provider /models /keys /mcp /config /security /permissions /status /cost /context /doctor /memory /feedback /login /logout /init /export /diff /review /compact /summarize /agents /skills /teams /hooks /todo /release-notes /pr_comments /bug` 等——多数读写**真实配置**（`config.Load()`/`Save()`）与引擎状态，未知命令回退到聊天（模型）。复用真实 `gh`/`git` 子进程、配置与引擎，行为与原生 CLI 一致。
+
+### ☑️ CLI 斜杠命令对标 Claude Code 对账补全（Task #111/#114）
+- 盘点 49 条 CLI 斜杠命令，对照 Claude Code 命令集，补齐缺失并增强不完整的：
+  - **新增**：`/bug`（打开预填 GitHub issue URL）、`/pr_comments`（用 `gh` 取 PR 评论）、`/release-notes`（读 CHANGELOG.md 生成）、`/statusline`（开关底部状态栏并持久化 `tui.show_status_line`）、`/vim`（开关 vim 风格键位并持久化 `tui.vim`）。
+  - **增强**：`/mcp`（list/add/remove/get/restart 子命令，持久化到 config）、`/memory`（查看/编辑 ICODE.md）、`/permissions`（显示安全等级 + hooks 明细）、`/review`（支持文件参数 + 模型回合）、`/compact`（支持自定义压缩指令）、`/config`（新增 `set <key> <value>`，支持 theme/lang/security/model/provider）、`/model`（切换持久化）。
+- iCode 独有命令（`/keys`、`/models`、`/summarize`、`/welcome`、`/token`、`/multiline`、`/rewind`、`/feedback`、`/agents`、`/skills`、`/teams`）保留；Claude Code 不适用项（`/add-dir`、`/remind`、`/voice`、`/terminal-setup`、`/skill`、`/stop` 等）跳过。
+- 新增配置字段 `TUICfg.Vim`、`TUICfg.ShowStatusLine *bool`（`*bool`+`omitempty` 避免 yaml.v3 把未设键归零为 false，`Default()` 设 `boolPtr(true)`）；`slashDefs` 注册表与 `handleSlash` case 保持同步；新增 i18n 文案（zh-CN/zh-TW/en）。
+- 新增单测 `TestSubmitSlashVim` / `TestSubmitSlashStatusline` / `TestSubmitSlashConfigSet` / `TestSubmitSlashMCP` / `TestSubmitSlashReleaseNotes`（均 snapshot/restore config 防污染）；`TestClaudeStyleRender` 固定 `statusVisible=true`。
+
+### 📦 根目录放置 icode-cli.exe（Task #110）
+- 复制 `bin/icode-cli.exe` → `E:\icode\icode-cli.exe`（控制台子系统，与 `bin/` 同构：终端内即完整 TUI，双击即进 WebView2 简易 UI）。
+
+### ✨ CLI 全角/CJK 宽度修正（emoji / 组合符 / 扩展汉字）
+- `internal/tui/textutil.go` 的 `runeWidth` 扩展：新增 emoji（U+1F000+）、地区指示符、杂项符号/箭头、组合变音与变异选择符（宽度 0）、CJK 扩展 B+（U+20000+）为宽度 2；原 box/geometric/punctuation 调校保留。
+- 修复聊天中 emoji（🚀🔥）、带变异选择符的 ❤️、扩展汉字（𠮷）等被按 1 列计、导致折行越过终端右边界的问题；`renderMarkdown`/`wrapText` 自动受益（已按全角计宽）。
+- 新增单测 `TestRuneWidthCJKAndEmoji` / `TestWrapTextCJKNoOverflow`。
+
+### ✨ 简易 UI 增强：Markdown 渲染 + 智能滚动
+- `cmd/simpleui_windows.go`：气泡内容经轻量 Markdown→HTML 渲染（标题/粗体/斜体/行内代码/代码块/引用/列表/分隔线，**先转义后渲染，模型输出无法注入脚本**），比 CLI 纯文本更直观；流式过程显示纯文本、`uiDone` 时统一渲染为 Markdown。
+- 智能自动滚动：仅当用户已停在底部时才跟随新消息；向上翻看历史时不再被「拽回」底部。
+- 右侧命令面板 / 拖拽滑块 / 折叠按钮 / 原生滚动条沿用；输入框为 `<textarea>`，原生支持鼠标点击任意位置放置光标编辑。
+
+### ✨ 对标打磨第 2 轮（对标 claude code / opencode / reasonix / workbuddy）
+- **CLI（`internal/tui/slash_commands.go`）**：
+  - `/cost` 从一行简版升级为**费用面板**：Prompt / Completion / 合计 / 缓存命中率（含 10 格迷你进度条）/ 本轮估算费用，并提示 `/token` 查看完整 Cache-First Loop 节省报告（对标 Claude Code 的 `/cost` 明细 + 凸显 iCode「超级省 token」卖点）。
+  - 新增 `/undo`：opencode 式快速撤销最近一次工具调用（复用检查点回滚，抽取 `rewindSteps(n)` 与 `/rewind` 共享）。
+  - 新增 `/share`：导出时间戳 Markdown 副本并打印绝对路径（opencode 式分享）。
+  - `slashDefs` + 三语文案（zh-CN/zh-TW/en）同步注册；新增单测 `TestSubmitSlashCostPanel` / `TestSubmitSlashUndo` / `TestSubmitSlashShare`（share 测试自动清理导出文件）。
+- **简易 UI（`cmd/simpleui_windows.go`）**：
+  - **代码块一键复制**：渲染的 Markdown 代码块右上角加「复制」按钮（事件委托 + clipboard）。
+  - **会话管理**：顶栏新增会话下拉（`Sessions()` 从 `SessStore.List` 取 50 条）+「新会话」按钮（`NewSession()` 仅脱离当前会话、不删旧会话，与「清空」删除语义区分）；下拉切换即 `OpenSession(id)` 加载历史消息到 UI；桥接同步选中态（`refreshSessions`/`uiSetSession`）。补齐 `/session` `/sessions` `/resume` `/new` 真实处理（此前落入聊天）。
+  - **真实 `/cost`**：改用 `Engine.SessionStats` 输出节省报告（已节省 Token/缓存命中率/压缩次数/预估费用，与 CLI `/token` 同源）；`/share` 落为时间戳导出。
+- 验证：`go build ./...`、`go vet ./cmd/...`、`go test ./internal/tui/` 全绿；四份二进制重编，`icode version` → `0.35.0`。
+
+### ✨ 对标打磨第 3 轮（路线图 #124~#127：/output-style、/update、/add-dir、桌面美观）
+- **CLI `/output-style`**：Claude Code 对等。`config.DefaultCfg` 新增 `output_style`；`config.EffectiveSystemPrompt()` 统一组合「基础提示词 + 风格指令 + 额外目录」，concise/verbose 注入英文行为指令；启动与 `/output-style` 即时切换同源生效（`chatCallback.OnOutputStyle` → `Engine.SetSystemPrompt` + 持久化）。
+- **CLI `/update`**：刷新模型目录（`app.RefreshModels` → `Updater.UpdateAll`），逐 provider 报告成功/失败与模型数，并即时刷新 `/model` 与 Tab 的模型列表（`tui.SetModels`）。
+- **CLI `/add-dir`**：Claude Code 对等。`config.DefaultCfg` 新增 `extra_dirs`；校验目录存在性、去重持久化、重组合系统提示词注入上下文；无参时列出全部。
+- **Callback 接口扩展**：`OnOutputStyle / OnAddDir / OnUpdateModels`（`chatCallback` 单实现者，安全）；TUI 无引擎时走 `persistSetting` 降级路径。三语文案 + 单测 `TestSubmitSlashOutputStyle/Update/AddDir` 全绿；简易 UI（runSlash）三命令同步真实实现。
+- **桌面美观「只增不改」**（遵循既有 Reasonix 设计系统）：`Markdown.tsx` 代码块/代码头/行内码/复制按钮对齐发丝边框（0.5px）、圆角 8px、行高 1.6、等宽字体代码头；`global.css` 增量：滚动条悬停加宽（4px→8px）、`::placeholder` 用 muted 色、`hr` 发丝线。不改任何现有组件结构。
+- 验证：`go build ./...`、`go vet ./cmd/...`、`go test ./internal/tui/ ./internal/config/... ./internal/server/` 全绿；前端 `vite build` 通过并重嵌；四份二进制重编 `0.35.0`。
+
+### ✨ 桌面快捷键面板（`?` 弹出速查，Task #128，对标 workbuddy）
+- 新增 `desktop/src/components/ShortcutPanel.tsx`：分组速查（全局/对话/命令面板/编辑），kbd 键帽样式（发丝边框 + 等宽字体，遵循 Reasonix 设计系统），`scaleIn` 入场动画；Esc 或点击空白关闭。
+- `App.tsx` 全局监听 `?`（含全角 `？`）切换面板——**输入框/文本域/可编辑区内不触发**（避免正常打字误弹）；复用既有设置弹层挂载模式。
+- 三语 i18n `shortcuts` 块（zh-CN/zh-TW/en），面板内容与实际快捷键核对一致（Ctrl+, 设置 / Ctrl+K 命令面板 / Enter 发送 / Shift+Enter 换行 / @ 引用文件 / # 记忆 / ! shell / ↑↓ 选择 / Esc 中断关闭）。
+- 验证：前端 `vite build` 通过并重嵌 `internal/embedded/dist`；四份二进制重编 `0.35.0`。
+
+### 🐞 桌面「会话列表加载全部消息」卡死（剩余主线程外瓶颈，Task #117/#118）
+- **根因**：`internal/db/store.go` 的 `List()` 对**每一个**会话（上限 100）都 `loadMessages()` 读取完整消息正文，经 `GET /api/sessions` 在启动与每次列表刷新时一次性序列化所有会话的全部历史。会话多/历史长时，该请求既慢又大，前端阻塞等待 + 解析，表现为「启动/切换会话卡死」。v0.35.0 已修 MCP boot 阻塞与快速删除 localStorage 阻塞，此为该路径**最后一处**同步瓶颈。
+- **修复**：后端 `List()` 改为**仅返回元数据**（与前端 `saveToLocal` 元数据化一致）；单会话 `GET /api/sessions/{id}`（`store.Get` 仍带 `loadMessages`）不变。桌面前端 `appStore.ts` 新增 `loadActive(id)`：在 `setActiveSession`（点击切换）与 `loadSessions` 初始恢复时，对当前活动会话 `GET /api/sessions/{id}` 懒加载消息填充，打开历史会话不再空白。
+- 验证：前端 `vite build` 通过（1819 模块，无 TS 错误）；dist 重嵌 `internal/embedded/dist`；`go build ./...`、`go test ./internal/tui/ ./internal/server/` 全绿；四份二进制重编（见构建块）。
+
+### 🐞 桌面启动卡死全面排查修复（Task #129~#131，全链路审计）
+- **审计范围**：逐行审 `bootDesktopBackend`（Bootstrap → server.Start → health 轮询）、`runWebView`（WebView2 创建）、前端 `App.tsx` init。已修阻塞均确认在后台：MCP（v0.35.0）、provider 健康检查（v0.29）、前端 12s 超时兜底（v0.31）。`registerProviders` / `registerCustomModel` / `handleHealth` 确认无网络无阻塞。
+- **修复① LSP 启动卡死（真凶之一）**：`internal/lsp/client.go` 的 `SendRequest` 在 `result := <-ch` 上**无超时永久阻塞**——语言服务器进程启动成功但不回应 `initialize` 时，`app.Bootstrap` 的 LSP 预启动（用户配置 `lsp.auto_start` 时触发）卡死整个 boot（无窗口）。修复：`SendRequest` 加 `select` 30s 超时并清理 pending；`app.go` 的 LSP AutoStart 从 boot 前台挪到**后台 goroutine** + 每服务器 10s 超时（与 MCP 同范式）。
+- **修复② WebView2 数据目录僵尸锁（真凶之二，真实世界高发）**：上次崩溃残留的 `msedgewebview2.exe` 持有 `%LOCALAPPDATA%\icode\webview` 锁 → `webview2.NewWithOptions` 同步创建运行时**无限挂起** → 无窗口卡死。新增 `cmd/webview_cleanup_windows.go` 的 `killStaleWebViewProcesses(dataPath)`：枚举命令行含本数据目录的 WebView2 进程，沿父进程链检查——**祖先链中有存活 icode*.exe（另一实例在跑）则绝不杀**，只杀僵尸树（PowerShell CIM，8s 超时 + recover，失败静默）。在 `runWebView`（桌面）与 `runSimpleUI`（简易 UI）的 `NewWithOptions` 前均调用。非 Windows 平台为 no-op 桩。
+- **修复③ 启动阶段计时日志**：`bootDesktopBackend` 各阶段（Bootstrap / server.Start / health 就绪 / 开窗前）与 `runWebView` 的 WebView2 创建前后均打 `[desktop] stage:` 计时日志到 `~/.icode/desktop.log`——下次若再卡死，看日志最后一行即知卡在哪一阶段，不再盲查。
+- 验证：`go build ./...`、`go vet ./cmd/... ./internal/lsp/... ./internal/app/...`、`go test ./internal/lsp/... ./internal/server/... ./internal/tui/` 全绿；四份二进制重编 `0.35.0`。
+
+### 🐞 CLI 汉字输入重叠显示修复
+- **根因**：`internal/tui/render.go` 的 `drawInputBox` 在定位输入行光标时，硬编码 `col := 2 + vw`——假定提示符 `"❯ "` 恒为 2 列。在 CJK 终端环境中（且我们的 `runeWidth` 已将 dingbats 计为宽字），`❯` (U+276F) 的显示宽度为 2 → `"❯ "` = 3 列 → 光标定位偏左 → 后一个汉字画到前一个字上（重叠）。
+- **修复**：光标列改用 `visibleWidth(prompt+" ") + vw + 1` 动态计算；输入行内容截断宽度 `innerW` 同步改为 `W - visibleWidth(prompt) - 2`（精确减 prompt 宽，不再硬减 4）。`drawSearchBox` 无用户逐字输入光标，不受影响。
+- 新增单测 `TestCursorColCJK` 覆盖「空/ASCII/CJK/混排」光标列计算（含 `❯` 宽字终端场景）。四份二进制重编 `0.35.0`。
+
+### 🔧 构建 / 验证
+- 三份二进制同步重编并通过：`icode.exe`、`bin/icode-cli.exe`、`icode-cli.exe`（根目录，均控制台子系统）、`icode-desktop.exe`（windowsgui）。简易 UI（`cmd/simpleui_windows.go`）+ 全量斜杠命令改动已编入。
+- `go build ./...`、`go vet ./cmd/...`、`./internal/tui`、`./internal/server`、`./internal/mcp` 全量单测均通过；`go test ./internal/tui/` 全绿；`icode version` → `0.35.0`。
+
+---
+
 ## v0.34.0 — CLI 闪退兜底 + 真正的交互式 /model 选择器（2026-07-28）
 
 > 第三十批：用户反馈「CLI 版大模型显示出来了，但不能上下选择切换，并且会闪退」「桌面版还是有点卡」。

@@ -9,7 +9,7 @@ import (
 
 const (
 	ProviderName = "huawei"
-	DefaultBase  = "https://nlp-api.cloud.huawei.com/v1"
+	DefaultBase  = "https://maas-console.huawei.com/api/v1"
 )
 
 func New(apiKey, apiBase string) types.Provider {
@@ -27,15 +27,6 @@ func DefaultModels() []types.ModelInfo {
 			Provider:        ProviderName,
 			ContextWindow:   131072,
 			MaxOutputTokens: 16384,
-			Plans: []types.TokenPlan{
-				{
-					Name:        "coding-plan",
-					Description: "标准编程计划",
-					InputPrice:  3.0,
-					OutputPrice: 3.0,
-					Currency:    "CNY",
-				},
-			},
 			Capabilities: types.ModelCap{
 				Tools:     true,
 				Streaming: true,
@@ -50,20 +41,63 @@ func DefaultModels() []types.ModelInfo {
 			Provider:        ProviderName,
 			ContextWindow:   131072,
 			MaxOutputTokens: 16384,
-			Plans: []types.TokenPlan{
-				{
-					Name:        "code-plan",
-					Description: "代码专用计划",
-					InputPrice:  2.0,
-					OutputPrice: 2.0,
-					Currency:    "CNY",
-				},
-			},
 			Capabilities: types.ModelCap{
 				Tools:     true,
 				Streaming: true,
 				JSONMode:  true,
 				Reasoning: true,
+			},
+			UpdatedAt: time.Now(),
+		},
+		{
+			ID:              "pangu-5.0-lite",
+			Name:            "盘古 5.0 Lite",
+			Description:     "华为盘古轻量模型，高性价比，适合日常编程与对话场景",
+			Provider:        ProviderName,
+			ContextWindow:   65536,
+			MaxOutputTokens: 8192,
+			Capabilities: types.ModelCap{
+				Tools:     true,
+				Streaming: true,
+			},
+			UpdatedAt: time.Now(),
+		},
+		{
+			ID:              "qwen2.5-72b-instruct",
+			Name:            "Qwen2.5-72B (华为云)",
+			Description:     "华为云ModelArts代理通义千问72B模型",
+			Provider:        ProviderName,
+			ContextWindow:   131072,
+			MaxOutputTokens: 8192,
+			Capabilities: types.ModelCap{
+				Tools:     true,
+				Streaming: true,
+			},
+			UpdatedAt: time.Now(),
+		},
+		{
+			ID:              "deepseek-v3-0324",
+			Name:            "DeepSeek-V3 (华为云)",
+			Description:     "华为云ModelArts代理DeepSeek-V3模型",
+			Provider:        ProviderName,
+			ContextWindow:   131072,
+			MaxOutputTokens: 8192,
+			Capabilities: types.ModelCap{
+				Tools:     true,
+				Streaming: true,
+			},
+			UpdatedAt: time.Now(),
+		},
+		{
+			ID:              "glm-4-0520",
+			Name:            "GLM-4 (华为云)",
+			Description:     "华为云ModelArts代理智谱GLM-4模型",
+			Provider:        ProviderName,
+			ContextWindow:   131072,
+			MaxOutputTokens: 8192,
+			Capabilities: types.ModelCap{
+				Tools:     true,
+				Streaming: true,
 			},
 			UpdatedAt: time.Now(),
 		},

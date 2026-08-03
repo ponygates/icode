@@ -22,6 +22,7 @@ export interface Model {
   plan: string;
   plans?: Array<{
     name: string;
+    type?: string;
     description?: string;
     inputPrice?: number;
     outputPrice?: number;
@@ -41,6 +42,45 @@ export interface Model {
   icon?: string;
   category?: string;
   tags?: string[];
+  apiBase?: string;
+  deprecated?: boolean;
+  deprecatedCount?: number;
+}
+
+// Loose shapes for backend API responses (the Go server is authoritative).
+interface ApiMessage {
+  id?: string;
+  role?: string;
+  content?: string;
+  attachments?: Attachment[];
+  timestamp?: string | number;
+}
+interface ApiSession {
+  id: string;
+  title?: string;
+  messages?: ApiMessage[];
+  model_id?: string;
+  provider_name?: string;
+  created_at?: string | number;
+}
+interface ApiModelRef { id: string; name?: string; }
+interface ApiRefreshResult {
+  name: string;
+  added?: ApiModelRef[];
+  removed?: string[];
+}
+interface ApiRefreshData { results?: ApiRefreshResult[]; }
+
+export interface RefreshSummary {
+  totalAdded: number;
+  totalRemoved: number;
+  providers: Array<{
+    name: string;
+    added: number;
+    removed: number;
+    addedModels: Array<{ id: string; name: string }>;
+    removedModels: string[];
+  }>;
 }
 
 export interface Attachment {
@@ -113,6 +153,8 @@ interface AppStore {
   setModels: (models: Model[]) => void;
   setSelectedModel: (id: string) => void;
   refreshModels: () => Promise<void>;
+  refreshSummary: RefreshSummary | null;
+  clearRefreshSummary: () => void;
 
   // Sessions
   sessions: Session[];
@@ -327,6 +369,8 @@ export const useAppStore = create<AppStore>()(
   selectedModel: 'openrouter/free',
   setModels: (models) => set({ models }),
   setSelectedModel: (id) => set({ selectedModel: id }),
+  refreshSummary: null,
+  clearRefreshSummary: () => set({ refreshSummary: null }),
 
   async refreshModels() {
     // Try Electron IPC
@@ -340,6 +384,13 @@ export const useAppStore = create<AppStore>()(
     // HTTP fallback (native WebView2 desktop)
     const { backendUrl } = get();
     if (backendUrl) {
+      let refreshData: ApiRefreshData | null = null;
+      try {
+        const resp = await fetch(`${backendUrl}/api/models/refresh`, { method: 'POST' });
+        if (resp.ok) {
+          refreshData = await resp.json();
+        }
+      } catch { /* ignore — refresh is optional, list still works */ }
       try {
         const res = await fetch(`${backendUrl}/api/models`, { cache: 'no-cache' });
         if (res.ok) {
@@ -350,6 +401,28 @@ export const useAppStore = create<AppStore>()(
           }
         }
       } catch { /* ignore */ }
+
+      if (refreshData && refreshData.results) {
+        const summary: RefreshSummary = { totalAdded: 0, totalRemoved: 0, providers: [] };
+        for (const r of refreshData.results) {
+          const added = r.added || [];
+          const removed = r.removed || [];
+          if (added.length > 0 || removed.length > 0) {
+            summary.providers.push({
+              name: r.name,
+              added: added.length,
+              removed: removed.length,
+              addedModels: added.map((m) => ({ id: m.id, name: m.name || m.id })),
+              removedModels: removed,
+            });
+            summary.totalAdded += added.length;
+            summary.totalRemoved += removed.length;
+          }
+        }
+        if (summary.totalAdded > 0 || summary.totalRemoved > 0) {
+          set({ refreshSummary: summary });
+        }
+      }
     }
     // Also check backend health
     get().checkBackend();
@@ -363,17 +436,40 @@ export const useAppStore = create<AppStore>()(
   activeWorkspaceId: loadActiveWorkspace(),
 
   loadSessions: async () => {
+    // Lazily load one session's messages (the list API returns metadata only,
+    // so opening a session / restoring the last active one needs a follow-up
+    // GET /api/sessions/{id}). Without this, history would render blank.
+    const loadActive = (aid: string) => {
+      const { backendUrl } = get();
+      if (!backendUrl) return;
+      fetch(`${backendUrl}/api/sessions/${aid}`, { cache: 'no-cache' })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data: ApiSession | null) => {
+          if (!data) return;
+          const msgs = (data.messages || []).map((m) => ({
+            id: m.id || Math.random().toString(36).slice(2),
+            role: (m.role as Message['role']) || 'assistant',
+            content: m.content || '',
+            attachments: m.attachments || [],
+            timestamp: m.timestamp ? new Date(m.timestamp).getTime() : Date.now(),
+          }));
+          set((state) => ({
+            sessions: state.sessions.map((s) => (s.id === aid ? { ...s, messages: msgs } : s)),
+          }));
+        })
+        .catch(() => {});
+    };
     try {
       // Try Electron IPC first
       if (window.icode && window.icode.listSessions) {
         const list = await window.icode.listSessions();
         if (Array.isArray(list) && list.length > 0) {
-          const loaded: Session[] = list.map((s: any) => ({
+          const loaded: Session[] = list.map((s: ApiSession) => ({
             id: s.id,
             title: s.title || '会话',
-            messages: (s.messages || []).map((m: any) => ({
+            messages: (s.messages || []).map((m) => ({
               id: m.id || Math.random().toString(36).slice(2),
-              role: m.role || 'assistant',
+              role: (m.role as Message['role']) || 'assistant',
               content: m.content || '',
               attachments: m.attachments || [],
               timestamp: m.timestamp ? new Date(m.timestamp).getTime() : Date.now(),
@@ -389,6 +485,7 @@ export const useAppStore = create<AppStore>()(
           saveToLocal(loaded);
           if (loaded.length > 0) {
             set({ activeSessionId: loaded[loaded.length - 1].id });
+            loadActive(loaded[loaded.length - 1].id);
           }
           return;
         }
@@ -402,12 +499,12 @@ export const useAppStore = create<AppStore>()(
           const data = await res.json();
           const list = data.sessions || data || [];
           if (Array.isArray(list) && list.length > 0) {
-            const loaded: Session[] = list.map((s: any) => ({
+            const loaded: Session[] = list.map((s: ApiSession) => ({
               id: s.id,
               title: s.title || '会话',
-              messages: (s.messages || []).map((m: any) => ({
+              messages: (s.messages || []).map((m) => ({
                 id: m.id || Math.random().toString(36).slice(2),
-                role: m.role || 'assistant',
+                role: (m.role as Message['role']) || 'assistant',
                 content: m.content || '',
                 timestamp: m.timestamp ? new Date(m.timestamp).getTime() : Date.now(),
               })),
@@ -419,6 +516,7 @@ export const useAppStore = create<AppStore>()(
             saveToLocal(loaded);
             if (loaded.length > 0) {
               set({ activeSessionId: loaded[loaded.length - 1].id });
+              loadActive(loaded[loaded.length - 1].id);
             }
             return;
           }
@@ -433,6 +531,7 @@ export const useAppStore = create<AppStore>()(
           openTabIds: state.openTabIds.length > 0 ? state.openTabIds : local.map((s) => s.id),
           activeSessionId: local[local.length - 1].id,
         }));
+        loadActive(local[local.length - 1].id);
       }
     } catch { /* ignore */ }
   },
@@ -500,12 +599,36 @@ export const useAppStore = create<AppStore>()(
     }));
   },
 
-  setActiveSession: (id) => set((state) => ({
-    activeSessionId: id,
-    openTabIds: state.openTabIds.includes(id)
-      ? state.openTabIds
-      : [...state.openTabIds, id],
-  })),
+  setActiveSession: (id) => {
+    set((state) => ({
+      activeSessionId: id,
+      openTabIds: state.openTabIds.includes(id)
+        ? state.openTabIds
+        : [...state.openTabIds, id],
+    }));
+    // The sessions list no longer carries message bodies (backend returns
+    // metadata only to avoid freezing on startup), so load this session's
+    // messages lazily the moment it becomes active.
+    const { backendUrl } = get();
+    if (backendUrl) {
+      fetch(`${backendUrl}/api/sessions/${id}`, { cache: 'no-cache' })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data: ApiSession | null) => {
+          if (!data) return;
+          const msgs = (data.messages || []).map((m) => ({
+            id: m.id || Math.random().toString(36).slice(2),
+            role: (m.role as Message['role']) || 'assistant',
+            content: m.content || '',
+            attachments: m.attachments || [],
+            timestamp: m.timestamp ? new Date(m.timestamp).getTime() : Date.now(),
+          }));
+          set((state) => ({
+            sessions: state.sessions.map((s) => (s.id === id ? { ...s, messages: msgs } : s)),
+          }));
+        })
+        .catch(() => {});
+    }
+  },
 
   renameSession: (id, title) => {
     const clean = (title || '').trim();
@@ -527,6 +650,12 @@ export const useAppStore = create<AppStore>()(
   },
 
   deleteSession: (id) => {
+    // Debounce rapid re-clicks of the same session's delete button — each
+    // click would otherwise trigger an optimistic set() + a DELETE round-trip,
+    // and a fast double-click could fire two writes.
+    const now = Date.now();
+    if (now - (deleteDebounce.get(id) || 0) < 500) return;
+    deleteDebounce.set(id, now);
     set((state) => {
       const remaining = state.sessions.filter((s) => s.id !== id);
       // If we just deleted the active session, switch to the most recent one.
@@ -679,6 +808,10 @@ export const useAppStore = create<AppStore>()(
 // made the desktop "freeze" at launch and while generating.
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
 
+// deleteDebounce guards against rapid re-clicks of the same session's delete
+// button firing redundant optimistic updates + DELETE round-trips.
+const deleteDebounce = new Map<string, number>();
+
 function flushPersist() {
   if (persistTimer != null) {
     clearTimeout(persistTimer);
@@ -722,15 +855,32 @@ const LS_ACTIVE = 'icode.activeSessionId';
 const LS_WORKSPACE = 'icode.activeWorkspaceId';
 
 function saveToLocal(sessions: Session[]) {
+  // Persist ONLY session metadata (id/title/model/provider/createdAt) — never
+  // the full message transcript. Serializing up to 50 sessions of complete
+  // chats on the critical path (every session mutation AND every streaming
+  // frame) is what made the desktop "freeze" — see v0.25. The transcript is
+  // owned by the backend DB; localStorage is just an offline fallback for the
+  // session LIST, so message bodies must not live here.
   try {
-    localStorage.setItem(LS_KEY, JSON.stringify(sessions.slice(-50)));
+    const meta = sessions.slice(-50).map((s) => ({
+      id: s.id,
+      title: s.title,
+      modelId: s.modelId,
+      provider: s.provider,
+      createdAt: s.createdAt,
+    }));
+    localStorage.setItem(LS_KEY, JSON.stringify(meta));
   } catch {}
 }
 
 function loadFromLocal(): Session[] {
   try {
     const raw = localStorage.getItem(LS_KEY);
-    return raw ? JSON.parse(raw) : [];
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as Array<Partial<Session>>;
+    // Restore the messages field so the Session[] type stays valid; the
+    // transcript is reloaded from the backend when a session is opened.
+    return parsed.map((s) => ({ ...s, messages: [] } as Session));
   } catch {
     return [];
   }

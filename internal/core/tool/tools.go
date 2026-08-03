@@ -6,11 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ponygates/icode/internal/executil"
@@ -19,6 +22,7 @@ import (
 
 // Registry holds all available tools.
 type Registry struct {
+	mu    sync.RWMutex
 	tools map[string]types.Tool
 }
 
@@ -63,14 +67,19 @@ func NewRegistry() *Registry {
 	return r
 }
 
-// Register adds a tool to the registry.
+// Register adds a tool to the registry. Safe for concurrent use (MCP tool
+// refresh runs in a background goroutine while chat requests read the map).
 func (r *Registry) Register(t types.Tool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.tools[t.Def().Name] = t
 }
 
 // SetTaskRunner injects the sub-agent runner into the Task tool.
 // Called during Engine initialisation once the runner is available.
 func (r *Registry) SetTaskRunner(runner SubAgentRunner) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	if tt, ok := r.tools["task"]; ok {
 		if task, ok := tt.(*TaskTool); ok {
 			task.runner = runner
@@ -81,6 +90,8 @@ func (r *Registry) SetTaskRunner(runner SubAgentRunner) {
 // SetMultimodalOptions injects the multimodal backend config into the
 // image_gen / video_gen tools. Called during Bootstrap once config is loaded.
 func (r *Registry) SetMultimodalOptions(opts MultimodalOptions) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	if it, ok := r.tools["image_gen"]; ok {
 		if img, ok := it.(*ImageGenTool); ok {
 			cp := opts
@@ -99,6 +110,8 @@ func (r *Registry) SetMultimodalOptions(opts MultimodalOptions) {
 // during Bootstrap once the engine's skill registry is loaded. The loader
 // fetches a SKILL.md body on demand so it never lives in the cached prefix.
 func (r *Registry) SetSkillsLoader(fn SkillLoader) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	if st, ok := r.tools["use_skill"]; ok {
 		if sk, ok := st.(*UseSkillTool); ok {
 			sk.loader = fn
@@ -108,17 +121,23 @@ func (r *Registry) SetSkillsLoader(fn SkillLoader) {
 
 // Get returns a tool by name.
 func (r *Registry) Get(name string) (types.Tool, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	t, ok := r.tools[name]
 	return t, ok
 }
 
 // Unregister removes a tool from the registry by name.
 func (r *Registry) Unregister(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	delete(r.tools, name)
 }
 
 // ListDefs returns tool definitions for all registered tools.
 func (r *Registry) ListDefs() []types.ToolDef {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	defs := make([]types.ToolDef, 0, len(r.tools))
 	for _, t := range r.tools {
 		defs = append(defs, t.Def())
@@ -915,11 +934,20 @@ func (t *FetchTool) Execute(ctx context.Context, args string) (*types.ToolResult
 		return nil, err
 	}
 
+	if err := validateFetchURL(url); err != nil {
+		return &types.ToolResult{Success: false, Error: err.Error()}, nil
+	}
+
 	client := &http.Client{
 		Timeout: 30 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 3 {
 				return fmt.Errorf("too many redirects")
+			}
+			// Re-validate every redirect hop so a public URL can't bounce us
+			// onto loopback/private/metadata targets (SSRF via redirect).
+			if err := validateFetchURL(req.URL.String()); err != nil {
+				return err
 			}
 			return nil
 		},
@@ -960,6 +988,78 @@ func (t *FetchTool) Execute(ctx context.Context, args string) (*types.ToolResult
 		Success: true,
 		Content: content,
 	}, nil
+}
+
+// validateFetchURL blocks SSRF targets before the fetch tool dials them:
+// only http(s) schemes, and no loopback / private / link-local addresses
+// (which include cloud metadata 169.254.169.254). Every resolved IP is checked
+// so a DNS name mixing public + private records can't slip through.
+func validateFetchURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("fetch: invalid URL %q", raw)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("fetch: only http/https URLs are allowed (got %q)", u.Scheme)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("fetch: missing host in %q", raw)
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return fmt.Errorf("fetch: cannot resolve host %q", host)
+	}
+	if len(ips) == 0 {
+		return fmt.Errorf("fetch: no addresses for host %q", host)
+	}
+	for _, ip := range ips {
+		if blockedBySSRF(ip) {
+			return fmt.Errorf("fetch: blocked address %s (private/loopback/link-local not allowed)", ip)
+		}
+	}
+	return nil
+}
+
+func blockedBySSRF(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	if v4 := ip.To4(); v4 != nil {
+		switch {
+		case v4[0] == 127: // loopback
+			return true
+		case v4[0] == 0: // 0.0.0.0/8
+			return true
+		case v4[0] == 10: // 10.0.0.0/8
+			return true
+		case v4[0] == 169 && v4[1] == 254: // 169.254.0.0/16 link-local + cloud metadata
+			return true
+		case v4[0] == 172 && v4[1] >= 16 && v4[1] <= 31: // 172.16.0.0/12
+			return true
+		case v4[0] == 192 && v4[1] == 168: // 192.168.0.0/16
+			return true
+		case v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127: // CGNAT 100.64.0.0/10
+			return true
+		default:
+			return false
+		}
+	}
+	// IPv6
+	switch {
+	case ip.IsLoopback():
+		return true
+	case ip.IsLinkLocalUnicast(): // fe80::/10
+		return true
+	case ip.IsLinkLocalMulticast(): // ff02::/16
+		return true
+	case ip.IsPrivate(): // fc00::/7
+		return true
+	case ip.IsUnspecified(): // ::
+		return true
+	default:
+		return false
+	}
 }
 
 // ============================================================================

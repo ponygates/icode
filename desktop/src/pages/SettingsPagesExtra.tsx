@@ -28,13 +28,16 @@ const Section: React.FC<{ title: string; children: React.ReactNode }> = ({ title
   </div>
 );
 
-export function PageTools({ store }: { store: any }) {
+type StoreState = ReturnType<typeof useAppStore.getState>;
+type ConfigPatch = Record<string, unknown>;
+
+export function PageTools({ store }: { store: StoreState }) {
   const { t } = useTranslation();
   const [bashTimeout, setBashTimeout] = useState(30);
   const [rules, setRules] = useState<Record<string,string>>({});
   const backendUrl = useAppStore((s) => s.backendUrl);
 
-  const saveConfig = async (patch: any) => {
+  const saveConfig = async (patch: ConfigPatch) => {
     if (!store.backendUrl) return;
     try { await fetch(`${store.backendUrl}/api/config`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) }); } catch {}
   };
@@ -151,11 +154,11 @@ export function PageTools({ store }: { store: any }) {
   );
 }
 
-export function PageUpdates({ store }: { store: any }) {
+export function PageUpdates({ store }: { store: StoreState }) {
   const { t } = useTranslation();
   const [autoUpdate, setAutoUpdate] = useState(true);
   const [channel, setChannel] = useState('stable');
-  const saveConfig = async (patch: any) => {
+  const saveConfig = async (patch: ConfigPatch) => {
     if (!store.backendUrl) return;
     try { await fetch(`${store.backendUrl}/api/config`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) }); } catch {}
   };
@@ -186,15 +189,15 @@ export function PageUpdates({ store }: { store: any }) {
   );
 }
 
-export function PageAbout({ store }: { store: any }) {
+export function PageAbout({ store }: { store: StoreState }) {
   const { t } = useTranslation();
   const clearData = async () => {
     if (!window.confirm(t('settings.confirmClearAll'))) return;
     if (!store.backendUrl) return;
     try {
       const resp = await fetch(`${store.backendUrl}/api/sessions`);
-      const sessions = await resp.json();
-      for (const s of (sessions as any[])) {
+      const sessions = (await resp.json()) as Array<{ id: string }>;
+      for (const s of sessions) {
         await fetch(`${store.backendUrl}/api/sessions/${s.id}`, { method: 'DELETE' });
       }
     } catch {}

@@ -53,6 +53,13 @@ func (p *Provider) Name() string                  { return ProviderName }
 func (p *Provider) ListModels() []types.ModelInfo { return p.models }
 func (p *Provider) SupportsCache() bool           { return true }
 
+// SetModels updates the model list (called after a live catalog refresh).
+func (p *Provider) SetModels(models []types.ModelInfo) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.models = models
+}
+
 // SetCredentials updates the API key and base URL at runtime. Empty values are
 // left unchanged. See openai_compat.BaseProvider for rationale.
 func (p *Provider) SetCredentials(apiKey, apiBase string) {

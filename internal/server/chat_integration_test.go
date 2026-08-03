@@ -47,19 +47,19 @@ type fakeRegistry struct {
 	p *fakeProvider
 }
 
-func (r *fakeRegistry) Register(p types.Provider) error              { return nil }
-func (r *fakeRegistry) Get(name string) (types.Provider, error)      { return r.p, nil }
-func (r *fakeRegistry) List() []string                              { return []string{"openrouter"} }
-func (r *fakeRegistry) ListAllModels() []types.ModelInfo            { return r.p.ListModels() }
-func (r *fakeRegistry) RefreshAll(ctx context.Context) []error      { return nil }
+func (r *fakeRegistry) Register(p types.Provider) error         { return nil }
+func (r *fakeRegistry) Get(name string) (types.Provider, error) { return r.p, nil }
+func (r *fakeRegistry) List() []string                          { return []string{"openrouter"} }
+func (r *fakeRegistry) ListAllModels() []types.ModelInfo        { return r.p.ListModels() }
+func (r *fakeRegistry) RefreshAll(ctx context.Context) []error  { return nil }
 func (r *fakeRegistry) ResolveModel(modelID string) (types.Provider, types.ModelInfo, error) {
 	return r.p, types.ModelInfo{ID: "openrouter/free", Provider: "openrouter", MaxOutputTokens: 1024}, nil
 }
-func (r *fakeRegistry) SetCredentials(name, key, base string) bool { return true }
-func (r *fakeRegistry) SetTimeout(name string, sec int) bool       { return true }
+func (r *fakeRegistry) SetCredentials(name, key, base string) bool          { return true }
+func (r *fakeRegistry) SetTimeout(name string, sec int) bool                { return true }
 func (r *fakeRegistry) RegisterCustomModel(m types.ModelInfo, alias string) {}
-func (r *fakeRegistry) RemoveCustomModel(canonicalID string)      {}
-func (r *fakeRegistry) Deregister(name string)                    {}
+func (r *fakeRegistry) RemoveCustomModel(canonicalID string)                {}
+func (r *fakeRegistry) Deregister(name string)                              {}
 
 // TestChatStreamIntegration reproduces the exact desktop failure path:
 //  1. pre-populate the store with sessions (so List() returns rows),

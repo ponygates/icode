@@ -56,9 +56,7 @@ func TestModelsHaveValidConfig(t *testing.T) {
 		if m.Provider != ProviderName {
 			t.Errorf("model %q: provider should be %q, got %q", m.ID, ProviderName, m.Provider)
 		}
-		if len(m.Plans) == 0 {
-			t.Errorf("model %q: expected at least 1 pricing plan", m.ID)
-		}
+
 	}
 }
 

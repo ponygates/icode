@@ -20,6 +20,10 @@ func TestClaudeStyleRender(t *testing.T) {
 	tui.color = true
 	tui.width = 120
 	tui.height = 40
+	// Pin the status bar on: this test verifies the layout, not the /statusline
+	// toggle (which persists to the real config and would otherwise flip the
+	// default-visible assumption).
+	tui.statusVisible = true
 
 	// Populate conversation + status state.
 	tui.model = "deepseek-v4-flash"

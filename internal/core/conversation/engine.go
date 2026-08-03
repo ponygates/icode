@@ -21,6 +21,7 @@ import (
 	"github.com/ponygates/icode/internal/core/privacy"
 	"github.com/ponygates/icode/internal/core/router"
 	"github.com/ponygates/icode/internal/core/skills"
+	"github.com/ponygates/icode/internal/core/slashcmd"
 	"github.com/ponygates/icode/internal/core/tool"
 	"github.com/ponygates/icode/internal/llm/tokenopt"
 	"github.com/ponygates/icode/internal/lsp"
@@ -109,7 +110,9 @@ func NewEngine(
 		teamRegistry:   make(map[string]*agent.TeamDef),
 		budgetEnforcer: tokenopt.NewBudgetEnforcer(tokenopt.DefaultBudgetConfig()),
 	}
-	// Register the Task tool (sub-agent dispatcher).
+	if gate != nil {
+		slashcmd.SetShellGate(&shellGateAdapter{gate: gate})
+	}
 	e.toolReg.Register(tool.NewTaskTool(e))
 	return e
 }
@@ -289,7 +292,10 @@ func (e *Engine) WireTaskRunner() {
 // ExecuteTool runs a tool directly without going through the permission
 // gate. Used by CLI commands (cleanup, etc.) and model-free operations.
 func (e *Engine) ExecuteTool(name string, args string) *types.ToolResult {
-	ctx := context.Background()
+	// Bound execution so a hung tool (network read, stuck subprocess) cannot
+	// block the caller indefinitely. 2 minutes matches the default tool budget.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
 	tc := types.ToolCall{Name: name, Arguments: args}
 	return e.runTool(ctx, tc)
 }
@@ -357,7 +363,7 @@ func (e *Engine) getAgentRunner() *agent.Runner {
 		reg := agent.Load(agent.AgentDefaultDirs()...)
 		reg.RegisterDefaults()
 		e.agentRegistry = reg
-		e.agentRunner = agent.NewRunner(e.providerReg, e.toolReg)
+		e.agentRunner = agent.NewRunnerWithGate(e.providerReg, e.toolReg, e.gate)
 	})
 	return e.agentRunner
 }
@@ -379,15 +385,20 @@ func buildAction(toolName, arguments string) permission.Action {
 	switch toolName {
 	case "bash":
 		a.Command = getStr("command")
-	case "read_file", "write_file":
+	case "read_file", "write_file", "ls":
 		a.Path = getStr("path")
 	case "edit":
+		a.Path = getStr("file_path")
+	case "search_replace":
 		a.Path = getStr("file_path")
 	case "grep":
 		a.Pattern = getStr("pattern")
 		a.Path = getStr("path")
 	case "glob":
 		a.Pattern = getStr("pattern")
+		if p := getStr("path"); p != "" {
+			a.Path = p
+		}
 	case "git_commit":
 		a.Command = getStr("message")
 	case "fetch":
@@ -455,6 +466,15 @@ func (e *Engine) executeToolBatch(
 			wg.Add(1)
 			go func(i int) {
 				defer wg.Done()
+				// A panic in a parallel tool must not leave wg.Wait blocked
+				// (which would hang the whole conversation loop). Recover,
+				// mark the tool as failed, and keep going.
+				defer func() {
+					if r := recover(); r != nil {
+						fmt.Fprintf(os.Stderr, "[engine] parallel tool panic: %v\n%s\n", r, debug.Stack())
+						finish(i, &types.ToolResult{Success: false, Error: fmt.Sprintf("工具执行 panic（已恢复）: %v", r)})
+					}
+				}()
 				sem <- struct{}{}
 				defer func() { <-sem }()
 				finish(i, e.executeTool(ctx, sessionID, toolCalls[i], out))
@@ -1052,7 +1072,11 @@ func (e *Engine) checkDiagnosticsAfterTool(filePath string) string {
 	// Lazily start the language server for this language on first use.
 	// StartLanguageServer is idempotent (no-ops if already running) and
 	// returns an error when the binary is absent, so this stays safe.
-	if err := e.lspManager.StartLanguageServer(context.Background(), lang); err != nil {
+	// Cap with a timeout so an unresponsive server initialize cannot hang
+	// the first tool call that triggers it.
+	lspCtx, lspCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer lspCancel()
+	if err := e.lspManager.StartLanguageServer(lspCtx, lang); err != nil {
 		return ""
 	}
 	client := e.lspManager.GetClient(lang)
@@ -1290,4 +1314,17 @@ func firstN(s string, n int) string {
 		return s
 	}
 	return string(runes[:n]) + "..."
+}
+
+type shellGateAdapter struct {
+	gate *permission.Gate
+}
+
+func (a *shellGateAdapter) CheckShellCommand(cmd string) (bool, string) {
+	action := permission.Action{Tool: "bash", Command: cmd, Arguments: fmt.Sprintf(`{"command":%q}`, cmd)}
+	res := a.gate.Check("", action)
+	if res.Decision == permission.DecisionDeny {
+		return false, res.Reason
+	}
+	return true, ""
 }

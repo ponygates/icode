@@ -3,9 +3,11 @@ package tui
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -15,6 +17,7 @@ import (
 	"github.com/ponygates/icode/internal/core/agent"
 	"github.com/ponygates/icode/internal/core/checkpoint"
 	"github.com/ponygates/icode/internal/core/permission"
+	"github.com/ponygates/icode/internal/core/searchreplace"
 	"github.com/ponygates/icode/internal/core/skills"
 	"github.com/ponygates/icode/internal/core/slashcmd"
 	"github.com/ponygates/icode/internal/executil"
@@ -39,7 +42,7 @@ func (t *TUI) handleSlash(text string) {
 
 		// Append user-defined slash commands (.icode/commands/*.md) so
 		// `/help` reflects everything the current session will accept.
-		if custom := slashcmd.Load(slashcmd.DefaultDirs()...).List(); len(custom) > 0 {
+		if custom := slashcmd.CachedLoad(slashcmd.DefaultDirs()...).List(); len(custom) > 0 {
 			b.WriteString("\n自定义命令:\n")
 			for _, c := range custom {
 				hint := c.ArgumentHint
@@ -57,6 +60,7 @@ func (t *TUI) handleSlash(text string) {
 		b.WriteString("  Ctrl+C           " + t.tstr("sc.ctrlc") + "\n")
 		b.WriteString("  Ctrl+L           " + t.tstr("sc.ctrll") + "\n")
 		b.WriteString("  Ctrl+P / Ctrl+N  " + t.tstr("sc.history") + "\n")
+		b.WriteString("  Ctrl+Y           复制最近助手回复到剪贴板\n")
 		b.WriteString("  " + t.tstr("cmd.ac"))
 		t.add(RoleSystem, b.String())
 
@@ -91,14 +95,35 @@ func (t *TUI) handleSlash(text string) {
 
 	case "/mode":
 		if len(args) > 0 {
-			t.mode = args[0]
-			t.add(RoleSystem, "Mode -> "+args[0])
+			want := strings.ToLower(args[0])
+			valid := map[string]bool{"agent": true, "plan": true, "yolo": true, "auto": true, "ask": true}
+			if valid[want] {
+				t.mode = want
+				t.add(RoleSystem, "Mode -> "+want)
+			} else {
+				t.add(RoleError, "无效模式: "+want+"（可选 agent/plan/yolo/auto/ask）")
+			}
+		} else {
+			t.add(RoleSystem, "当前模式: "+t.mode+"\n用法: /mode <agent|plan|yolo|auto|ask>")
 		}
 
 	case "/session", "/sessions":
 		if t.callback != nil {
 			t.add(RoleSystem, t.callback.OnListSessions())
 		}
+
+	case "/new", "/newsession":
+		if t.callback != nil {
+			t.callback.OnSlashCommand("/clear", nil)
+		}
+		t.mu.Lock()
+		t.messages = nil
+		t.promptTokens = 0
+		t.completionTokens = 0
+		t.cost = ""
+		t.cacheHitRate = 0
+		t.mu.Unlock()
+		t.add(RoleSystem, "新会话已创建。")
 
 	case "/resume":
 		if len(args) > 0 && t.callback != nil {
@@ -117,14 +142,85 @@ func (t *TUI) handleSlash(text string) {
 		t.mu.Unlock()
 		t.add(RoleSystem, "Conversation cleared.")
 
-	case "/compact":
-		t.compact()
+	case "/search":
+		query := strings.Join(args, " ")
+		if query == "" {
+			t.add(RoleSystem, "Usage: /search <query> — 搜索历史对话")
+			break
+		}
+		if t.callback != nil {
+			t.callback.OnSlashCommand("/search", args)
+		} else {
+			t.add(RoleSystem, "搜索需要会话存储支持。")
+		}
 
-	case "/export":
-		t.exportMarkdown(args)
+	case "/compact":
+		t.compactCommand(args)
+
+  case "/export":
+    t.exportMarkdown(args)
+
+  case "/copy":
+    t.copyLastAssistant(args)
+
+	case "/share":
+		// Export the conversation to a timestamped Markdown file and print the
+		// absolute path, so it can be pasted into docs / sent to others.
+		name := fmt.Sprintf("icode-share-%s.md", time.Now().Format("20060102-150405"))
+		t.exportMarkdown([]string{name})
+		if abs, err := filepath.Abs(name); err == nil {
+			t.add(RoleSystem, "📤 可分享副本: "+abs+"\n（该 Markdown 文件可直接发送或粘贴到支持 Markdown 的工具）")
+		}
 
 	case "/diff":
-		t.showGitDiff()
+		t.showGitDiff(args)
+
+	case "/output-style":
+		if len(args) == 0 {
+			cur := "normal"
+			if c, err := config.Load(); err == nil && c.Defaults.OutputStyle != "" {
+				cur = c.Defaults.OutputStyle
+			}
+			t.add(RoleSystem, "当前输出风格: "+cur+"\n用法: /output-style <concise|normal|verbose>")
+			break
+		}
+		style := strings.ToLower(args[0])
+		if style != "concise" && style != "normal" && style != "verbose" {
+			t.add(RoleError, "无效风格: "+args[0]+"（可选 concise|normal|verbose）")
+			break
+		}
+		if t.callback != nil {
+			t.add(RoleSystem, t.callback.OnOutputStyle(style))
+		} else {
+			t.persistSetting(func(c *config.Config) { c.Defaults.OutputStyle = style })
+			t.add(RoleSystem, "输出风格已设为 "+style+"（已持久化，重启会话后生效）")
+		}
+
+	case "/update":
+		if t.callback != nil {
+			t.add(RoleSystem, t.callback.OnUpdateModels())
+		} else {
+			t.add(RoleSystem, "引擎未初始化。")
+		}
+
+	case "/add-dir":
+		if len(args) == 0 {
+			var list []string
+			if c, err := config.Load(); err == nil {
+				list = c.Defaults.ExtraDirs
+			}
+			if len(list) == 0 {
+				t.add(RoleSystem, "没有额外工作目录。\n用法: /add-dir <路径>")
+			} else {
+				t.add(RoleSystem, "额外工作目录：\n  "+strings.Join(list, "\n  ")+"\n\n添加: /add-dir <路径>")
+			}
+			break
+		}
+		if t.callback != nil {
+			t.add(RoleSystem, t.callback.OnAddDir(args[0]))
+		} else {
+			t.add(RoleSystem, "引擎未初始化。")
+		}
 
 	case "/rewind":
 		n := 1
@@ -135,33 +231,42 @@ func (t *TUI) handleSlash(text string) {
 			t.add(RoleSystem, "用法: /rewind [N]  — 回滚前 N 步工具调用")
 			break
 		}
-		sessionID := ""
+		t.rewindSteps(n)
+
+	case "/undo":
+		t.rewindSteps(1)
+
+	case "/apply":
 		if t.callback != nil {
-			sessionID = t.callback.SessionID()
+			t.callback.OnSlashCommand("/apply", args)
+		} else {
+			t.applyStagedEdits()
 		}
-		if sessionID == "" {
-			t.add(RoleSystem, "没有活跃会话。")
-			break
+
+	case "/reject":
+		if t.callback != nil {
+			t.callback.OnSlashCommand("/reject", args)
+		} else {
+			t.rejectStagedEdits()
 		}
-		store, err := checkpoint.GetOrOpen(sessionID)
-		if err != nil {
-			t.add(RoleError, "打开检查点失败: "+err.Error())
-			break
+
+	case "/admin":
+		if len(args) == 0 || (len(args) > 0 && strings.ToLower(args[0]) != "off") {
+			if t.callback != nil {
+				t.callback.OnSlashCommand("/mode", []string{"yolo"})
+			}
+			t.mode = "yolo"
+			t.add(RoleSystem, "管理员模式开启（yolo 模式，不再逐一询问工具权限）")
+		} else {
+			if t.callback != nil {
+				t.callback.OnSlashCommand("/mode", []string{"ask"})
+			}
+			t.mode = "ask"
+			t.add(RoleSystem, "管理员模式已关闭，恢复 ask 模式")
 		}
-		files, err := store.Rewind(context.Background(), n)
-		if err != nil {
-			t.add(RoleError, "回滚失败: "+err.Error())
-			break
-		}
-		msg := fmt.Sprintf("⏪ 已回滚 %d 步。影响文件:\n", n)
-		for _, f := range files {
-			msg += "  " + f + "\n"
-		}
-		t.add(RoleSystem, msg)
 
 	case "/todo":
 		var b strings.Builder
-		sessionID := ""
 		if t.callback != nil {
 			if p, a, d, total := t.callback.TodoCounts(); total > 0 {
 				fmt.Fprintf(&b, "📋 待办 (%d 待处理 · %d 进行中 · %d 完成)\n\n", p, a, d)
@@ -170,7 +275,6 @@ func (t *TUI) handleSlash(text string) {
 				b.WriteString("当前会话没有待办事项。让模型执行任务时会自动创建。\n")
 			}
 		}
-		_ = sessionID
 		t.add(RoleSystem, b.String())
 
 	case "/init":
@@ -225,13 +329,7 @@ func (t *TUI) handleSlash(text string) {
 		t.add(RoleSystem, a.String())
 
 	case "/mcp":
-		cfg, err := config.Load()
-		if err != nil { t.add(RoleSystem, err.Error()); break }
-		var a strings.Builder
-		a.WriteString("MCP 服务器:\n")
-		for _, s := range cfg.MCP { a.WriteString(fmt.Sprintf("  %s: %s\n", s.Name, s.Command)) }
-		if a.Len() < 12 { a.WriteString("  未配置\n在 ~/.icode/mcp.json 中添加。\n") }
-		t.add(RoleSystem, a.String())
+		t.mcpCommand(args)
 
 	case "/hooks":
 		home, _ := os.UserHomeDir()
@@ -252,15 +350,7 @@ func (t *TUI) handleSlash(text string) {
 		}
 
 	case "/cost":
-		info := fmt.Sprintf("Tokens: %d prompt + %d completion = %d total",
-			t.promptTokens, t.completionTokens, t.promptTokens+t.completionTokens)
-		if t.cost != "" {
-			info += " · Cost: " + t.cost
-		}
-		if t.cacheHitRate > 0 {
-			info += fmt.Sprintf(" · Cache: %.0f%%", t.cacheHitRate*100)
-		}
-		t.add(RoleSystem, info)
+		t.costPanel()
 
 	case "/provider":
 		if len(args) > 0 {
@@ -276,7 +366,7 @@ func (t *TUI) handleSlash(text string) {
 		} else {
 			t.add(RoleSystem, "引擎未初始化。")
 		}
-case "/multiline":
+	case "/multiline":
 		t.multiline = !t.multiline
 		if t.multiline {
 			t.add(RoleSystem, "[Multiline ON] Enter=newline, Alt+Enter=send")
@@ -284,7 +374,7 @@ case "/multiline":
 			t.add(RoleSystem, "[Multiline OFF]")
 		}
 
-
+	case "/keys":
 		cfg, err := config.Load()
 		if err != nil {
 			t.add(RoleSystem, "无法读取配置: "+err.Error())
@@ -320,22 +410,7 @@ case "/multiline":
 		t.add(RoleSystem, b.String())
 
 	case "/config":
-		cfg, _ := config.Load()
-		lang := "zh-CN"
-		theme := "auto"
-		diff := "unified"
-		syntax := "on"
-		if cfg != nil {
-			lang = cfg.Language
-			theme = cfg.TUI.Theme
-			diff = cfg.TUI.DiffMode
-			if !cfg.TUI.SyntaxHL {
-				syntax = "off"
-			}
-		}
-		t.add(RoleSystem, fmt.Sprintf("当前设置：\n  Model:     %s\n  Provider:  %s\n  Mode:      %s\n  Language:  %s\n  Theme:     %s\n  Diff:      %s\n  Security:  %s\n  Syntax:    %s\n\n用 `icode config <key> <value>` 修改，或 `/lang` `/theme`  `/security` 即时切换。",
-			t.model, t.provider, t.mode, lang, theme, diff,
-			permission.SecurityLabel(config.SecurityLevel(t.securityLevel)), syntax))
+		t.configCommand(args)
 
 	case "/history":
 		if len(t.history) == 0 {
@@ -415,7 +490,7 @@ case "/multiline":
 		t.add(RoleSystem, b.String())
 
 	case "/review":
-		t.add(RoleSystem, "🔍 审查模式已启用。请描述你想审查的代码或文件路径，我将分析代码质量、安全性和潜在问题。")
+		t.reviewCommand(args)
 
 	case "/security":
 		if len(args) == 0 {
@@ -474,8 +549,7 @@ case "/multiline":
 		}
 
 	case "/permissions":
-		t.add(RoleSystem, fmt.Sprintf("当前权限/安全等级: %s",
-			permission.SecurityLabel(config.SecurityLevel(t.securityLevel))))
+		t.permissionsCommand(args)
 
 	case "/verbose":
 		t.verbose = !t.verbose
@@ -485,10 +559,39 @@ case "/multiline":
 			t.add(RoleSystem, "[ ] 详细输出已关闭")
 		}
 
+	case "/vim":
+		t.vimMode = !t.vimMode
+		t.persistSetting(func(c *config.Config) { c.TUI.Vim = t.vimMode })
+		if t.vimMode {
+			t.add(RoleSystem, "[x] Vim 模式已开启（vi 风格键位，输入行按 Esc 进入普通模式）")
+		} else {
+			t.add(RoleSystem, "[ ] Vim 模式已关闭")
+		}
+
+	case "/statusline":
+		t.statusVisible = !t.statusVisible
+		t.persistSetting(func(c *config.Config) {
+			v := t.statusVisible
+			c.TUI.ShowStatusLine = &v
+		})
+		if t.statusVisible {
+			t.add(RoleSystem, "[x] 底部状态栏已显示")
+		} else {
+			t.add(RoleSystem, "[ ] 底部状态栏已隐藏")
+		}
+		t.render()
+
+	case "/pr_comments":
+		t.prCommentsCommand(args)
+
+	case "/release-notes":
+		t.releaseNotesCommand()
+
+	case "/bug":
+		t.bugCommand()
+
 	case "/memory":
-		proj := t.projectMemoryPath()
-		user, _ := projectcontext.UserMemoryPath()
-		t.add(RoleSystem, fmt.Sprintf("记忆文件:\n  项目级: %s\n  用户级: %s", proj, user))
+		t.memoryCommand(args)
 
 	case "/feedback":
 		t.add(RoleSystem, "反馈渠道:\n  · GitHub Issues: https://github.com/ponygates/icode/issues\n  · 对话中输入 `# <建议>` 可写入记忆文件")
@@ -568,7 +671,7 @@ func (t *TUI) doctor() {
 // match is found, its template is expanded and the result is submitted as a
 // regular user message. Returns true if a custom command handled the input.
 func (t *TUI) tryCustomSlash(cmd, argStr string) bool {
-	reg := slashcmd.Load(slashcmd.DefaultDirs()...)
+	reg := slashcmd.CachedLoad(slashcmd.DefaultDirs()...)
 	c, ok := reg.Get(cmd)
 	if !ok {
 		return false
@@ -606,6 +709,370 @@ func (t *TUI) tryCustomSlash(cmd, argStr string) bool {
 	t.ensureAnim()
 	t.drainStream()
 	return true
+}
+
+// ── Claude Code-parity command helpers ──────────────────────────
+
+// mcpCommand manages MCP servers (Claude Code's /mcp has list/add/get/remove/
+// restart subcommands). Configuration is persisted to the user config file.
+func (t *TUI) mcpCommand(args []string) {
+	cfg, err := config.Load()
+	if err != nil {
+		t.add(RoleSystem, "无法读取配置: "+err.Error())
+		return
+	}
+	sub := ""
+	if len(args) > 0 {
+		sub = strings.ToLower(args[0])
+	}
+	switch sub {
+	case "", "list":
+		var b strings.Builder
+		b.WriteString("MCP 服务器:\n")
+		if len(cfg.MCP) == 0 {
+			b.WriteString("  （无。用 `/mcp add <name> <stdio|sse> <command> [args...]` 添加，\n   或编辑 ~/.icode/config.yaml 的 mcp 段）\n")
+		}
+		for _, s := range cfg.MCP {
+			en := "✓"
+			if !s.Enabled {
+				en = "·"
+			}
+			line := fmt.Sprintf("  %s %s [%s] %s", en, s.Name, s.Type, s.Command)
+			if s.URL != "" {
+				line += " " + s.URL
+			}
+			b.WriteString(line + "\n")
+		}
+		t.add(RoleSystem, b.String())
+	case "add":
+		if len(args) < 4 {
+			t.add(RoleSystem, "用法: /mcp add <name> <stdio|sse> <command> [args...]")
+			return
+		}
+		name := args[1]
+		typ := strings.ToLower(args[2])
+		if typ != "stdio" && typ != "sse" {
+			t.add(RoleSystem, "类型只能是 stdio 或 sse")
+			return
+		}
+		mc := config.MCPServerCfg{Name: name, Type: typ, Command: args[3], Enabled: true}
+		if len(args) > 4 {
+			mc.Args = args[4:]
+		}
+		filtered := make([]config.MCPServerCfg, 0, len(cfg.MCP))
+		for _, s := range cfg.MCP {
+			if s.Name != name {
+				filtered = append(filtered, s)
+			}
+		}
+		cfg.MCP = append(filtered, mc)
+		if err := cfg.Save(config.DefaultPath()); err != nil {
+			t.add(RoleError, "保存失败: "+err.Error())
+			return
+		}
+		t.add(RoleSystem, fmt.Sprintf("[x] 已添加 MCP 服务器 %s（%s）。重启 iCode 后生效。", name, typ))
+	case "remove":
+		if len(args) < 2 {
+			t.add(RoleSystem, "用法: /mcp remove <name>")
+			return
+		}
+		name := args[1]
+		filtered := make([]config.MCPServerCfg, 0, len(cfg.MCP))
+		found := false
+		for _, s := range cfg.MCP {
+			if s.Name != name {
+				filtered = append(filtered, s)
+			} else {
+				found = true
+			}
+		}
+		if !found {
+			t.add(RoleSystem, "未找到 MCP 服务器: "+name)
+			return
+		}
+		cfg.MCP = filtered
+		if err := cfg.Save(config.DefaultPath()); err != nil {
+			t.add(RoleError, "保存失败: "+err.Error())
+			return
+		}
+		t.add(RoleSystem, fmt.Sprintf("[x] 已移除 MCP 服务器 %s。重启 iCode 后生效。", name))
+	case "get":
+		if len(args) < 2 {
+			t.add(RoleSystem, "用法: /mcp get <name>")
+			return
+		}
+		name := args[1]
+		for _, s := range cfg.MCP {
+			if s.Name == name {
+				var b strings.Builder
+				fmt.Fprintf(&b, "MCP 服务器 %s:\n", name)
+				fmt.Fprintf(&b, "  类型: %s\n", s.Type)
+				fmt.Fprintf(&b, "  命令: %s\n", s.Command)
+				if len(s.Args) > 0 {
+					fmt.Fprintf(&b, "  参数: %s\n", strings.Join(s.Args, " "))
+				}
+				if s.URL != "" {
+					fmt.Fprintf(&b, "  地址: %s\n", s.URL)
+				}
+				fmt.Fprintf(&b, "  启用: %v\n", s.Enabled)
+				if s.TrustMode != "" {
+					fmt.Fprintf(&b, "  信任模式: %s\n", s.TrustMode)
+				}
+				t.add(RoleSystem, b.String())
+				return
+			}
+		}
+		t.add(RoleSystem, "未找到 MCP 服务器: "+name)
+	case "restart":
+		if len(args) < 2 {
+			t.add(RoleSystem, "用法: /mcp restart <name>")
+			return
+		}
+		t.add(RoleSystem, fmt.Sprintf("已请求重启 %s。MCP 连接于启动时建立，请重启 iCode 使新配置生效。", args[1]))
+	default:
+		t.add(RoleSystem, "用法: /mcp [list] | add <name> <stdio|sse> <command> [args...] | remove <name> | get <name> | restart <name>")
+	}
+}
+
+// memoryCommand shows (or edits) the memory files (Claude Code's /memory).
+func (t *TUI) memoryCommand(args []string) {
+	proj := t.projectMemoryPath()
+	user, _ := projectcontext.UserMemoryPath()
+	if len(args) > 0 && strings.ToLower(args[0]) == "edit" {
+		editor := os.Getenv("EDITOR")
+		if editor == "" {
+			if runtime.GOOS == "windows" {
+				editor = "notepad"
+			} else {
+				editor = "vi"
+			}
+		}
+		cmd := exec.Command(editor, proj)
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			t.add(RoleError, "打开编辑器失败: "+err.Error())
+		} else {
+			t.add(RoleSystem, "[x] 已用 "+editor+" 打开项目记忆 "+proj)
+		}
+		return
+	}
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("记忆文件:\n  项目级: %s\n  用户级: %s\n\n", proj, user))
+	if data, err := os.ReadFile(proj); err == nil && len(data) > 0 {
+		b.WriteString("── 项目记忆 (ICODE.md) ──\n" + string(data) + "\n")
+	} else {
+		b.WriteString("（项目记忆为空，用 `# <内容>` 追加，或 `/memory edit` 编辑）\n")
+	}
+	t.add(RoleSystem, b.String())
+}
+
+// permissionsCommand shows the current permission/security configuration.
+func (t *TUI) permissionsCommand(args []string) {
+	cfg, _ := config.Load()
+	var b strings.Builder
+	b.WriteString("权限 / 安全:\n")
+	b.WriteString(fmt.Sprintf("  当前安全等级: %s\n", permission.SecurityLabel(config.SecurityLevel(t.securityLevel))))
+	b.WriteString(fmt.Sprintf("  配置值:       %s\n", t.securityLevel))
+	if cfg != nil {
+		if len(cfg.Hooks) > 0 {
+			b.WriteString("  生命周期钩子:\n")
+			for ev, rules := range cfg.Hooks {
+				for _, r := range rules {
+					b.WriteString(fmt.Sprintf("    %-12s %s\n", ev, r.Command))
+				}
+			}
+		}
+	}
+	b.WriteString("\n切换安全等级: /security [local|desensitize|local-llm|foreign-llm|unrestricted]\n")
+	b.WriteString("工具级允许/拒绝请在桌面端 设置 → 工具权限 中配置。")
+	t.add(RoleSystem, b.String())
+}
+
+// reviewCommand runs a code review over a path or the working-tree diff
+// (Claude Code's /review). The gathered content is fed to the model as a
+// normal user turn so the assistant streams back the analysis.
+func (t *TUI) reviewCommand(args []string) {
+	var target string
+	if len(args) > 0 {
+		path := args[0]
+		if data, err := os.ReadFile(path); err == nil {
+			target = fmt.Sprintf("请审查文件 %s：\n\n%s", path, string(data))
+		} else {
+			t.add(RoleError, "读取文件失败: "+err.Error())
+			return
+		}
+	} else {
+		cmd := executil.Command("git", "diff")
+		out, err := cmd.CombinedOutput()
+		if err != nil && len(out) == 0 {
+			t.add(RoleError, "git diff 失败: "+err.Error())
+			return
+		}
+		if len(out) == 0 {
+			t.add(RoleSystem, "没有未提交的改动可审查。可指定路径：/review <file>")
+			return
+		}
+		target = "请审查以下 git 工作区差异，指出质量问题、安全隐患与改进建议：\n\n```diff\n" + string(out) + "\n```"
+	}
+	t.mu.Lock()
+	t.messages = append(t.messages, Message{Role: RoleUser, Content: target})
+	t.streaming = true
+	t.streamBuf.Reset()
+	t.turnStart = time.Now()
+	t.mu.Unlock()
+	if t.callback != nil {
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.add(RoleError, fmt.Sprintf("内部错误: %v", r))
+				}
+			}()
+			t.callback.OnSend(target)
+		}()
+	}
+	t.ensureAnim()
+	t.drainStream()
+}
+
+// configCommand shows the current configuration, or sets a key when given
+// `set <key> <value>` (Claude Code's /config opens an interactive menu; here
+// we expose the most useful keys directly).
+func (t *TUI) configCommand(args []string) {
+	if len(args) > 0 && strings.ToLower(args[0]) == "set" {
+		if len(args) < 3 {
+			t.add(RoleSystem, "用法: /config set <key> <value>\n可配置: theme|lang|security|model|provider")
+			return
+		}
+		key := strings.ToLower(args[1])
+		val := strings.Join(args[2:], " ")
+		switch key {
+		case "theme":
+			if val != "auto" && val != "dark" && val != "light" {
+				t.add(RoleSystem, "theme 仅支持 auto|dark|light")
+				return
+			}
+			t.theme = val
+			t.persistSetting(func(c *config.Config) { c.TUI.Theme = val })
+			t.add(RoleSystem, "Theme -> "+val)
+		case "lang":
+			if val != "zh-CN" && val != "zh-TW" && val != "en" {
+				t.add(RoleSystem, "lang 仅支持 zh-CN|zh-TW|en")
+				return
+			}
+			t.lang = val
+			t.persistSetting(func(c *config.Config) { c.Language = val })
+			t.add(RoleSystem, "Language -> "+val)
+		case "security":
+			t.securityLevel = val
+			lvl := config.ParseSecurityLevel(val)
+			t.persistSetting(func(c *config.Config) { c.SecurityLevel = lvl })
+			t.add(RoleSystem, "Security -> "+permission.SecurityLabel(lvl))
+		case "model":
+			t.model = val
+			t.add(RoleSystem, "Model -> "+val)
+		case "provider":
+			t.provider = val
+			t.add(RoleSystem, "Provider -> "+val)
+		default:
+			t.add(RoleSystem, "未知配置项: "+key)
+			return
+		}
+		return
+	}
+	cfg, _ := config.Load()
+	lang := "zh-CN"
+	theme := "auto"
+	diff := "unified"
+	syntax := "on"
+	if cfg != nil {
+		lang = cfg.Language
+		theme = cfg.TUI.Theme
+		diff = cfg.TUI.DiffMode
+		if !cfg.TUI.SyntaxHL {
+			syntax = "off"
+		}
+	}
+	t.add(RoleSystem, fmt.Sprintf("当前设置：\n  Model:     %s\n  Provider:  %s\n  Mode:      %s\n  Language:  %s\n  Theme:     %s\n  Diff:      %s\n  Security:  %s\n  Syntax:    %s\n\n用 `/config set <key> <value>` 或 `/lang` `/theme` `/security` 即时切换。",
+		t.model, t.provider, t.mode, lang, theme, diff,
+		permission.SecurityLabel(config.SecurityLevel(t.securityLevel)), syntax))
+}
+
+// prCommentsCommand shows pull-request comments via the GitHub CLI (Claude
+// Code's /pr_comments). Requires `gh` to be installed and authenticated.
+func (t *TUI) prCommentsCommand(args []string) {
+	if _, err := exec.LookPath("gh"); err != nil {
+		t.add(RoleSystem, "未检测到 GitHub CLI (gh)。请先安装并登录：https://cli.github.com")
+		return
+	}
+	pr := ""
+	if len(args) > 0 {
+		pr = args[0]
+	}
+	var cmd *exec.Cmd
+	if pr != "" {
+		cmd = exec.Command("gh", "pr", "view", pr, "--comments", "--json", "title,comments")
+	} else {
+		cmd = exec.Command("gh", "pr", "view", "--comments", "--json", "title,comments")
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.add(RoleError, "获取 PR 评论失败: "+string(out))
+		return
+	}
+	t.add(RoleSystem, "PR 评论:\n"+string(out))
+}
+
+// releaseNotesCommand prints the latest release notes from CHANGELOG.md
+// (Claude Code's /release-notes).
+func (t *TUI) releaseNotesCommand() {
+	candidates := []string{"CHANGELOG.md", filepath.Join(".icode", "CHANGELOG.md")}
+	var data []byte
+	for _, c := range candidates {
+		if d, err := os.ReadFile(c); err == nil {
+			data = d
+			break
+		}
+	}
+	if len(data) == 0 {
+		t.add(RoleSystem, "未找到 CHANGELOG.md。")
+		return
+	}
+	text := string(data)
+	if i := strings.Index(text, "\n## "); i > 0 {
+		rest := text[i+1:]
+		if j := strings.Index(rest, "\n## "); j > 0 {
+			text = text[:i+1+j]
+		}
+	}
+	const max = 2000
+	if len(text) > max {
+		text = text[:max] + "\n…"
+	}
+	t.add(RoleSystem, "发布说明:\n"+text)
+}
+
+// bugCommand opens a pre-filled GitHub issue for bug reports (Claude Code's
+// /bug).
+func (t *TUI) bugCommand() {
+	body := fmt.Sprintf("**环境**: iCode %s / %s / %s\n**复现步骤**:\n1. \n\n**预期**: \n**实际**: ",
+		t.version, t.provider, t.model)
+	u := "https://github.com/ponygates/icode/issues/new?title=%5Bbug%5D&body=" + url.QueryEscape(body)
+	t.add(RoleSystem, "请在此提交 Bug 报告：\n"+u)
+	openURL(u)
+}
+
+// openURL opens a URL in the default browser (cross-platform).
+func openURL(u string) {
+	switch runtime.GOOS {
+	case "windows":
+		_ = exec.Command("rundll32", "url.dll,FileProtocolHandler", u).Start()
+	case "darwin":
+		_ = exec.Command("open", u).Start()
+	default:
+		_ = exec.Command("xdg-open", u).Start()
+	}
 }
 
 // add appends a message and refreshes the screen.
@@ -677,7 +1144,12 @@ func (t *TUI) execShell(cmdStr string) {
 
 // ── Compact ──────────────────────────────────────────────────────
 
-func (t *TUI) compact() {
+// compactCommand mirrors Claude Code's /compact [instructions]: it summarises
+// the older turns of the conversation into a single system note so the model
+// keeps the context while freeing up the token budget. An optional instruction
+// string is folded into the summary so the user can steer what is preserved.
+func (t *TUI) compactCommand(args []string) {
+	instruction := strings.Join(args, " ")
 	t.mu.Lock()
 	if len(t.messages) < 4 {
 		t.messages = append(t.messages, Message{Role: RoleSystem, Content: "Not enough messages to compact."})
@@ -687,7 +1159,11 @@ func (t *TUI) compact() {
 	}
 	var keep []Message
 	var summary strings.Builder
-	summary.WriteString("[Compacted] Summary of earlier turns:\n")
+	summary.WriteString("[Compacted] Summary of earlier turns")
+	if instruction != "" {
+		summary.WriteString(" (focus: " + instruction + ")")
+	}
+	summary.WriteString(":\n")
 	count := 0
 	for _, m := range t.messages {
 		if m.Role == RoleSystem || count >= len(t.messages)-4 {
@@ -701,6 +1177,67 @@ func (t *TUI) compact() {
 	t.messages = append(t.messages, Message{Role: RoleSystem, Content: summary.String()})
 	t.mu.Unlock()
 	t.render()
+	t.add(RoleSystem, "✓ 已压缩较早的对话上下文。")
+}
+
+// ── Rewind / Cost panel ──────────────────────────────────────────
+
+// rewindSteps rolls back the last n tool-call steps via the checkpoint store.
+// Shared by /rewind and /undo.
+func (t *TUI) rewindSteps(n int) {
+	sessionID := ""
+	if t.callback != nil {
+		sessionID = t.callback.SessionID()
+	}
+	if sessionID == "" {
+		t.add(RoleSystem, "没有活跃会话。")
+		return
+	}
+	store, err := checkpoint.GetOrOpen(sessionID)
+	if err != nil {
+		t.add(RoleError, "打开检查点失败: "+err.Error())
+		return
+	}
+	files, err := store.Rewind(context.Background(), n)
+	if err != nil {
+		t.add(RoleError, "回滚失败: "+err.Error())
+		return
+	}
+	msg := fmt.Sprintf("⏪ 已回滚 %d 步。影响文件:\n", n)
+	for _, f := range files {
+		msg += "  " + f + "\n"
+	}
+	t.add(RoleSystem, msg)
+}
+
+// miniBar renders a small progress bar (used by the cache-hit meter).
+func miniBar(frac float64, width int) string {
+	if frac < 0 {
+		frac = 0
+	}
+	if frac > 1 {
+		frac = 1
+	}
+	fill := int(frac * float64(width))
+	return repeat("█", fill) + repeat("░", width-fill)
+}
+
+// costPanel shows the current session's token/cost breakdown with a cache-hit
+// meter, then points to /token for the full Cache-First Loop savings report.
+func (t *TUI) costPanel() {
+	var b strings.Builder
+	b.WriteString("💰 费用（本次会话）\n")
+	b.WriteString(fmt.Sprintf("  Prompt:     %s\n", formatTokens(t.promptTokens)))
+	b.WriteString(fmt.Sprintf("  Completion: %s\n", formatTokens(t.completionTokens)))
+	b.WriteString(fmt.Sprintf("  合计:       %s\n", formatTokens(t.promptTokens+t.completionTokens)))
+	if t.cacheHitRate > 0 {
+		b.WriteString(fmt.Sprintf("  缓存命中率:  %.0f%% %s\n", t.cacheHitRate*100, miniBar(t.cacheHitRate, 10)))
+	}
+	if t.cost != "" {
+		b.WriteString(fmt.Sprintf("  估算费用:    %s（本轮）\n", t.cost))
+	}
+	b.WriteString("\n提示: /token 查看完整 Token 节省报告（Cache-First Loop 五层压缩）")
+	t.add(RoleSystem, b.String())
 }
 
 // ── Export ───────────────────────────────────────────────────────
@@ -744,8 +1281,10 @@ func (t *TUI) exportMarkdown(args []string) {
 
 // ── Git diff ─────────────────────────────────────────────────────
 
-func (t *TUI) showGitDiff() {
-	cmd := executil.Command("git", "diff")
+func (t *TUI) showGitDiff(args []string) {
+	gitArgs := []string{"diff"}
+	gitArgs = append(gitArgs, args...)
+	cmd := executil.Command("git", gitArgs...)
 	output, err := cmd.CombinedOutput()
 	if err != nil && len(output) == 0 {
 		t.add(RoleError, "git diff: "+err.Error())
@@ -769,30 +1308,106 @@ func (t *TUI) showModelPicker() {
 	t.openModelPicker()
 }
 
-// buildModelPicker renders the interactive /model panel. The row at
-// t.modelPickerIdx is marked with ▶; a hint line explains the keys.
-func (t *TUI) buildModelPicker() string {
+// buildModelPickerList renders a static /model list (used in line mode, where
+// the interactive overlay is unavailable). The row at highlightIdx is marked
+// with ▶ (pass -1 for no highlight). The current model is tagged "(当前)".
+func (t *TUI) buildModelPickerList(highlightIdx int) string {
 	var b strings.Builder
 	b.WriteString("选择模型（↑/↓ 移动，Enter 确认，Esc 取消；也可直接输入编号）：\n")
 	for i, m := range t.models {
 		mark := "  "
-		if i == t.modelPickerIdx {
+		if i == highlightIdx {
 			mark = "▶ "
 		} else if m == t.model {
 			mark = "  " // current but not highlighted
 		}
-		b.WriteString(fmt.Sprintf("  %s%-3d %s\n", mark, i+1, m))
+		tag := ""
+		if m == t.model {
+			tag = "  (当前)"
+		}
+		b.WriteString(fmt.Sprintf("  %s%-3d %s%s\n", mark, i+1, m, tag))
 	}
-	if t.modelPickerIdx >= 0 && t.modelPickerIdx < len(t.models) {
-		b.WriteString(fmt.Sprintf("\n  当前高亮：%s\n", t.models[t.modelPickerIdx]))
+	if highlightIdx >= 0 && highlightIdx < len(t.models) {
+		b.WriteString(fmt.Sprintf("\n  当前高亮：%s\n", t.models[highlightIdx]))
 	}
 	return b.String()
 }
 
-// openModelPicker appends a live picker panel and enters selection mode.
+// modelPickerOverlay renders the interactive /model panel as a FIXED overlay
+// (like helpBox / permLines). It is always fully on screen regardless of the
+// conversation scroll position or the number of models. When the list is taller
+// than the viewport, an internal top-index (modelPickerTop) scrolls the window
+// so the highlighted row (modelPickerIdx) is always visible — this is what
+// fixes the "highlight scrolls out of view" symptom that the old
+// message-appended panel had.
+func (t *TUI) modelPickerOverlay(W, bodyH int) []string {
+	title := "选择模型（↑/↓ 移动，Enter 确认，Esc 取消；也可直接输入编号）："
+	const titleRows = 1
+	maxRows := bodyH - titleRows
+	if maxRows < 1 {
+		maxRows = 1
+	}
+	n := len(t.models)
+	if n == 0 {
+		return []string{title, t.paint("dim", "  （暂无可用模型）")}
+	}
+	// When the list is taller than the viewport we also need a scroll-hint
+	// line, so reserve one row for it to keep the whole overlay within bodyH.
+	if n > maxRows {
+		maxRows = bodyH - titleRows - 1
+		if maxRows < 1 {
+			maxRows = 1
+		}
+	}
+	// Keep modelPickerIdx inside the visible window [top, top+maxRows).
+	if t.modelPickerTop < 0 {
+		t.modelPickerTop = 0
+	}
+	if t.modelPickerIdx < t.modelPickerTop {
+		t.modelPickerTop = t.modelPickerIdx
+	}
+	if t.modelPickerIdx >= t.modelPickerTop+maxRows {
+		t.modelPickerTop = t.modelPickerIdx - maxRows + 1
+	}
+	if t.modelPickerTop > n-maxRows {
+		t.modelPickerTop = n - maxRows
+	}
+	if t.modelPickerTop < 0 {
+		t.modelPickerTop = 0
+	}
+	var lines []string
+	lines = append(lines, t.paint("bold", title))
+	for i := t.modelPickerTop; i < t.modelPickerTop+maxRows && i < n; i++ {
+		num := fmt.Sprintf("%-3d", i+1)
+		var row string
+		if i == t.modelPickerIdx {
+			row = "  " + t.paint("green", "▶ ")+" "+num+t.paint("green", t.models[i])
+		} else {
+			row = "  " + "  " + num + t.models[i]
+		}
+		if t.models[i] == t.model {
+			row += t.paint("dim", "  (当前)")
+		}
+		lines = append(lines, row)
+	}
+	if n > maxRows {
+		above := t.modelPickerTop
+		below := n - (t.modelPickerTop + maxRows)
+		lines = append(lines, t.paint("dim",
+			fmt.Sprintf("  ↑ %d 更多  ·  ↓ %d 更多  (共 %d)", above, below, n)))
+	}
+	return lines
+}
+
+// openModelPicker enters selection mode. In raw mode it opens the interactive
+// overlay; in line mode it prints a static list (no overlay available).
 func (t *TUI) openModelPicker() {
 	if len(t.models) == 0 {
 		t.add(RoleSystem, "暂无可用模型列表。\n  请先配置 API Key：icode auth set --provider <provider> --key <YOUR_KEY>\n  或直接切换：/model <模型ID>（如 /model openrouter/free）")
+		return
+	}
+	if !t.rawMode {
+		t.add(RoleSystem, t.buildModelPickerList(-1))
 		return
 	}
 	t.modelPickerOpen = true
@@ -800,27 +1415,13 @@ func (t *TUI) openModelPicker() {
 		t.modelIdx = 0
 	}
 	t.modelPickerIdx = t.modelIdx
-	t.mu.Lock()
-	t.messages = append(t.messages, Message{Role: RoleSystem, Content: t.buildModelPicker()})
-	t.modelPickerMsgIdx = len(t.messages) - 1
-	t.mu.Unlock()
-	if t.rawMode {
-		t.render()
-	}
+	t.modelPickerTop = 0
+	t.render()
 }
 
-// updateModelPicker rewrites the live picker panel in place (navigation).
+// updateModelPicker refreshes the overlay after navigation.
 func (t *TUI) updateModelPicker() {
-	if t.modelPickerMsgIdx < 0 {
-		return
-	}
-	content := t.buildModelPicker()
-	t.mu.Lock()
-	if t.modelPickerMsgIdx < len(t.messages) {
-		t.messages[t.modelPickerMsgIdx] = Message{Role: RoleSystem, Content: content}
-	}
-	t.mu.Unlock()
-	if t.rawMode {
+	if t.modelPickerOpen && t.rawMode {
 		t.render()
 	}
 }
@@ -852,19 +1453,14 @@ func (t *TUI) selectModelAt(i int) {
 	t.add(RoleSystem, t.tstr("mode.set")+" -> "+t.model)
 }
 
-// closeModelPicker exits selection mode and removes the live panel message.
+// closeModelPicker exits selection mode and removes the overlay.
 func (t *TUI) closeModelPicker() {
-	wasOpen := t.modelPickerOpen
-	t.modelPickerOpen = false
-	if t.modelPickerMsgIdx >= 0 {
-		t.mu.Lock()
-		if t.modelPickerMsgIdx < len(t.messages) {
-			t.messages = append(t.messages[:t.modelPickerMsgIdx], t.messages[t.modelPickerMsgIdx+1:]...)
-		}
-		t.mu.Unlock()
-		t.modelPickerMsgIdx = -1
+	if !t.modelPickerOpen {
+		return
 	}
-	if wasOpen && t.rawMode {
+	t.modelPickerOpen = false
+	t.modelPickerTop = 0
+	if t.rawMode {
 		t.render()
 	}
 }
@@ -876,4 +1472,115 @@ func indexOfString(s []string, v string) int {
 		}
 	}
 	return -1
+}
+
+func (t *TUI) applyStagedEdits() {
+	edits := searchreplace.StageList()
+	if len(edits) == 0 {
+		t.add(RoleSystem, "No staged edits to apply.")
+		return
+	}
+	snapshottedFiles := make(map[string]bool)
+	for _, ed := range edits {
+		if ed.Valid && ed.FilePath != "" && !snapshottedFiles[ed.FilePath] {
+			if checkpoint.DefaultUndo != nil {
+				_, _ = checkpoint.DefaultUndo.SnapshotFile(context.Background(), ed.FilePath)
+			}
+			snapshottedFiles[ed.FilePath] = true
+		}
+	}
+	results := searchreplace.StageApplyValid()
+	for _, r := range results {
+		t.add(RoleSystem, r)
+	}
+}
+
+func (t *TUI) rejectStagedEdits() {
+	n := searchreplace.StageCount()
+	if n == 0 {
+		t.add(RoleSystem, "No staged edits to reject.")
+		return
+	}
+	searchreplace.StageClear()
+	t.add(RoleSystem, fmt.Sprintf("Rejected %d staged edits.", n))
+}
+
+func (t *TUI) copyLastAssistant(args []string) {
+	t.mu.Lock()
+	var content string
+	if len(args) > 0 {
+		if n, err := strconv.Atoi(args[0]); err == nil && n > 0 {
+			count := 0
+			for i := len(t.messages) - 1; i >= 0; i-- {
+				if t.messages[i].Role == RoleAssistant {
+					count++
+					if count == n {
+						content = t.messages[i].Content
+						break
+					}
+				}
+			}
+		} else {
+			t.mu.Unlock()
+			t.add(RoleSystem, "用法: /copy [N]  — 复制倒数第 N 条助手回复（默认 1）")
+			return
+		}
+	} else {
+		for i := len(t.messages) - 1; i >= 0; i-- {
+			if t.messages[i].Role == RoleAssistant {
+				content = t.messages[i].Content
+				break
+			}
+		}
+	}
+	t.mu.Unlock()
+	if content == "" {
+		t.add(RoleSystem, "没有助手回复可复制。")
+		return
+	}
+	if err := writeClipboard(content); err != nil {
+		t.add(RoleError, "复制到剪贴板失败: "+err.Error())
+		return
+	}
+	t.add(RoleSystem, "✓ 已复制最近一条助手回复到剪贴板。")
+}
+
+func writeClipboard(text string) error {
+	switch runtime.GOOS {
+	case "windows":
+		cmd := exec.Command("clip")
+		cmd.Stdin = strings.NewReader(text)
+		return cmd.Run()
+	case "darwin":
+		cmd := exec.Command("pbcopy")
+		cmd.Stdin = strings.NewReader(text)
+		return cmd.Run()
+	default:
+		cmd := exec.Command("xclip", "-selection", "clipboard")
+		cmd.Stdin = strings.NewReader(text)
+		return cmd.Run()
+	}
+}
+
+// copyLastReply copies the most recent assistant message to the system
+// clipboard, triggered by Ctrl+Y.
+func (t *TUI) copyLastReply() {
+	t.mu.Lock()
+	var content string
+	for i := len(t.messages) - 1; i >= 0; i-- {
+		if t.messages[i].Role == RoleAssistant {
+			content = t.messages[i].Content
+			break
+		}
+	}
+	t.mu.Unlock()
+	if content == "" {
+		t.add(RoleSystem, "没有助手回复可复制。")
+		return
+	}
+	if err := writeClipboard(content); err != nil {
+		t.add(RoleError, "复制到剪贴板失败: "+err.Error())
+		return
+	}
+	t.add(RoleSystem, "✓ 已复制最近一条助手回复到剪贴板 (Ctrl+Y)。")
 }

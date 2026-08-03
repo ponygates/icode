@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import i18n from '../i18n';
-import { useAppStore, Message, Attachment } from '../stores/appStore';
+import { useAppStore, Message, Attachment, type Model } from '../stores/appStore';
 import { Send, Plus, Trash2, MessageSquare, Cpu, Shield, Square, ShieldAlert, GitBranch, FileText, RefreshCw, Folder, Edit3, Download } from 'lucide-react';
 import Markdown from '../components/Markdown';
 import CommandPalette, { useCommandPalette } from '../components/CommandPalette';
@@ -18,6 +18,51 @@ function shortDir(p: string): string {
   const parts = p.replace(/\\/g, '/').split('/').filter(Boolean);
   if (parts.length <= 2) return parts.join('/');
   return parts.slice(-2).join('/');
+}
+
+// A permission prompt surfaced from the engine's tool gate while a session is
+// blocked waiting on the user's decision.
+interface PermissionRequest {
+  request_id: string;
+  tool: string;
+  prompt?: string;
+  sid?: string;
+}
+
+// Token usage as reported by the backend (snake_case) or a provider (PascalCase).
+interface UsageInfo {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  cache_hit_tokens?: number;
+  PromptTokens?: number;
+  CompletionTokens?: number;
+  TotalTokens?: number;
+  total_tokens?: number;
+}
+
+interface CostParts { input: number; output: number; }
+
+interface PlanInfo {
+  type?: string;
+  name?: string;
+  cost?: CostParts;
+}
+
+// A single server-sent event from /api/chat's SSE stream.
+type ChatEvent =
+  | { type: 'text'; content: string }
+  | { type: 'tool_use'; tool_call?: { name: string }; ToolCall?: { Name: string } }
+  | { type: 'permission'; permission?: PermissionRequest; Permission?: PermissionRequest }
+  | { type: 'done'; meta?: { usage?: UsageInfo } }
+  | { type: 'error'; content: string };
+
+// Request body for POST /api/chat (and the slash-command re-entry path).
+interface ChatPayload {
+  session_id: string;
+  content: string;
+  model: string;
+  provider: string;
+  attachments?: Array<{ type: string; mime: string; data: string }>;
 }
 
 // Renders inline multimodal attachments (image thumbnails / file chips) inside a chat bubble.
@@ -73,13 +118,27 @@ const MessageList = React.memo(({ messages, isStreaming, onRegenerate, onZoom }:
   const { t } = useTranslation();
   return (
     <>
-      {messages.map((msg) => (
+      {messages.map((msg, idx) => {
+        // Only the final assistant message is "streaming" — passing this down
+        // lets Markdown skip expensive highlightAuto on every token frame and
+        // do it once on the final render instead.
+        const isLast = idx === messages.length - 1;
+        const msgStreaming = isStreaming && isLast && msg.role === 'assistant';
+        return (
         <div
           key={msg.id}
           style={{
             display: 'flex', gap: 10, padding: '6px 24px',
             justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
             alignItems: 'flex-start',
+            // content-visibility: auto lets the browser skip rendering work
+            // for messages outside the viewport — the cheapest form of list
+            // virtualisation, with zero scroll/height regressions (unlike a
+            // full virtualiser with dynamic heights). contain-intrinsic-size
+            // gives the browser a height hint so the scrollbar stays stable
+            // before a row scrolls into view and is measured.
+            contentVisibility: 'auto',
+            containIntrinsicSize: 'auto 140px',
           }}
         >
           {msg.role === 'assistant' && (
@@ -109,7 +168,7 @@ const MessageList = React.memo(({ messages, isStreaming, onRegenerate, onZoom }:
                   </div>
                 ) : (
                   <>
-                    <Markdown text={msg.content} />
+                    <Markdown text={msg.content} streaming={msgStreaming} />
                     {/* Action buttons — hidden until bubble hover */}
                     <div className="action-hidden" style={{ display: 'flex', gap: 6, marginTop: 8 }}>
                       <ActionBtn icon="📋" label={t('chat.copy')} title={t('chat.copyTitle')}
@@ -140,7 +199,8 @@ const MessageList = React.memo(({ messages, isStreaming, onRegenerate, onZoom }:
             }}>U</div>
           )}
         </div>
-      ))}
+        );
+      })}
     </>
   );
 });
@@ -152,7 +212,7 @@ const ChatPage: React.FC = () => {
   const [isStreaming, setIsStreaming] = useState(false);
   // Interactive permission request pending an answer from the user. When set,
   // the conversation engine is blocked server-side until we respond.
-  const [pendingPermission, setPendingPermission] = useState<any>(null);
+  const [pendingPermission, setPendingPermission] = useState<PermissionRequest | null>(null);
   // Zoomed image attachment (lightbox)
   const [lightbox, setLightbox] = useState<string | null>(null);
   const [attachedImages, setAttachedImages] = useState<{ mime: string; data: string }[]>([]);
@@ -169,13 +229,34 @@ const ChatPage: React.FC = () => {
     checkBackend();
   }, []);
 
-  const {
-    sessions, activeSessionId, selectedModel,
-    createSession, setActiveSession, deleteSession, closeTab,
-    addMessage, updateMessage, clearMessages, models,
-    updateTokenUsage, tokenUsage, checkBackend, backendUrl, setBackendUrl,
-    openTabIds, activeWorkspaceId, workspaces,
-  } = useAppStore();
+  // Precise selectors: subscribe only to the slices this component needs, so
+  // unrelated store updates (e.g. settings changes, tokenUsage ticks on other
+  // pages) don't re-render the whole ChatPage. Actions are stable refs.
+  const sessions = useAppStore(s => s.sessions);
+  const activeSessionId = useAppStore(s => s.activeSessionId);
+  const selectedModel = useAppStore(s => s.selectedModel);
+  const models = useAppStore(s => s.models);
+  const tokenUsage = useAppStore(s => s.tokenUsage);
+  const backendUrl = useAppStore(s => s.backendUrl);
+  const openTabIds = useAppStore(s => s.openTabIds);
+  const activeWorkspaceId = useAppStore(s => s.activeWorkspaceId);
+  const workspaces = useAppStore(s => s.workspaces);
+  // Individual selectors (not a fresh object literal) so zustand's Object.is
+  // comparison keeps unrelated store updates (e.g. tokenUsage ticks) from
+  // re-rendering this component on every frame.
+  const createSession = useAppStore(s => s.createSession);
+  const setActiveSession = useAppStore(s => s.setActiveSession);
+  const deleteSession = useAppStore(s => s.deleteSession);
+  const closeTab = useAppStore(s => s.closeTab);
+  const addMessage = useAppStore(s => s.addMessage);
+  const updateMessage = useAppStore(s => s.updateMessage);
+  const clearMessages = useAppStore(s => s.clearMessages);
+  const updateTokenUsage = useAppStore(s => s.updateTokenUsage);
+  const checkBackend = useAppStore(s => s.checkBackend);
+  const setBackendUrl = useAppStore(s => s.setBackendUrl);
+  const setSelectedModel = useAppStore(s => s.setSelectedModel);
+  const setMode = useAppStore(s => s.setMode);
+  const refreshModels = useAppStore(s => s.refreshModels);
 
   const abortRef = useRef<AbortController | null>(null);
   const activeSession = sessions.find((s) => s.id === activeSessionId);
@@ -443,7 +524,7 @@ const ChatPage: React.FC = () => {
       }
     };
 
-    const onEvent = (event: any) => {
+    const onEvent = (event: ChatEvent) => {
       if (settled) return;
       const ty = event?.type;
       if (ty === 'text') {
@@ -461,11 +542,11 @@ const ChatPage: React.FC = () => {
         flushNow();
         setIsStreaming(false);
         setPendingPermission(null);
-        const u = event.meta?.usage || {};
+        const u = event.meta?.usage;
         updateTokenUsage({
-          input: u.prompt_tokens || 0,
-          output: u.completion_tokens || 0,
-          cacheHit: u.cache_hit_tokens || 0,
+          input: u?.prompt_tokens || u?.PromptTokens || 0,
+          output: u?.completion_tokens || u?.CompletionTokens || 0,
+          cacheHit: u?.cache_hit_tokens || 0,
           cost: estimateCost(u, currentModel),
         });
       } else if (ty === 'error') {
@@ -477,8 +558,56 @@ const ChatPage: React.FC = () => {
       }
     };
 
+    // CLI-parity slash commands — routed to /api/slash (the same vocabulary
+    // as the TUI, implemented once server-side in internal/core/slashui).
+    if (text.startsWith('/') && url && sid) {
+      try {
+        const res = await fetch(`${url}/api/slash`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text,
+            session_id: sid,
+            model,
+            provider,
+            mode,
+          }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data?.new_session) {
+            createSession(selectedModel, currentModel?.provider || 'openrouter');
+          } else if (data?.clear_session) {
+            clearMessages(sid);
+          }
+          if (data?.model && data.model !== selectedModel) setSelectedModel(data.model);
+          if (data?.provider) {
+            setSelectedModel(`${data.provider}/${currentModel?.id?.split('/')[1] || model.split('/')[1] || 'free'}`);
+          }
+          if (data?.mode && data.mode !== mode) setMode(data.mode);
+
+          if (data?.chat) {
+            // Command expands into a model turn (e.g. /review) — stream it.
+            const payload: ChatPayload = { session_id: sid, content: data.content || text, model, provider };
+            if (attachedImages.length > 0) {
+              payload.attachments = attachedImages.map(img => ({ type: 'image', mime: img.mime, data: img.data }));
+              setAttachedImages([]);
+            }
+            await streamChat(url, payload, onEvent, abortRef);
+          } else {
+            const out = data?.output || '';
+            updateMessage(sid, { ...assistantMsg, content: out || '(no output)' });
+            setIsStreaming(false);
+          }
+          if (!settled) { settled = true; }
+          setInput('');
+          return;
+        }
+      } catch { /* fall through to normal chat if slash endpoint unavailable */ }
+    }
+
     if (url) {
-      const payload: any = { session_id: sid, content: text, model, provider };
+      const payload: ChatPayload = { session_id: sid, content: text, model, provider };
       if (attachedImages.length > 0) {
         payload.attachments = attachedImages.map(img => ({ type: 'image', mime: img.mime, data: img.data }));
         setAttachedImages([]);
@@ -514,7 +643,7 @@ const ChatPage: React.FC = () => {
     setIsStreaming(false);
     // Try Electron IPC first, then HTTP
     if (window.icode?.stopChat) {
-      window.icode.stopChat(activeSessionId);
+      window.icode.stopChat(activeSessionId).catch(() => {});
     } else if (backendUrl) {
       fetch(`${backendUrl}/api/chat/stop`, {
         method: 'POST',
@@ -589,6 +718,21 @@ const ChatPage: React.FC = () => {
           }}>
             {currentModel?.name || selectedModel}
           </span>
+          <button className="interactive" title={t('shortcuts.refreshModels', '刷新模型列表')}
+            onClick={async () => {
+              const btn = document.getElementById('hdr-refresh-btn');
+              if (btn) btn.style.opacity = '0.5';
+              await refreshModels();
+              if (btn) btn.style.opacity = '1';
+            }}
+            id="hdr-refresh-btn"
+            style={{
+              background: 'none', border: '0.5px solid var(--border-color)',
+              color: 'var(--text-muted)', padding: '3px 6px', borderRadius: 6,
+              display: 'flex', alignItems: 'center', fontSize: 11, cursor: 'pointer',
+            }}>
+            <RefreshCw size={12} />
+          </button>
         </div>
 
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -596,9 +740,8 @@ const ChatPage: React.FC = () => {
           <button className="interactive" title={t('chat.openDir')}
             onClick={() => {
               // Use the Electron shell API if available
-              const api = window.icode as any;
-              if (api?.openFolder) {
-                api.openFolder('.');
+              if (window.icode?.openFolder) {
+                window.icode.openFolder('.').catch(() => {});
               }
             }}
             style={{
@@ -1217,7 +1360,7 @@ const ChatPage: React.FC = () => {
               <button
                 onClick={async () => {
                   // Allow this tool AND remember for this session
-                  const sid = (pendingPermission as any)?.sid || activeSessionId;
+                  const sid = pendingPermission.sid || activeSessionId;
                   if (backendUrl && sid) {
                     await fetch(`${backendUrl}/api/permission/allow-tool`, {
                       method: 'POST',
@@ -1262,8 +1405,8 @@ const ChatPage: React.FC = () => {
  */
 async function streamChat(
   baseUrl: string,
-  payload: Record<string, any>,
-  onEvent: (e: any) => void,
+  payload: ChatPayload,
+  onEvent: (e: ChatEvent) => void,
   abortRef?: React.MutableRefObject<AbortController | null>,
 ) {
   const ctrl = new AbortController();
@@ -1307,11 +1450,11 @@ async function streamChat(
     if (!fired) {
       onEvent({ type: 'error', content: i18n.t('chat.noResponse') });
     }
-  } catch (e: any) {
-    if (e?.name === 'AbortError') {
+  } catch (e) {
+    if (e instanceof DOMException && e.name === 'AbortError') {
       onEvent({ type: 'error', content: i18n.t('chat.timeoutError') });
     } else {
-      onEvent({ type: 'error', content: e?.message || String(e) });
+      onEvent({ type: 'error', content: e instanceof Error ? e.message : String(e) });
     }
   } finally {
     clearTimeout(t);
@@ -1319,14 +1462,16 @@ async function streamChat(
   }
 }
 
-function estimateCost(usage: any, model: any): string {
+function estimateCost(usage: UsageInfo | null | undefined, model: Model | null | undefined): string {
   if (!usage || (!usage.PromptTokens && !usage.prompt_tokens && !usage.TotalTokens && !usage.total_tokens))
     return '\xA50.00';
   const input = usage.PromptTokens || usage.prompt_tokens || 0;
   const output = usage.CompletionTokens || usage.completion_tokens || 0;
   // Use model's actual pricing if available
-  const plans = model?.plans || model?.Plans || [];
-  const plan = plans.find((p: any) => p.type === 'token' || (p.name && /token|coding/i.test(p.name)));
+  const plans = (model?.plans as PlanInfo[] | undefined) ||
+    (model as { Plans?: PlanInfo[] } | undefined)?.Plans ||
+    [];
+  const plan = plans.find((p) => p.type === 'token' || (p.name ? /token|coding/i.test(p.name) : false));
   if (plan?.cost) {
     const ip = plan.cost.input || 0;
     const op = plan.cost.output || 0;

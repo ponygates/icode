@@ -1,10 +1,10 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useAppStore } from '../stores/appStore';
+import { useAppStore, RefreshSummary, type Model } from '../stores/appStore';
 import {
   RefreshCw, Search, Zap, Sparkles, Shield, Cpu, X, Check,
   Key, Globe, Thermometer, Hash, DollarSign, Layers,
-  ChevronRight, Settings, Star, Plus, Trash2,
+  ChevronRight, Settings, Star, Plus, Trash2, AlertTriangle,
 } from 'lucide-react';
 
 // ── Per-model settings modal ──────────────────────────────────────
@@ -17,7 +17,7 @@ interface ModelSettings {
 }
 
 const ModelSettingsModal: React.FC<{
-  model: any;
+  model: Model;
   onClose: () => void;
   onSave: (settings: ModelSettings) => void;
   onSetDefault: (modelId: string) => void;
@@ -112,7 +112,7 @@ const ModelSettingsModal: React.FC<{
                 <DollarSign size={12} style={{ display: 'inline', marginRight: 4 }} /> {t('models.pricing')}
               </div>
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                {model.plans.map((plan: any, i: number) => (
+                {model.plans.map((plan, i) => (
                   <div key={i} style={{
                     background: 'var(--bg-primary)', borderRadius: 8,
                     border: '1px solid var(--border-color)', padding: '8px 12px', flex: 1, minWidth: 130,
@@ -292,14 +292,31 @@ const providerIcons: Record<string, React.ReactNode> = {
 
 const ModelsPage: React.FC = () => {
   const { t } = useTranslation();
-  const { models, selectedModel, setSelectedModel, refreshModels, backendUrl,
-    customModels, addCustomModel, removeCustomModel } = useAppStore();
+  const models = useAppStore(s => s.models);
+  const selectedModel = useAppStore(s => s.selectedModel);
+  const setSelectedModel = useAppStore(s => s.setSelectedModel);
+  const refreshModels = useAppStore(s => s.refreshModels);
+  const refreshSummary = useAppStore(s => s.refreshSummary);
+  const clearRefreshSummary = useAppStore(s => s.clearRefreshSummary);
+  const backendUrl = useAppStore(s => s.backendUrl);
+  const customModels = useAppStore(s => s.customModels);
+  const addCustomModel = useAppStore(s => s.addCustomModel);
+  const removeCustomModel = useAppStore(s => s.removeCustomModel);
   const [search, setSearch] = useState('');
   const [refreshing, setRefreshing] = useState(false);
-  const [selectedSettingsModel, setSelectedSettingsModel] = useState<any>(null);
+  const [selectedSettingsModel, setSelectedSettingsModel] = useState<Model | null>(null);
   const [expandedProviders, setExpandedProviders] = useState<Set<string>>(new Set());
   const [showAddCustom, setShowAddCustom] = useState(false);
   const [newCustom, setNewCustom] = useState({ name: '', id: '', provider: '', apiBase: '' });
+  const [showToast, setShowToast] = useState(false);
+
+  useEffect(() => {
+    if (refreshSummary && (refreshSummary.totalAdded > 0 || refreshSummary.totalRemoved > 0)) {
+      setShowToast(true);
+      const timer = setTimeout(() => { setShowToast(false); clearRefreshSummary(); }, 8000);
+      return () => clearTimeout(timer);
+    }
+  }, [refreshSummary]);
 
   const filtered = models.filter((m) =>
     m.name.toLowerCase().includes(search.toLowerCase()) ||
@@ -355,6 +372,49 @@ const ModelsPage: React.FC = () => {
           onSetDefault={(id) => { setSelectedModel(id); }}
           isDefault={selectedSettingsModel.id === selectedModel}
         />
+      )}
+
+      {/* Refresh summary toast */}
+      {showToast && refreshSummary && (
+        <div style={{
+          position: 'fixed', top: 20, right: 20, zIndex: 1100,
+          background: 'var(--bg-secondary)', borderRadius: 12,
+          border: '1px solid var(--border-color)',
+          boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
+          padding: '14px 20px', maxWidth: 380,
+          animation: 'slideIn 0.3s ease',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+            <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
+              {t('models.refreshResult', '模型刷新结果')}
+            </span>
+            <button onClick={() => { setShowToast(false); clearRefreshSummary(); }} style={{
+              background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: 2,
+            }}>
+              <X size={14} />
+            </button>
+          </div>
+          <div style={{ display: 'flex', gap: 16, marginBottom: refreshSummary.providers.length > 0 ? 8 : 0 }}>
+            {refreshSummary.totalAdded > 0 && (
+              <span style={{ fontSize: 12, color: '#34D399', fontWeight: 500 }}>
+                +{refreshSummary.totalAdded} {t('models.newModels', '新模型')}
+              </span>
+            )}
+            {refreshSummary.totalRemoved > 0 && (
+              <span style={{ fontSize: 12, color: '#FBBF24', fontWeight: 500 }}>
+                ⚠ {refreshSummary.totalRemoved} {t('models.deprecatedModels', '已下架')}
+              </span>
+            )}
+          </div>
+          {refreshSummary.providers.slice(0, 5).map(p => (
+            <div key={p.name} style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+              <strong>{p.name}</strong>:
+              {p.added > 0 && ` +${p.added}`}
+              {p.removed > 0 && ` ⚠${p.removed}`}
+              {p.addedModels.length > 0 && ` (${p.addedModels.slice(0, 3).map(m => m.name || m.id).join(', ')}${p.addedModels.length > 3 ? '...' : ''})`}
+            </div>
+          ))}
+        </div>
       )}
 
       {/* Header — Reasonix glass-morphism style */}
@@ -473,7 +533,7 @@ const ModelsPage: React.FC = () => {
               }}>{t('settings.cancel')}</button>
               <button onClick={() => {
                 if (!newCustom.name || !newCustom.id || !newCustom.provider) return;
-                const model: any = {
+                const model: Model = {
                   id: newCustom.id,
                   name: newCustom.name,
                   provider: newCustom.provider,
@@ -549,6 +609,7 @@ const ModelsPage: React.FC = () => {
                 <div style={{ paddingLeft: 4, display: 'flex', flexDirection: 'column', gap: 3 }}>
                   {providerModels.map((model) => {
                     const isSelected = model.id === selectedModel;
+                    const isDeprecated = model.deprecated;
                     return (
                       <div
                         key={model.id}
@@ -556,12 +617,15 @@ const ModelsPage: React.FC = () => {
                           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
                           padding: '9px 14px 9px 16px',
                           borderRadius: 8, cursor: 'pointer',
-                          background: isSelected ? `${color}14` : 'var(--bg-secondary)',
-                          border: isSelected
-                            ? `1px solid ${color}40`
-                            : '1px solid transparent',
+                          background: isDeprecated ? 'rgba(251,191,36,0.06)' : isSelected ? `${color}14` : 'var(--bg-secondary)',
+                          border: isDeprecated
+                            ? '1px solid rgba(251,191,36,0.2)'
+                            : isSelected
+                              ? `1px solid ${color}40`
+                              : '1px solid transparent',
                           transition: 'all 0.15s',
-                          borderLeft: isSelected ? `3px solid ${color}` : '3px solid transparent',
+                          borderLeft: isSelected ? `3px solid ${color}` : isDeprecated ? '3px solid rgba(251,191,36,0.4)' : '3px solid transparent',
+                          opacity: isDeprecated ? 0.7 : 1,
                         }}
                       >
                         {/* Left: select model */}
@@ -579,8 +643,9 @@ const ModelsPage: React.FC = () => {
                             {isSelected && <Check size={9} color="#fff" />}
                           </div>
                           <div>
-                            <div style={{ fontSize: 12.5, fontWeight: isSelected ? 600 : 400, color: 'var(--text-primary)' }}>
+                            <div style={{ fontSize: 12.5, fontWeight: isSelected ? 600 : 400, color: isDeprecated ? 'var(--text-muted)' : 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: 6 }}>
                               {model.name}
+                              {isDeprecated && <AlertTriangle size={11} color="#FBBF24" />}
                             </div>
                             <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
                               {model.id}
@@ -588,9 +653,17 @@ const ModelsPage: React.FC = () => {
                           </div>
                         </div>
 
-                        {/* Right: plan badge + settings button */}
+                        {/* Right: plan badge + deprecated badge + settings button */}
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                          {model.plan && (
+                          {isDeprecated && (
+                            <span style={{
+                              fontSize: 9, padding: '2px 6px', borderRadius: 4, fontWeight: 500,
+                              background: 'rgba(251,191,36,0.12)', color: '#FBBF24',
+                            }}>
+                              {t('models.deprecated', '已下架')}
+                            </span>
+                          )}
+                          {model.plan && !isDeprecated && (
                             <span style={{
                               fontSize: 10, padding: '2px 7px', borderRadius: 4, fontWeight: 500,
                               background: model.plan.includes('free')

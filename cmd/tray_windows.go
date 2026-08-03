@@ -10,9 +10,11 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/getlantern/systray"
 	"github.com/jchv/go-webview2"
@@ -65,24 +67,72 @@ func runWebView(url string) {
 			log.Printf("[desktop] runWebView panic: %v\n%s", r, debug.Stack())
 		}
 	}()
+	// go-webview2 requires WebView2 creation AND its message pump (w.Run) to
+	// run on ONE OS thread: New captures the creating thread as mainthread
+	// and Dispatch posts WMApp to it, while Run pumps the *current* thread's
+	// queue. If the pump migrates to another thread (Go goroutines are
+	// free-running), the window's messages are never dispatched — the window
+	// freezes and Chromium's ~60s watchdog terminates the host ("桌面闪退").
+	// Lock this goroutine so creation and pump always share a single thread.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
 	cache, _ := os.UserCacheDir()
 	dataPath := filepath.Join(cache, "icode", "webview")
 
-	w := webview2.NewWithOptions(webview2.WebViewOptions{
-		Debug:    false,
-		DataPath: dataPath,
-		WindowOptions: webview2.WindowOptions{
-			Title:  "iCode",
-			Width:  1200,
-			Height: 820,
-			Center: true,
-		},
-	})
+	// Kill zombie WebView2 processes left by a previous crashed run BEFORE
+	// creating the runtime — they hold the data-dir lock and would deadlock
+	// NewWithOptions below (the "无窗口启动卡死" real-world cause).
+	killStaleWebViewProcesses(dataPath)
+	// Wipe the data dir pre-emptively when it has bloated past the size cap
+	// or is unreadable — a corrupt/oversized dir makes NewWithOptions hang,
+	// so repairing it here keeps boot fast instead of paying the timeout.
+	healWebViewDataDir(dataPath)
+
+	// Watchdog: creation is synchronous on this locked thread (WebView2 is
+	// thread-affine, so it can't be moved into a timeout goroutine). The heal
+	// above makes hangs unlikely; if one still happens, this logs where boot
+	// stalled without freezing the tray.
+	initDone := make(chan struct{})
+	go func() {
+		select {
+		case <-initDone:
+		case <-time.After(15 * time.Second):
+			log.Printf("[desktop] WARNING: WebView2 creation still in progress after 15s")
+		}
+	}()
+
+	w := tryInitWebView(dataPath, url, 1200, 820)
+	if w == nil {
+		// Primary data path is corrupt/locked: wipe it and retry a FRESH
+		// primary before resorting to the fallback dir, so the broken dir is
+		// repaired instead of failing every boot.
+		log.Printf("[desktop] WebView2 failed on primary, wiping and retrying %s", dataPath)
+		resetWebViewDataDir(dataPath)
+		w = tryInitWebView(dataPath, url, 1200, 820)
+	}
+	if w == nil {
+		// Primary still unavailable — try a clean fallback directory.
+		fallback := dataPath + "-R"
+		_ = os.RemoveAll(fallback)
+		log.Printf("[desktop] WebView2 failed on primary again, retrying with %s", fallback)
+		killStaleWebViewProcesses(fallback)
+		w = tryInitWebView(fallback, url, 1200, 820)
+	}
+	if w == nil {
+		// Last resort: ephemeral in-memory profile. No disk file, no
+		// lock possible, always succeeds on a healthy WebView2 runtime.
+		// Downside: no persistent cookies / login state — acceptable
+		// fallback when the disk-based data paths are stuck.
+		log.Printf("[desktop] WebView2 failed on fallback, retrying with ephemeral profile")
+		w = tryInitWebView("", url, 1200, 820)
+	}
+	close(initDone)
 	if w == nil {
 		showDesktopError("iCode",
-			"无法初始化原生窗口（WebView2 运行时未安装）。\n\n"+
+			"WebView2 窗口创建失败。\n\n"+
 				"iCode 桌面端使用 Windows 原生 WebView2 控件渲染界面。\n"+
-				"请安装 Microsoft Edge WebView2 运行时后重试\n"+
+				"请安装或修复 Microsoft Edge WebView2 运行时后重试\n"+
 				"（Windows 10/11 通常已内置）：\n\n"+
 				"https://developer.microsoft.com/zh-cn/microsoft-edge/webview2/")
 		return
@@ -208,6 +258,40 @@ func runTray() {
 			trayCancel()
 		}
 	})
+}
+
+// tryInitWebView attempts to create a WebView2 window, recovering from any
+// panic (a nil-pointer deref inside go-webview2 when the runtime is
+// uninitialized or locked). Returns nil on failure so callers can retry.
+//
+// IMPORTANT: this must be called on the SAME locked OS thread that will run
+// w.Run() afterwards — go-webview2 captures the creating thread as mainthread
+// and only that thread can pump the window's messages. Running it inside a
+// separate goroutine (as an old timeout wrapper did) split creation from the
+// message pump: the window froze and Chromium's watchdog killed the process
+// ~60s later. Callers therefore lock their thread and call this synchronously.
+func tryInitWebView(dataPath, url string, width, height uint) webview2.WebView {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[desktop] WebView2 init panic on %s: %v", dataPath, r)
+		}
+	}()
+	log.Printf("[desktop] stage: creating WebView2 window (dataPath=%s)", dataPath)
+	opts := webview2.WebViewOptions{
+		Debug:    false,
+		DataPath: dataPath,
+		WindowOptions: webview2.WindowOptions{
+			Title:  "iCode",
+			Width:  width,
+			Height: height,
+			Center: true,
+		},
+	}
+	// Empty DataPath = ephemeral in-memory profile. When the persistent
+	// data dir is locked by a zombie process and our cleanup couldn't
+	// kill it, the last resort is a fully transient environment that
+	// never touches disk — no lock, no hang.
+	return webview2.NewWithOptions(opts)
 }
 
 // makeIcon 用标准库绘制一个 64×64 的蓝色 "i" 图标并封装为 ICO

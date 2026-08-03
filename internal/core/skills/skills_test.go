@@ -204,6 +204,34 @@ func TestDefaultDirs(t *testing.T) {
 	}
 }
 
+// TestDefaultDirsMimocodeInterop locks in mimocode skill interop: both
+// user-level and project-level .mimocode/skills must be present, and each must
+// sort before the corresponding .icode/skills dir (iCode wins name conflicts).
+func TestDefaultDirsMimocodeInterop(t *testing.T) {
+	dirs := DefaultDirs()
+	var mimoIdx, icodeIdx []int
+	for i, d := range dirs {
+		slash := filepath.ToSlash(d)
+		if strings.HasSuffix(slash, ".mimocode/skills") {
+			mimoIdx = append(mimoIdx, i)
+		}
+		if strings.HasSuffix(slash, ".icode/skills") {
+			icodeIdx = append(icodeIdx, i)
+		}
+	}
+	if len(mimoIdx) != 2 {
+		t.Fatalf("expected 2 .mimocode/skills dirs (user+project), got %d in %v", len(mimoIdx), dirs)
+	}
+	if len(icodeIdx) != 2 {
+		t.Fatalf("expected 2 .icode/skills dirs (user+project), got %d in %v", len(icodeIdx), dirs)
+	}
+	for k := 0; k < 2; k++ {
+		if mimoIdx[k] > icodeIdx[k] {
+			t.Errorf(".mimocode/skills should sort before .icode/skills (iCode wins conflicts): %v", dirs)
+		}
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && searchString(s, substr)
 }

@@ -327,10 +327,46 @@ func (t *TUI) renderInline(text string) string {
 			}
 		}
 
+		// Bare URL auto-link: https://...
+		if r == 'h' && i+7 < n && string(runes[i:i+7]) == "http://" {
+			end := findURLEnd(runes, i)
+			if end > i+7 {
+				url := string(runes[i:end])
+				b.WriteString("\x1b[4m")
+				b.WriteString(url)
+				b.WriteString("\x1b[0m")
+				i = end
+				continue
+			}
+		}
+		if r == 'h' && i+8 < n && string(runes[i:i+8]) == "https://" {
+			end := findURLEnd(runes, i)
+			if end > i+8 {
+				url := string(runes[i:end])
+				b.WriteString("\x1b[4m")
+				b.WriteString(url)
+				b.WriteString("\x1b[0m")
+				i = end
+				continue
+			}
+		}
+
 		b.WriteRune(r)
 		i++
 	}
 	return b.String()
+}
+
+// findURLEnd returns the index just past the URL starting at position i.
+// A URL ends at the first whitespace, >, ", or closing bracket.
+func findURLEnd(runes []rune, start int) int {
+	for j := start; j < len(runes); j++ {
+		switch runes[j] {
+		case ' ', '\t', '\n', '\r', '>', '"', '\'', ')', ']', '}', '|':
+			return j
+		}
+	}
+	return len(runes)
 }
 
 // ── Table rendering ──

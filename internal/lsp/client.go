@@ -27,9 +27,16 @@ import (
 	"os/exec"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	executil "github.com/ponygates/icode/internal/executil"
+	"github.com/ponygates/icode/internal/xgo"
 )
+
+// requestTimeout caps how long SendRequest waits for a JSON-RPC response.
+// Without this, a language server that starts but never answers "initialize"
+// blocks the caller forever — on the boot path that froze desktop startup.
+const requestTimeout = 30 * time.Second
 
 // Transport manages the JSON-RPC communication with a language server.
 type Transport struct {
@@ -75,7 +82,7 @@ func NewTransport(ctx context.Context, command string, args ...string) (*Transpo
 		cancel:  cancel,
 	}
 
-	go t.readLoop()
+	xgo.GoSafe("lsp.readLoop", t.readLoop)
 	return t, nil
 }
 
@@ -104,8 +111,17 @@ func (t *Transport) SendRequest(method string, params any) (json.RawMessage, err
 		return nil, err
 	}
 
-	result := <-ch
-	return result, nil
+	select {
+	case result := <-ch:
+		return result, nil
+	case <-time.After(requestTimeout):
+		// The server never answered — unblock the caller and drop the pending
+		// entry so a late response doesn't leak into a stale channel.
+		t.mu.Lock()
+		delete(t.pending, id)
+		t.mu.Unlock()
+		return nil, fmt.Errorf("lsp request %q timed out after %s", method, requestTimeout)
+	}
 }
 
 // SendNotification sends a JSON-RPC notification (no response expected).

@@ -235,6 +235,12 @@ type TimeoutSetter interface {
 	SetTimeout(sec int)
 }
 
+// ModelSetter is an OPTIONAL capability implemented by providers whose model
+// list can be updated at runtime (e.g. after a live catalog refresh).
+type ModelSetter interface {
+	SetModels(models []ModelInfo)
+}
+
 // ============================================================================
 // Model Info
 // ============================================================================
@@ -256,6 +262,17 @@ type ModelInfo struct {
 
 	// Multimodal support hint.
 	SupportsVision bool `json:"supports_vision"`
+
+	// Deprecated marks a model that is no longer available via the provider's
+	// /v1/models API. Deprecated models are kept in the list (greyed out in UI)
+	// so existing sessions referencing them still work, but they show a ⚠ icon
+	// and "已下架" label. A model is only marked deprecated after it is absent
+	// from the API response for two consecutive refreshes.
+	Deprecated bool `json:"deprecated,omitempty"`
+
+	// DeprecatedCount tracks how many consecutive refreshes a model was absent
+	// from the provider's API. Once this reaches 2, Deprecated is set to true.
+	DeprecatedCount int `json:"deprecated_count,omitempty"`
 
 	// Last update of this model record.
 	UpdatedAt time.Time `json:"updated_at"`

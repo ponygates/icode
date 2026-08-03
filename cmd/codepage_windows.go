@@ -141,6 +141,51 @@ func fixConsoleCodepage() {
 	setConsoleMode.Call(hOut, uintptr(mode))
 }
 
+// isFreshConsole reports whether this process is the ONLY one attached to its
+// console — i.e. Windows created a brand-new console for us because the exe was
+// double-clicked in Explorer (no parent terminal). When a terminal launched us,
+// the shell's PID is also attached, so the count is > 1. A redirected / piped
+// process has no console window at all, which also reports false so a piped
+// `icode` never accidentally opens the GUI.
+func isFreshConsole() bool {
+	kernel32 := windows.NewLazySystemDLL("kernel32.dll")
+	gcw := kernel32.NewProc("GetConsoleWindow")
+	if gcw.Find() != nil {
+		return false
+	}
+	hwnd, _, _ := gcw.Call()
+	if hwnd == 0 {
+		return false
+	}
+	proc := kernel32.NewProc("GetConsoleProcessList")
+	var pids [1]uint32
+	r, _, _ := proc.Call(uintptr(unsafe.Pointer(&pids[0])), 1)
+	return r <= 1
+}
+
+// hideConsoleWindow hides the console window created when a console-subsystem
+// exe is double-clicked, so only the WebView2 chat window is visible.
+func hideConsoleWindow() {
+	kernel32 := windows.NewLazySystemDLL("kernel32.dll")
+	gcw := kernel32.NewProc("GetConsoleWindow")
+	showW := kernel32.NewProc("ShowWindow")
+	freeC := kernel32.NewProc("FreeConsole")
+	if gcw.Find() != nil || showW.Find() != nil {
+		return
+	}
+	hwnd, _, _ := gcw.Call()
+	if hwnd == 0 {
+		return
+	}
+	// SW_HIDE handles most Windows builds. If it silently fails (some
+	// Windows 11 or Server editions), FreeConsole detaches from the
+	// console entirely as a permanent fallback — no black box flash.
+	showW.Call(hwnd, 0) // SW_HIDE
+	if freeC.Find() == nil {
+		freeC.Call()
+	}
+}
+
 // showCLIMessage displays a native message box telling the user this is a
 // command-line tool, then waits for a key press before exiting.
 func showCLIMessage() {

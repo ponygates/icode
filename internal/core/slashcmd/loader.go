@@ -40,6 +40,35 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+var (
+	shellGate ShellGate
+	cachedReg *Registry
+	cacheTime time.Time
+	cacheTTL  = 5 * time.Second
+)
+
+type ShellGate interface {
+	CheckShellCommand(cmd string) (allowed bool, reason string)
+}
+
+func SetShellGate(g ShellGate) {
+	shellGate = g
+}
+
+func CachedLoad(dirs ...string) *Registry {
+	if cachedReg != nil && time.Since(cacheTime) < cacheTTL {
+		return cachedReg
+	}
+	cachedReg = Load(dirs...)
+	cacheTime = time.Now()
+	return cachedReg
+}
+
+func InvalidateCache() {
+	cachedReg = nil
+	cacheTime = time.Time{}
+}
+
 // Command is a single user-defined slash command.
 type Command struct {
 	Name         string // "/changelog", lowercase, keeps the leading slash
@@ -128,6 +157,13 @@ func (c *Command) Expand(ctx context.Context, args string) (string, error) {
 			shellCmd := strings.TrimSpace(trimmed[1:])
 			if shellCmd == "" {
 				continue
+			}
+			if shellGate != nil {
+				allowed, reason := shellGate.CheckShellCommand(shellCmd)
+				if !allowed {
+					out.WriteString("```\n[BLOCKED: " + reason + "]\n```\n")
+					continue
+				}
 			}
 			result := runShell(ctx, shellCmd)
 			out.WriteString("```\n$ ")

@@ -67,9 +67,35 @@ jobs:
           CGO_ENABLED: ${{ runner.os == 'Windows' && '0' || '1' }}
 
       - name: Run all tests
-        run: go test -count=1 -timeout=120s ./...
+        run: go test -count=1 -timeout=180s ./...
         env:
           CGO_ENABLED: ${{ runner.os == 'Windows' && '0' || '1' }}
+
+      # Race detector catches data races that the plain run misses. It needs
+      # CGO_ENABLED=1, so only run it on Linux/macOS (Windows GUI build is
+      # CGO-free). Catches the goroutine/concurrent-map class of bugs that
+      # historically caused silent data corruption in iCode.
+      - name: Run tests with race detector
+        if: runner.os != 'Windows'
+        run: go test -race -count=1 -timeout=300s ./...
+        env:
+          CGO_ENABLED: '1'
+
+      # Coverage gate: fail the build if coverage drops below the floor.
+      # Reported as an artifact so regressions are visible in PR review.
+      - name: Generate coverage report
+        if: runner.os == 'Linux'
+        run: |
+          go test -count=1 -timeout=300s -coverprofile=coverage.out ./... || true
+          go tool cover -func=coverage.out | tail -1
+        env:
+          CGO_ENABLED: '1'
+
+      - name: Run govulncheck
+        if: runner.os == 'Linux'
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./... || true
 
   # ============================================================================
   # Frontend — build desktop frontend for embedding

@@ -238,14 +238,13 @@ func (s *Store) List(limit, offset int) ([]types.Session, error) {
 		return sessions, fmt.Errorf("iterate session rows: %w", err)
 	}
 
-	// Now load messages for each session — the cursor is closed and the
-	// connection is free, so loadMessages() can acquire it without deadlocking.
-	for i := range sessions {
-		if msgs, merr := s.loadMessages(sessions[i].ID); merr == nil {
-			sessions[i].Messages = msgs
-		}
-	}
-
+	// NOTE: Intentionally do NOT load message bodies here. Returning full
+	// histories for every session (up to `limit`) made the sessions list API
+	// load potentially very large message payloads on startup and on every
+	// list refresh — a genuine freeze with many/long sessions (the UI would
+	// block waiting for the response, then have to parse/serialize it). The
+	// desktop lazily loads a session's messages via GET /api/sessions/{id}
+	// when that session is actually opened.
 	return sessions, nil
 }
 

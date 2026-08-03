@@ -30,7 +30,7 @@ const BootSplash: React.FC = () => {
       style={{
         position: 'fixed',
         inset: 0,
-        zIndex: 9999,
+        zIndex: 5000,
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',

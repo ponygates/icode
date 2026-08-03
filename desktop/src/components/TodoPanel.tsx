@@ -6,10 +6,17 @@ import { useAppStore } from '../stores/appStore';
  * Inline todo section — meant to be embedded inside a parent sidebar,
  * not positioned fixed. This avoids overlapping with the chat stats panel.
  */
+interface TodoItem {
+  id?: string;
+  status?: 'pending' | 'in_progress' | 'completed' | string;
+  content?: string;
+  activeForm?: string;
+}
+
 const TodoPanel: React.FC = () => {
   const { t } = useTranslation();
-  const { activeSessionId } = useAppStore();
-  const [todos, setTodos] = React.useState<any[]>([]);
+  const activeSessionId = useAppStore(s => s.activeSessionId);
+  const [todos, setTodos] = React.useState<TodoItem[]>([]);
 
   // Use the store's backendUrl instead of window.icode
   const backendUrl = useAppStore(s => s.backendUrl);
@@ -49,14 +56,14 @@ const TodoPanel: React.FC = () => {
       }}>
         {t('todo.title')} ({todos.filter(t => t.status !== 'completed').length}/{todos.length})
       </div>
-      {todos.map((t: any, i: number) => (
+      {todos.map((t, i) => (
         <div key={t.id || i} style={{
           display: 'flex', gap: 6, padding: '3px 0',
           color: t.status === 'completed' ? 'var(--text-muted)' : 'var(--text-secondary)',
           fontSize: 11,
         }}>
           <span style={{ color: t.status === 'in_progress' ? 'var(--accent)' : t.status === 'completed' ? 'var(--success)' : 'var(--text-muted)' }}>
-            {statusSymbol(t.status)}
+            {statusSymbol(t.status ?? '')}
           </span>
           <span style={{
             textDecoration: t.status === 'completed' ? 'line-through' : 'none',

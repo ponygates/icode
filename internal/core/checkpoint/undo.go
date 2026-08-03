@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	executil "github.com/ponygates/icode/internal/executil"
 )
@@ -68,12 +69,16 @@ func NewFileSnapshot(projectRoot string) (*FileSnapshot, error) {
 	}
 
 	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
-		if _, e := fs.gitCmd(context.Background(), "init"); e != nil {
+		// init/config are one-shot; bound them so a broken git install
+		// doesn't hang first-use of undo indefinitely.
+		initCtx, initCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer initCancel()
+		if _, e := fs.gitCmd(initCtx, "init"); e != nil {
 			return nil, fmt.Errorf("undo: init: %w", e)
 		}
 		// Set local git config so commits work
-		_, _ = fs.gitCmd(context.Background(), "config", "user.name", "iCode-Undo")
-		_, _ = fs.gitCmd(context.Background(), "config", "user.email", "undo@icode.local")
+		_, _ = fs.gitCmd(initCtx, "config", "user.name", "iCode-Undo")
+		_, _ = fs.gitCmd(initCtx, "config", "user.email", "undo@icode.local")
 	}
 
 	return fs, nil
@@ -233,7 +238,9 @@ func (fs *FileSnapshot) Undo(ctx context.Context, steps int) ([]string, error) {
 			continue
 		}
 		dstDir := filepath.Dir(dstPath)
-		os.MkdirAll(dstDir, 0755)
+		if err := os.MkdirAll(dstDir, 0755); err != nil {
+			return nil, fmt.Errorf("undo: mkdir %s: %w", dstDir, err)
+		}
 		if err := os.WriteFile(dstPath, input, 0644); err != nil {
 			continue
 		}

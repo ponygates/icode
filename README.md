@@ -186,7 +186,7 @@ Use Settings → MCP page for visual add, edit, delete, and test of MCP servers.
 ### CLI Commands
 
 ```bash
-icoode config add-mcp --name my-server --command npx --args "-y @modelcontextprotocol/server-filesystem /path"
+icode config add-mcp --name my-server --command npx --args "-y @modelcontextprotocol/server-filesystem /path"
 icode config list-mcp
 icode config remove-mcp --name my-server
 ```
@@ -253,7 +253,12 @@ go run . server --port 9090
 - [x] **v0.8**: Multimodal tools (`image_gen` / `video_gen` via OpenAI-compatible backends), first-turn parallel tool execution + LSP diagnostics
 - [x] **v0.9**: Cache-First hardening — lazy skill index + `use_skill` tool + activated budget layer (Level 4) + token-savings visibility (`/token`, desktop "🪙 Saved" chip)
 - [x] **v0.10**: Local zero-cost embedding routing (`routing.mode: embedding`, fully offline / zero-token, more accurate than keywords)
-- [ ] **v0.11**: Skill marketplace distribution, VS Code extension, multimodal result feedback
+- [x] **v0.11**: Skill marketplace distribution (built-in catalog + install/uninstall/import), VS Code extension, multimodal result feedback
+- [x] **v0.12–v0.15**: Desktop system tray + global hotkey, token-savings dashboard, multi-tab sessions + workspaces, skill/MCP/connector management, VS Code extension chat panel
+- [x] **v0.16–v0.20**: Multimodal result feed-back into context (vision round-trips), desktop settings page (autostart / backend port), routing default → embedding
+- [x] **v0.25–v0.35**: Desktop freeze/startup hardening (MCP boot blocking, localStorage serialization, main-thread re-render isolation, `/model` picker, simple WebView2 UI)
+- [x] **v0.36**: One-click model auto-update (detection + deprecation marking + doc enrichment)
+- [ ] **Current**: Backend security & concurrency hardening (CSRF/same-origin guard, fetch SSRF blocking, directory sandbox for file tools, config/tool-registry locking, API-key redaction) + frontend type/test hardening (vitest, i18n locale parity)
 
 ## License
 

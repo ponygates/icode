@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/ponygates/icode/internal/config"
 	"github.com/ponygates/icode/internal/core/agent"
@@ -52,6 +53,7 @@ type App struct {
 // Bootstrap initializes all subsystems and returns a ready-to-use App.
 func Bootstrap() (*App, error) {
 	app := &App{}
+	t0 := time.Now()
 
 	// 1. Load configuration
 	cfg, err := config.Load()
@@ -60,6 +62,7 @@ func Bootstrap() (*App, error) {
 		cfg = config.Default()
 	}
 	app.Cfg = cfg
+	log.Printf("[iCode] bootstrap: config loaded (t=%dms)", time.Since(t0).Milliseconds())
 
 	// 2. Try SQLite persistence first, fall back to in-memory
 	dbStore, err := db.New(db.Config{})
@@ -70,10 +73,12 @@ func Bootstrap() (*App, error) {
 		app.DB = dbStore
 		app.SessStore = dbStore
 	}
+	log.Printf("[iCode] bootstrap: SQLite ready (t=%dms)", time.Since(t0).Milliseconds())
 
 	// 3. Initialize provider registry
 	app.Reg = registry.NewRegistry()
 	app.registerProviders(cfg)
+	log.Printf("[iCode] bootstrap: providers registered (t=%dms)", time.Since(t0).Milliseconds())
 
 	// 4. Initialize permission gate with the configured security level.
 	//    NewGate defaults to SecLocal; we must apply the user's configured
@@ -94,8 +99,9 @@ func Bootstrap() (*App, error) {
 	// 5. Initialize conversation engine (with permission gate wired in)
 	app.Engine = conversation.NewEngine(app.Reg, app.SessStore, app.Gate)
 	app.Engine.SetGenerationParams(cfg.Defaults.Temperature, cfg.Defaults.MaxTokens)
-	app.Engine.SetSystemPrompt(cfg.Defaults.SystemPrompt)
+	app.Engine.SetSystemPrompt(config.EffectiveSystemPrompt(cfg))
 	app.Engine.SetFallbackModels(cfg.Defaults.FallbackModels)
+	log.Printf("[iCode] bootstrap: engine ready (t=%dms)", time.Since(t0).Milliseconds())
 
 	// 5b. Wire smart model router (simple → cheap, complex → powerful)
 	defaultModel := cfg.Defaults.Model
@@ -185,11 +191,26 @@ func Bootstrap() (*App, error) {
 		if cwd, err := os.Getwd(); err == nil {
 			app.LSPManager = lsp.NewManager(cwd)
 			app.Engine.SetLSPManager(app.LSPManager)
-			// Eagerly start language servers the user pinned in config.
-			for _, lang := range cfg.LSP.AutoStart {
-				if err := app.LSPManager.StartLanguageServer(context.Background(), lang); err != nil {
-					log.Printf("[iCode LSP] auto-start %s skipped: %v", lang, err)
-				}
+			// Eagerly start user-pinned language servers in the BACKGROUND with a
+			// per-server timeout. A server that starts but never answers the
+			// initialize handshake must never block the boot path — doing this
+			// synchronously froze desktop startup before the window could open
+			// (the classic "桌面启动卡死", same class as the MCP boot blocker).
+			if len(cfg.LSP.AutoStart) > 0 {
+				go func(langs []string) {
+					defer func() {
+						if r := recover(); r != nil {
+							log.Printf("[iCode LSP] auto-start panic: %v", r)
+						}
+					}()
+					for _, lang := range langs {
+						lctx, lcancel := context.WithTimeout(context.Background(), 10*time.Second)
+						if err := app.LSPManager.StartLanguageServer(lctx, lang); err != nil {
+							log.Printf("[iCode LSP] auto-start %s skipped: %v", lang, err)
+						}
+						lcancel()
+					}
+				}(cfg.LSP.AutoStart)
 			}
 		}
 	}
@@ -216,6 +237,7 @@ func Bootstrap() (*App, error) {
 		APIKey:       cfg.Multimodal.APIKey,
 		OutputDir:    cfg.Multimodal.OutputDir,
 	})
+	log.Printf("[iCode] bootstrap: skills/teams/hooks/LSP/multimodal done (t=%dms)", time.Since(t0).Milliseconds())
 
 	// 6. Initialize undo system (file-level snapshot /undo)
 	if err := checkpoint.InitUndo(""); err != nil {
@@ -230,6 +252,7 @@ func Bootstrap() (*App, error) {
 		p, _ := app.Reg.Get(name)
 		app.Updater.Register(p)
 	}
+	log.Printf("[iCode] bootstrap: updater ready (t=%dms)", time.Since(t0).Milliseconds())
 
 	return app, nil
 }
@@ -292,6 +315,7 @@ func hasExternalKeys(cfg *config.Config) bool {
 
 // Close shuts down all subsystems gracefully.
 func (app *App) Close() error {
+	tool.KillAllBgTasks()
 	if app.LSPManager != nil {
 		app.LSPManager.CloseAll()
 	}

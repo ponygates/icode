@@ -16,10 +16,16 @@ const Sidebar: React.FC<Props> = ({ onToggle }) => {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState('');
 
-  const {
-    sessions, activeSessionId, selectedModel,
-    setActiveSession, createSession, deleteSession, renameSession,
-  } = useAppStore();
+  // Precise selectors: the sidebar renders the session list + model name.
+  // It must re-render when sessions/activeSession/selectedModel change, but
+  // not on every tokenUsage tick or message append in the active session.
+  const sessions = useAppStore(s => s.sessions);
+  const activeSessionId = useAppStore(s => s.activeSessionId);
+  const selectedModel = useAppStore(s => s.selectedModel);
+  const setActiveSession = useAppStore(s => s.setActiveSession);
+  const createSession = useAppStore(s => s.createSession);
+  const deleteSession = useAppStore(s => s.deleteSession);
+  const renameSession = useAppStore(s => s.renameSession);
   const currentModel = useAppStore((s) => s.models.find((m) => m.id === s.selectedModel));
   const backendConnected = useAppStore((s) => s.backendConnected);
   const backendChecking = useAppStore((s) => s.backendChecking);

@@ -468,6 +468,18 @@ interface MCPServerView {
   trustMode?: string;
 }
 
+// Add/edit form state (args kept as a raw string, split on save).
+interface MCPFormState {
+  name: string; type: string; command: string; args: string;
+  url: string; enabled: boolean;
+}
+
+// Payload sent to PUT /api/mcp.
+interface MCPBody {
+  name: string; type: string; command: string; enabled: boolean;
+  args?: string[]; url?: string;
+}
+
 function PageMCP({ store }: { store: ReturnType<typeof useAppStore.getState> }) {
   const { t } = useTranslation();
   const [servers, setServers] = useState<MCPServerView[]>([]);
@@ -498,7 +510,7 @@ function PageMCP({ store }: { store: ReturnType<typeof useAppStore.getState> }) 
       const res = await api('/tools');
       if (res.ok) {
         const tools = await res.json();
-        setAllTools((tools as any[]).map(t => t.name));
+        setAllTools(((tools as Array<{ name: string }>) || []).map(t => t.name));
       }
     } catch {}
   }, [store.backendUrl]);
@@ -515,21 +527,29 @@ function PageMCP({ store }: { store: ReturnType<typeof useAppStore.getState> }) 
   };
 
   const doSave = async () => {
-    const body: any = { name: form.name, type: form.type, command: form.command, enabled: form.enabled };
+    const body: MCPBody = { name: form.name, type: form.type, command: form.command, enabled: form.enabled };
     if (form.args.trim()) body.args = form.args.trim().split(/\s+/);
     if (form.url.trim()) body.url = form.url.trim();
-    await api('', { method:'PUT', body: JSON.stringify(body) });
-    setAdding(false); setEditing(null); load(); loadTools();
+    try {
+      await api('', { method:'PUT', body: JSON.stringify(body) });
+      setAdding(false); setEditing(null); load(); loadTools();
+    } catch (e) {
+      alert(t('settings.mcpSaveFailed', { error: e instanceof Error ? e.message : String(e) }));
+    }
   };
 
   const doDelete = async (name: string) => {
     if (!window.confirm(t('settings.deleteMcpConfirm', { name }))) return;
-    await api('', { method:'DELETE', body: JSON.stringify({ name }) });
-    load(); loadTools();
+    try {
+      await api('', { method:'DELETE', body: JSON.stringify({ name }) });
+      load(); loadTools();
+    } catch (e) {
+      alert(t('settings.mcpDeleteFailed', { error: e instanceof Error ? e.message : String(e) }));
+    }
   };
 
   const doTest = async (s: MCPServerView) => {
-    const body: any = { name: s.name, type: s.type, command: s.command, enabled: true };
+    const body: MCPBody = { name: s.name, type: s.type, command: s.command, enabled: true };
     if ((s.args||[]).length > 0) body.args = s.args;
     if (s.url) body.url = s.url;
     setTestResult(null);
@@ -537,8 +557,8 @@ function PageMCP({ store }: { store: ReturnType<typeof useAppStore.getState> }) 
       const res = await api('/test', { method:'POST', body: JSON.stringify(body) });
       const data = await res.json();
       setTestResult({ name: s.name, ok: data.ok, tools: data.tools, error: data.error });
-    } catch (e: any) {
-      setTestResult({ name: s.name, ok: false, error: e.message });
+    } catch (e) {
+      setTestResult({ name: s.name, ok: false, error: e instanceof Error ? e.message : String(e) });
     }
   };
 
@@ -720,9 +740,9 @@ function PageMCP({ store }: { store: ReturnType<typeof useAppStore.getState> }) 
 }
 
 // MCP server form fields (shared by add & edit)
-function MCPServerForm({ form, setForm }: { form: any; setForm: (f: any) => void }) {
+function MCPServerForm({ form, setForm }: { form: MCPFormState; setForm: (f: MCPFormState) => void }) {
   const { t } = useTranslation();
-  const upd = (k: string, v: any) => setForm({ ...form, [k]: v });
+  const upd = (k: keyof MCPFormState, v: string | boolean) => setForm({ ...form, [k]: v });
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
       <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8 }}>
@@ -757,11 +777,30 @@ function MCPServerForm({ form, setForm }: { form: any; setForm: (f: any) => void
 // Page: Skills
 // ═══════════════════════════════════════════════════════════════
 
+interface SkillView {
+  name: string;
+  description?: string;
+  triggers?: string[];
+  enabled?: boolean;
+}
+
+interface MarketSkill {
+  name: string;
+  description?: string;
+  triggers?: string[];
+  installed?: boolean;
+}
+
+interface ConnectorView {
+  name: string;
+  connected?: boolean;
+}
+
 function PageSkills() {
   const { t } = useTranslation();
   const store = useAppStore();
-  const [skills, setSkills] = useState<any[]>([]);
-  const [connectors, setConnectors] = useState<any[]>([]);
+  const [skills, setSkills] = useState<SkillView[]>([]);
+  const [connectors, setConnectors] = useState<ConnectorView[]>([]);
   const [mem, setMem] = useState('');
   const [loadingSkills, setLoadingSkills] = useState(true);
   const [memSaved, setMemSaved] = useState(false);
@@ -769,7 +808,7 @@ function PageSkills() {
 
   // Market state
   const [tab, setTab] = useState<'installed' | 'market'>('installed');
-  const [market, setMarket] = useState<any[]>([]);
+  const [market, setMarket] = useState<MarketSkill[]>([]);
   const [loadingMarket, setLoadingMarket] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [importPath, setImportPath] = useState('');
@@ -794,7 +833,7 @@ function PageSkills() {
         body: JSON.stringify({ name }),
       });
       if (r.ok) {
-        setMarket((prev) => prev.map((m: any) => m.name === name ? { ...m, installed: true } : m));
+        setMarket((prev) => prev.map((m) => m.name === name ? { ...m, installed: true } : m));
         const sk = await fetch(`${store.backendUrl}/api/skills`);
         if (sk.ok) { const d = await sk.json(); setSkills(d.skills || []); }
       }
@@ -809,7 +848,7 @@ function PageSkills() {
     try {
       const r = await fetch(`${store.backendUrl}/api/skills/market/${encodeURIComponent(name)}`, { method: 'DELETE' });
       if (r.ok) {
-        setMarket((prev) => prev.map((m: any) => m.name === name ? { ...m, installed: false } : m));
+        setMarket((prev) => prev.map((m) => m.name === name ? { ...m, installed: false } : m));
         const sk = await fetch(`${store.backendUrl}/api/skills`);
         if (sk.ok) { const d = await sk.json(); setSkills(d.skills || []); }
       }
@@ -825,7 +864,7 @@ function PageSkills() {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path: importPath.trim() }),
       });
-      const d = await r.json().catch(() => ({} as any));
+      const d = await r.json().catch(() => ({} as Record<string, unknown>));
       if (r.ok) {
         setImportMsg(t('settings.skillMarket.importDone'));
         setImportPath('');
@@ -835,8 +874,8 @@ function PageSkills() {
       } else {
         setImportMsg(t('settings.skillMarket.importFailed') + (d.error || 'unknown'));
       }
-    } catch (e: any) {
-      setImportMsg(t('settings.skillMarket.importFailed') + (e?.message || 'unknown'));
+    } catch (e) {
+      setImportMsg(t('settings.skillMarket.importFailed') + (e instanceof Error ? e.message : 'unknown'));
     }
   };
 
@@ -873,7 +912,7 @@ function PageSkills() {
     const method = enable ? 'POST' : 'DELETE';
     try {
       await fetch(`${store.backendUrl}/api/skills/${encodeURIComponent(name)}/enable`, { method });
-      setSkills((prev: any[]) => prev.map((s: any) => s.name === name ? { ...s, enabled: enable } : s));
+      setSkills((prev) => prev.map((s) => s.name === name ? { ...s, enabled: enable } : s));
     } catch {}
   };
 
@@ -913,12 +952,12 @@ function PageSkills() {
             <div style={{ padding: 16, textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>未安装技能</div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {skills.map((s: any) => (
+              {skills.map((s) => (
                 <div key={s.name} style={cardStyle}>
                   <div style={{ minWidth: 0 }}>
                     <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{s.name}</div>
                     <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 1 }}>{s.description || '（无描述）'}</div>
-                    {s.triggers?.length > 0 && (
+                    {s.triggers && s.triggers.length > 0 && (
                       <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>触发词：{s.triggers.join('、')}</div>
                     )}
                   </div>
@@ -937,12 +976,12 @@ function PageSkills() {
             <div style={{ padding: 16, textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>市场为空</div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {market.map((m: any) => (
+              {market.map((m) => (
                 <div key={m.name} style={cardStyle}>
                   <div style={{ minWidth: 0 }}>
                     <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{m.name}</div>
                     <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 1 }}>{m.description || '（无描述）'}</div>
-                    {m.triggers?.length > 0 && (
+                    {m.triggers && m.triggers.length > 0 && (
                       <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>触发词：{m.triggers.join('、')}</div>
                     )}
                   </div>
@@ -987,7 +1026,7 @@ function PageSkills() {
           <div style={{padding:16,textAlign:'center',color:'var(--text-muted)',fontSize:12}}>无连接器</div>
         ) : (
           <div style={{display:'flex',flexWrap:'wrap',gap:8}}>
-            {connectors.map((c: any) => (
+            {connectors.map((c) => (
               <span key={c.name} style={chipStyle}>
                 {c.name}
                 <span style={{fontSize:9,color:c.connected?'var(--success)':'var(--text-muted)'}}>
@@ -1067,6 +1106,10 @@ function PageShortcuts() {
     ['Esc',t('shortcuts.stopGeneration')],
     ['↑↓',t('shortcuts.browseHistory')],
     ['Tab',t('shortcuts.completeCommand')],
+    ['Ctrl+C / Ctrl+V',t('shortcuts.copyPaste')],
+    ['Ctrl+X',t('shortcuts.cut')],
+    ['Ctrl+A',t('shortcuts.selectAll')],
+    ['↻',t('shortcuts.refreshModels')],
     ['Ctrl+C',t('shortcuts.exit')],
     ['/, @',t('shortcuts.cmdFileComplete')],
   ];
@@ -1295,4 +1338,4 @@ function PageDesktop({ store }: { store: ReturnType<typeof useAppStore.getState>
   );
 }
 
-export default SettingsPage;
+export default React.memo(SettingsPage);

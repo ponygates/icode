@@ -7,15 +7,44 @@ import (
 	"runtime/debug"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ponygates/icode/internal/config"
 	"github.com/ponygates/icode/internal/core/permission"
+	"github.com/ponygates/icode/internal/xgo"
 )
+
+// cliLogRotator is a package-level rotating writer so cli.log (panic stack
+// traces from the TUI) can't grow unbounded across many crashes. 1 MB cap —
+// crash dumps are infrequent but can be large; keep one backup.
+var (
+	cliLogOnce     sync.Once
+	cliLogRotator  *xgo.RotatingWriter
+)
+
+func cliLogWriter() *xgo.RotatingWriter {
+	cliLogOnce.Do(func() {
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			return
+		}
+		path := filepath.Join(home, ".icode", "cli.log")
+		if rw, err := xgo.NewRotatingWriter(path, 1024*1024); err == nil {
+			cliLogRotator = rw
+		}
+	})
+	return cliLogRotator
+}
 
 // writeCliLog appends a diagnostic message to ~/.icode/cli.log so a crash is
 // never silent — the user (or a helper) can inspect it after a "flash close".
 func writeCliLog(s string) {
+	if rw := cliLogWriter(); rw != nil {
+		rw.Write([]byte(s))
+		return
+	}
+	// Fallback (home dir unavailable or rotator init failed): stderr.
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		fmt.Fprint(os.Stderr, s)
@@ -115,11 +144,15 @@ func (t *TUI) render() {
 
 	// Bottom status bar: a single compact line (model · tokens · context% ·
 	// cost · cache), truncated to the terminal width so it stays a thin strip.
-	statusLine := status
-	if visibleWidth(statusLine) > W {
-		statusLine = truncVisible(statusLine, W)
+	// Hidden entirely when /statusline is toggled off (Claude Code parity).
+	statusW := []string{}
+	if t.statusVisible {
+		statusLine := status
+		if visibleWidth(statusLine) > W {
+			statusLine = truncVisible(statusLine, W)
+		}
+		statusW = []string{statusLine}
 	}
-	statusW := []string{statusLine}
 
 	// Overlays drawn above the input box.
 	acLines := t.autocompleteLines()
@@ -175,7 +208,16 @@ func (t *TUI) render() {
 		convTotal = len(conv)
 	}
 
-	if t.helpVisible {
+	if t.modelPickerOpen {
+		// Fixed overlay: always fully visible. The panel scrolls its own
+		// internal window (modelPickerTop) to keep the highlighted row on
+		// screen, independent of the conversation scroll position. It takes
+		// precedence over the welcome banner so /model works even on a fresh
+		// session (before the first message dismisses the banner).
+		conv = t.modelPickerOverlay(W, bodyH)
+		t.scrollOffset = 0
+		sbActive = false
+	} else if t.helpVisible {
 		conv = t.helpBox(contentW, bodyH)
 		t.scrollOffset = 0
 		sbActive = false
@@ -1193,7 +1235,8 @@ func (t *TUI) drawInputBox(W, H int, inputBuf string, cursor int, streaming bool
 
 	// Prompt line: "❯ <input>" (Claude Code style)
 	prompt := t.paint(modeColor(t.mode), "❯")
-	innerW := W - 4
+	// Content must fit after the prompt + space, with a 1-char margin.
+	innerW := W - visibleWidth(prompt) - 2
 	if innerW < 4 {
 		innerW = 4
 	}
@@ -1212,18 +1255,26 @@ func (t *TUI) drawInputBox(W, H int, inputBuf string, cursor int, streaming bool
 		hint = t.paint("dim", "  "+t.tstr("input.hint.streaming"))
 	}
 
-	// Status row (right side, model-style)
-	effort := t.paint("dim", "*") + "max"
+	// Status row: left = model / cache rate, right = effort level.
+	// Combines what Claude Code splits across its status + effort rows into one
+	// compact line so we stay at the same 3-row input footprint.
+	mLine := t.model
+	if len(mLine) > 24 {
+		mLine = mLine[:24] + "…"
+	}
+	if t.cacheHitRate > 0 {
+		mLine += t.paint("dim", " · Csh ") + fmt.Sprintf("%.0f%%", t.cacheHitRate*100)
+	}
+	effort := t.paint("dim", "⚙") + "max"
 	if t.mode == ModeYOLO {
-		effort = t.paint("yellow", "*") + "yolo"
+		effort = t.paint("yellow", "⚡") + "yolo"
 	}
-	rightStatus := effort + t.paint("dim", " · /effort")
-	// Right-align
-	pad := W - visibleWidth(rightStatus) - 2
-	if pad < 0 {
-		pad = 0
+	rightPart := effort + t.paint("dim", " · /effort")
+	pad := W - visibleWidth(mLine) - visibleWidth(rightPart) - 2
+	if pad < 1 {
+		pad = 1
 	}
-	statusPadded := strings.Repeat(" ", pad) + rightStatus
+	statusLine := mLine + strings.Repeat(" ", pad) + rightPart
 
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", topRow))
@@ -1231,9 +1282,14 @@ func (t *TUI) drawInputBox(W, H int, inputBuf string, cursor int, streaming bool
 	b.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", hintRow))
 	b.WriteString(hint)
 	b.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", statusRow))
-	b.WriteString(statusPadded)
+	b.WriteString(statusLine)
 
 	// Position the cursor on the input line, just after the typed prefix.
+	// The prefix is "❯ " = prompt + space. Use visibleWidth instead of a
+	// hardcoded column so CJK terminals (and our own runeWidth extension that
+	// counts dingbats/misc-symbols like ❯ as 2) always land the cursor at the
+	// right display column. Without this, full-width characters typed after a
+	// mis-measured prompt would render on top of each other ("重叠显示").
 	runes := []rune(inputBuf)
 	if cursor > len(runes) {
 		cursor = len(runes)
@@ -1242,7 +1298,10 @@ func (t *TUI) drawInputBox(W, H int, inputBuf string, cursor int, streaming bool
 	if vw > innerW {
 		vw = innerW
 	}
-	col := 2 + vw // "❯ "(2) → content starts at column 2
+	if vw < 0 {
+		vw = 0
+	}
+	col := visibleWidth(prompt+" ") + vw + 1 // prompt+space width + content up to cursor + 1-based ANSI
 	if col > W {
 		col = W
 	}
@@ -1310,10 +1369,8 @@ func (t *TUI) totalConvLines(msgs []Message, streaming bool, streamContent strin
 	return len(t.conversationLines(msgs, streaming, streamContent, width))
 }
 
-// scrollPgUp scrolls one page up (or to top).
 func (t *TUI) scrollPgUp() {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	bodyH := t.convHeight()
 	if bodyH < 1 {
 		bodyH = 10
@@ -1322,13 +1379,12 @@ func (t *TUI) scrollPgUp() {
 	if t.welcomeVisible {
 		t.welcomeVisible = false
 	}
+	t.mu.Unlock()
 	t.scheduleRender()
 }
 
-// scrollPgDn scrolls one page down (or to bottom / auto-follow).
 func (t *TUI) scrollPgDn() {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	bodyH := t.convHeight()
 	if bodyH < 1 {
 		bodyH = 10
@@ -1337,19 +1393,19 @@ func (t *TUI) scrollPgDn() {
 	if t.scrollOffset < 0 {
 		t.scrollOffset = 0
 	}
+	t.mu.Unlock()
 	t.scheduleRender()
 }
 
-// scrollToTop jumps to the oldest conversation lines.
 func (t *TUI) scrollToTop() {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	msgs := append([]Message{}, t.messages...)
 	total := len(t.conversationLines(msgs, t.streaming, t.streamBuf.String(), t.width))
 	bodyH := t.convHeight()
 	if total > bodyH {
 		t.scrollOffset = total - bodyH
 	}
+	t.mu.Unlock()
 	t.scheduleRender()
 }
 
@@ -1361,22 +1417,20 @@ func (t *TUI) scrollToBottom() {
 	t.scheduleRender()
 }
 
-// scrollUpSmall moves up a few lines.
 func (t *TUI) scrollUpSmall() {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	t.scrollOffset += 3
+	t.mu.Unlock()
 	t.scheduleRender()
 }
 
-// scrollDownSmall moves down a few lines.
 func (t *TUI) scrollDownSmall() {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	t.scrollOffset -= 3
 	if t.scrollOffset < 0 {
 		t.scrollOffset = 0
 	}
+	t.mu.Unlock()
 	t.scheduleRender()
 }
 

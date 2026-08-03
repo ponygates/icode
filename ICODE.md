@@ -2,7 +2,7 @@
 
 ## 项目描述
 
-iCode 是一个多模型 AI 编码助手，可运行于终端和桌面。开箱支持 9 个 LLM 提供商、60+ 模型，缓存优先架构可实现最高 94% token 节省。Go 语言编写，使用 cobra CLI 框架，附带 Electron 桌面应用。
+iCode 是一个多模型 AI 编码助手，可运行于终端和桌面。开箱支持 9 个 LLM 提供商、60+ 模型，缓存优先架构可实现最高 94% token 节省。Go 语言编写，使用 cobra CLI 框架，附带 Electron 桌面应用。一键自动更新模型：刷新后自动检测新增/下架模型，连续 2 次确认标记下架，文档页富化补充元数据。
 
 ## 构建命令
 
@@ -87,7 +87,7 @@ internal/
   tui/                   终端 UI（71KB，全屏 raw 模式 + 后备行模式）
   types/                 共享类型定义
 pkg/
-  modelupdate/           模型列表更新
+  modelupdate/           模型列表自动更新（API+文档富化+Diff检测+下架标记+持久化）
 desktop/                 Electron 桌面应用 + web UI
 configs/                 默认配置文件
 ```
@@ -121,6 +121,7 @@ configs/                 默认配置文件
 - 桌面端 Electron 应用
 - 技能系统（SKILL.md，自动注入 system prompt，模型按需遵循）
 - 智能模型路由（按查询复杂度自动选 cheap/normal/powerful 模型）
+- 模型自动更新（API+文档富化+Diff检测+下架标记，一键刷新）
 - 多智能体团队（Agent Teams，task 工具以 `team:<name>` 调度，内置 team:review）
 - LSP 代码诊断（文件改后自动启动对应语言服务器并注入编译错误提示）
 - SEARCH/REPLACE 编辑块（search_replace 工具，支持 unified diff 应用）
@@ -159,12 +160,21 @@ configs/                 默认配置文件
 - **附件感知 token 估算**：`EstimateAttachmentTokens` 按 base64 解码字节数 ÷750（下限 85 / 上限 2000）估算图片 token；`estimateTokensLocked` 纳入附件权重 → `ShouldCompact` 不再低估多模态上下文。
 - **统计**：`Stats.attachments_evicted` 新计数，节省量计入 `tokens_saved`（Token 仪表盘自动体现）。engine 零改动（零值配置自动生效，含 CLI↔桌面历史重放路径）。
 
+### 已完成（v0.36 第二十批新增 — 一键自动更新模型）
+- **三阶段更新管线**：API 获取 ID 列表 → 内置元数据富化 → llms.txt 文档页补充。`fetchDocModels()` 从 7 个 provider 的 llms.txt 抓取补充元数据（上下文/视觉/推理），404 优雅降级。
+- **Diff 检测 + 连续 2 次下架确认**：`compareModels()` 对比 API vs 内置列表，新增模型自动加入；下架模型需连续 2 次 API 缺失才标记 `Deprecated: true`（避免抖动误判），灰显+⚠图标保留可用。
+- **富化合并**：`mergeModelInfo()` 优先级 内置 > 文档 > API，确保 API 只返回 ID 骨架时仍能展示完整元数据。
+- **Desktop Toast**：刷新后 8 秒浮动通知"✅ +N 新模型 | ⚠ M 已下架"，展开每 provider 详情。
+- **SimpleUI 摘要**：刷新结果显示"📋 变更: ➕N 新增, ⚠️M 下架"+ 每个新模型名称。
+- **持久化**：`~/.icode/cache/update-history.json`（最近 50 条）+ `{provider}.json`（含 Deprecated/DeprecatedCount）。
+- `ModelInfo` 新增 `Deprecated` + `DeprecatedCount`；`ProviderUpdate` 新增 `Added`/`Removed`。
+
 ### 与竞品差距（剩余）
 > 以下为 2026-07-25 状态（第十九批完成后，含 v0.23.0）。
 
 1. **非 Windows 平台托盘/热键（已补齐）**: v0.18 起 `icode desktop` 在 macOS / Linux 提供系统托盘 + 菜单「在浏览器中打开 / 退出」+ 自动打开默认浏览器；v0.19 起 POSIX 也注册全局热键 `Ctrl+Shift+Space`（用 `golang.design/x/hotkey`，CGO），触发即重新聚焦/打开本机前端，与 Windows 原生热键组合一致。Windows 仍走原生 WebView2 窗口 + 子类化窗口过程（`Ctrl+Shift+Space` 显隐切换）。**已知限制**：① macOS 需授予辅助功能（Accessibility）权限且热键事件需主线程派发，真机待点测；② Linux Wayland 会话不暴露全局热键协议，注册通常失败，回退托盘菜单；③ macOS / Linux 的原生托盘与热键依赖 CGO（Cocoa / libappindicator / ayatana），必须在目标 OS 上以 `CGO_ENABLED=1` + 对应 SDK 构建，本 Windows 开发环境无法交叉编译验证（仅验证 Windows 构建与代码），真机待点测。
 2. **托盘真机验证**: v0.12 原生托盘/热键仅在无头环境验证编译与纯函数单测，真实 Windows 交互待点测（v0.18 未改变此状态）。
-> 已完成：Token 节省深化（v0.23，多模态附件淘汰 + 附件感知估算，多模态会话最大浪费点消除）、VS Code 扩展增强（v0.22，选中代码右键发送 + 状态栏后端状态 + binPath/serverPort/autoStart 配置项）、跨平台自动构建 CI（v0.21，桌面 GUI 原生 CGO 构建 + 无界面 CLI 纯 Go 交叉编译，覆盖 win/linux/darwin amd64+arm64 + freebsd）、跨平台桌面后端启动（v0.18，executil 跨平台编译修复 + 共享 bootDesktopBackend）、桌面端设置增强（v0.20，开机自启 / 后端端口 / 全局热键说明，纯前端可验证）、前端图片展示（v0.17，ChatPage 渲染 message.attachments 缩略图 + lightbox）、多模态结果回灌上下文（v0.16，image_gen 回灌图片 + Provider 编码 image_url/Anthropic 图片块）、技能市场分发（v0.14）、VS Code 扩展（v0.15）、工作区↔会话深度绑定（v0.13）、多标签跨路由持久化（v0.13）、Embedding 路由默认开启（v0.13）、v0.12 桌面四大子系统。
+> 已完成：模型自动更新（v0.36，API+文档富化+Diff检测+下架标记+持久化）、Token 节省深化（v0.23，多模态附件淘汰 + 附件感知估算，多模态会话最大浪费点消除）、VS Code 扩展增强（v0.22，选中代码右键发送 + 状态栏后端状态 + binPath/serverPort/autoStart 配置项）、跨平台自动构建 CI（v0.21，桌面 GUI 原生 CGO 构建 + 无界面 CLI 纯 Go 交叉编译，覆盖 win/linux/darwin amd64+arm64 + freebsd）、跨平台桌面后端启动（v0.18，executil 跨平台编译修复 + 共享 bootDesktopBackend）、桌面端设置增强（v0.20，开机自启 / 后端端口 / 全局热键说明，纯前端可验证）、前端图片展示（v0.17，ChatPage 渲染 message.attachments 缩略图 + lightbox）、多模态结果回灌上下文（v0.16，image_gen 回灌图片 + Provider 编码 image_url/Anthropic 图片块）、技能市场分发（v0.14）、VS Code 扩展（v0.15）、工作区↔会话深度绑定（v0.13）、多标签跨路由持久化（v0.13）、Embedding 路由默认开启（v0.13）、v0.12 桌面四大子系统。
 
 ## 约定
 
@@ -187,5 +197,6 @@ configs/                 默认配置文件
 - `E:\icode\internal\types\types.go` — 核心类型定义
 - `E:\icode\internal\core\tool\tools.go` — 工具系统
 - `E:\icode\internal\core\tokenopt\optimizer.go` — token 优化
+- `E:\icode\pkg\modelupdate\service.go` — 模型自动更新服务（富化+Diff+下架+文档抓取）
 - `E:\icode\cmd\commands.go` — CLI 命令
 - `E:\icode\desktop\` — 桌面端

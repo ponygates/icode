@@ -13,7 +13,6 @@ package permission
 
 import (
 	"fmt"
-	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -616,34 +615,4 @@ func CheckBashCommand(cmd string) []BashRuleViolation {
 		}
 	}
 	return violations
-}
-
-// validatePathForBash checks if a file path is safe for bash operations.
-// Returns nil if safe, or a violation if the path is dangerous.
-func validatePathForBash(path string) error {
-	if path == "" {
-		return nil
-	}
-
-	absPath, err := filepath.Abs(path)
-	if err != nil {
-		return fmt.Errorf("invalid path: %w", err)
-	}
-
-	// Block operations on critical system paths
-	criticalPaths := []string{
-		"/etc", "/sys", "/proc", "/boot", "/dev",
-		"/usr", "/bin", "/sbin", "/lib",
-		`C:\Windows`, `C:\Program Files`, `C:\ProgramData`,
-		`C:\System32`, `C:\Boot`,
-	}
-
-	lower := strings.ToLower(absPath)
-	for _, cp := range criticalPaths {
-		if strings.HasPrefix(lower, strings.ToLower(cp)) {
-			return fmt.Errorf("禁止操作关键系统路径: %s", cp)
-		}
-	}
-
-	return nil
 }

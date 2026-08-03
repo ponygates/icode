@@ -5,31 +5,32 @@ import hljs from 'highlight.js';
 // ── styles ──
 const codeBlock: React.CSSProperties = {
   background: 'var(--bg-primary)',
-  border: '1px solid var(--border-color)',
-  borderRadius: 6, padding: '10px 12px',
-  overflowX: 'auto', fontSize: 12,
+  border: '0.5px solid var(--border-color)',
+  borderRadius: 8, padding: '12px 14px', lineHeight: 1.6,
+  overflowX: 'auto', fontSize: 12.5,
   fontFamily: 'var(--font-mono)', color: 'var(--text-primary)', margin: 0,
 };
 const codeHead: React.CSSProperties = {
   display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-  padding: '4px 12px', background: 'var(--bg-tertiary)',
-  border: '1px solid var(--border-color)', borderBottom: 'none',
-  borderRadius: '6px 6px 0 0', fontSize: 11, color: 'var(--text-muted)',
+  padding: '5px 12px', background: 'var(--bg-tertiary)',
+  border: '0.5px solid var(--border-color)', borderBottom: 'none',
+  borderRadius: '8px 8px 0 0', fontSize: 11, color: 'var(--text-secondary)',
+  fontFamily: 'var(--font-mono)', letterSpacing: '0.02em',
 };
 const icoStyle: React.CSSProperties = {
-  background: 'var(--bg-primary)', border: '1px solid var(--border-color)',
-  borderRadius: 4, padding: '1px 5px', fontSize: 12, fontFamily: 'var(--font-mono)',
+  background: 'var(--bg-primary)', border: '0.5px solid var(--border-color)',
+  borderRadius: 5, padding: '1px 6px', fontSize: '0.92em', fontFamily: 'var(--font-mono)',
 };
 const copyBtn: React.CSSProperties = {
-  background: 'transparent', border: '1px solid var(--border-color)',
-  borderRadius: 4, color: 'var(--text-muted)', cursor: 'pointer', fontSize: 11, padding: '2px 8px',
+  background: 'transparent', border: '0.5px solid var(--border-color)',
+  borderRadius: 5, color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 11, padding: '2px 8px',
 };
 
 // ── inline renderer (Supports: **bold**, *italic*, ~~strike~~, `code`, [link](url), bare URLs) ──
 function renderInline(text: string, keyBase: string): React.ReactNode[] {
   const nodes: React.ReactNode[] = [];
   // Tokenizer: match **bold**, *italic*, ~~strike~~, `code`, [text](url)
-  const re = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|~~[^~]+~~|\[[^\]]+\]\([^)]+\))/g;
+  const re = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|_[^_]+_|~~[^~]+~~|\[[^\]]+\]\([^)]+\))/g;
   let last = 0, m: RegExpExecArray | null, i = 0;
   while ((m = re.exec(text)) !== null) {
     if (m.index > last) {
@@ -45,6 +46,8 @@ function renderInline(text: string, keyBase: string): React.ReactNode[] {
       nodes.push(<em key={keyBase + i}>{tok.slice(1, -1)}</em>);
     } else if (tok.startsWith('~~')) {
       nodes.push(<del key={keyBase + i}>{tok.slice(2, -2)}</del>);
+    } else if (tok.startsWith('_')) {
+      nodes.push(<em key={keyBase + i}>{tok.slice(1, -1)}</em>);
     } else {
       const lm = /\[([^\]]+)\]\(([^)]+)\)/.exec(tok);
       if (lm) {
@@ -81,6 +84,26 @@ function linkify(text: string, key: string): React.ReactNode[] {
   return parts;
 }
 
+// Diff line colouring: applies green/red/cyan inline styles to unified-diff lines.
+function colorizeDiffLines(code: string): React.ReactNode[] {
+  const lines = code.split('\n');
+  const diffAdd: React.CSSProperties = { color: 'var(--success, #4caf50)' };
+  const diffDel: React.CSSProperties = { color: 'var(--error, #f44336)' };
+  const diffHunk: React.CSSProperties = { color: 'var(--accent, #2196f3)' };
+  const diffHead: React.CSSProperties = { fontWeight: 600 };
+  return lines.map((ln, i) => {
+    if (ln.startsWith('+++') || ln.startsWith('---')) return <span key={i} style={diffHead}>{ln}</span>;
+    if (ln.startsWith('+')) return <span key={i} style={diffAdd}>{ln}</span>;
+    if (ln.startsWith('-')) return <span key={i} style={diffDel}>{ln}</span>;
+    if (ln.startsWith('@@')) return <span key={i} style={diffHunk}>{ln}</span>;
+    return <span key={i}>{ln}</span>;
+  }).reduce<React.ReactNode[]>((acc, node, i) => {
+    if (i > 0) acc.push('\n');
+    acc.push(node);
+    return acc;
+  }, []);
+}
+
 // HTML-escape for the safe plain-text fallback used when we skip expensive
 // syntax highlighting on large code blocks.
 function escapeHtml(s: string): string {
@@ -91,7 +114,7 @@ function escapeHtml(s: string): string {
 }
 
 // ── code block with syntax highlighting and copy ──
-const CodeBlock = React.memo(({ code, lang }: { code: string; lang: string }) => {
+const CodeBlock = React.memo(({ code, lang, streaming }: { code: string; lang: string; streaming?: boolean }) => {
   const { t } = useTranslation();
   const [copied, setCopied] = useState(false);
   const handleCopy = () => {
@@ -120,14 +143,20 @@ const CodeBlock = React.memo(({ code, lang }: { code: string; lang: string }) =>
       if (lang && hljs.getLanguage(lang)) {
         return hljs.highlight(safeCode, { language: lang });
       }
-      if (safeCode.length < 8000) {
+      // highlightAuto scans every grammar and is O(len × langs) — fine for a
+      // finished message, but during streaming it runs every frame as text
+      // grows, freezing the UI on medium code blocks. Skip it while streaming;
+      // the final render (streaming=false) will pick the language up if the
+      // model emitted a fenced block with a language tag, or fall back to
+      // escaped plain text. Never run highlightAuto mid-stream.
+      if (!streaming && safeCode.length < 8000) {
         return hljs.highlightAuto(safeCode);
       }
       return { value: escapeHtml(safeCode), language: '' };
     } catch {
       return { value: escapeHtml(safeCode), language: '' };
     }
-  }, [safeCode, lang]);
+  }, [safeCode, lang, streaming]);
 
   return (
     <div style={{ margin: '8px 0' }}>
@@ -136,14 +165,19 @@ const CodeBlock = React.memo(({ code, lang }: { code: string; lang: string }) =>
         <button onClick={handleCopy} style={copyBtn}>{copied ? `✓ ${t('markdown.copied')}` : t('markdown.copy')}</button>
       </div>
       <pre style={{ ...codeBlock, borderRadius: lang ? '0 0 6px 6px' : 6 }}>
-        <code dangerouslySetInnerHTML={{ __html: highlighted.value }} />
+        {lang === 'diff' ? <code>{colorizeDiffLines(safeCode)}</code> :
+          <code dangerouslySetInnerHTML={{ __html: highlighted.value }} />}
       </pre>
     </div>
   );
 });
 
 // ── main Markdown component ──
-const Markdown = React.memo(({ text }: { text: string }) => {
+// `streaming` is true while the assistant message is still being generated.
+// It disables the expensive highlightAuto path on code blocks so the UI
+// doesn't freeze on every token; the final (streaming=false) render will
+// pick up highlighting then.
+const Markdown = React.memo(({ text, streaming }: { text: string; streaming?: boolean }) => {
   const lines = text.split('\n');
   const blocks: React.ReactNode[] = [];
   let i = 0, key = 0;
@@ -161,7 +195,7 @@ const Markdown = React.memo(({ text }: { text: string }) => {
         code.push(lines[i]); i++;
       }
       i++; // skip closing ```
-      blocks.push(<CodeBlock key={key++} code={code.join('\n')} lang={lang} />);
+      blocks.push(<CodeBlock key={key++} code={code.join('\n')} lang={lang} streaming={streaming} />);
       continue;
     }
 

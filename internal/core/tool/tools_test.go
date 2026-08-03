@@ -2,6 +2,7 @@ package tool
 
 import (
 	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -407,4 +408,54 @@ func (m *mockTool) Def() types.ToolDef {
 
 func (m *mockTool) Execute(ctx context.Context, args string) (*types.ToolResult, error) {
 	return &types.ToolResult{Success: true, Content: "ok"}, nil
+}
+
+// Registry map access must be safe under concurrent Register/Unregister/Get/
+// ListDefs (MCP tool refresh runs in a background goroutine while chat reads).
+func TestRegistryConcurrentAccess(t *testing.T) {
+	r := NewRegistry()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 500; i++ {
+			r.Register(&LSTool{})
+			_, _ = r.Get("ls")
+			_ = r.ListDefs()
+		}
+	}()
+	for i := 0; i < 500; i++ {
+		r.Unregister("ls")
+		_, _ = r.Get("ls")
+		_ = r.ListDefs()
+		r.Register(&LSTool{})
+	}
+	<-done
+}
+
+func TestValidateFetchURL_BlocksSSRF(t *testing.T) {
+	blocked := []string{
+		"http://127.0.0.1:8080/admin",      // loopback
+		"http://169.254.169.254/latest/meta-data", // cloud metadata
+		"http://10.0.0.5/",                  // private
+		"http://192.168.1.1/",               // private
+		"http://172.16.0.1/",                // private
+		"http://localhost:3000",             // loopback hostname
+		"file:///etc/passwd",                // non-http scheme
+		"ftp://example.com/x",               // non-http scheme
+	}
+	for _, u := range blocked {
+		if err := validateFetchURL(u); err == nil {
+			t.Errorf("validateFetchURL(%q) = nil, want block", u)
+		}
+	}
+}
+
+func TestValidateFetchURL_AllowsPublic(t *testing.T) {
+	// blockedBySSRF is the network-independent core; public IPs must pass.
+	public := []string{"8.8.8.8", "1.1.1.1", "93.184.216.34", "2001:4860:4860::8888"}
+	for _, s := range public {
+		if blockedBySSRF(net.ParseIP(s)) {
+			t.Errorf("blockedBySSRF(%q) = true, want false", s)
+		}
+	}
 }

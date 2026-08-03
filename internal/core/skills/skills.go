@@ -5,6 +5,9 @@
 //	<project>/.icode/skills/<name>/SKILL.md  — project-scoped skills
 //	~/.icode/skills/<name>/SKILL.md           — user-global skills
 //
+// Interop: WorkBuddy (.workbuddy/skills) and mimocode (.mimocode/skills)
+// directories are loaded too, at lower priority than iCode's own dirs.
+//
 // Each SKILL.md has optional YAML frontmatter + Markdown body:
 //
 //	---
@@ -363,7 +366,7 @@ func Install(name string) error {
 
 // Uninstall removes a skill from the user's skills directory. It only deletes
 // user-installed skills (never the embedded catalog, which is read-only, nor
-// WorkBuddy skills that live in a different directory).
+// WorkBuddy/mimocode skills that live in a different directory).
 func Uninstall(name string) error {
 	dir := userSkillsDir()
 	if dir == "" {
@@ -409,22 +412,25 @@ func Import(src string) error {
 }
 
 // DefaultDirs returns standard load paths. Besides iCode's own directories,
-// WorkBuddy skill directories are included as well — the SKILL.md format
-// (YAML frontmatter with name/description + Markdown body) is compatible,
-// so skills installed via WorkBuddy are immediately usable in iCode.
+// WorkBuddy and mimocode skill directories are included as well — the SKILL.md
+// format (YAML frontmatter with name/description + Markdown body) is
+// compatible, so skills installed via those tools are immediately usable in
+// iCode.
 func DefaultDirs() []string {
 	var out []string
-	// Order matters: later dirs override earlier ones, so WorkBuddy dirs come
+	// Order matters: later dirs override earlier ones, so interop dirs come
 	// first and iCode's own dirs win on name conflicts.
 	if home, err := os.UserHomeDir(); err == nil {
 		out = append(out,
 			filepath.Join(home, ".workbuddy", "skills"), // WorkBuddy user-level skills
+			filepath.Join(home, ".mimocode", "skills"),  // mimocode user-level skills
 			filepath.Join(home, ".icode", "skills"),
 		)
 	}
 	if cwd, err := os.Getwd(); err == nil {
 		out = append(out,
 			filepath.Join(cwd, ".workbuddy", "skills"), // WorkBuddy project-level skills
+			filepath.Join(cwd, ".mimocode", "skills"),  // mimocode project-level skills
 			filepath.Join(cwd, ".icode", "skills"),
 		)
 	}

@@ -55,7 +55,8 @@ const value: React.CSSProperties = {
 
 const AnalyticsPage: React.FC = () => {
   const { t } = useTranslation();
-  const { activeSessionId, backendUrl } = useAppStore();
+  const activeSessionId = useAppStore(s => s.activeSessionId);
+  const backendUrl = useAppStore(s => s.backendUrl);
   const [view, setView] = useState<'session' | 'global'>('session');
   const [stats, setStats] = useState<Stats | null>(null);
   const [global, setGlobal] = useState<GlobalAgg | null>(null);

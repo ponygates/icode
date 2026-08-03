@@ -95,6 +95,18 @@ func runeWidth(r rune) int {
 	if r == 0 {
 		return 0
 	}
+	// Zero-width: combining marks and variation selectors must not consume a
+	// cell, otherwise emoji like "❤️" (U+2764 + U+FE0F) or accented text would
+	// be over-counted and wrap one cell too early.
+	switch {
+	case r >= 0x0300 && r <= 0x036F, // Combining Diacritical Marks
+		r >= 0x1AB0 && r <= 0x1AFF, // Combining Diacritical Marks Extended
+		r >= 0x1DC0 && r <= 0x1DFF, // Combining Diacritical Marks Supplement
+		r >= 0x20D0 && r <= 0x20FF, // Combining Diacritical Marks for Symbols
+		r >= 0xFE00 && r <= 0xFE0F, // Variation Selectors
+		r >= 0xE0100 && r <= 0xE01EF: // Variation Selectors Supplement
+		return 0
+	}
 	if r >= 0x1100 && (r <= 0x115F ||
 		r == 0x2329 || r == 0x232A ||
 		(r >= 0x2E80 && r <= 0x303E) ||
@@ -132,6 +144,22 @@ func runeWidth(r rune) int {
 		(r >= 0xFF00 && r <= 0xFF60) ||
 		(r >= 0xFFE0 && r <= 0xFFE6)) {
 		return 2
+	}
+	// Emoji and Supplementary CJK planes (East Asian Wide / Fullwidth).
+	if r >= 0x1F000 && r <= 0x1FAFF {
+		return 2 // emoji pictographs (😀🚀🔥…)
+	}
+	if r >= 0x1F1E6 && r <= 0x1F1FF {
+		return 2 // regional indicator symbols (flags)
+	}
+	if r >= 0x2600 && r <= 0x27BF {
+		return 2 // Miscellaneous Symbols + Dingbats (★☀☂✅…)
+	}
+	if r >= 0x2B00 && r <= 0x2BFF {
+		return 2 // Miscellaneous Symbols and Arrows
+	}
+	if r >= 0x20000 {
+		return 2 // CJK Extension B+ and the rest of the Supplementary planes
 	}
 	return 1
 }

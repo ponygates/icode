@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/BurntSushi/toml"
@@ -41,6 +42,10 @@ func ParseSecurityLevel(s string) SecurityLevel {
 		return SecLocal // safest default
 	}
 }
+
+// boolPtr returns a pointer to b (handy for optional bool config fields whose
+// zero value is meaningful).
+func boolPtr(b bool) *bool { return &b }
 
 // Config is the root configuration object.
 type Config struct {
@@ -108,6 +113,12 @@ type DefaultCfg struct {
 	Cache          bool     `yaml:"cache" json:"cache"`
 	SystemPrompt   string   `yaml:"system_prompt,omitempty" json:"system_prompt,omitempty"`
 	FallbackModels []string `yaml:"fallback_models,omitempty" json:"fallback_models,omitempty"`
+	// OutputStyle controls answer verbosity injected into the system prompt:
+	// concise | normal | verbose (empty = normal).
+	OutputStyle string `yaml:"output_style,omitempty" json:"output_style,omitempty"`
+	// ExtraDirs are additional working directories (beyond cwd) the agent may
+	// reference, surfaced in the system prompt (Claude Code /add-dir parity).
+	ExtraDirs []string `yaml:"extra_dirs,omitempty" json:"extra_dirs,omitempty"`
 	// Smart model routing: cheap model for simple queries, powerful for complex
 	CheapModel    string `yaml:"cheap_model,omitempty" json:"cheap_model,omitempty"`
 	CheapProv     string `yaml:"cheap_provider,omitempty" json:"cheap_provider,omitempty"`
@@ -146,6 +157,12 @@ type TUICfg struct {
 	Theme     string `yaml:"theme" json:"theme"`
 	SyntaxHL  bool   `yaml:"syntax_highlight" json:"syntax_highlight"`
 	DiffMode  string `yaml:"diff_mode" json:"diff_mode"`
+	// Vim toggles vi-style key bindings in the CLI TUI (mirrors Claude Code's
+	// /vim). Off by default.
+	Vim bool `yaml:"vim" json:"vim"`
+	// ShowStatusLine controls the bottom status bar. Defaults to true; a nil
+	// pointer means "unset" → treated as true by consumers.
+	ShowStatusLine *bool `yaml:"show_status_line,omitempty" json:"show_status_line,omitempty"`
 }
 
 type ToolsCfg struct {
@@ -206,7 +223,7 @@ type MultimodalCfg struct {
 	VideoModel string `yaml:"video_model,omitempty" json:"video_model,omitempty"`
 	// APIKey authenticates both endpoints (Bearer). Falls back to the
 	// ICODE_MULTIMODAL_API_KEY / OPENAI_API_KEY environment variables.
-	APIKey string `yaml:"api_key,omitempty" json:"api_key,omitempty"`
+	APIKey string `yaml:"api_key,omitempty" json:"-"`
 	// OutputDir is where generated media is saved. Defaults to ./.icode/generated.
 	OutputDir string `yaml:"output_dir,omitempty" json:"output_dir,omitempty"`
 }
@@ -214,6 +231,41 @@ type MultimodalCfg struct {
 // Default returns a Config populated with sensible defaults.
 // The default security level is "local" — iCode NEVER sends data externally
 // without explicit user consent. No telemetry, no tracking, no phone-home.
+// OutputStyleDirective returns the behavioral directive appended to the system
+// prompt for a given output style. Empty for "normal" (default).
+func OutputStyleDirective(style string) string {
+	switch strings.ToLower(strings.TrimSpace(style)) {
+	case "concise":
+		return "Answer style: be extremely concise. Get to the point in as few words as possible; skip preamble, restating the question, and closing summaries unless the user asks for detail."
+	case "verbose":
+		return "Answer style: be thorough and explanatory. Show your reasoning, include relevant examples, and give step-by-step detail."
+	default:
+		return ""
+	}
+}
+
+// EffectiveSystemPrompt composes the runtime system prompt from the user's
+// base prompt plus the output-style directive and any extra working dirs
+// (/output-style, /add-dir). Centralized so CLI startup and live slash-command
+// changes stay consistent.
+func EffectiveSystemPrompt(c *Config) string {
+	if c == nil {
+		return ""
+	}
+	base := strings.TrimSpace(c.Defaults.SystemPrompt)
+	var parts []string
+	if base != "" {
+		parts = append(parts, base)
+	}
+	if d := OutputStyleDirective(c.Defaults.OutputStyle); d != "" {
+		parts = append(parts, d)
+	}
+	if len(c.Defaults.ExtraDirs) > 0 {
+		parts = append(parts, "Additional working directories you may read and reference beyond the current directory:\n"+strings.Join(c.Defaults.ExtraDirs, "\n"))
+	}
+	return strings.Join(parts, "\n\n")
+}
+
 func Default() *Config {
 	return &Config{
 		Language:      "zh-CN",
@@ -234,9 +286,10 @@ func Default() *Config {
 			"nvidia":     {APIBase: "https://integrate.api.nvidia.com/v1", Timeout: 120},
 		},
 		TUI: TUICfg{
-			Theme:    "auto",
-			SyntaxHL: true,
-			DiffMode: "unified",
+			Theme:         "auto",
+			SyntaxHL:      true,
+			DiffMode:      "unified",
+			ShowStatusLine: boolPtr(true),
 		},
 		Tools: ToolsCfg{
 			BashTimeout: 120,
@@ -375,11 +428,18 @@ func applyEnvOverrides(cfg *Config) {
 	}
 }
 
-// Save writes the current config to disk.
+// Save writes the current config to disk under the write lock. Prefer
+// WithLock + SaveLocked when mutating several fields and persisting atomically.
 func (c *Config) Save(path string) error {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.SaveLocked(path)
+}
 
+// SaveLocked writes the current config to disk WITHOUT taking the lock — the
+// caller MUST already hold the write lock (e.g. inside WithLock). Used so a
+// batch mutation + persist is atomic; calling it outside a held lock races.
+func (c *Config) SaveLocked(path string) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
@@ -390,15 +450,26 @@ func (c *Config) Save(path string) error {
 		return fmt.Errorf("marshal config: %w", err)
 	}
 
-	return os.WriteFile(path, data, 0644)
+	// 0600: config.yaml contains plaintext API keys. Group-readable (0640) or
+	// world-readable (0644) would leak credentials to other users on shared
+	// machines. Keep it owner-only until keychain migration lands.
+	return os.WriteFile(path, data, 0600)
 }
 
-// Lock acquires the config mutex for direct concurrent access to the Config
-// fields (e.g. the server mutating the MCP list while persisting).
-func (c *Config) Lock() { c.mu.Lock() }
-
-// Unlock releases the config mutex acquired by Lock.
-func (c *Config) Unlock() { c.mu.Unlock() }
+// WithLock runs fn while holding the config write lock. Mutations to config
+// fields (especially the Providers/Models maps) plus any persistence inside fn
+// are therefore atomic with respect to readers and other writers.
+//
+// NOTE: fn must mutate the Config via direct field assignment (e.g.
+// c.Providers[name] = pc) — calling a method that takes the lock again inside
+// fn (SetProvider, UpsertMCP, UpsertModel, Save) deadlocks, since Go's write
+// lock is not reentrant. SaveLocked is the exception (it is lock-free by
+// design and meant to be called here).
+func (c *Config) WithLock(fn func() error) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return fn()
+}
 
 // UpsertMCP adds or replaces an MCP server configuration entry.
 func (c *Config) UpsertMCP(m MCPServerCfg) {
@@ -435,6 +506,57 @@ func (c *Config) APIKey(provider string) string {
 		return p.APIKey
 	}
 	return ""
+}
+
+// Provider returns a copy of a provider config entry.
+func (c *Config) Provider(name string) (ProviderCfg, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	pc, ok := c.Providers[name]
+	return pc, ok
+}
+
+// SetProvider inserts or replaces a provider config entry. Use inside
+// WithLock when you also need to persist atomically.
+func (c *Config) SetProvider(name string, pc ProviderCfg) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Providers[name] = pc
+}
+
+// DeleteProvider removes a provider config entry.
+func (c *Config) DeleteProvider(name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.Providers, name)
+}
+
+// ProvidersCopy returns a shallow copy of the provider map, safe for iteration
+// while other goroutines mutate the config.
+func (c *Config) ProvidersCopy() map[string]ProviderCfg {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := make(map[string]ProviderCfg, len(c.Providers))
+	for k, v := range c.Providers {
+		out[k] = v
+	}
+	return out
+}
+
+// ModelsCopy returns a copy of the custom-models slice, safe for iteration.
+func (c *Config) ModelsCopy() []ModelCfg {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := make([]ModelCfg, len(c.Models))
+	copy(out, c.Models)
+	return out
+}
+
+// WithRLock runs fn while holding the config read lock.
+func (c *Config) WithRLock(fn func()) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	fn()
 }
 
 // UpsertModel adds or updates a model entry, persisting the change.

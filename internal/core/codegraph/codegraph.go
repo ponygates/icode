@@ -96,8 +96,7 @@ func (g *Graph) Build(rootDir string) error {
 			}
 			return nil
 		}
-		// Skip minified bundles — symbol extraction is meaningless there.
-		if strings.HasSuffix(path, ".min.js") {
+		if strings.HasSuffix(path, ".min.js") || strings.HasSuffix(path, ".pb.go") {
 			return nil
 		}
 		ext := filepath.Ext(path)
@@ -112,6 +111,14 @@ func (g *Graph) Build(rootDir string) error {
 }
 
 func (g *Graph) indexFile(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	const maxFileSize = 1 << 20
+	if info.Size() > maxFileSize {
+		return nil
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err

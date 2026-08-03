@@ -64,3 +64,9 @@ build-desktop-backend.js
 
 # Backup files
 *.bak
+
+# Test output
+.test_out.txt
+
+# Dev tooling.deveco/
+

@@ -1,5 +1,9 @@
 // Global type declaration for the iCode Electron preload bridge (window.icode).
 // Exposes the native API injected by preload.js into the renderer.
+// NOTE: the native WebView2 desktop does NOT inject this bridge — these IPC
+// methods are optional and every call site must fall back to the HTTP API.
+
+export type DirEntry = string | { name: string; is_dir?: boolean };
 
 interface ICodeAPI {
   getVersion: () => Promise<string>;
@@ -7,6 +11,9 @@ interface ICodeAPI {
   getBackendPort: () => Promise<number | null>;
   getBackendURL: () => Promise<string | null>;
   openExternal: (url: string) => Promise<void>;
+  openFolder: (path?: string) => Promise<void>;
+  readDir: (dir: string) => Promise<DirEntry[]>;
+  getCwd: () => Promise<string>;
 
   listModels: () => Promise<any>;
   refreshModels: () => Promise<any>;
@@ -46,7 +53,11 @@ interface ICodeAPI {
 declare global {
   interface Window {
     icode?: Partial<ICodeAPI>;
+    /** Boot-phase marker written by the renderer so the WebView2 watchdog
+     *  (main.tsx) can report which startup step stalled. */
+    __icodePhase?: string;
+    /** Set once React has mounted, so the watchdog can distinguish "still
+     *  booting" from "mounted but unresponsive". */
+    __icodeMounted?: boolean;
   }
 }
-
-export {};

@@ -1318,6 +1318,98 @@ func (c *chatCallback) OnTokenStats() string {
 	return b.String()
 }
 
+// OnOutputStyle implements tui.Callback — applies an answer style live and
+// persists it to config (takes effect from the next model turn).
+func (c *chatCallback) OnOutputStyle(style string) string {
+	style = strings.ToLower(strings.TrimSpace(style))
+	if style != "concise" && style != "normal" && style != "verbose" {
+		return "无效风格: " + style + "（可选 concise|normal|verbose）"
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return "读取配置失败: " + err.Error()
+	}
+	cfg.Defaults.OutputStyle = style
+	if err := cfg.Save(config.DefaultPath()); err != nil {
+		return "保存配置失败: " + err.Error()
+	}
+	if c.app != nil && c.app.Engine != nil {
+		c.app.Engine.SetSystemPrompt(config.EffectiveSystemPrompt(cfg))
+		return "输出风格已设为 " + style + "（已即时生效并持久化）"
+	}
+	return "输出风格已设为 " + style + "（已持久化，重启会话后生效）"
+}
+
+// OnAddDir implements tui.Callback — registers an extra working directory and
+// re-applies the composed system prompt so the model can reference it.
+func (c *chatCallback) OnAddDir(dir string) string {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "解析路径失败: " + err.Error()
+	}
+	st, err := os.Stat(abs)
+	if err != nil || !st.IsDir() {
+		return "目录不存在或不是文件夹: " + abs
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return "读取配置失败: " + err.Error()
+	}
+	for _, d := range cfg.Defaults.ExtraDirs {
+		if d == abs {
+			return "该目录已在工作目录列表中: " + abs
+		}
+	}
+	cfg.Defaults.ExtraDirs = append(cfg.Defaults.ExtraDirs, abs)
+	if err := cfg.Save(config.DefaultPath()); err != nil {
+		return "保存配置失败: " + err.Error()
+	}
+	if c.app != nil && c.app.Engine != nil {
+		c.app.Engine.SetSystemPrompt(config.EffectiveSystemPrompt(cfg))
+	}
+	return fmt.Sprintf("✓ 已添加工作目录: %s（共 %d 个，已注入上下文）", abs, len(cfg.Defaults.ExtraDirs))
+}
+
+// OnUpdateModels implements tui.Callback — refreshes provider model catalogs
+// and the TUI model picker list.
+func (c *chatCallback) OnUpdateModels() string {
+	if c.app == nil {
+		return "引擎未初始化。"
+	}
+	updates, err := c.app.RefreshModels(context.Background())
+	if err != nil && len(updates) == 0 {
+		return "刷新失败: " + err.Error()
+	}
+	var b strings.Builder
+	b.WriteString("模型目录刷新结果：\n")
+	ok, fail := 0, 0
+	for _, u := range updates {
+		if u.Success {
+			ok++
+			b.WriteString(fmt.Sprintf("  ✓ %-14s %d 个模型（%s）\n", u.Name, u.Count, u.Source))
+		} else {
+			fail++
+			msg := u.Error
+			if msg == "" {
+				msg = "未知错误"
+			}
+			b.WriteString(fmt.Sprintf("  ✗ %-14s %s\n", u.Name, msg))
+		}
+	}
+	b.WriteString(fmt.Sprintf("成功 %d · 失败 %d", ok, fail))
+	// Refresh the TUI's model list so /model and Tab switching see updates.
+	if c.app.Reg != nil && c.tui != nil {
+		if all := c.app.Reg.ListAllModels(); len(all) > 0 {
+			ids := make([]string, 0, len(all))
+			for _, m := range all {
+				ids = append(ids, m.ID)
+			}
+			c.tui.SetModels(ids)
+		}
+	}
+	return b.String()
+}
+
 // formatInt renders an integer with thousands separators.
 func formatInt(n int) string {
 	neg := n < 0

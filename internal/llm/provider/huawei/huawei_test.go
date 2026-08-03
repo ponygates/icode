@@ -56,9 +56,7 @@ func TestModelsHaveValidConfig(t *testing.T) {
 		if m.Provider != ProviderName {
 			t.Errorf("model %q: provider should be %q, got %q", m.ID, ProviderName, m.Provider)
 		}
-		if len(m.Plans) == 0 {
-			t.Errorf("model %q: expected at least 1 pricing plan", m.ID)
-		}
+
 	}
 }
 
@@ -101,7 +99,7 @@ func TestProviderNameConstant(t *testing.T) {
 	if ProviderName != "huawei" {
 		t.Errorf("expected ProviderName 'huawei', got %q", ProviderName)
 	}
-	if DefaultBase != "https://nlp-api.cloud.huawei.com/v1" {
-		t.Errorf("expected DefaultBase 'https://nlp-api.cloud.huawei.com/v1', got %q", DefaultBase)
+	if DefaultBase != "https://maas-console.huawei.com/api/v1" {
+		t.Errorf("expected DefaultBase 'https://maas-console.huawei.com/api/v1', got %q", DefaultBase)
 	}
 }

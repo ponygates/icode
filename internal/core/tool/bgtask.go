@@ -20,6 +20,7 @@ import (
 
 	"github.com/ponygates/icode/internal/executil"
 	"github.com/ponygates/icode/internal/types"
+	"github.com/ponygates/icode/internal/xgo"
 )
 
 // bgTask is one background shell process.
@@ -33,6 +34,7 @@ type bgTask struct {
 	done   bool
 	errMsg string
 	cancel context.CancelFunc
+	cmd    *exec.Cmd
 }
 
 func (t *bgTask) Write(p []byte) (int, error) {
@@ -69,6 +71,10 @@ type bgTaskManager struct {
 
 var bgTasks = &bgTaskManager{tasks: map[string]*bgTask{}}
 
+func KillAllBgTasks() {
+	bgTasks.KillAll()
+}
+
 // Start launches cmdStr in the background and returns its task id.
 func (m *bgTaskManager) Start(cmdStr, workDir string) (string, error) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -90,7 +96,7 @@ func (m *bgTaskManager) Start(cmdStr, workDir string) (string, error) {
 	m.mu.Lock()
 	m.seq++
 	id := fmt.Sprintf("bg-%d", m.seq)
-	task := &bgTask{id: id, command: cmdStr, start: time.Now(), cancel: cancel}
+	task := &bgTask{id: id, command: cmdStr, start: time.Now(), cancel: cancel, cmd: cmd}
 	m.tasks[id] = task
 	m.mu.Unlock()
 
@@ -105,7 +111,7 @@ func (m *bgTaskManager) Start(cmdStr, workDir string) (string, error) {
 		return "", err
 	}
 
-	go func() {
+	xgo.GoSafe("bgtask.wait", func() {
 		err := cmd.Wait()
 		task.mu.Lock()
 		task.done = true
@@ -114,7 +120,7 @@ func (m *bgTaskManager) Start(cmdStr, workDir string) (string, error) {
 		}
 		task.mu.Unlock()
 		cancel()
-	}()
+	})
 
 	return id, nil
 }
@@ -143,6 +149,19 @@ func (m *bgTaskManager) List() []string {
 		out = append(out, fmt.Sprintf("%s  [%s, %s]  %s", t.id, status, elapsed.Round(time.Second), truncN(t.command, 80)))
 	}
 	return out
+}
+
+func (m *bgTaskManager) KillAll() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, t := range m.tasks {
+		t.mu.Lock()
+		if !t.done && t.cmd != nil && t.cmd.Process != nil {
+			_ = t.cmd.Process.Kill()
+		}
+		t.mu.Unlock()
+		t.cancel()
+	}
 }
 
 // ============================================================================

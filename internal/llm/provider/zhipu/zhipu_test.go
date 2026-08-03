@@ -40,8 +40,8 @@ func TestDefaultModels(t *testing.T) {
 	if !ids["glm-5"] {
 		t.Error("expected glm-5 in default models")
 	}
-	if !ids["glm-4-flash"] {
-		t.Error("expected glm-4-flash in default models")
+	if !ids["glm-4-flash-250414"] {
+		t.Error("expected glm-4-flash-250414 in default models")
 	}
 }
 
@@ -56,9 +56,7 @@ func TestModelsHaveValidConfig(t *testing.T) {
 		if m.Provider != ProviderName {
 			t.Errorf("model %q: provider should be %q, got %q", m.ID, ProviderName, m.Provider)
 		}
-		if len(m.Plans) == 0 {
-			t.Errorf("model %q: expected at least 1 pricing plan", m.ID)
-		}
+
 	}
 }
 

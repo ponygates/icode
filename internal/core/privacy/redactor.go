@@ -21,20 +21,25 @@ import (
 )
 
 var (
-	// Chinese ID: 18 digits (possibly with X suffix)
 	idPattern = regexp.MustCompile(`[1-9]\d{5}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx]`)
 
-	// Phone: Chinese mobile numbers
 	phonePattern = regexp.MustCompile(`1[3-9]\d{9}`)
 
-	// Email
 	emailPattern = regexp.MustCompile(`[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}`)
 
-	// Internal IPs
 	internalIPPattern = regexp.MustCompile(`(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})`)
 
-	// API keys (common patterns)
-	apiKeyPattern = regexp.MustCompile(`(sk-[a-zA-Z0-9]{20,}|api[_-]?key[=:]\s*['"]?[a-zA-Z0-9_\-]{16,}|token[=:]\s*['"]?[a-zA-Z0-9_\-]{16,})`)
+	apiKeyPattern = regexp.MustCompile(`(sk-[a-zA-Z0-9]{20,}|sk-ant-[a-zA-Z0-9]{20,}|api[_-]?key[=:]\s*['"]?[a-zA-Z0-9_\-]{16,}|token[=:]\s*['"]?[a-zA-Z0-9_\-]{16,})`)
+
+	creditCardPattern = regexp.MustCompile(`\b4\d{12,18}\b|\b5[1-5]\d{14}\b|\b3[47]\d{13}\b|\b6(?:011|5\d{2})\d{12}\b`)
+
+	ssnPattern = regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`)
+
+	jwtPattern = regexp.MustCompile(`eyJ[a-zA-Z0-9_-]{10,}\.`)
+
+	privateKeyPattern = regexp.MustCompile(`-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----`)
+
+	winHomePattern = regexp.MustCompile(`[A-Z]:\\Users\\[^\x00\\/:"*?<>|]+\\`)
 )
 
 // Redact strips PII from the given text. Returns the sanitized version.
@@ -43,8 +48,23 @@ var (
 func Redact(text string) string {
 	result := text
 
-	// Replace API keys with placeholder
 	result = apiKeyPattern.ReplaceAllString(result, "[API KEY REDACTED]")
+
+	result = creditCardPattern.ReplaceAllString(result, "[CC REDACTED]")
+
+	result = ssnPattern.ReplaceAllString(result, "[SSN REDACTED]")
+
+	result = jwtPattern.ReplaceAllString(result, "[JWT REDACTED]")
+
+	result = privateKeyPattern.ReplaceAllString(result, "[PRIVATE KEY REDACTED]")
+
+	result = winHomePattern.ReplaceAllStringFunc(result, func(match string) string {
+		idx := strings.Index(match[3:], "\\")
+		if idx < 0 {
+			return "[USER PATH REDACTED]"
+		}
+		return match[:3] + "[USER]" + match[3+idx:]
+	})
 
 	// Replace Chinese ID numbers
 	result = idPattern.ReplaceAllStringFunc(result, func(match string) string {

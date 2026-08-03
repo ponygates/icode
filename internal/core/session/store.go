@@ -4,6 +4,7 @@ package session
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -139,14 +140,9 @@ func (s *Store) SearchMessages(query string, limit int) ([]types.SearchResult, e
 		}
 	}
 
-	// Sort by timestamp descending (most recent first)
-	for i := 0; i < len(results); i++ {
-		for j := i + 1; j < len(results); j++ {
-			if results[j].Timestamp.After(results[i].Timestamp) {
-				results[i], results[j] = results[j], results[i]
-			}
-		}
-	}
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Timestamp.After(results[j].Timestamp)
+	})
 
 	if len(results) > limit {
 		results = results[:limit]

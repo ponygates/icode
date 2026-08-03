@@ -258,7 +258,12 @@ go run . server --port 9090
 - [x] **v0.8**: 多模态工具（`image_gen` / `video_gen`，走 OpenAI 兼容后端）、首回合并行工具执行 + LSP 诊断
 - [x] **v0.9**: Cache-First 加固——技能懒加载索引 + `use_skill` 工具 + 激活预算层(Level 4) + Token 节省可视化(`/token`、桌面「🪙 已节省」)
 - [x] **v0.10**: 本地零成本 Embedding 语义路由（`routing.mode: embedding`，纯离线/零 token，比关键词更准）
-- [ ] **v0.11**: 技能市场分发、VS Code 扩展、多模态结果回灌
+- [x] **v0.11**: 技能市场分发（内置 catalog + 一键安装/卸载/导入）、VS Code 扩展、多模态结果回灌
+- [x] **v0.12–v0.15**: 桌面系统托盘 + 全局热键、Token 节省仪表盘、多标签会话 + 工作区、技能/MCP/连接器管理、VS Code 扩展聊天面板
+- [x] **v0.16–v0.20**: 多模态结果回灌上下文（vision 闭环）、桌面设置页（开机自启 / 后端端口）、路由默认升级 embedding
+- [x] **v0.25–v0.35**: 桌面卡死/启动加固（MCP boot 阻塞、localStorage 序列化、主线程重渲染隔离、`/model` 选择器、简易 WebView2 UI）
+- [x] **v0.36**: 一键自动更新模型（新增检测 + 下架标记 + 文档富化）
+- [ ] **当前**: 后端安全与并发加固（CSRF/同源防护、fetch SSRF 拦截、文件工具目录沙箱、配置/工具注册表加锁、API Key 脱敏）+ 前端类型与测试加固（vitest、i18n 三语键一致性）
 
 ## 许可证
 

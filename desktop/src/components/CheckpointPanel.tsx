@@ -11,7 +11,8 @@ interface CheckpointEntry {
 
 const CheckpointPanel: React.FC = () => {
   const { t } = useTranslation();
-  const { activeSessionId, backendUrl } = useAppStore();
+  const activeSessionId = useAppStore(s => s.activeSessionId);
+  const backendUrl = useAppStore(s => s.backendUrl);
   const [entries, setEntries] = useState<CheckpointEntry[]>([]);
   const [rewinding, setRewinding] = useState(false);
 

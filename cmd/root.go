@@ -23,9 +23,24 @@ var (
 )
 
 // ExecuteDesktop launches the desktop-only build.
-func ExecuteDesktop() error {
-	appVersion = "0.4.0"
+// version/build/commit come from the main package (set via ldflags) so the
+// desktop binary reports the same version as the CLI instead of a stale
+// hardcoded constant.
+func ExecuteDesktop(version, build, commit string) error {
+	appVersion = version
+	appBuild = build
+	appCommit = commit
 	return runDesktop()
+}
+
+// ExecuteSimpleUI launches the lightweight WebView2 chat window (the "CLI 的
+// UI 版"). It is built as a separate binary with -tags simpleui (see
+// main_ui.go), so the CLI binary never auto-opens a GUI window.
+func ExecuteSimpleUI(version, build, commit string) error {
+	appVersion = version
+	appBuild = build
+	appCommit = commit
+	return runSimpleUI()
 }
 
 // Execute is the main entry point for the CLI.
@@ -67,8 +82,9 @@ func Execute(version, build, commit string) (err error) {
 		return runDesktop()
 	}
 
-	// Ensure the Windows console uses UTF-8 so Unicode UI glyphs and Chinese
-	// input render correctly instead of as mojibake.
+	// Console available: run the TUI. (The WebView2 simple-UI and the desktop
+	// are now separate binaries — see -tags simpleui / desktop_only — so this
+	// CLI binary never auto-launches a GUI window on double-click.)
 	fixConsoleCodepage()
 	return rootCmd.Execute()
 }

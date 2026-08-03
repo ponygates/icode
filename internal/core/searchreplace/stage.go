@@ -79,9 +79,14 @@ func (s *StagingArea) Add(filePath, search, replace string) (int, bool, string) 
 			ed.Reason = fmt.Sprintf("search text not found in %s", filePath)
 			ed.Valid = false
 		} else {
-			newText := strings.ReplaceAll(text, search, replace)
+			var newText string
+			if c == 1 {
+				newText = strings.ReplaceAll(text, search, replace)
+			} else {
+				newText = strings.Replace(text, search, replace, 1)
+			}
 			ed.Valid = true
-			ed.Reason = fmt.Sprintf("%d occurrence(s) will be replaced", c)
+			ed.Reason = fmt.Sprintf("%d occurrence(s) found, replacing first only", c)
 			ed.Diff = unifiedDiff(filePath, text, newText, search, replace)
 		}
 	}
@@ -137,7 +142,7 @@ func (s *StagingArea) ApplyValid() []string {
 			remaining = append(remaining, ed)
 			continue
 		}
-		text = strings.ReplaceAll(text, ed.Search, ed.Replace)
+		text = strings.Replace(text, ed.Search, ed.Replace, 1)
 		if err := os.WriteFile(ed.FilePath, []byte(text), 0644); err != nil {
 			results = append(results, fmt.Sprintf("FAILED %s: write error: %v", ed.FilePath, err))
 			remaining = append(remaining, ed)
