@@ -736,6 +736,14 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 
 	opt := e.getOrCreateOptimizer(sessionID, modelInfo, sess.Messages, sessionum.Get(sess))
 
+	// Long-goal mode: when the session has a goal, re-inject it into the
+	// system prompt every turn so the model keeps working toward it. The
+	// optimizer's SetSystemPrompt is a no-op when unchanged, keeping the
+	// provider cache prefix stable.
+	if goal := sessionum.GetGoal(sess); goal != "" {
+		opt.SetSystemPrompt(e.buildSystemPrompt(sessionID) + "\n\nCURRENT GOAL (keep working toward this until done):\n" + goal)
+	}
+
 	// Redact content if security level is "desensitize"
 	sendContent := content
 	if e.gate != nil && e.gate.SecurityLevel() == config.SecDesensitize {

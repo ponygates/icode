@@ -232,6 +232,21 @@ func NewWithModel(modelInfo types.ModelInfo, systemPrompt string) *Optimizer {
 	return New(Config{ModelInfo: modelInfo, SystemPrompt: systemPrompt})
 }
 
+// SetSystemPrompt replaces the immutable system prompt. Used by the engine to
+// inject a session's long goal on every turn. No-op when unchanged so the
+// provider cache prefix stays stable between turns.
+func (o *Optimizer) SetSystemPrompt(p string) {
+	if p == "" {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.systemPrompt == p {
+		return
+	}
+	o.systemPrompt = p
+}
+
 // SetTools records the tool schemas (part of the immutable prefix).
 func (o *Optimizer) SetTools(tools []types.ToolDef) {
 	o.mu.Lock()

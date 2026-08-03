@@ -1086,6 +1086,56 @@ func (c *chatCallback) OnSlashCommand(cmd string, args []string) {
 		} else {
 			c.tui.AddMessage(tui.RoleSystem, "Usage: /fork <session-id>[@<n>]")
 		}
+	case "/goal":
+		sub := "show"
+		if len(args) > 0 {
+			sub = strings.ToLower(args[0])
+		}
+		withSess := func(fn func(*types.Session)) {
+			if c.sessionID == "" || c.app == nil || c.app.SessStore == nil {
+				c.tui.AddMessage(tui.RoleSystem, "没有活跃会话。")
+				return
+			}
+			sess, err := c.app.SessStore.Get(c.sessionID)
+			if err != nil {
+				c.tui.AddMessage(tui.RoleSystem, "读取会话失败: "+err.Error())
+				return
+			}
+			fn(sess)
+		}
+		switch sub {
+		case "set":
+			if len(args) < 2 {
+				c.tui.AddMessage(tui.RoleSystem, "用法: /goal set <目标文本>")
+				break
+			}
+			goal := strings.TrimSpace(strings.Join(args[1:], " "))
+			withSess(func(sess *types.Session) {
+				if err := sessionum.SetGoal(c.app.SessStore, sess, goal); err != nil {
+					c.tui.AddMessage(tui.RoleSystem, "保存目标失败: "+err.Error())
+				} else {
+					c.tui.AddMessage(tui.RoleSystem, "已设置长目标（后续每轮对话都会自动携带）：\n"+goal)
+				}
+			})
+		case "show":
+			withSess(func(sess *types.Session) {
+				if g := sessionum.GetGoal(sess); g != "" {
+					c.tui.AddMessage(tui.RoleSystem, "当前目标（长目标模式生效中）：\n"+g)
+				} else {
+					c.tui.AddMessage(tui.RoleSystem, "当前没有目标。\n用法: /goal set <目标> | /goal show | /goal clear")
+				}
+			})
+		case "clear", "unset":
+			withSess(func(sess *types.Session) {
+				if err := sessionum.SetGoal(c.app.SessStore, sess, ""); err != nil {
+					c.tui.AddMessage(tui.RoleSystem, "清除目标失败: "+err.Error())
+				} else {
+					c.tui.AddMessage(tui.RoleSystem, "已清除目标，退出长目标模式。")
+				}
+			})
+		default:
+			c.tui.AddMessage(tui.RoleSystem, "用法: /goal set <目标> | /goal show | /goal clear")
+		}
 	case "/clear":
 		if c.sessionID != "" && c.app != nil && c.app.SessStore != nil {
 			c.app.SessStore.Delete(c.sessionID)

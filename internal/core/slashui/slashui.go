@@ -110,6 +110,8 @@ func Execute(ctx context.Context, b *Backend, st *State, text string) Result {
 		return cmdResume(b, st, args)
 	case "/fork":
 		return cmdFork(b, st, args)
+	case "/goal":
+		return cmdGoal(b, st, args)
 	case "/new", "/newsession":
 		archiveSession(b, st)
 		return ok("新会话已创建。").withNewSession()
@@ -266,7 +268,7 @@ func helpDefs() []helpItem {
 		{"/model [id]", "切换模型"}, {"/provider [名]", "切换提供商"},
 		{"/mode [agent|plan|yolo|auto|ask]", "切换模式"}, {"/models", "列出自定义模型"},
 		{"/session", "显示当前会话"}, {"/sessions", "列出已保存会话"},
-		{"/resume <id>", "载入历史会话"}, {"/fork <id>[@n]", "从历史会话分支出独立会话"}, {"/new", "开启新会话"},
+		{"/resume <id>", "载入历史会话"}, {"/fork <id>[@n]", "从历史会话分支出独立会话"}, {"/goal [set|show|clear]", "长目标模式"}, {"/new", "开启新会话"},
 		{"/clear", "清空当前会话"}, {"/wipe", "清空会话上下文"},
 		{"/undo [N]", "回滚 N 步文件更改"}, {"/rewind [N]", "同上（检查点回滚）"},
 		{"/diff", "显示 git 工作区差异"}, {"/review [file]", "审查 diff 或指定文件"},
@@ -596,6 +598,71 @@ func archiveSession(b *Backend, st *State) {
 		return
 	}
 	_ = sessionum.Save(b.SessStore, sess, sessionum.Generate(sess, st.Model, st.Provider, st.Mode))
+}
+
+// cmdGoal manages the session's long-goal mode: /goal set <text> injects the
+// goal into every turn's system prompt; /goal show / clear inspect or remove
+// it. The goal itself costs no tokens beyond its own text — it replaces the
+// need to re-state intent in every message.
+func cmdGoal(b *Backend, st *State, args []string) Result {
+	if b == nil || b.SessStore == nil || st.SessionID == "" {
+		return ok("没有活跃会话（先发一条消息）。")
+	}
+	load := func() (*types.Session, Result) {
+		sess, err := b.SessStore.Get(st.SessionID)
+		if err != nil {
+			return nil, errf("读取会话失败: %v", err)
+		}
+		return sess, Result{}
+	}
+	if len(args) == 0 {
+		sess, r := load()
+		if sess == nil {
+			return r
+		}
+		if g := sessionum.GetGoal(sess); g != "" {
+			return ok("当前目标（长目标模式生效中）：\n" + g)
+		}
+		return ok("当前没有目标。\n用法: /goal set <目标> — 开启长目标模式（每轮自动携带）\n      /goal show — 查看\n      /goal clear — 退出")
+	}
+	switch strings.ToLower(args[0]) {
+	case "set":
+		if len(args) < 2 {
+			return ok("用法: /goal set <目标文本>")
+		}
+		goal := strings.TrimSpace(strings.Join(args[1:], " "))
+		if goal == "" {
+			return ok("目标不能为空。用法: /goal set <目标文本>")
+		}
+		sess, r := load()
+		if sess == nil {
+			return r
+		}
+		if err := sessionum.SetGoal(b.SessStore, sess, goal); err != nil {
+			return errf("保存目标失败: %v", err)
+		}
+		return ok("已设置长目标（后续每轮对话都会自动携带）：\n" + goal)
+	case "show":
+		sess, r := load()
+		if sess == nil {
+			return r
+		}
+		if g := sessionum.GetGoal(sess); g != "" {
+			return ok("当前目标（长目标模式生效中）：\n" + g)
+		}
+		return ok("当前没有目标。")
+	case "clear", "unset":
+		sess, r := load()
+		if sess == nil {
+			return r
+		}
+		if err := sessionum.SetGoal(b.SessStore, sess, ""); err != nil {
+			return errf("清除目标失败: %v", err)
+		}
+		return ok("已清除目标，退出长目标模式。")
+	default:
+		return errf("未知子命令: %s（支持 set / show / clear）", args[0])
+	}
 }
 
 func cmdSearch(b *Backend, args []string) Result {

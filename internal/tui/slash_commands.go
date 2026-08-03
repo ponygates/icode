@@ -144,6 +144,13 @@ func (t *TUI) handleSlash(text string) {
 			t.add(RoleSystem, "Usage: /fork <session-id>[@<n>] — 从历史会话分支出一个独立会话")
 		}
 
+	case "/goal":
+		if t.callback != nil {
+			t.callback.OnSlashCommand("/goal", args)
+		} else {
+			t.add(RoleSystem, "Usage: /goal set <目标> | /goal show | /goal clear")
+		}
+
 	case "/clear":
 		t.mu.Lock()
 		t.messages = nil
