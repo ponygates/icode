@@ -121,6 +121,8 @@ func Execute(ctx context.Context, b *Backend, st *State, text string) Result {
 		return cmdSearch(b, args)
 	case "/clear", "/wipe":
 		return cmdClear(b, st)
+	case "/restore":
+		return cmdRestore(b, args)
 	case "/undo", "/rewind":
 		return cmdUndo(st, args)
 	case "/diff":
@@ -505,8 +507,13 @@ func cmdSessions(b *Backend, st *State, _ []string) Result {
 		return ok("暂无已保存会话。开始对话后自动创建。")
 	}
 	var sb strings.Builder
+	kept := 0
 	sb.WriteString(fmt.Sprintf("已保存会话 (%d):\n", len(sessions)))
 	for _, s := range sessions {
+		if sessionum.IsDeleted(&s) {
+			continue
+		}
+		kept++
 		title := s.Title
 		if title == "" {
 			title = "(untitled)"
@@ -523,6 +530,9 @@ func cmdSessions(b *Backend, st *State, _ []string) Result {
 			line += fmt.Sprintf("\n      ↳ %s", first)
 		}
 		sb.WriteString(line + "\n")
+	}
+	if kept == 0 {
+		sb.WriteString("  (无可用会话 — 全部已软删除，可用 /restore <id> 恢复)\n")
 	}
 	sb.WriteString("\n/resume <session_id> 载入某个会话")
 	return ok(sb.String())
@@ -561,6 +571,9 @@ func cmdResume(b *Backend, st *State, args []string) Result {
 	sess, err := b.SessStore.Get(id)
 	if err != nil {
 		return errf("会话不存在: %s", id)
+	}
+	if sessionum.IsDeleted(sess) {
+		return errf("该会话已被软删除，先用 /restore %s 恢复。", id)
 	}
 	if lite > 0 {
 		if sessionum.Get(sess) == "" {
@@ -797,9 +810,33 @@ func cmdSearch(b *Backend, args []string) Result {
 
 func cmdClear(b *Backend, st *State) Result {
 	if b != nil && b.SessStore != nil && st.SessionID != "" {
-		_ = b.SessStore.Delete(st.SessionID)
+		if sess, err := b.SessStore.Get(st.SessionID); err == nil {
+			if err := sessionum.MarkDeleted(b.SessStore, sess); err != nil {
+				return errf("归档失败（会话未删除）: %v", err)
+			}
+		}
 	}
-	return Result{Output: "会话已清空。", ClearSession: true}
+	return Result{Output: "会话已归档并标记删除，可从列表移除（/restore <id> 可恢复）。", ClearSession: true}
+}
+
+func cmdRestore(b *Backend, args []string) Result {
+	if len(args) == 0 {
+		return ok("用法: /restore <session-id> — 恢复被 /clear 软删除的会话")
+	}
+	if b == nil || b.SessStore == nil {
+		return ok("无会话存储可用。")
+	}
+	sess, err := b.SessStore.Get(args[0])
+	if err != nil {
+		return errf("会话不存在: %s", args[0])
+	}
+	if !sessionum.IsDeleted(sess) {
+		return ok("该会话未被删除，无需恢复。")
+	}
+	if err := sessionum.Restore(b.SessStore, sess); err != nil {
+		return errf("恢复失败: %v", err)
+	}
+	return ok(fmt.Sprintf("已恢复会话 %s — %d 条消息", sess.ID, len(sess.Messages)))
 }
 
 func cmdUndo(st *State, args []string) Result {

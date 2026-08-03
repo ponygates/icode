@@ -141,6 +141,10 @@ const (
 	EventDone       StreamEventType = "done"
 	EventError      StreamEventType = "error"
 	EventPermission StreamEventType = "permission"
+	// EventSystem is an engine-originated notice (e.g. budget guard kicking
+	// in) shown to the user as a system message — never folded into the
+	// assistant reply or persisted into the conversation.
+	EventSystem StreamEventType = "system"
 )
 
 // PermissionReq is emitted when the engine needs interactive approval for a

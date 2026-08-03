@@ -857,7 +857,7 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 
 	out := make(chan types.StreamEvent, 64)
 	if trimmed {
-		out <- types.StreamEvent{Type: types.EventText, Content: "\nⓘ [预算护栏] 会话上下文超出预算，已自动压缩为摘要 + 最近消息（≤ 预算）。"}
+		out <- types.StreamEvent{Type: types.EventSystem, Content: "ⓘ [预算护栏] 会话上下文超出预算，已自动压缩为摘要 + 最近消息（≤ 预算）。"}
 	}
 	go func() {
 		defer close(out)

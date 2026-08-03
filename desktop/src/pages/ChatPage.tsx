@@ -53,6 +53,7 @@ interface PlanInfo {
 type ChatEvent =
   | { type: 'text'; content: string }
   | { type: 'thinking'; content: string }
+  | { type: 'system'; content: string }
   | { type: 'tool_use'; tool_call?: { name: string; arguments?: string }; ToolCall?: { Name: string; Arguments?: string } }
   | { type: 'permission'; permission?: PermissionRequest; Permission?: PermissionRequest }
   | { type: 'done'; meta?: { usage?: UsageInfo } }
@@ -624,6 +625,15 @@ const ChatPage: React.FC = () => {
       if (ty === 'thinking') {
         thinkingBuf += event.content || '';
         if (thinkingBuf.length > 3000) thinkingBuf = thinkingBuf.slice(0, 3000);
+        return;
+      }
+      if (ty === 'system') {
+        // Engine notice (e.g. budget guard) — standalone system message,
+        // never folded into the assistant reply.
+        addMessage(sid, {
+          id: (Date.now() + 1).toString(36) + 's',
+          role: 'system', content: event.content || '', timestamp: Date.now(),
+        });
         return;
       }
       if (ty === 'text') {

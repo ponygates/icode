@@ -361,6 +361,8 @@ func (b *simpleUIBridge) runPrompt(prompt string) {
 					b.appendAssistantText(event.Content)
 					b.push(fmt.Sprintf("uiDelta(%s)", jsStr(event.Content)))
 				}
+			case types.EventSystem:
+				b.push(fmt.Sprintf("uiAppend('system', %s)", jsStr(strings.TrimSpace(event.Content))))
 			case types.EventToolUse:
 				b.mu.Lock()
 				b.lastTool = event.ToolCall.Name
@@ -417,11 +419,14 @@ func (b *simpleUIBridge) ArchiveCurrent() {
 	_ = sessionum.Save(b.app.SessStore, sess, sessionum.Generate(sess, b.model, b.provider, ""))
 }
 
-// Clear starts a fresh session.
+// Clear archives a summary (if missing) then soft-deletes the session — the
+// transcript is kept and restorable via /restore.
 func (b *simpleUIBridge) Clear() {
 	b.mu.Lock()
 	if b.sessionID != "" && b.app != nil && b.app.SessStore != nil {
-		b.app.SessStore.Delete(b.sessionID)
+		if sess, err := b.app.SessStore.Get(b.sessionID); err == nil {
+			_ = sessionum.MarkDeleted(b.app.SessStore, sess)
+		}
 	}
 	b.sessionID = ""
 	b.messages = nil
@@ -448,6 +453,9 @@ func (b *simpleUIBridge) Sessions() []SessionEntry {
 	}
 	out := make([]SessionEntry, 0, len(list))
 	for _, s := range list {
+		if sessionum.IsDeleted(&s) {
+			continue
+		}
 		title := s.Title
 		if title == "" {
 			title = s.ID

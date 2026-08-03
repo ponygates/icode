@@ -964,6 +964,8 @@ func (c *chatCallback) OnSend(text string) {
 		case types.EventThinking:
 			// Store thinking content for display in the thinking box
 			c.tui.AddMessage(tui.RoleThinking, event.Content)
+		case types.EventSystem:
+			c.tui.AddMessage(tui.RoleSystem, strings.TrimSpace(event.Content))
 		case types.EventToolUse:
 			c.lastTool = event.ToolCall.Name
 			// Strip empty/no-op parameter objects so the conversation
@@ -1028,6 +1030,9 @@ func (c *chatCallback) OnResume(id string) string {
 	sess, err := c.app.SessStore.Get(id)
 	if err != nil {
 		return fmt.Sprintf("Session not found: %s", id)
+	}
+	if sessionum.IsDeleted(sess) {
+		return fmt.Sprintf("该会话已被软删除，先用 /restore %s 恢复。", id)
 	}
 	c.sessionID = sess.ID
 
@@ -1094,6 +1099,20 @@ func (c *chatCallback) OnSlashCommand(cmd string, args []string) {
 			}
 		}
 		c.tui.AddMessage(tui.RoleSystem, c.OnResume(id))
+	case "/restore":
+		if len(args) == 0 || c.app == nil || c.app.SessStore == nil {
+			c.tui.AddMessage(tui.RoleSystem, "Usage: /restore <session-id> — 恢复被 /clear 软删除的会话")
+			break
+		}
+		if sess, err := c.app.SessStore.Get(args[0]); err != nil {
+			c.tui.AddMessage(tui.RoleSystem, "会话不存在: "+args[0])
+		} else if !sessionum.IsDeleted(sess) {
+			c.tui.AddMessage(tui.RoleSystem, "该会话未被删除，无需恢复。")
+		} else if err := sessionum.Restore(c.app.SessStore, sess); err != nil {
+			c.tui.AddMessage(tui.RoleSystem, "恢复失败: "+err.Error())
+		} else {
+			c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("已恢复会话 %s — %d 条消息", sess.ID, len(sess.Messages)))
+		}
 	case "/fork":
 		if len(args) > 0 && c.app != nil && c.app.SessStore != nil {
 			spec := args[0]
@@ -1220,10 +1239,14 @@ func (c *chatCallback) OnSlashCommand(cmd string, args []string) {
 		}
 	case "/clear":
 		if c.sessionID != "" && c.app != nil && c.app.SessStore != nil {
-			c.app.SessStore.Delete(c.sessionID)
+			if sess, err := c.app.SessStore.Get(c.sessionID); err == nil {
+				if err := sessionum.MarkDeleted(c.app.SessStore, sess); err != nil {
+					c.tui.AddMessage(tui.RoleSystem, "归档失败（会话未删除）: "+err.Error())
+				}
+			}
 		}
 		c.sessionID = ""
-		c.tui.AddMessage(tui.RoleSystem, "Session cleared.")
+		c.tui.AddMessage(tui.RoleSystem, "Session cleared (soft). /restore <id> 可恢复。")
 	case "/summarize":
 		if c.sessionID != "" && c.app != nil && c.app.SessStore != nil {
 			if sess, err := c.app.SessStore.Get(c.sessionID); err == nil {

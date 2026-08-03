@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"path/filepath"
 
+	"github.com/ponygates/icode/internal/core/sessionum"
 	"github.com/ponygates/icode/internal/types"
 )
 
@@ -41,7 +42,14 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, sessions)
+		kept := sessions[:0]
+		for _, sess := range sessions {
+			if sessionum.IsDeleted(&sess) {
+				continue
+			}
+			kept = append(kept, sess)
+		}
+		writeJSON(w, http.StatusOK, kept)
 
 	case http.MethodPost:
 		var sess types.Session
