@@ -113,6 +113,7 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 	mux.HandleFunc("/api/chat", s.handleChat)
 	mux.HandleFunc("/api/chat/stop", s.handleChatStop)
 	mux.HandleFunc("/api/slash", s.handleSlash)
+	mux.HandleFunc("/api/shell", s.handleShell)
 
 	// Config
 	mux.HandleFunc("/api/config", s.handleConfig)

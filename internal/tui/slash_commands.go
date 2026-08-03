@@ -563,7 +563,8 @@ func (t *TUI) handleSlash(text string) {
 		t.vimMode = !t.vimMode
 		t.persistSetting(func(c *config.Config) { c.TUI.Vim = t.vimMode })
 		if t.vimMode {
-			t.add(RoleSystem, "[x] Vim 模式已开启（vi 风格键位，输入行按 Esc 进入普通模式）")
+			t.vimInsert = true
+			t.add(RoleSystem, "[x] Vim 模式已开启（Esc 进入普通模式: h/l/0/$ 移动, x 删字符, dd 删整行, u 撤销, i/a/I/A 插入）")
 		} else {
 			t.add(RoleSystem, "[ ] Vim 模式已关闭")
 		}

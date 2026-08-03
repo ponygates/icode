@@ -104,6 +104,23 @@ const App: React.FC = () => {
         setSettingsOpen(v => !v);
         return;
       }
+      // Ctrl+N — new chat session (mirrors the sidebar "+" button).
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'n') {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent('icode:new-session'));
+        return;
+      }
+      // Ctrl+L — focus the chat input bar.
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'l') {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent('icode:focus-input'));
+        return;
+      }
+      // Esc — interrupt streaming generation (no-op when idle).
+      if (e.key === 'Escape') {
+        window.dispatchEvent(new CustomEvent('icode:stop-chat'));
+        return;
+      }
       // "?" toggles the shortcut panel — but never while the user is typing in
       // an input / textarea / contentEditable (where "?" is legitimate text).
       if (e.key === '?' || e.key === '？') {

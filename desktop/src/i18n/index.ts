@@ -57,6 +57,7 @@ i18n.use(initReactI18next).init({
           modePlan: '规划',
           modeNormal: '常规',
           modeAsk: '询问',
+          modeYolo: '全自动',
         },
         models: {
           title: '模型管理',
@@ -488,6 +489,7 @@ i18n.use(initReactI18next).init({
           modePlan: '規劃',
           modeNormal: '常規',
           modeAsk: '詢問',
+          modeYolo: '全自動',
         },
         models: {
           title: '模型管理',
@@ -919,6 +921,7 @@ i18n.use(initReactI18next).init({
           modePlan: 'Plan',
           modeNormal: 'Normal',
           modeAsk: 'Ask',
+          modeYolo: 'Yolo',
         },
         models: {
           title: 'Model Management',

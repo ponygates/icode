@@ -203,11 +203,11 @@ function PageGeneral({ store }: { store: ReturnType<typeof useAppStore.getState>
         <div style={{ display:'flex', gap:6 }}>
           {[
             { v:'plan',  label: t('settings.modePlan') },
-            { v:'agent', label: t('settings.modeAgent') },
+            { v:'ask',   label: t('settings.modeAgent') },
             { v:'auto',  label: t('settings.modeAuto') },
             { v:'yolo',  label: t('settings.modeYolo') },
           ].map(({v, label}) => {
-            const sel = store.mode === v || (store.mode === 'plan' && v === 'agent');
+            const sel = store.mode === v || (v === 'ask' && store.mode === 'agent');
             return (
               <button key={v} onClick={() => store.setMode(v)} style={{
                 padding:'7px 14px', borderRadius:6, fontSize:11, fontWeight: sel ? 600 : 400,
@@ -1110,7 +1110,6 @@ function PageShortcuts() {
     ['Ctrl+X',t('shortcuts.cut')],
     ['Ctrl+A',t('shortcuts.selectAll')],
     ['↻',t('shortcuts.refreshModels')],
-    ['Ctrl+C',t('shortcuts.exit')],
     ['/, @',t('shortcuts.cmdFileComplete')],
   ];
   return (

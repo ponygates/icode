@@ -11,6 +11,7 @@ import TabBar from '../components/TabBar';
 import CheckpointPanel from '../components/CheckpointPanel';
 import FilePicker from '../components/FilePicker';
 import PlumBlossom from '../components/PlumBlossom';
+import { executeSlash, filterSlash, type SlashCommand } from '../lib/slashCommands';
 
 // Shorten a path to its last 2 segments for display.
 function shortDir(p: string): string {
@@ -51,7 +52,7 @@ interface PlanInfo {
 // A single server-sent event from /api/chat's SSE stream.
 type ChatEvent =
   | { type: 'text'; content: string }
-  | { type: 'tool_use'; tool_call?: { name: string }; ToolCall?: { Name: string } }
+  | { type: 'tool_use'; tool_call?: { name: string; arguments?: string }; ToolCall?: { Name: string; Arguments?: string } }
   | { type: 'permission'; permission?: PermissionRequest; Permission?: PermissionRequest }
   | { type: 'done'; meta?: { usage?: UsageInfo } }
   | { type: 'error'; content: string };
@@ -65,9 +66,29 @@ interface ChatPayload {
   attachments?: Array<{ type: string; mime: string; data: string }>;
 }
 
+// Fields worth surfacing in a tool-call chip — keeps the bubble informative
+// without dumping the full (often huge) JSON argument payload into the stream.
+const TOOL_ARG_FIELDS = ['path', 'command', 'pattern', 'query', 'file', 'directory', 'url', 'name', 'content'];
+
+function summarizeToolArgs(raw?: string): string {
+  if (!raw) return '';
+  try {
+    const obj = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    const parts: string[] = [];
+    for (const k of TOOL_ARG_FIELDS) {
+      const v = obj?.[k];
+      if (v == null) continue;
+      const s = String(v).replace(/\s+/g, ' ').trim();
+      parts.push(`${k}=${s.length > 60 ? s.slice(0, 57) + '…' : s}`);
+    }
+    return parts.length ? ' ' + parts.join(' ') : '';
+  } catch {
+    return '';
+  }
+}
+
 // Renders inline multimodal attachments (image thumbnails / file chips) inside a chat bubble.
-function AttachmentView({ items, onZoom }: { items: Attachment[]; onZoom: (src: string) => void }) {
-  return (
+function AttachmentView({ items, onZoom }: { items: Attachment[]; onZoom: (src: string) => void }) {  return (
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
       {items.map((a, i) => {
         const isImage = a.type === 'image' || (a.mime || '').startsWith('image/');
@@ -160,12 +181,29 @@ const MessageList = React.memo(({ messages, isStreaming, onRegenerate, onZoom }:
             {msg.role === 'assistant' ? (
               msg.content ? (
                 msg.content.startsWith('[Tool:') ? (
-                  <div style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
-                    <div style={{ color: 'var(--accent)', fontWeight: 500, marginBottom: 4 }}>
-                      ⏺ {msg.content.match(/\[Tool: ([^\]]+)\]/)?.[1] || t('chat.toolCall')}
-                    </div>
-                    <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{msg.content.replace(/\[Tool: [^\]]+\]\n?/, '')}</pre>
-                  </div>
+                  (() => {
+                    const tm = msg.content.match(/^\[Tool: ([^\]]+)\]/);
+                    const name = tm?.[1] || t('chat.toolCall');
+                    const afterHeader = msg.content.slice(tm?.[0].length || 0);
+                    const nl = afterHeader.indexOf('\n');
+                    const detail = (nl < 0 ? afterHeader : afterHeader.slice(0, nl)).trim();
+                    const output = nl < 0 ? '' : afterHeader.slice(nl + 1);
+                    return (
+                      <div style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                        <div style={{ color: 'var(--accent)', fontWeight: 500, marginBottom: 2 }}>
+                          ⏺ {name}
+                        </div>
+                        {detail && (
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 2, wordBreak: 'break-all' }}>
+                            {detail}
+                          </div>
+                        )}
+                        {output && (
+                          <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{output}</pre>
+                        )}
+                      </div>
+                    );
+                  })()
                 ) : (
                   <>
                     <Markdown text={msg.content} streaming={msgStreaming} />
@@ -217,7 +255,19 @@ const ChatPage: React.FC = () => {
   const [lightbox, setLightbox] = useState<string | null>(null);
   const [attachedImages, setAttachedImages] = useState<{ mime: string; data: string }[]>([]);
   const [gitBranch, setGitBranch] = useState('');
+  // Session runtime is measured from the session's createdAt; tick once a second
+  // so the "runtime" card stays live without re-rendering the message list.
+  const [now, setNow] = useState(() => Date.now());
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  // Per-session input history for ↑/↓ browsing (mirrors the TUI). The draft
+  // holds whatever the user typed before starting to browse so ↓ can restore it.
+  const historyRef = useRef<string[]>([]);
+  const [historyIdx, setHistoryIdx] = useState(-1);
+  const draftRef = useRef('');
+  // Slash-command autocomplete (visible while the input starts with "/" and no
+  // args have been typed yet). Selected index for ↑/↓/Tab navigation.
+  const [slashSel, setSlashSel] = useState(0);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const scrollRafRef = useRef<number | null>(null);
@@ -261,16 +311,32 @@ const ChatPage: React.FC = () => {
   const abortRef = useRef<AbortController | null>(null);
   const activeSession = sessions.find((s) => s.id === activeSessionId);
 
+  // Latest handleSend, kept in a ref so handleRegenerate can trigger a resend
+  // without depending on `input` (which would re-render the memoized list on
+  // every keystroke). Assigned right after handleSend is defined below.
+  const handleSendRef = useRef<(() => Promise<void>) | null>(null);
+
   // Stable handler so the memoized <MessageList> doesn't re-render on every
-  // keystroke or unrelated store update.
+  // keystroke or unrelated store update. Truncates the session at the user
+  // message preceding the assistant turn, then re-sends it (true regenerate,
+  // not just a prefill).
   const handleRegenerate = useCallback((id: string) => {
     const msgs = activeSession?.messages || [];
     const idx = msgs.findIndex((m) => m.id === id);
-    if (idx > 0) {
-      const userMsg = msgs[idx - 1];
-      if (userMsg.role === 'user') setInput(userMsg.content);
-    }
-  }, [activeSession, setInput]);
+    if (idx <= 0) return;
+    const userMsg = msgs[idx - 1];
+    if (!userMsg || userMsg.role !== 'user') return;
+    const sid = activeSessionId;
+    if (!sid) return;
+    // Keep only what precedes this user message — it will be re-sent.
+    const keep = msgs.slice(0, idx - 1);
+    useAppStore.setState(prev => ({
+      sessions: prev.sessions.map(s => s.id === sid ? { ...s, messages: keep } : s),
+    }));
+    setInput(userMsg.content);
+    // Let the store update flush, then send (same pattern as the toolbar buttons).
+    setTimeout(() => handleSendRef.current?.(), 60);
+  }, [activeSession, activeSessionId, setInput]);
 
   // Multi-tab state lives in the store (openTabIds) so it survives route
   // changes and restarts. Filter the open tabs by the active workspace for
@@ -408,6 +474,15 @@ const ChatPage: React.FC = () => {
     }
   }, [activeSession?.messages]);
 
+  // Keep the runtime card ticking while a session is open (1 Hz, resets the
+  // baseline whenever the active session switches).
+  useEffect(() => {
+    setNow(Date.now());
+    if (!activeSessionId) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [activeSessionId]);
+
   // Fetch git branch for the status bar
   useEffect(() => {
     const fetchBranch = async () => {
@@ -427,6 +502,11 @@ const ChatPage: React.FC = () => {
 
   const handleSend = useCallback(async () => {
     if (!input.trim() || isStreaming) return;
+
+    // Record the submitted text in the input history (↑/↓ browser).
+    historyRef.current.push(input.trim());
+    if (historyRef.current.length > 200) historyRef.current.shift();
+    setHistoryIdx(-1);
 
     // Handle # memory append (like TUI)
     if (input.trim().startsWith('#')) {
@@ -532,7 +612,8 @@ const ChatPage: React.FC = () => {
         scheduleFlush();
       } else if (ty === 'tool_use') {
         const name = event.tool_call?.name || event.ToolCall?.Name || 'tool';
-        accumulated += `\n⏺ ${name}\n`;
+        const argsRaw = event.tool_call?.arguments || event.ToolCall?.Arguments;
+        accumulated += `\n[Tool: ${name}]${summarizeToolArgs(argsRaw)}\n`;
         scheduleFlush();
       } else if (ty === 'permission') {
         const req = event.permission || event.Permission;
@@ -557,6 +638,56 @@ const ChatPage: React.FC = () => {
         setPendingPermission(null);
       }
     };
+
+    // `! <shell>` — run a shell command and surface the output as a tool block
+    // (zero tokens: the result is shown but never auto-fed to the model).
+    if (text.startsWith('!')) {
+      const cmd = text.slice(1).trim();
+      setInput('');
+      if (!cmd || !url || !sid) { onEvent({ type: 'error', content: t('chat.backendError') }); return; }
+      const toolMsg: Message = {
+        id: (Date.now() + 1).toString(36),
+        role: 'assistant', content: `[Tool: bash]\n$ ${cmd}`, timestamp: Date.now(),
+      };
+      addMessage(sid, toolMsg);
+      try {
+        const res = await fetch(`${url}/api/shell`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ cmd }),
+        });
+        const data = await res.json();
+        let detail = (data?.output || '(无输出)');
+        if (data?.error) detail += `\n❌ ${data.error}`;
+        if (data?.exit_code && data.exit_code !== 0) detail += `\n[exit ${data.exit_code}]`;
+        updateMessage(sid, { ...toolMsg, content: `[Tool: bash]\n$ ${cmd}\n${detail}` });
+      } catch (e) {
+        updateMessage(sid, { ...toolMsg, content: `[Tool: bash]\n$ ${cmd}\n❌ 执行失败: ${String(e)}` });
+      }
+      return;
+    }
+
+    // Client-side slash first (local commands + natural-language rewrites).
+    // Unknown commands fall through to the backend slash layer below — the two
+    // vocabularies are intentionally disjoint, not duplicated.
+    if (text.startsWith('/') && url && sid) {
+      const outcome = await executeSlash(text);
+      if (outcome.type === 'rewrite') {
+        const payload: ChatPayload = { session_id: sid, content: outcome.text, model, provider };
+        if (attachedImages.length > 0) {
+          payload.attachments = attachedImages.map(img => ({ type: 'image', mime: img.mime, data: img.data }));
+          setAttachedImages([]);
+        }
+        await streamChat(url, payload, onEvent, abortRef);
+        setInput('');
+        return;
+      }
+      if (outcome.type === 'handled') {
+        setInput('');
+        return;
+      }
+      // passthrough → backend /api/slash below
+    }
 
     // CLI-parity slash commands — routed to /api/slash (the same vocabulary
     // as the TUI, implemented once server-side in internal/core/slashui).
@@ -620,6 +751,7 @@ const ChatPage: React.FC = () => {
 
     if (!settled) { settled = true; setIsStreaming(false); }
   }, [input, activeSessionId, isStreaming, selectedModel, currentModel, attachedImages]);
+  handleSendRef.current = handleSend;
 
   const respondPermission = useCallback(async (requestId: string, decision: string) => {
     setPendingPermission(null);
@@ -653,13 +785,72 @@ const ChatPage: React.FC = () => {
     }
   }, [activeSessionId, backendUrl]);
 
+  // Global shortcuts dispatched from App.tsx: Ctrl+N / Ctrl+L / Esc.
+  useEffect(() => {
+    const newSession = () => createSession(selectedModel, currentModel?.provider || 'openrouter');
+    const focusInput = () => { inputRef.current?.focus(); };
+    const stopChat = () => { if (isStreaming) handleStop(); };
+    window.addEventListener('icode:new-session', newSession);
+    window.addEventListener('icode:focus-input', focusInput);
+    window.addEventListener('icode:stop-chat', stopChat);
+    return () => {
+      window.removeEventListener('icode:new-session', newSession);
+      window.removeEventListener('icode:focus-input', focusInput);
+      window.removeEventListener('icode:stop-chat', stopChat);
+    };
+  }, [createSession, selectedModel, currentModel, isStreaming, handleStop]);
+
   // File picker state - triggered by @ in input
   const [pickerOpen, setPickerOpen] = useState(false);
+
+  // Slash autocomplete list — derived from the input, empty once args are typed.
+  const slashMenu = useMemo(() => filterSlash(input), [input]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSend();
+      return;
+    }
+    // While the slash menu is open, ↑/↓ navigate it (instead of history) and
+    // Tab accepts the highlighted command.
+    if (slashMenu.length > 0) {
+      if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        setSlashSel((i) => (i + (e.key === 'ArrowDown' ? 1 : -1) + slashMenu.length) % slashMenu.length);
+        return;
+      }
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        setInput('/' + slashMenu[slashSel].name + ' ');
+        setSlashSel(0);
+        return;
+      }
+    }
+    // ↑/↓ browse the input history — only in single-line input, where the
+    // arrows don't need to move the caret (multi-line keeps native behaviour).
+    if (!e.shiftKey && !e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+      if (input.includes('\n')) return;
+      const list = historyRef.current;
+      if (e.key === 'ArrowUp') {
+        if (list.length === 0) return;
+        e.preventDefault();
+        if (historyIdx === -1) draftRef.current = input;
+        const next = Math.min(historyIdx + 1, list.length - 1);
+        setHistoryIdx(next);
+        setInput(list[list.length - 1 - next]);
+        return;
+      }
+      if (historyIdx === -1) return;
+      e.preventDefault();
+      if (historyIdx === 0) {
+        setHistoryIdx(-1);
+        setInput(draftRef.current);
+        return;
+      }
+      const next = historyIdx - 1;
+      setHistoryIdx(next);
+      setInput(list[list.length - 1 - next]);
       return;
     }
     if (e.key === '@' && (input || '').trim() === '') {
@@ -1054,7 +1245,9 @@ const ChatPage: React.FC = () => {
               <div>
                 <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{t('chat.runTime')}</div>
                 <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
-                  {Math.floor((Date.now() - (activeSessionId ? 0 : Date.now())) / 1000)}s
+                  {activeSession?.createdAt
+                    ? Math.max(0, Math.floor((now - activeSession.createdAt) / 1000)) + 's'
+                    : '0s'}
                 </div>
               </div>
               <div>
@@ -1222,7 +1415,33 @@ const ChatPage: React.FC = () => {
           background: 'var(--bg-primary)', borderRadius: 10,
           border: '1px solid var(--border-color)', padding: '6px 8px',
         }}>
+          <div style={{ position: 'relative', flex: 1 }}>
+            {slashMenu.length > 0 && (
+              <div style={{
+                position: 'absolute', bottom: '100%', left: 0, right: 0, marginBottom: 4,
+                background: 'var(--bg-primary)', border: '0.5px solid var(--border-color)',
+                borderRadius: 8, boxShadow: '0 8px 24px rgba(0,0,0,0.25)', zIndex: 50,
+                maxHeight: 240, overflowY: 'auto', padding: 4,
+              }}>
+                {slashMenu.map((c, i) => (
+                  <div
+                    key={c.name}
+                    onMouseEnter={() => setSlashSel(i)}
+                    onClick={() => { setInput('/' + c.name + ' '); setSlashSel(0); }}
+                    style={{
+                      padding: '5px 10px', borderRadius: 6, cursor: 'pointer',
+                      background: i === slashSel ? 'var(--accent-soft)' : 'transparent',
+                    }}
+                  >
+                    <span style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent)' }}>/{c.name}</span>
+                    {c.usage && <span style={{ color: 'var(--text-muted)', fontSize: 11 }}> {c.usage}</span>}
+                    <span style={{ color: 'var(--text-muted)', fontSize: 11, marginLeft: 8 }}>{t(c.descKey)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           <textarea
+            ref={inputRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
@@ -1245,12 +1464,13 @@ const ChatPage: React.FC = () => {
             placeholder={t('chat.placeholder')}
             rows={1}
             style={{
-              flex: 1, background: 'transparent', border: 'none',
+              width: '100%', background: 'transparent', border: 'none',
               color: 'var(--text-primary)', resize: 'none',
               outline: 'none', padding: '6px 4px', maxHeight: 200,
               lineHeight: 1.5,
             }}
           />
+          </div>
           {isStreaming ? (
             <button
               onClick={handleStop}
@@ -1295,7 +1515,7 @@ const ChatPage: React.FC = () => {
             { v: 'plan', label: t('chat.modePlan') },
             { v: 'auto', label: t('chat.modeNormal') },
             { v: 'ask',  label: t('chat.modeAsk') },
-            { v: 'yolo', label: 'Yolo' },
+            { v: 'yolo', label: t('chat.modeYolo') },
           ].map(m => (
             <button key={m.v} className={mode === m.v ? 'nav-item active' : 'nav-item'} style={{
               padding: '3px 10px', borderRadius: 4, fontSize: 10, fontWeight: mode === m.v ? 600 : 400,

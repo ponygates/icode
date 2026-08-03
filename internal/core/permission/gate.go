@@ -207,6 +207,11 @@ func (g *Gate) CheckProviderAccess(providerName string) error {
 func (g *Gate) SetMode(mode Mode) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	// Normalise the desktop/CLI "ask" vocabulary onto ModeAgent so every
+	// caller (config PUT, /api/permission/mode, slashui) behaves identically.
+	if mode == Mode("ask") {
+		mode = ModeAgent
+	}
 	g.mode = mode
 }
 

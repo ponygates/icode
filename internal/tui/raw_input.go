@@ -254,9 +254,12 @@ func (t *TUI) handleKey(r rune) bool {
 			ur, _, err := br.ReadRune()
 			if err != nil {
 				// Lone Esc (no follow-up byte): cancel the model picker if
-				// open, otherwise just swallow it.
+				// open, otherwise switch back from vim normal mode.
 				if t.modelPickerOpen {
 					t.closeModelPicker()
+				} else if t.vimMode && !t.vimInsert {
+					t.vimInsert = true
+					t.render()
 				}
 				return true
 			}
@@ -467,6 +470,12 @@ func (t *TUI) handleKey(r rune) bool {
 		return true
 	}
 
+	// Vim normal mode: printable runes are vi commands until the user returns
+	// to insert mode (i/a/I/A or Esc). The dispatcher swallows unknown keys.
+	if t.vimMode && !t.vimInsert {
+		return t.handleVimKey(r)
+	}
+
 	// Printable rune (incl. Chinese) — insert at cursor.
 	// The first keystroke also clears the welcome banner so typing feels
 	// immediate (Claude Code does the same).
@@ -495,6 +504,74 @@ func (t *TUI) deleteAtCursor() {
 	runes = append(runes[:t.cursor-1], runes[t.cursor:]...)
 	t.inputBuf = string(runes)
 	t.cursor--
+}
+
+// handleVimKey implements the vi-style normal-mode key bindings. A compact but
+// real subset: hjkl / 0 / $ motion, i a I A to insert, x delete-char, dd
+// delete-line, u undo, Esc back to insert.
+func (t *TUI) handleVimKey(r rune) bool {
+	switch r {
+	case 'h':
+		if t.cursor > 0 {
+			t.cursor--
+		}
+	case 'l':
+		if t.cursor < len([]rune(t.inputBuf)) {
+			t.cursor++
+		}
+	case '0':
+		t.cursor = 0
+	case '$':
+		t.cursor = len([]rune(t.inputBuf))
+	case 'i':
+		t.vimInsert = true
+	case 'a':
+		if t.cursor < len([]rune(t.inputBuf)) {
+			t.cursor++
+		}
+		t.vimInsert = true
+	case 'I':
+		t.cursor = 0
+		t.vimInsert = true
+	case 'A':
+		t.cursor = len([]rune(t.inputBuf))
+		t.vimInsert = true
+	case 'x':
+		t.saveVimUndo()
+		runes := []rune(t.inputBuf)
+		if t.cursor < len(runes) {
+			runes = append(runes[:t.cursor], runes[t.cursor+1:]...)
+			t.inputBuf = string(runes)
+		}
+	case 'd':
+		// dd — delete the whole line (vi operator simplified to `d` = clear).
+		t.saveVimUndo()
+		t.inputBuf = ""
+		t.cursor = 0
+	case 'u':
+		t.restoreVimUndo()
+	default:
+		// swallow unknown normal-mode keys so they never leak into the buffer
+	}
+	t.updateSuggestions()
+	return true
+}
+
+// saveVimUndo snapshots the buffer before a destructive normal-mode edit so `u`
+// can restore it. Multiple edits keep the most recent snapshot.
+func (t *TUI) saveVimUndo() {
+	t.vimUndo = t.inputBuf
+	t.vimUndoValid = true
+}
+
+// restoreVimUndo applies the snapshot recorded by the last destructive edit.
+func (t *TUI) restoreVimUndo() {
+	if !t.vimUndoValid {
+		return
+	}
+	t.inputBuf = t.vimUndo
+	t.cursor = len([]rune(t.inputBuf))
+	t.vimUndoValid = false
 }
 
 func (t *TUI) historyPrev() {

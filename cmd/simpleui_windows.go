@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,8 +18,10 @@ import (
 	"github.com/jchv/go-webview2"
 	"github.com/ponygates/icode/internal/app"
 	"github.com/ponygates/icode/internal/config"
+	projectcontext "github.com/ponygates/icode/internal/core/context"
 	"github.com/ponygates/icode/internal/core/permission"
 	"github.com/ponygates/icode/internal/core/slashui"
+	"github.com/ponygates/icode/internal/executil"
 	"github.com/ponygates/icode/internal/types"
 	"github.com/ponygates/icode/internal/xgo"
 )
@@ -92,19 +93,104 @@ func (b *simpleUIBridge) Send(text string) {
 	b.runPrompt(text)
 }
 
-// RunCommand executes a slash command (the same vocabulary as the CLI TUI),
-// so the lightweight UI exposes the full CLI feature set. Unknown commands are
-// forwarded to the model as a normal message.
+// RunCommand is the single input entry point (mirrors the CLI submit prefix
+// scan). It dispatches:
+//   - "/cmd ..."      → shared slashui command set
+//   - "# <content>"   → append to project memory (ICODE.md)
+//   - "# user: ..."   → append to user-level memory (~/.icode/)
+//   - "! <shell>"     → run a shell command and show the output
+//   - anything else   → normal chat message
 func (b *simpleUIBridge) RunCommand(text string) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return
 	}
-	if !strings.HasPrefix(text, "/") {
-		b.Send(text)
+	if strings.HasPrefix(text, "/") {
+		b.runSlash(text)
 		return
 	}
-	b.runSlash(strings.TrimSpace(text))
+	if strings.HasPrefix(text, "!") {
+		b.execShell(strings.TrimSpace(strings.TrimPrefix(text, "!")))
+		return
+	}
+	if strings.HasPrefix(text, "#") {
+		b.appendMemory(strings.TrimSpace(strings.TrimPrefix(text, "#")))
+		return
+	}
+	b.Send(text)
+}
+
+// appendMemory writes a quick memory note, mirroring the CLI's `#` shortcut.
+// Plain `# note` targets the project memory file (./ICODE.md); `# user: note`
+// targets the cross-project user memory (~/.icode/).
+func (b *simpleUIBridge) appendMemory(text string) {
+	if text == "" {
+		b.sys("用法: # <记到项目 ICODE.md>  |  # user: <记到用户级 ~/.icode>")
+		return
+	}
+	lower := strings.ToLower(text)
+	var userPrefix string
+	if strings.HasPrefix(lower, "user:") {
+		userPrefix = "user:"
+	} else if strings.HasPrefix(lower, "user：") {
+		userPrefix = "user："
+	}
+	if userPrefix != "" {
+		note := strings.TrimSpace(text[len(userPrefix):])
+		if err := projectcontext.AppendUserMemory(note); err != nil {
+			b.sys("追加 memory 失败: " + err.Error())
+			return
+		}
+		path, _ := projectcontext.UserMemoryPath()
+		b.sys("✓ 已记录到用户级 " + path)
+		return
+	}
+	path, err := projectcontext.AppendProjectMemory(text)
+	if err != nil {
+		b.sys("追加 memory 失败: " + err.Error())
+		return
+	}
+	b.sys("✓ 已记录到项目 " + path)
+}
+
+// execShell runs a shell command and surfaces the output as a tool block,
+// mirroring the CLI's `!` shortcut (60s timeout).
+func (b *simpleUIBridge) execShell(cmdStr string) {
+	if cmdStr == "" {
+		return
+	}
+	b.push(fmt.Sprintf("uiTool(%s, %s)", jsStr("shell"), jsStr(cmdStr)))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = executil.CommandContext(ctx, "cmd", "/C", cmdStr)
+	} else {
+		cmd = executil.CommandContext(ctx, "sh", "-c", cmdStr)
+	}
+	output, err := cmd.CombinedOutput()
+	if err != nil && len(output) == 0 {
+		b.push(fmt.Sprintf("uiAppend('error', %s)", jsStr("shell: "+err.Error())))
+		return
+	}
+	if len(output) == 0 {
+		b.push(fmt.Sprintf("uiToolResult(%s)", jsStr("(无输出)")))
+		return
+	}
+	b.push(fmt.Sprintf("uiToolResult(%s)", jsStr(strings.TrimRight(string(output), "\n"))))
+}
+
+// Stop cancels the in-flight generation for the active session.
+func (b *simpleUIBridge) Stop() {
+	b.mu.Lock()
+	sid := b.sessionID
+	b.mu.Unlock()
+	if sid != "" && b.app != nil && b.app.Engine != nil {
+		b.app.Engine.Stop(sid)
+		b.push("uiBusy(false)")
+	}
 }
 
 // RefreshModelsUI triggers a live model-catalog refresh from all configured
@@ -229,13 +315,16 @@ func (b *simpleUIBridge) runPrompt(prompt string) {
 	eventCh, err := b.app.Engine.Send(ctx, b.sessionID, prompt)
 	if err != nil {
 		b.push(fmt.Sprintf("uiAppend('error', %s)", jsStr(fmt.Sprintf("引擎错误: %v", err))))
+		b.push("uiBusy(false)")
 		return
 	}
+	b.push("uiBusy(true)")
 
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				b.push(fmt.Sprintf("uiAppend('error', %s)", jsStr(fmt.Sprintf("内部错误: %v", r))))
+				b.push("uiBusy(false)")
 			}
 		}()
 		for event := range eventCh {
@@ -266,10 +355,14 @@ func (b *simpleUIBridge) runPrompt(prompt string) {
 				b.push(fmt.Sprintf("uiTool(%s, %s)", jsStr(event.ToolCall.Name), jsStr(args)))
 			case types.EventDone:
 				b.push("uiDone()")
+				b.push("uiBusy(false)")
+				b.pushStats()
 				return
 			case types.EventError:
 				b.push(fmt.Sprintf("uiAppend('error', %s)", jsStr(event.Content)))
 				b.push("uiDone()")
+				b.push("uiBusy(false)")
+				b.pushStats()
 				return
 			}
 		}
@@ -287,6 +380,7 @@ func (b *simpleUIBridge) Clear() {
 	b.curAssistant = -1
 	b.mu.Unlock()
 	b.push("uiClear()")
+	b.pushStats()
 }
 
 // SessionEntry is a lightweight session descriptor for the dropdown.
@@ -325,6 +419,7 @@ func (b *simpleUIBridge) NewSession() {
 	b.mu.Unlock()
 	b.push("uiClear()")
 	b.sys("✓ 已开启新会话（旧会话已保存在下拉列表中）。")
+	b.pushStats()
 }
 
 // OpenSession loads a saved session's messages into the bridge and the UI.
@@ -365,6 +460,7 @@ func (b *simpleUIBridge) OpenSession(id string) {
 	}
 	b.push("refreshSessions()")
 	b.push(fmt.Sprintf("uiSetSession(%s)", jsStr(sess.ID)))
+	b.pushStats()
 }
 
 // push schedules a JS snippet to run on the WebView UI thread.
@@ -388,6 +484,38 @@ func jsStr(s string) string {
 // is implemented once in the shared slashui package, so the lightweight UI
 // exposes the complete CLI feature set through a single code path.
 func (b *simpleUIBridge) runSlash(text string) {
+	// /theme is a real UI concept here (the window has a light/dark toggle),
+	// so bridge it to the page instead of the CLI-only stub in slashui.
+	if parts := strings.Fields(text); len(parts) > 0 && strings.EqualFold(parts[0], "/theme") {
+		t := "toggle"
+		if len(parts) > 1 {
+			t = strings.ToLower(parts[1])
+		}
+		b.push(fmt.Sprintf("uiTheme(%s)", jsStr(t)))
+		return
+	}
+	// /login & /logout are the key-management entry points (this window has no
+	// settings page). With args they persist directly; bare /login opens the
+	// in-page key dialog.
+	if parts := strings.Fields(text); len(parts) > 0 {
+		switch {
+		case strings.EqualFold(parts[0], "/login"):
+			if len(parts) >= 3 {
+				b.sys(b.setKey(parts[1], strings.Join(parts[2:], " ")))
+			} else {
+				b.push("uiKeyPrompt()")
+			}
+			return
+		case strings.EqualFold(parts[0], "/logout"):
+			if len(parts) >= 2 {
+				b.sys(b.setKey(parts[1], ""))
+			} else {
+				b.sys("用法: /logout <provider>（清除该提供商的 API Key）")
+			}
+			return
+		}
+	}
+
 	backend := &slashui.Backend{}
 	if b.app != nil {
 		backend.Engine = b.app.Engine
@@ -449,6 +577,34 @@ func (b *simpleUIBridge) runSlash(text string) {
 	}
 }
 
+// setKey persists an API key for a provider — the simple-ui key entry point,
+// since the lightweight window has no settings page. An empty key clears it.
+// Mirrors `icode config key <provider> <apikey>` from the CLI.
+func (b *simpleUIBridge) setKey(provider, key string) string {
+	provider = strings.TrimSpace(provider)
+	key = strings.TrimSpace(key)
+	if provider == "" {
+		return "用法: /login <provider> <api key>（如 /login deepseek sk-xxx）"
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return "读取配置失败: " + err.Error()
+	}
+	pc, _ := cfg.Provider(provider)
+	pc.APIKey = key
+	cfg.SetProvider(provider, pc)
+	if err := cfg.Save(config.DefaultPath()); err != nil {
+		return "保存配置失败: " + err.Error()
+	}
+	if b.app != nil && b.app.Reg != nil {
+		b.app.Reg.SetCredentials(provider, key, pc.APIBase)
+	}
+	if key == "" {
+		return "已清除 " + provider + " 的 API Key"
+	}
+	return "已设置 " + provider + " 的 API Key，可用 /doctor 验证连通性。"
+}
+
 // chatTurn runs a prompt that needs a model response.
 func (b *simpleUIBridge) chatTurn(prompt string) {
 	if !b.ensureSession() {
@@ -462,503 +618,53 @@ func (b *simpleUIBridge) sys(s string) {
 	b.push(fmt.Sprintf("uiAppend('system', %s)", jsStr(s)))
 }
 
-func (b *simpleUIBridge) cmdModel(args []string) {
-	if len(args) == 0 {
-		var b2 strings.Builder
-		b2.WriteString("可用模型（在下拉框选择，或用 /model <id>）：\n")
-		for _, id := range b.Models() {
-			mark := ""
-			if id == b.model {
-				mark = "  (当前)"
-			}
-			b2.WriteString("  " + id + mark + "\n")
-		}
-		b.sys(b2.String())
-		return
-	}
-	b.SetModel(args[0])
-	b.sys("Model -> " + args[0])
+// uiStatsPayload is the status-bar payload pushed after each turn.
+type uiStatsPayload struct {
+	Model        string  `json:"model"`
+	Provider     string  `json:"provider"`
+	Mode         string  `json:"mode"`
+	Security     string  `json:"security"`
+	PromptTokens int     `json:"prompt_tokens"`
+	Completion   int     `json:"completion_tokens"`
+	Total        int     `json:"total_tokens"`
+	CacheHitRate float64 `json:"cache_hit_rate"`
+	Cost         float64 `json:"cost"`
 }
 
-func (b *simpleUIBridge) cmdSessions() {
-	list := b.Sessions()
-	if len(list) == 0 {
-		b.sys("暂无已保存会话。")
-		return
-	}
-	var sb strings.Builder
-	sb.WriteString("已保存会话（下拉框切换，或 /resume <id>）：\n")
-	for i, e := range list {
-		mark := ""
-		if e.ID == b.sessionID {
-			mark = "  (当前)"
-		}
-		sb.WriteString(fmt.Sprintf("  %d. %s  [%s]%s\n", i+1, e.Title, e.ID, mark))
-	}
-	b.sys(sb.String())
-}
-
-func (b *simpleUIBridge) cmdCost() {
-	if b.app == nil || b.app.Engine == nil || b.sessionID == "" {
-		b.sys("没有活跃会话，先发一条消息再查看。")
-		return
-	}
-	stats := b.app.Engine.SessionStats(b.sessionID)
-	if stats == nil {
-		b.sys("暂无统计数据。")
-		return
-	}
-	var sb strings.Builder
-	sb.WriteString("🪙 Token 节省报告（本次会话）\n")
-	sb.WriteString(fmt.Sprintf("已节省 Token:   %d\n", stats.TokensSaved))
-	sb.WriteString(fmt.Sprintf("缓存命中率:     %.1f%%\n", stats.CacheHitRate*100))
-	sb.WriteString(fmt.Sprintf("累计压缩次数:   %d\n", stats.CompactionsDone))
-	sb.WriteString(fmt.Sprintf("Prompt Token:   %d\n", stats.PromptTokens))
-	sb.WriteString(fmt.Sprintf("Completion:     %d\n", stats.CompletionTokens))
-	sb.WriteString(fmt.Sprintf("总 Token:       %d\n", stats.TotalTokens))
-	if stats.CacheHitTokens > 0 {
-		sb.WriteString(fmt.Sprintf("缓存命中 Token: %d\n", stats.CacheHitTokens))
-	}
-	if stats.EstimatedCost > 0 {
-		sb.WriteString(fmt.Sprintf("预估费用:       ¥%.4f\n", stats.EstimatedCost))
-	}
-	sb.WriteString("\n机制: Cache-First Loop（不可变前缀 + 追加日志 + 易失暂存）")
-	b.sys(sb.String())
-}
-
-func (b *simpleUIBridge) cmdOutputStyle(args []string) {
-	if len(args) == 0 {
-		cur := "normal"
-		if cfg, err := config.Load(); err == nil && cfg.Defaults.OutputStyle != "" {
-			cur = cfg.Defaults.OutputStyle
-		}
-		b.sys("当前输出风格: " + cur + "\n用法: /output-style <concise|normal|verbose>")
-		return
-	}
-	style := strings.ToLower(args[0])
-	if style != "concise" && style != "normal" && style != "verbose" {
-		b.sys("无效风格: " + args[0] + "（可选 concise|normal|verbose）")
-		return
-	}
-	cfg, err := config.Load()
-	if err != nil {
-		b.sys("读取配置失败: " + err.Error())
-		return
-	}
-	cfg.Defaults.OutputStyle = style
-	if err := cfg.Save(config.DefaultPath()); err != nil {
-		b.sys("保存失败: " + err.Error())
-		return
-	}
-	if b.app != nil && b.app.Engine != nil {
-		b.app.Engine.SetSystemPrompt(config.EffectiveSystemPrompt(cfg))
-	}
-	b.sys("输出风格已设为 " + style + "（已生效并持久化）")
-}
-
-func (b *simpleUIBridge) cmdUpdate() {
-	if b.app == nil {
-		b.sys("引擎未初始化。")
-		return
-	}
-	updates, err := b.app.RefreshModels(context.Background())
-	if err != nil && len(updates) == 0 {
-		b.sys("刷新失败: " + err.Error())
-		return
-	}
-	var sb strings.Builder
-	sb.WriteString("模型目录刷新结果：\n")
-	ok, fail := 0, 0
-	for _, u := range updates {
-		if u.Success {
-			ok++
-			sb.WriteString(fmt.Sprintf("  ✓ %s: %d 个模型\n", u.Name, u.Count))
-		} else {
-			fail++
-			sb.WriteString(fmt.Sprintf("  ✗ %s: %s\n", u.Name, u.Error))
-		}
-	}
-	sb.WriteString(fmt.Sprintf("成功 %d · 失败 %d", ok, fail))
-	b.sys(sb.String())
-}
-
-func (b *simpleUIBridge) cmdAddDir(args []string) {
-	if len(args) == 0 {
-		cfg, _ := config.Load()
-		if cfg == nil || len(cfg.Defaults.ExtraDirs) == 0 {
-			b.sys("没有额外工作目录。\n用法: /add-dir <路径>")
-			return
-		}
-		b.sys("额外工作目录：\n  " + strings.Join(cfg.Defaults.ExtraDirs, "\n  "))
-		return
-	}
-	abs, err := filepath.Abs(args[0])
-	if err != nil {
-		b.sys("解析路径失败: " + err.Error())
-		return
-	}
-	st, err := os.Stat(abs)
-	if err != nil || !st.IsDir() {
-		b.sys("目录不存在或不是文件夹: " + abs)
-		return
-	}
-	cfg, err := config.Load()
-	if err != nil {
-		b.sys("读取配置失败: " + err.Error())
-		return
-	}
-	for _, d := range cfg.Defaults.ExtraDirs {
-		if d == abs {
-			b.sys("该目录已在列表中: " + abs)
-			return
-		}
-	}
-	cfg.Defaults.ExtraDirs = append(cfg.Defaults.ExtraDirs, abs)
-	if err := cfg.Save(config.DefaultPath()); err != nil {
-		b.sys("保存失败: " + err.Error())
-		return
-	}
-	if b.app != nil && b.app.Engine != nil {
-		b.app.Engine.SetSystemPrompt(config.EffectiveSystemPrompt(cfg))
-	}
-	b.sys(fmt.Sprintf("✓ 已添加工作目录: %s（共 %d 个）", abs, len(cfg.Defaults.ExtraDirs)))
-}
-
-func (b *simpleUIBridge) cmdModels() {
-	cfg, err := config.Load()
-	if err != nil || len(cfg.Models) == 0 {
-		b.sys("暂无自定义模型。\n用 `icode config model add <provider> <model_id> [name]` 新增。")
-		return
-	}
-	var b2 strings.Builder
-	b2.WriteString("自定义模型：\n")
-	for _, m := range cfg.Models {
-		name := m.Name
-		if name == "" {
-			name = m.ModelID
-		}
-		b2.WriteString(fmt.Sprintf("  %-26s %s / %s\n", m.ID, m.Provider, name))
-	}
-	b.sys(b2.String())
-}
-
-func (b *simpleUIBridge) cmdKeys() {
-	cfg, err := config.Load()
-	if err != nil {
-		b.sys("无法读取配置: " + err.Error())
-		return
-	}
-	var b2 strings.Builder
-	b2.WriteString("API 密钥状态：\n")
-	for name, pc := range cfg.Providers {
-		st := "未配置"
-		if pc.APIKey != "" {
-			st = "已配置"
-		}
-		b2.WriteString(fmt.Sprintf("  %-14s %s\n", name, st))
-	}
-	b2.WriteString("\n用 `icode config key <provider> <key>` 或桌面端设置配置。")
-	b.sys(b2.String())
-}
-
-func (b *simpleUIBridge) cmdMCP(args []string) {
-	cfg, err := config.Load()
-	if err != nil {
-		b.sys("无法读取配置: " + err.Error())
-		return
-	}
-	sub := ""
-	if len(args) > 0 {
-		sub = strings.ToLower(args[0])
-	}
-	if sub == "add" && len(args) >= 4 {
-		name, typ, command := args[1], strings.ToLower(args[2]), args[3]
-		mc := config.MCPServerCfg{Name: name, Type: typ, Command: command, Enabled: true}
-		if len(args) > 4 {
-			mc.Args = args[4:]
-		}
-		filtered := make([]config.MCPServerCfg, 0, len(cfg.MCP))
-		for _, s := range cfg.MCP {
-			if s.Name != name {
-				filtered = append(filtered, s)
-			}
-		}
-		cfg.MCP = append(filtered, mc)
-		if err := cfg.Save(config.DefaultPath()); err != nil {
-			b.sys("保存失败: " + err.Error())
-			return
-		}
-		b.sys(fmt.Sprintf("[x] 已添加 MCP 服务器 %s。重启 iCode 后生效。", name))
-		return
-	}
-	if sub == "remove" && len(args) >= 2 {
-		name := args[1]
-		filtered := make([]config.MCPServerCfg, 0, len(cfg.MCP))
-		found := false
-		for _, s := range cfg.MCP {
-			if s.Name != name {
-				filtered = append(filtered, s)
-			} else {
-				found = true
-			}
-		}
-		if !found {
-			b.sys("未找到 MCP 服务器: " + name)
-			return
-		}
-		cfg.MCP = filtered
-		if err := cfg.Save(config.DefaultPath()); err != nil {
-			b.sys("保存失败: " + err.Error())
-			return
-		}
-		b.sys(fmt.Sprintf("[x] 已移除 MCP 服务器 %s。重启后生效。", name))
-		return
-	}
-	var b2 strings.Builder
-	b2.WriteString("MCP 服务器:\n")
-	if len(cfg.MCP) == 0 {
-		b2.WriteString("  （无。用 `/mcp add <name> <stdio|sse> <command> [args...]` 添加）\n")
-	}
-	for _, s := range cfg.MCP {
-		en := "✓"
-		if !s.Enabled {
-			en = "·"
-		}
-		line := fmt.Sprintf("  %s %s [%s] %s", en, s.Name, s.Type, s.Command)
-		if s.URL != "" {
-			line += " " + s.URL
-		}
-		b2.WriteString(line + "\n")
-	}
-	b.sys(b2.String())
-}
-
-func (b *simpleUIBridge) cmdConfig() {
-	cfg, _ := config.Load()
-	lang, theme, diff, syntax := "zh-CN", "auto", "unified", "on"
-	if cfg != nil {
-		lang = cfg.Language
-		theme = cfg.TUI.Theme
-		diff = cfg.TUI.DiffMode
-		if !cfg.TUI.SyntaxHL {
-			syntax = "off"
-		}
-	}
-	sec := "local"
-	if cfg != nil {
-		sec = string(cfg.SecurityLevel)
-	}
-	b.sys(fmt.Sprintf("当前设置：\n  Model:     %s\n  Provider:  %s\n  Language:  %s\n  Theme:     %s\n  Diff:      %s\n  Security:  %s\n  Syntax:    %s",
-		b.model, b.provider, lang, theme, diff, permission.SecurityLabel(config.SecurityLevel(sec)), syntax))
-}
-
-func (b *simpleUIBridge) cmdDoctor() {
-	cfg, err := config.Load()
-	var b2 strings.Builder
-	b2.WriteString("iCode 诊断:\n")
-	b2.WriteString(fmt.Sprintf("  版本:      %s\n", runningVersion()))
-	b2.WriteString(fmt.Sprintf("  模型:      %s\n", b.model))
-	b2.WriteString(fmt.Sprintf("  提供商:    %s\n", b.provider))
-	if err != nil {
-		b2.WriteString("  配置:      读取失败 " + err.Error() + "\n")
-	} else {
-		configured := 0
-		for _, pc := range cfg.Providers {
-			if pc.APIKey != "" {
-				configured++
-			}
-		}
-		b2.WriteString(fmt.Sprintf("  已配置Key: %d 个提供商\n", configured))
-		b2.WriteString(fmt.Sprintf("  自定义模型: %d\n", len(cfg.Models)))
-		b2.WriteString(fmt.Sprintf("  MCP 服务器: %d\n", len(cfg.MCP)))
-	}
-	b.sys(b2.String())
-}
-
-func (b *simpleUIBridge) cmdInit() {
-	cwd, err := os.Getwd()
-	if err != nil {
-		b.sys("无法获取当前目录: " + err.Error())
-		return
-	}
-	path := filepath.Join(cwd, "ICODE.md")
-	if _, err := os.Stat(path); err == nil {
-		b.sys("ICODE.md 已存在")
-		return
-	}
-	if err := os.WriteFile(path, []byte("# Project Context\n\nEdit this file.\n"), 0o644); err != nil {
-		b.sys("创建失败: " + err.Error())
-		return
-	}
-	b.sys("[x] ICODE.md 已生成: " + path)
-}
-
-func (b *simpleUIBridge) cmdExport(args []string) {
-	filename := "icode-export.md"
-	if len(args) > 0 {
-		filename = args[0]
-	}
+// statsJSON renders the current session/token/mode/security summary as JSON.
+func (b *simpleUIBridge) statsJSON() string {
+	var p uiStatsPayload
 	b.mu.Lock()
-	msgs := append([]simpleMsg{}, b.messages...)
+	p.Model, p.Provider = b.model, b.provider
 	b.mu.Unlock()
-	var sb strings.Builder
-	sb.WriteString("# iCode Conversation Export\n\n")
-	sb.WriteString(fmt.Sprintf("**Model:** %s  \n", b.model))
-	sb.WriteString(fmt.Sprintf("**Provider:** %s  \n\n", b.provider))
-	sb.WriteString("---\n\n")
-	for _, m := range msgs {
-		switch m.Role {
-		case "user":
-			sb.WriteString("## User\n\n")
-		case "assistant":
-			sb.WriteString("## Assistant\n\n")
-		case "system":
-			sb.WriteString("> ")
-		case "error":
-			sb.WriteString("### Error\n\n")
-		}
-		sb.WriteString(m.Content)
-		sb.WriteString("\n\n")
+	if b.app != nil && b.app.Gate != nil {
+		p.Mode = string(b.app.Gate.Mode())
+		p.Security = permission.SecurityLabel(b.app.Gate.SecurityLevel())
 	}
-	if err := os.WriteFile(filename, []byte(sb.String()), 0o644); err != nil {
-		b.sys("导出失败: " + err.Error())
-		return
-	}
-	b.sys(fmt.Sprintf("已导出到 %s（%d 条消息）", filename, len(msgs)))
-}
-
-func (b *simpleUIBridge) cmdGitDiff() {
-	cmd := exec.Command("git", "diff")
-	out, err := cmd.CombinedOutput()
-	if err != nil && len(out) == 0 {
-		b.sys("git diff 失败: " + err.Error())
-		return
-	}
-	if len(out) == 0 {
-		b.sys("No unstaged changes.")
-		return
-	}
-	b.sys("git diff:\n" + string(out))
-}
-
-func (b *simpleUIBridge) cmdReview(args []string) {
-	var target string
-	if len(args) > 0 {
-		if data, err := os.ReadFile(args[0]); err == nil {
-			target = fmt.Sprintf("请审查文件 %s：\n\n%s", args[0], string(data))
-		} else {
-			b.sys("读取文件失败: " + err.Error())
-			return
-		}
-	} else {
-		cmd := exec.Command("git", "diff")
-		out, err := cmd.CombinedOutput()
-		if err != nil && len(out) == 0 {
-			b.sys("git diff 失败: " + err.Error())
-			return
-		}
-		if len(out) == 0 {
-			b.sys("没有未提交的改动可审查。可指定路径：/review <file>")
-			return
-		}
-		target = "请审查以下 git 工作区差异，指出质量问题、安全隐患与改进建议：\n\n```diff\n" + string(out) + "\n```"
-	}
-	b.chatTurn(target)
-}
-
-func (b *simpleUIBridge) cmdReleaseNotes() {
-	candidates := []string{"CHANGELOG.md", filepath.Join(".icode", "CHANGELOG.md")}
-	var data []byte
-	for _, c := range candidates {
-		if d, err := os.ReadFile(c); err == nil {
-			data = d
-			break
+	if b.app != nil && b.app.Engine != nil {
+		b.mu.Lock()
+		sid := b.sessionID
+		b.mu.Unlock()
+		if sid != "" {
+			if s := b.app.Engine.SessionStats(sid); s != nil {
+				p.PromptTokens = s.PromptTokens
+				p.Completion = s.CompletionTokens
+				p.Total = s.TotalTokens
+				p.CacheHitRate = s.CacheHitRate
+				p.Cost = s.EstimatedCost
+			}
 		}
 	}
-	if len(data) == 0 {
-		b.sys("未找到 CHANGELOG.md。")
-		return
-	}
-	text := string(data)
-	if i := strings.Index(text, "\n## "); i > 0 {
-		rest := text[i+1:]
-		if j := strings.Index(rest, "\n## "); j > 0 {
-			text = text[:i+1+j]
-		}
-	}
-	const max = 2000
-	if len(text) > max {
-		text = text[:max] + "\n…"
-	}
-	b.sys("发布说明:\n" + text)
-}
-
-func (b *simpleUIBridge) cmdPRComments(args []string) {
-	if _, err := exec.LookPath("gh"); err != nil {
-		b.sys("未检测到 GitHub CLI (gh)。请先安装并登录：https://cli.github.com")
-		return
-	}
-	pr := ""
-	if len(args) > 0 {
-		pr = args[0]
-	}
-	var cmd *exec.Cmd
-	if pr != "" {
-		cmd = exec.Command("gh", "pr", "view", pr, "--comments", "--json", "title,comments")
-	} else {
-		cmd = exec.Command("gh", "pr", "view", "--comments", "--json", "title,comments")
-	}
-	out, err := cmd.CombinedOutput()
+	v, err := json.Marshal(&p)
 	if err != nil {
-		b.sys("获取 PR 评论失败: " + string(out))
-		return
+		return "{}"
 	}
-	b.sys("PR 评论:\n" + string(out))
+	return string(v)
 }
 
-func (b *simpleUIBridge) cmdBug() {
-	body := fmt.Sprintf("**环境**: iCode %s / %s / %s\n**复现步骤**:\n1. \n\n**预期**: \n**实际**: ",
-		runningVersion(), b.provider, b.model)
-	u := "https://github.com/ponygates/icode/issues/new?title=%5Bbug%5D&body=" + url.QueryEscape(body)
-	b.sys("请在此提交 Bug 报告：\n" + u)
-	openURL(u)
-}
-
-// helpText lists every slash command the simple UI supports (mirrors the CLI).
-func helpText() string {
-	groups := []struct {
-		title string
-		cmds  []string
-	}{
-		{"会话", []string{"/clear", "/new", "/sessions", "/resume", "/compact", "/export", "/share", "/diff", "/review", "/summarize", "/history", "/undo"}},
-		{"模型", []string{"/model", "/provider", "/models", "/keys", "/update"}},
-		{"配置", []string{"/config", "/theme", "/lang", "/security", "/permissions", "/mcp", "/vim", "/statusline", "/output-style"}},
-		{"工具", []string{"/init", "/add-dir", "/agents", "/skills", "/teams", "/hooks", "/todo"}},
-		{"信息", []string{"/help", "/whoami", "/status", "/cost", "/doctor", "/memory", "/context", "/feedback"}},
-		{"系统", []string{"/login", "/logout", "/pr_comments", "/release-notes", "/bug"}},
-	}
-	var b strings.Builder
-	b.WriteString("可用命令：\n")
-	for _, g := range groups {
-		b.WriteString("  " + g.title + ":\n")
-		for _, c := range g.cmds {
-			b.WriteString("    " + c + "\n")
-		}
-	}
-	b.WriteString("\n输入 /命令 开始；点击右侧面板也可执行。")
-	return b.String()
-}
-
-// openURL opens a URL in the default browser (cross-platform).
-func openURL(u string) {
-	switch runtime.GOOS {
-	case "windows":
-		_ = exec.Command("rundll32", "url.dll,FileProtocolHandler", u).Start()
-	case "darwin":
-		_ = exec.Command("open", u).Start()
-	default:
-		_ = exec.Command("xdg-open", u).Start()
-	}
+// pushStats refreshes the bottom status bar after a turn completes.
+func (b *simpleUIBridge) pushStats() {
+	b.push("uiStats(" + b.statsJSON() + ")")
 }
 
 // runningVersion returns the running version string.
@@ -1095,10 +801,13 @@ func runSimpleUI() error {
 	w.Bind("setModel", func(id string) { b.SetModel(id) })
 	w.Bind("clear", func() { b.Clear() })
 	w.Bind("runCommand", func(text string) { b.RunCommand(text) })
+	w.Bind("stop", func() { b.Stop() })
+	w.Bind("stats", func() string { return b.statsJSON() })
 	w.Bind("refreshModels", func() string { return b.RefreshModelsUI() })
 	w.Bind("sessions", func() []SessionEntry { return b.Sessions() })
 	w.Bind("openSession", func(id string) { b.OpenSession(id) })
 	w.Bind("newSession", func() { b.NewSession() })
+	w.Bind("setKey", b.setKey)
 	w.SetHtml(simpleUIHTML(model, provider))
 	log.Printf("[simpleui] stage: bridge wired, HTML loaded, entering message pump")
 	w.Run()
@@ -1164,6 +873,15 @@ func simpleUIHTML(model, provider string) string {
   }
   #send { background: #ff7a45; color: #1a1205; border: none; border-radius: 8px; padding: 0 18px; font-weight: 700; cursor: pointer; }
   #send:hover { background: #ff9166; }
+  #stopBtn { background: #b53a3a; color: #fff; border: none; border-radius: 8px; padding: 0 16px; font-weight: 700; cursor: pointer; }
+  #stopBtn:hover { background: #cf4a4a; }
+  /* Bottom status bar: model/provider/mode/security/tokens/cache/cost */
+  #status {
+    flex: 0 0 auto; padding: 5px 12px; font-size: 12px; color: #6b7484;
+    background: #12151c; border-top: 1px solid #262b36; white-space: nowrap;
+    overflow-x: auto; scrollbar-width: none;
+  }
+  #status::-webkit-scrollbar { display: none; }
   /* Right command panel + draggable slider */
   #grip {
     flex: 0 0 6px; cursor: col-resize; background: #262b36;
@@ -1232,6 +950,8 @@ func simpleUIHTML(model, provider string) string {
   html.light #inputbar { background: #fff; border-color: #e0e0e5; }
   html.light #inp { background: #f7f7f9; color: #1a1a1f; border-color: #d0d0da; }
   html.light #send { background: #ff7a45; color: #fff; }
+  html.light #stopBtn { background: #c0392b; }
+  html.light #status { background: #f4f4f7; border-color: #e0e0e5; color: #888; }
   html.light #side { background: #f4f4f7; border-color: #e0e0e5; }
   html.light #grip { background: #d0d0da; }
   html.light #grip:hover { background: #ff7a45; }
@@ -1273,8 +993,10 @@ func simpleUIHTML(model, provider string) string {
       <button id="clearBtn" title="清空并删除当前会话">清空</button>
     </div>
     <div id="log"></div>
+    <div id="status" title="模型 / 提供商 / 模式 / 安全等级 / Token / 缓存 / 费用"></div>
     <div id="inputbar">
       <textarea id="inp" placeholder="输入消息或 /命令，Enter 发送，Shift+Enter 换行…"></textarea>
+      <button id="stopBtn" title="停止生成" style="display:none;">■ 停止</button>
       <button id="send">发送</button>
     </div>
   </div>
@@ -1282,6 +1004,18 @@ func simpleUIHTML(model, provider string) string {
   <div id="side">
     <div class="side-head">命令面板 <button class="collapse" id="collapseBtn" title="折叠/展开">⟨</button></div>
     <div class="side-list" id="sideList"></div>
+  </div>
+  <div id="keyModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:999; align-items:center; justify-content:center;">
+    <div style="background:#171a21; border:1px solid #2a2e3a; border-radius:10px; padding:18px; width:360px;">
+      <div style="font-weight:600; margin-bottom:4px;">配置 API Key</div>
+      <div style="font-size:12px; color:#888; margin-bottom:10px;">简易界面没有设置页，在这里粘贴提供商密钥（如 deepseek / openrouter / zhipu）</div>
+      <input id="keyProvider" placeholder="提供商，如 deepseek" style="width:100%; box-sizing:border-box; padding:7px 9px; border-radius:6px; border:1px solid #2a2e3a; background:#0f1115; color:#e6e6e6; margin-bottom:8px;"/>
+      <input id="keyValue" type="password" placeholder="API Key" style="width:100%; box-sizing:border-box; padding:7px 9px; border-radius:6px; border:1px solid #2a2e3a; background:#0f1115; color:#e6e6e6; margin-bottom:12px;"/>
+      <div style="display:flex; gap:8px; justify-content:flex-end;">
+        <button onclick="document.getElementById('keyModal').style.display='none';" style="padding:6px 14px; border-radius:6px; border:1px solid #2a2e3a; background:transparent; color:#aaa; cursor:pointer;">取消</button>
+        <button onclick="keySave()" style="padding:6px 14px; border-radius:6px; border:none; background:#4f6ef7; color:#fff; cursor:pointer;">保存</button>
+      </div>
+    </div>
   </div>
 <script>
   var log = document.getElementById('log');
@@ -1419,27 +1153,52 @@ func simpleUIHTML(model, provider string) string {
   function uiStatus(kind, val) { if (kind === 'model') { var s = document.getElementById('model'); if (s) s.value = val; } }
   function uiSetSession(id) { var s = document.getElementById('session'); if (s) s.value = id; }
 
+  // Busy state toggles the stop button in place of the send button.
+  var sendBtn = document.getElementById('send');
+  var stopBtn = document.getElementById('stopBtn');
+  function uiBusy(b) {
+    if (b) { stopBtn.style.display = ''; sendBtn.style.display = 'none'; }
+    else { stopBtn.style.display = 'none'; sendBtn.style.display = ''; }
+  }
+
+  // Status bar rendering (model/provider/mode/security/tokens/cache/cost).
+  function fmtTok(n) { n = n || 0; return n >= 1000 ? (n/1000).toFixed(1) + 'k' : '' + n; }
+  function uiStats(s) {
+    var el = document.getElementById('status'); if (!el) return;
+    var parts = [];
+    if (s.model) parts.push('模型 ' + s.model);
+    if (s.provider) parts.push('提供商 ' + s.provider);
+    if (s.mode) parts.push('模式 ' + s.mode);
+    if (s.security) parts.push('安全 ' + s.security);
+    if (s.total !== undefined && s.total > 0) parts.push('↑' + fmtTok(s.prompt_tokens) + ' ↓' + fmtTok(s.completion_tokens) + ' = ' + fmtTok(s.total));
+    if (s.cache_hit_rate > 0) parts.push('缓存 ' + Math.round(s.cache_hit_rate * 100) + '%');
+    if (s.cost > 0) parts.push('¥' + s.cost.toFixed(4));
+    el.textContent = parts.join('  ·  ');
+  }
+
   function doSend() {
     var t = inp.value.trim(); if (!t) return;
     inp.value = '';
-    if (t.charAt(0) === '/') { if (window.runCommand) window.runCommand(t); }
-    else if (window.send) window.send(t);
+    if (window.runCommand) window.runCommand(t);
   }
 
   document.getElementById('send').addEventListener('click', doSend);
   document.getElementById('clearBtn').addEventListener('click', function(){ if (window.clear) window.clear(); });
+  stopBtn.addEventListener('click', function(){ if (window.stop) window.stop(); });
   inp.addEventListener('keydown', function(e){
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); }
   });
 
-  // Command catalog — rendered into the right panel.
+  // Command catalog — rendered into the right panel. Only lists commands that
+  // actually work in this UI (CLI-terminal-only commands like /vim /history
+  // are excluded).
   var CATALOG = [
-    {g:'会话', c:['/clear','/new','/sessions','/resume','/compact','/export','/share','/diff','/review','/summarize','/history','/undo']},
+    {g:'会话', c:['/clear','/new','/sessions','/resume','/compact','/export','/share','/diff','/review','/summarize','/undo']},
     {g:'模型', c:['/model','/provider','/models','/keys','/update']},
-    {g:'配置', c:['/config','/theme','/lang','/security','/permissions','/mcp','/vim','/statusline','/output-style']},
+    {g:'配置', c:['/config','/theme','/lang','/security','/permissions','/mcp','/output-style']},
     {g:'工具', c:['/init','/add-dir','/agents','/skills','/teams','/hooks','/todo']},
     {g:'信息', c:['/help','/whoami','/status','/cost','/doctor','/memory','/context','/feedback']},
-    {g:'系统', c:['/login','/logout','/pr_comments','/release-notes','/bug']}
+    {g:'系统', c:['/login','/logout','/release-notes','/bug']}
   ];
   var sideList = document.getElementById('sideList');
   CATALOG.forEach(function(group){
@@ -1557,8 +1316,11 @@ func simpleUIHTML(model, provider string) string {
 
   var hint = document.createElement('div');
   hint.className = 'msg system';
-  hint.textContent = 'iCode 简易聊天 — 输入消息或 /命令开始。右侧面板可点击执行任意 CLI 命令；代码块右上角可一键复制；顶栏可切换会话 / 新建会话。工具调用已自动批准。';
+  hint.textContent = 'iCode 简易聊天 — 输入消息或 /命令开始。右侧面板可点击执行任意 CLI 命令；代码块右上角可一键复制；顶栏可切换会话 / 新建会话。特殊语法：# 记入项目记忆、# user: 记入用户记忆、! 执行 shell 命令。工具调用已自动批准。';
   log.appendChild(hint);
+
+  // Initial status-bar fill.
+  if (window.stats) window.stats().then(uiStats).catch(function(){});
 
   // Dark / light theme toggle.
   var themeBtn = document.getElementById('themeBtn');
@@ -1572,6 +1334,29 @@ func simpleUIHTML(model, provider string) string {
   themeBtn.addEventListener('click', function(){
     applyTheme(document.documentElement.className === 'dark' ? 'light' : 'dark');
   });
+  function uiTheme(t) {
+    if (t === 'dark') applyTheme('dark');
+    else if (t === 'light') applyTheme('light');
+    else applyTheme(document.documentElement.className === 'dark' ? 'light' : 'dark');
+  }
+
+  // API-key entry dialog — opened by bare /login (this window has no settings
+  // page, so the modal is the only place to paste a provider key).
+  function uiKeyPrompt() {
+    document.getElementById('keyProvider').value = '';
+    document.getElementById('keyValue').value = '';
+    document.getElementById('keyModal').style.display = 'flex';
+    document.getElementById('keyProvider').focus();
+  }
+  function keySave() {
+    var p = document.getElementById('keyProvider').value.trim();
+    var k = document.getElementById('keyValue').value.trim();
+    document.getElementById('keyModal').style.display = 'none';
+    if (!p) { addBlock('system', '请填写提供商名称（如 deepseek / openrouter / zhipu）', true); return; }
+    if (window.setKey) {
+      window.setKey(p, k).then(function(msg){ addBlock('system', msg, true); }).catch(function(e){ addBlock('system', '设置失败: ' + e, true); });
+    }
+  }
 </script>
 </body></html>`
 }

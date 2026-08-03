@@ -158,6 +158,11 @@ type TUI struct {
 	history  []string
 	histIdx  int
 
+	// vim normal-mode state (real key bindings, toggled by /vim)
+	vimInsert    bool   // true = insert mode (default); false = normal mode
+	vimUndo      string // snapshot for `u` in normal mode
+	vimUndoValid bool
+
 	// renderMu serializes terminal writes (the streaming goroutine also renders).
 	renderMu sync.Mutex
 
@@ -271,6 +276,7 @@ func New(cfg Config) *TUI {
 
 		welcomeVisible: true, // show the startup banner on a fresh session
 		vimMode:        vimMode,
+		vimInsert:      true,
 		statusVisible:  statusVisible,
 	}
 }
