@@ -79,6 +79,12 @@ type Config struct {
 	// desktop file). Default false — iCode never auto-starts without an
 	// explicit opt-in from the user.
 	Autostart bool `yaml:"autostart,omitempty" json:"autostart,omitempty"`
+	// Proxy is an optional HTTP(S) proxy URL (e.g. http://127.0.0.1:7890)
+	// applied to all model/provider traffic. Empty means the standard
+	// HTTP_PROXY / HTTPS_PROXY environment variables are honoured instead.
+	// It is applied to the process environment at server start and on each
+	// settings save, so it takes effect without a restart.
+	Proxy string `yaml:"proxy,omitempty" json:"proxy,omitempty"`
 }
 
 // HookRule mirrors hooks.Rule but lives here so config stays dependency-free.

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../stores/appStore';
-import { PageTools, PageUpdates, PageAbout } from './SettingsPagesExtra';
+import { PageTools, PageUpdates, PageAbout, PageNetwork } from './SettingsPagesExtra';
 import {
   Settings, X, Key, Globe, Shield, Cpu, Moon, Sun, Monitor, Laptop,
   Zap, Wrench, Boxes, DollarSign, ChevronDown, Check, Plus, Trash2,
@@ -12,7 +12,7 @@ import {
 // Reasonix-style Settings Modal
 // ═══════════════════════════════════════════════════════════════
 
-type PageId = 'general' | 'models' | 'mcp' | 'skills' | 'billing' | 'shortcuts' | 'tools' | 'updates' | 'about' | 'desktop';
+type PageId = 'general' | 'models' | 'mcp' | 'skills' | 'billing' | 'shortcuts' | 'tools' | 'updates' | 'about' | 'desktop' | 'network';
 
 interface PageMeta { id: PageId; icon: React.ElementType; labelKey: string; }
 
@@ -24,6 +24,7 @@ const PAGES: PageMeta[] = [
   { id: 'skills',   icon: Zap,         labelKey: 'pageSkills' },
   { id: 'billing',  icon: DollarSign,  labelKey: 'pageBilling' },
   { id: 'updates',  icon: RefreshCw,   labelKey: 'pageUpdates' },
+  { id: 'network',  icon: Globe,        labelKey: 'pageNetwork' },
   { id: 'shortcuts',icon: Boxes,       labelKey: 'pageShortcuts' },
   { id: 'desktop',  icon: Laptop,      labelKey: 'pageDesktop' },
   { id: 'about',    icon: Info,        labelKey: 'pageAbout' },
@@ -101,7 +102,8 @@ const SettingsPage: React.FC<{ visible: boolean; onClose: () => void }> = ({ vis
             {page === 'skills' && <PageSkills />}
             {page === 'billing' && <PageBilling store={store} />}
             {page === 'updates' && <PageUpdates store={store} />}
-            {page === 'shortcuts' && <PageShortcuts />}
+            {page === 'network' && <PageNetwork store={store} />}
+            {page === 'shortcuts' && <PageShortcuts />} 
             {page === 'desktop' && <PageDesktop store={store} />}
             {page === 'about' && <PageAbout store={store} />}
           </div>

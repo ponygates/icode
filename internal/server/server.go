@@ -93,6 +93,9 @@ func New(cfg ServerConfig) *Server {
 // Start begins listening and serving API requests.
 // Returns the actual port the server is listening on (useful for port=0).
 func (s *Server) Start(ctx context.Context) (int, error) {
+	// Apply the configured proxy to the process environment before any
+	// provider request can fire (harmless no-op when unset).
+	s.cfg.WithRLock(func() { applyProxyEnv(s.cfg.Proxy) })
 	mux := http.NewServeMux()
 
 	// Health & status

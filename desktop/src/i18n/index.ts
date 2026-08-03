@@ -119,6 +119,7 @@ i18n.use(initReactI18next).init({
           pageSkills: '技能',
           pageBilling: '费用',
           pageUpdates: '更新',
+          pageNetwork: '网络',
           pageShortcuts: '快捷键',
           pageAbout: '关于',
           pageDesktop: '桌面',
@@ -280,6 +281,12 @@ i18n.use(initReactI18next).init({
           dataPath: '数据路径：',
           dataManagement: '数据管理',
           clearAllSessions: '清除所有会话',
+        },
+        network: {
+          proxy: 'HTTP/HTTPS 代理',
+          proxyHint: '留空则使用系统环境变量 HTTP_PROXY / HTTPS_PROXY。填 http://127.0.0.1:7890 之类的地址，保存后立即对所有模型请求生效。',
+          save: '保存',
+          saved: '已保存',
         },
         analytics: {
           title: 'Token 分析',
@@ -552,6 +559,7 @@ i18n.use(initReactI18next).init({
           pageSkills: '技能',
           pageBilling: '費用',
           pageUpdates: '更新',
+          pageNetwork: '網路',
           pageShortcuts: '快捷鍵',
           pageAbout: '關於',
           pageDesktop: '桌面',
@@ -713,6 +721,12 @@ i18n.use(initReactI18next).init({
           dataPath: '資料路徑：',
           dataManagement: '資料管理',
           clearAllSessions: '清除所有對話',
+        },
+        network: {
+          proxy: 'HTTP/HTTPS 代理',
+          proxyHint: '留空則使用系統環境變數 HTTP_PROXY / HTTPS_PROXY。填 http://127.0.0.1:7890 之類的位址，儲存後立即對所有模型請求生效。',
+          save: '儲存',
+          saved: '已儲存',
         },
         analytics: {
           title: 'Token 分析',
@@ -985,6 +999,7 @@ i18n.use(initReactI18next).init({
           pageSkills: 'Skills',
           pageBilling: 'Billing',
           pageUpdates: 'Updates',
+          pageNetwork: 'Network',
           pageShortcuts: 'Shortcuts',
           pageAbout: 'About',
           pageDesktop: 'Desktop',
@@ -1146,6 +1161,12 @@ i18n.use(initReactI18next).init({
           dataPath: 'Data Path:',
           dataManagement: 'Data Management',
           clearAllSessions: 'Clear All Sessions',
+        },
+        network: {
+          proxy: 'HTTP/HTTPS Proxy',
+          proxyHint: 'Leave empty to honour the HTTP_PROXY / HTTPS_PROXY environment variables. Enter e.g. http://127.0.0.1:7890; it applies to all model requests immediately after saving.',
+          save: 'Save',
+          saved: 'Saved',
         },
         analytics: {
           title: 'Token Analytics',

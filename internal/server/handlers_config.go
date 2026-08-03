@@ -4,11 +4,25 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
 
 	"github.com/ponygates/icode/internal/config"
 	"github.com/ponygates/icode/internal/core/permission"
 	"github.com/ponygates/icode/internal/desktop"
 )
+
+// applyProxyEnv pushes the configured proxy URL into the process environment
+// so provider http clients (which honour HTTP_PROXY/HTTPS_PROXY per request
+// via http.ProxyFromEnvironment) pick it up immediately, without a restart.
+func applyProxyEnv(proxy string) {
+	if proxy == "" {
+		_ = os.Unsetenv("HTTP_PROXY")
+		_ = os.Unsetenv("HTTPS_PROXY")
+		return
+	}
+	_ = os.Setenv("HTTP_PROXY", proxy)
+	_ = os.Setenv("HTTPS_PROXY", proxy)
+}
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -56,11 +70,15 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			// Desktop settings: launch-on-login + fixed backend port.
 			s.cfg.Autostart = cfg.Autostart
 			s.cfg.Server.Port = cfg.Server.Port
+			s.cfg.Proxy = cfg.Proxy
 			return s.cfg.SaveLocked(config.DefaultPath())
 		}); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
 		}
+		// Apply the proxy setting to the live process so it takes effect for
+		// the next model request (no restart needed).
+		applyProxyEnv(s.cfg.Proxy)
 		// Apply the launch-on-login preference immediately (best-effort;
 		// platform failures are logged, never fatal to the request).
 		if err := desktop.ApplyAutostart(cfg.Autostart); err != nil {
@@ -125,10 +143,12 @@ func (s *Server) handleConfigReset(w http.ResponseWriter, r *http.Request) {
 	s.cfg.TUI = def.TUI
 	s.cfg.Tools = def.Tools
 	s.cfg.Update = def.Update
+	s.cfg.Proxy = def.Proxy
 	if err := s.cfg.Save(config.DefaultPath()); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	applyProxyEnv(s.cfg.Proxy)
 	if s.engine != nil {
 		s.engine.SetGenerationParams(s.cfg.Defaults.Temperature, s.cfg.Defaults.MaxTokens)
 	}

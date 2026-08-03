@@ -228,3 +228,51 @@ export function PageAbout({ store }: { store: StoreState }) {
     </div>
   );
 }
+
+export function PageNetwork({ store }: { store: StoreState }) {
+  const { t } = useTranslation();
+  const [proxy, setProxy] = useState('');
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    if (!store.backendUrl) return;
+    fetch(`${store.backendUrl}/api/config`)
+      .then(r => r.json())
+      .then(cfg => setProxy(cfg?.proxy || ''))
+      .catch(() => {});
+  }, [store.backendUrl]);
+
+  const save = async () => {
+    if (!store.backendUrl) return;
+    try {
+      await fetch(`${store.backendUrl}/api/config`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ proxy }),
+      });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 1800);
+    } catch {}
+  };
+
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:20 }}>
+      <Section title={t('network.proxy')}>
+        <label style={lbl}>{t('network.proxy')}</label>
+        <input
+          type="text"
+          value={proxy}
+          placeholder="http://127.0.0.1:7890"
+          onChange={e => setProxy(e.target.value)}
+          style={selectStyle}
+        />
+        <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.6, marginTop: 6 }}>
+          {t('network.proxyHint')}
+        </div>
+        <button onClick={save} style={{ ...btnGhost, marginTop: 10, color: 'var(--accent)', borderColor: 'var(--accent)' }}>
+          {saved ? t('network.saved') : t('network.save')}
+        </button>
+      </Section>
+    </div>
+  );
+}
