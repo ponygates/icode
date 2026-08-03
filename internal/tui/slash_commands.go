@@ -132,9 +132,9 @@ func (t *TUI) handleSlash(text string) {
 
 	case "/resume":
 		if len(args) > 0 && t.callback != nil {
-			t.add(RoleSystem, t.callback.OnResume(args[0]))
+			t.callback.OnSlashCommand("/resume", args)
 		} else {
-			t.add(RoleSystem, "Usage: /resume <session-id>")
+			t.add(RoleSystem, "Usage: /resume <session-id> [--lite[=<n>]]")
 		}
 
 	case "/fork":

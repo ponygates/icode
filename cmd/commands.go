@@ -1064,9 +1064,36 @@ func (c *chatCallback) OnSlashCommand(cmd string, args []string) {
 			c.tui.AddMessage(tui.RoleSystem, "No active session. Start typing to create one.")
 		}
 	case "/resume":
-		if len(args) > 0 && c.app != nil && c.app.SessStore != nil {
-			c.tui.AddMessage(tui.RoleSystem, c.OnResume(args[0]))
+		if len(args) == 0 || c.app == nil || c.app.SessStore == nil {
+			c.tui.AddMessage(tui.RoleSystem, "Usage: /resume <session-id> [--lite[=<n>]]")
+			break
 		}
+		id := args[0]
+		lite := 0
+		if len(args) > 1 {
+			switch a := strings.TrimSpace(args[1]); {
+			case a == "--lite":
+				lite = 4
+			case strings.HasPrefix(a, "--lite="):
+				fmt.Sscanf(strings.TrimPrefix(a, "--lite="), "%d", &lite)
+			default:
+				c.tui.AddMessage(tui.RoleSystem, "用法: /resume <session-id> --lite=<n>（应为正整数）")
+				break
+			}
+		}
+		if lite > 0 {
+			if sess, err := c.app.SessStore.Get(id); err == nil {
+				if sessionum.Get(sess) == "" {
+					c.tui.AddMessage(tui.RoleSystem, "该会话还没有存档摘要，无法 lite 恢复。先 /summarize 或退出时自动存档后再试。")
+					break
+				}
+				if err := sessionum.SetLite(c.app.SessStore, sess, lite); err != nil {
+					c.tui.AddMessage(tui.RoleSystem, "设置 lite 模式失败: "+err.Error())
+					break
+				}
+			}
+		}
+		c.tui.AddMessage(tui.RoleSystem, c.OnResume(id))
 	case "/fork":
 		if len(args) > 0 && c.app != nil && c.app.SessStore != nil {
 			spec := args[0]

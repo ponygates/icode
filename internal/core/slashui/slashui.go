@@ -526,23 +526,55 @@ func cmdSessions(b *Backend, st *State, _ []string) Result {
 	return ok(sb.String())
 }
 
+// defaultLiteN is how many recent messages /resume --lite replays alongside
+// the archived summary (the rest is dropped from the model context).
+const defaultLiteN = 4
+
 func cmdResume(b *Backend, st *State, args []string) Result {
 	if len(args) == 0 {
-		return ok("用法: /resume <session-id>")
+		return ok("用法: /resume <session-id> [--lite[=<最近消息数>]]\n  --lite 只把摘要+最近 N 条消息送给模型，省 token（需要该会话已有存档摘要）")
 	}
 	if b == nil || b.SessStore == nil {
 		return ok("无会话存储可用。")
 	}
-	if st.SessionID != "" && st.SessionID != args[0] {
+	id := args[0]
+	lite := 0
+	if len(args) > 1 {
+		switch a := strings.TrimSpace(args[1]); {
+		case a == "--lite":
+			lite = defaultLiteN
+		case strings.HasPrefix(a, "--lite="):
+			if v, err := strconv.Atoi(strings.TrimPrefix(a, "--lite=")); err == nil && v > 0 {
+				lite = v
+			} else {
+				return errf("用法: /resume <session-id> --lite=<最近消息数>（应为正整数）")
+			}
+		default:
+			return errf("未知参数: %s（支持 --lite 或 --lite=<n>）", a)
+		}
+	}
+	if st.SessionID != "" && st.SessionID != id {
 		archiveSession(b, st)
 	}
-	sess, err := b.SessStore.Get(args[0])
+	sess, err := b.SessStore.Get(id)
 	if err != nil {
-		return errf("会话不存在: %s", args[0])
+		return errf("会话不存在: %s", id)
+	}
+	if lite > 0 {
+		if sessionum.Get(sess) == "" {
+			return errf("该会话还没有存档摘要，无法 lite 恢复。先运行 /summarize，或退出时自动存档后再试。")
+		}
+		if err := sessionum.SetLite(b.SessStore, sess, lite); err != nil {
+			return errf("设置 lite 模式失败: %v", err)
+		}
 	}
 	st.SessionID = sess.ID
+	out := fmt.Sprintf("已载入会话 %s — %d 条消息", sess.ID, len(sess.Messages))
+	if lite > 0 {
+		out = fmt.Sprintf("已载入会话 %s（lite 模式）— 摘要 + 最近 %d 条消息（共 %d 条）送入模型", sess.ID, lite, len(sess.Messages))
+	}
 	return Result{
-		Output:    fmt.Sprintf("已载入会话 %s — %d 条消息", sess.ID, len(sess.Messages)),
+		Output:    out,
 		Model:     sess.ModelID,
 		Provider:  sess.ProviderName,
 		SessionID: sess.ID,

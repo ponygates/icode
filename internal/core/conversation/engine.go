@@ -734,7 +734,17 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 		}
 	}
 
-	opt := e.getOrCreateOptimizer(sessionID, modelInfo, sess.Messages, sessionum.Get(sess))
+	// Lite-resume mode: when the session was resumed with /resume --lite, feed
+	// the model only the archived summary + the most recent n messages instead
+	// of the whole transcript. The summary is injected as a preset prefix (see
+	// getOrCreateOptimizer), so the model keeps the gist without the cost of
+	// replaying every old turn.
+	msgs := sess.Messages
+	if n := sessionum.LiteN(sess); n > 0 && n < len(msgs) {
+		msgs = msgs[len(msgs)-n:]
+	}
+
+	opt := e.getOrCreateOptimizer(sessionID, modelInfo, msgs, sessionum.Get(sess))
 
 	// Long-goal mode: when the session has a goal, re-inject it into the
 	// system prompt every turn so the model keeps working toward it. The
