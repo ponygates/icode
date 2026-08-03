@@ -1220,8 +1220,33 @@ func cmdToken(b *Backend, st *State) Result {
 	if stats.EstimatedCost > 0 {
 		sb.WriteString(fmt.Sprintf("预估费用:       ¥%.4f\n", stats.EstimatedCost))
 	}
+	if stats.EstimatedSavedCost > 0 {
+		sb.WriteString(fmt.Sprintf("预估节省:       ¥%.4f\n", stats.EstimatedSavedCost))
+	}
+	if len(stats.Rounds) > 0 {
+		sb.WriteString("\n每轮明细（缓存命中即可见节省）:\n")
+		for _, r := range stats.Rounds {
+			hit := "   miss"
+			if r.CacheHit > 0 {
+				hit = fmt.Sprintf("hit %8s", formatInt(r.CacheHit))
+			}
+			bar := sparkTokens(r.Prompt)
+			sb.WriteString(fmt.Sprintf("  #%-2d  prompt %-9s comp %-7s  cache %s  ¥%.4f  %s\n",
+				r.Turn, formatInt(r.Prompt), formatInt(r.Completion), hit, r.Cost, bar))
+		}
+	}
 	sb.WriteString("\n机制: Cache-First Loop（不可变前缀 + 追加日志 + 易失暂存）\n5 层压缩: Snip → 去重 → 折叠 → 摘要 → 预算上限")
 	return ok(sb.String())
+}
+
+// sparkTokens renders a tiny ASCII sparkline so prompt-size growth across turns
+// is visible at a glance (each block ≈ 2k tokens).
+func sparkTokens(prompt int) string {
+	blocks := prompt / 2000
+	if blocks > 12 {
+		blocks = 12
+	}
+	return strings.Repeat("█", blocks) + strings.Repeat("░", 12-blocks)
 }
 
 func cmdContext(b *Backend, st *State) Result {

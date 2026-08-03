@@ -213,13 +213,16 @@ func TestTrimToBudget_KeepsNewest(t *testing.T) {
 		msgs[i] = types.Message{Role: types.RoleUser, Content: strings.Repeat("x", 60)}
 	}
 
-	// Budget for ~5 messages (70% headroom → ~3 messages fit).
-	trimmed, didTrim := TrimToBudget(msgs, 300)
+	// Budget for ~5 messages (70% headroom → ~5 messages fit).
+	trimmed, didTrim := TrimToBudget(msgs, 150)
 	if !didTrim {
 		t.Fatalf("expected trim to happen")
 	}
 	if len(trimmed) == 0 || len(trimmed) >= len(msgs) {
 		t.Fatalf("trim should keep a strict subset, got %d", len(trimmed))
+	}
+	if len(trimmed) != 6 {
+		t.Fatalf("expected 6 kept messages, got %d", len(trimmed))
 	}
 	// The newest message must survive.
 	if trimmed[len(trimmed)-1].Content != msgs[len(msgs)-1].Content {

@@ -1482,9 +1482,34 @@ func (c *chatCallback) OnTokenStats() string {
 	if stats.EstimatedCost > 0 {
 		b.WriteString(fmt.Sprintf("预估费用:       ¥%.4f\n", stats.EstimatedCost))
 	}
+	if stats.EstimatedSavedCost > 0 {
+		b.WriteString(fmt.Sprintf("预估节省:       ¥%.4f\n", stats.EstimatedSavedCost))
+	}
+	if len(stats.Rounds) > 0 {
+		b.WriteString("\n每轮明细（缓存命中即可见节省）:\n")
+		for _, r := range stats.Rounds {
+			hit := "   miss"
+			if r.CacheHit > 0 {
+				hit = fmt.Sprintf("hit %8s", formatInt(r.CacheHit))
+			}
+			bar := cliSpark(r.Prompt)
+			b.WriteString(fmt.Sprintf("  #%-2d  prompt %-9s comp %-7s  cache %s  ¥%.4f  %s\n",
+				r.Turn, formatInt(r.Prompt), formatInt(r.Completion), hit, r.Cost, bar))
+		}
+	}
 	b.WriteString("\n机制: Cache-First Loop（不可变前缀 + 追加日志 + 易失暂存）\n")
 	b.WriteString("5 层压缩: Snip → 去重 → 折叠 → 摘要 → 预算上限")
 	return b.String()
+}
+
+// cliSpark renders a tiny ASCII sparkline for prompt-size growth across turns
+// (each block ≈ 2k tokens).
+func cliSpark(prompt int) string {
+	blocks := prompt / 2000
+	if blocks > 12 {
+		blocks = 12
+	}
+	return strings.Repeat("█", blocks) + strings.Repeat("░", 12-blocks)
 }
 
 // OnOutputStyle implements tui.Callback — applies an answer style live and
