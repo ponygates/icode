@@ -13,6 +13,7 @@ import (
 	"github.com/ponygates/icode/internal/config"
 	"github.com/ponygates/icode/internal/core/agent"
 	"github.com/ponygates/icode/internal/core/checkpoint"
+	"github.com/ponygates/icode/internal/core/sessionum"
 	projectcontext "github.com/ponygates/icode/internal/core/context"
 	"github.com/ponygates/icode/internal/core/conversation"
 	"github.com/ponygates/icode/internal/core/permission"
@@ -104,6 +105,7 @@ func Execute(ctx context.Context, b *Backend, st *State, text string) Result {
 	case "/resume":
 		return cmdResume(b, st, args)
 	case "/new", "/newsession":
+		archiveSession(b, st)
 		return ok("新会话已创建。").withNewSession()
 	case "/search":
 		return cmdSearch(b, args)
@@ -499,7 +501,18 @@ func cmdSessions(b *Backend, st *State, _ []string) Result {
 		if title == "" {
 			title = "(untitled)"
 		}
-		sb.WriteString(fmt.Sprintf("  %s  %s  [%s]\n", s.ID, title, s.ModelID))
+		line := fmt.Sprintf("  %s  %s  [%s]", s.ID, title, s.ModelID)
+		if sum := sessionum.Get(&s); sum != "" {
+			first := sum
+			if idx := strings.Index(first, "\n"); idx > 0 {
+				first = first[:idx]
+			}
+			if r := []rune(first); len(r) > 60 {
+				first = string(r[:60]) + "…"
+			}
+			line += fmt.Sprintf("\n      ↳ %s", first)
+		}
+		sb.WriteString(line + "\n")
 	}
 	sb.WriteString("\n/resume <session_id> 载入某个会话")
 	return ok(sb.String())
@@ -512,6 +525,9 @@ func cmdResume(b *Backend, st *State, args []string) Result {
 	if b == nil || b.SessStore == nil {
 		return ok("无会话存储可用。")
 	}
+	if st.SessionID != "" && st.SessionID != args[0] {
+		archiveSession(b, st)
+	}
 	sess, err := b.SessStore.Get(args[0])
 	if err != nil {
 		return errf("会话不存在: %s", args[0])
@@ -522,6 +538,20 @@ func cmdResume(b *Backend, st *State, args []string) Result {
 		Model:    sess.ModelID,
 		Provider: sess.ProviderName,
 	}
+}
+
+// archiveSession best-effort writes the current session's local summary into
+// its Metadata before the user leaves it (/new, /resume). Failures are
+// swallowed — archiving must never block navigation.
+func archiveSession(b *Backend, st *State) {
+	if b == nil || b.SessStore == nil || st == nil || st.SessionID == "" {
+		return
+	}
+	sess, err := b.SessStore.Get(st.SessionID)
+	if err != nil {
+		return
+	}
+	_ = sessionum.Save(b.SessStore, sess, sessionum.Generate(sess, st.Model, st.Provider, st.Mode))
 }
 
 func cmdSearch(b *Backend, args []string) Result {
@@ -1008,34 +1038,14 @@ func cmdSummarize(b *Backend, st *State) Result {
 	if err != nil {
 		return errf("读取会话失败: %v", err)
 	}
-	var sb strings.Builder
-	sb.WriteString("## 对话总结\n\n")
-	msgCount := 0
-	for _, m := range sess.Messages {
-		if m.Role == "user" || m.Role == "assistant" {
-			msgCount++
-		}
+	summary := sessionum.Generate(sess, st.Model, st.Provider, st.Mode)
+	if summary == "" {
+		return ok("没有可总结的对话内容。")
 	}
-	sb.WriteString(fmt.Sprintf("共 %d 条消息，模型: %s，提供商: %s，模式: %s\n\n", msgCount, shortStr(st.Model, "?"), shortStr(st.Provider, "?"), shortStr(st.Mode, "?")))
-	if stats := b.Engine.SessionStats(st.SessionID); stats != nil {
-		sb.WriteString(fmt.Sprintf("Token: %s 输入 + %s 输出 = %s 总计",
-			formatInt(stats.PromptTokens), formatInt(stats.CompletionTokens), formatInt(stats.TotalTokens)))
-		if stats.EstimatedCost > 0 {
-			sb.WriteString(fmt.Sprintf(" · 费用: ¥%.4f", stats.EstimatedCost))
-		}
-		sb.WriteString("\n\n")
+	if err := sessionum.Save(b.SessStore, sess, summary); err != nil {
+		return errf("存档摘要失败: %v", err)
 	}
-	sb.WriteString("### 用户提问\n\n")
-	for _, m := range sess.Messages {
-		if m.Role == "user" {
-			trunc := m.Content
-			if runes := []rune(trunc); len(runes) > 120 {
-				trunc = string(runes[:120]) + "…"
-			}
-			sb.WriteString(fmt.Sprintf("- %s\n", trunc))
-		}
-	}
-	return ok(sb.String())
+	return ok(summary + "\n\n（摘要已存档，之后 /resume 会作为上下文前缀注入）")
 }
 
 func cmdCompact(b *Backend, st *State) Result {

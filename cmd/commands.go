@@ -16,6 +16,7 @@ import (
 	"github.com/ponygates/icode/internal/core/permission"
 	"github.com/ponygates/icode/internal/core/checkpoint"
 	"github.com/ponygates/icode/internal/core/searchreplace"
+	"github.com/ponygates/icode/internal/core/sessionum"
 	"github.com/ponygates/icode/internal/core/todo"
 	"github.com/ponygates/icode/internal/llm/provider"
 	"github.com/ponygates/icode/internal/server"
@@ -1068,6 +1069,19 @@ func (c *chatCallback) OnSlashCommand(cmd string, args []string) {
 		}
 		c.sessionID = ""
 		c.tui.AddMessage(tui.RoleSystem, "Session cleared.")
+	case "/summarize":
+		if c.sessionID != "" && c.app != nil && c.app.SessStore != nil {
+			if sess, err := c.app.SessStore.Get(c.sessionID); err == nil {
+				mode := ""
+				if c.app.Gate != nil {
+					mode = string(c.app.Gate.Mode())
+				}
+				sum := sessionum.Generate(sess, c.tui.CurrentModel(), c.tui.CurrentProvider(), mode)
+				if sum != "" && sessionum.Save(c.app.SessStore, sess, sum) == nil {
+					c.tui.AddMessage(tui.RoleSystem, "✓ 会话摘要已存档（零 token，退出后可恢复）。")
+				}
+			}
+		}
 	case "/review":
 	  edits := searchreplace.StageList()
 	  if len(edits) == 0 {

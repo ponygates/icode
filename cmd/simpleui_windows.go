@@ -21,6 +21,7 @@ import (
 	projectcontext "github.com/ponygates/icode/internal/core/context"
 	"github.com/ponygates/icode/internal/core/permission"
 	"github.com/ponygates/icode/internal/core/slashui"
+	"github.com/ponygates/icode/internal/core/sessionum"
 	"github.com/ponygates/icode/internal/executil"
 	"github.com/ponygates/icode/internal/types"
 	"github.com/ponygates/icode/internal/xgo"
@@ -399,6 +400,23 @@ func (b *simpleUIBridge) runPrompt(prompt string) {
 	}()
 }
 
+// ArchiveCurrent best-effort saves a zero-token summary of the current
+// session before the user leaves it (new/open/close), so a later resume has
+// context without re-reading the transcript. Failures are swallowed.
+func (b *simpleUIBridge) ArchiveCurrent() {
+	b.mu.Lock()
+	sid := b.sessionID
+	b.mu.Unlock()
+	if sid == "" || b.app == nil || b.app.SessStore == nil {
+		return
+	}
+	sess, err := b.app.SessStore.Get(sid)
+	if err != nil {
+		return
+	}
+	_ = sessionum.Save(b.app.SessStore, sess, sessionum.Generate(sess, b.model, b.provider, ""))
+}
+
 // Clear starts a fresh session.
 func (b *simpleUIBridge) Clear() {
 	b.mu.Lock()
@@ -442,6 +460,7 @@ func (b *simpleUIBridge) Sessions() []SessionEntry {
 // NewSession detaches from the current session (kept in the store) and starts
 // a fresh one — unlike Clear, it does NOT delete the old session.
 func (b *simpleUIBridge) NewSession() {
+	b.ArchiveCurrent()
 	b.mu.Lock()
 	b.sessionID = ""
 	b.messages = nil
@@ -456,6 +475,12 @@ func (b *simpleUIBridge) NewSession() {
 func (b *simpleUIBridge) OpenSession(id string) {
 	if b.app == nil || b.app.SessStore == nil {
 		return
+	}
+	b.mu.Lock()
+	cur := b.sessionID
+	b.mu.Unlock()
+	if cur != "" && cur != id {
+		b.ArchiveCurrent()
 	}
 	sess, err := b.app.SessStore.Get(id)
 	if err != nil {
@@ -842,6 +867,7 @@ func runSimpleUI() error {
 	log.Printf("[simpleui] stage: bridge wired, HTML loaded, entering message pump")
 	w.Run()
 	log.Printf("[simpleui] stage: window closed")
+	b.ArchiveCurrent()
 	a.Close()
 	os.Exit(0)
 	return nil

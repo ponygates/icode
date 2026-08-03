@@ -164,6 +164,12 @@ type Config struct {
 	// Zero value = use defaults (default snip config).
 	Snip SnipConfig
 
+	// PresetSummary seeds compactionSummary with an archived session summary
+	// (from sessionum) on first construction, so a resumed session's earlier
+	// work is injected into the system prefix before any automatic compaction
+	// happens.
+	PresetSummary string
+
 	// Attachment controls multimodal attachment eviction.
 	// Zero value = use defaults (keep the most recent 2 attachments).
 	Attachment AttachmentEvictionConfig
@@ -217,6 +223,7 @@ func New(cfg Config) *Optimizer {
 		snipConfig:       snipCfg,
 		snipFilter:       NewSnipFilter(snipCfg),
 		attachCfg:        attachCfg,
+		compactionSummary: cfg.PresetSummary,
 	}
 }
 

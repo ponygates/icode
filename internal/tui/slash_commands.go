@@ -65,6 +65,11 @@ func (t *TUI) handleSlash(text string) {
 		t.add(RoleSystem, b.String())
 
 	case "/exit", "/quit":
+		// Summary-on-exit: archive a zero-token session summary so a later
+		// /resume can rebuild context without re-reading the full transcript.
+		if t.callback != nil {
+			t.callback.OnSlashCommand("/summarize", nil)
+		}
 		t.add(RoleSystem, "Goodbye!")
 		t.running = false
 
@@ -488,6 +493,11 @@ func (t *TUI) handleSlash(text string) {
 			}
 		}
 		t.add(RoleSystem, b.String())
+		// Also archive a zero-token summary to the session store so a later
+		// /resume can rebuild context without re-reading the transcript.
+		if t.callback != nil {
+			t.callback.OnSlashCommand("/summarize", nil)
+		}
 
 	case "/review":
 		t.reviewCommand(args)

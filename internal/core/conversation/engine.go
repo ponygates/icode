@@ -20,6 +20,7 @@ import (
 	"github.com/ponygates/icode/internal/core/permission"
 	"github.com/ponygates/icode/internal/core/privacy"
 	"github.com/ponygates/icode/internal/core/router"
+	"github.com/ponygates/icode/internal/core/sessionum"
 	"github.com/ponygates/icode/internal/core/skills"
 	"github.com/ponygates/icode/internal/core/slashcmd"
 	"github.com/ponygates/icode/internal/core/tool"
@@ -733,7 +734,7 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 		}
 	}
 
-	opt := e.getOrCreateOptimizer(sessionID, modelInfo, sess.Messages)
+	opt := e.getOrCreateOptimizer(sessionID, modelInfo, sess.Messages, sessionum.Get(sess))
 
 	// Redact content if security level is "desensitize"
 	sendContent := content
@@ -1163,16 +1164,17 @@ func (e *Engine) Stop(sessionID string) {
 	}
 }
 
-func (e *Engine) getOrCreateOptimizer(sessionID string, modelInfo types.ModelInfo, existingMessages []types.Message) *tokenopt.Optimizer {
+func (e *Engine) getOrCreateOptimizer(sessionID string, modelInfo types.ModelInfo, existingMessages []types.Message, presetSummary string) *tokenopt.Optimizer {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if opt, ok := e.optimizers[sessionID]; ok {
 		return opt
 	}
 	opt := tokenopt.New(tokenopt.Config{
-		ModelInfo:    modelInfo,
-		SystemPrompt: e.buildSystemPrompt(sessionID),
-		ProviderName: modelInfo.Provider,
+		ModelInfo:      modelInfo,
+		SystemPrompt:   e.buildSystemPrompt(sessionID),
+		ProviderName:   modelInfo.Provider,
+		PresetSummary:  presetSummary,
 	})
 	opt.SetTools(e.toolReg.ListDefs())
 
