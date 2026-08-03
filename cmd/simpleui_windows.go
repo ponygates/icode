@@ -37,6 +37,10 @@ type simpleUIBridge struct {
 	provider  string
 	sessionID string
 	lastTool  string
+	// thinkingBuf accumulates reasoning deltas (DeepSeek R1 etc.) so they can
+	// be folded into a collapsible box instead of being dropped. Truncated to
+	// keep the transcript light — shown in the UI, never re-sent to the model.
+	thinkingBuf string
 
 	// messages accumulates the visible conversation so commands like
 	// /export, /compact, /review, /clear can operate on it (mirrors the CLI).
@@ -329,10 +333,24 @@ func (b *simpleUIBridge) runPrompt(prompt string) {
 		}()
 		for event := range eventCh {
 			switch event.Type {
+			case types.EventThinking:
+				b.mu.Lock()
+				b.thinkingBuf += event.Content
+				if len(b.thinkingBuf) > 2000 {
+					b.thinkingBuf = b.thinkingBuf[:2000]
+				}
+				b.mu.Unlock()
 			case types.EventText:
 				b.mu.Lock()
 				lt := b.lastTool
+				th := b.thinkingBuf
 				b.mu.Unlock()
+				if th != "" {
+					b.push(fmt.Sprintf("uiThinking(%s)", jsStr(th)))
+					b.mu.Lock()
+					b.thinkingBuf = ""
+					b.mu.Unlock()
+				}
 				if lt != "" {
 					b.push(fmt.Sprintf("uiToolResult(%s)", jsStr(strings.TrimSpace(event.Content))))
 					b.mu.Lock()
@@ -342,8 +360,6 @@ func (b *simpleUIBridge) runPrompt(prompt string) {
 					b.appendAssistantText(event.Content)
 					b.push(fmt.Sprintf("uiDelta(%s)", jsStr(event.Content)))
 				}
-			case types.EventThinking:
-				// Subtle thinking note is omitted in the simple UI.
 			case types.EventToolUse:
 				b.mu.Lock()
 				b.lastTool = event.ToolCall.Name
@@ -354,11 +370,25 @@ func (b *simpleUIBridge) runPrompt(prompt string) {
 				}
 				b.push(fmt.Sprintf("uiTool(%s, %s)", jsStr(event.ToolCall.Name), jsStr(args)))
 			case types.EventDone:
+				b.mu.Lock()
+				th := b.thinkingBuf
+				b.thinkingBuf = ""
+				b.mu.Unlock()
+				if th != "" {
+					b.push(fmt.Sprintf("uiThinking(%s)", jsStr(th)))
+				}
 				b.push("uiDone()")
 				b.push("uiBusy(false)")
 				b.pushStats()
 				return
 			case types.EventError:
+				b.mu.Lock()
+				th := b.thinkingBuf
+				b.thinkingBuf = ""
+				b.mu.Unlock()
+				if th != "" {
+					b.push(fmt.Sprintf("uiThinking(%s)", jsStr(th)))
+				}
 				b.push(fmt.Sprintf("uiAppend('error', %s)", jsStr(event.Content)))
 				b.push("uiDone()")
 				b.push("uiBusy(false)")
@@ -865,6 +895,9 @@ func simpleUIHTML(model, provider string) string {
   .tool { background: #16202a; border: 1px solid #223; color: #9ecbff; font-size: 13px; }
   .tool .name { font-weight: 700; color: #7fd1ff; }
   .tool pre { margin: 6px 0 0; white-space: pre-wrap; word-break: break-word; color: #c7d2e0; }
+  .thinking { background: #1c2026; border: 1px dashed #334; color: #9aa4b2; font-size: 12px; }
+  .thinking summary { cursor: pointer; color: #9ecbff; font-weight: 600; }
+  .thinking pre { margin: 6px 0 0; white-space: pre-wrap; word-break: break-word; color: #8a93a3; }
   .role { font-size: 11px; color: #6b7484; margin-bottom: 3px; }
   #inputbar { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid #262b36; background: #161922; flex: 0 0 auto; }
   #inp {
@@ -947,6 +980,9 @@ func simpleUIHTML(model, provider string) string {
   html.light .tool { background: #eff6ff; border-color: #d0daf0; color: #2a4a7a; }
   html.light .tool .name { color: #1a5acc; }
   html.light .tool pre { color: #3a3a4a; }
+  html.light .thinking { background: #f4f6f8; border-color: #cfd6e2; color: #5a6270; }
+  html.light .thinking summary { color: #1a5acc; }
+  html.light .thinking pre { color: #5a6270; }
   html.light #inputbar { background: #fff; border-color: #e0e0e5; }
   html.light #inp { background: #f7f7f9; color: #1a1a1f; border-color: #d0d0da; }
   html.light #send { background: #ff7a45; color: #fff; }
@@ -1128,6 +1164,15 @@ func simpleUIHTML(model, provider string) string {
     current.__raw += text;
     current.querySelector('.content').textContent = current.__raw;
     stick();
+  }
+  function uiThinking(text) {
+    current = null;
+    var d = document.createElement('div'); d.className = 'msg thinking';
+    var s = document.createElement('summary'); s.textContent = '🧠 推理过程';
+    var p = document.createElement('pre'); p.textContent = text;
+    var details = document.createElement('details'); details.appendChild(s); details.appendChild(p);
+    d.appendChild(details);
+    log.appendChild(d); stick();
   }
   function uiTool(name, args) {
     current = null;

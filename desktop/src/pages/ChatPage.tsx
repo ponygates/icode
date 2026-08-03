@@ -52,6 +52,7 @@ interface PlanInfo {
 // A single server-sent event from /api/chat's SSE stream.
 type ChatEvent =
   | { type: 'text'; content: string }
+  | { type: 'thinking'; content: string }
   | { type: 'tool_use'; tool_call?: { name: string; arguments?: string }; ToolCall?: { Name: string; Arguments?: string } }
   | { type: 'permission'; permission?: PermissionRequest; Permission?: PermissionRequest }
   | { type: 'done'; meta?: { usage?: UsageInfo } }
@@ -180,7 +181,16 @@ const MessageList = React.memo(({ messages, isStreaming, onRegenerate, onZoom }:
           }}>
             {msg.role === 'assistant' ? (
               msg.content ? (
-                msg.content.startsWith('[Tool:') ? (
+                msg.content.startsWith('[Thinking]') ? (
+                  <details style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                    <summary style={{ cursor: 'pointer', color: 'var(--accent)', fontWeight: 500 }}>
+                      🧠 {t('chat.thinking')}
+                    </summary>
+                    <pre style={{ whiteSpace: 'pre-wrap', margin: '4px 0 0', color: 'var(--text-muted)' }}>
+                      {msg.content.slice(msg.content.indexOf('\n') + 1)}
+                    </pre>
+                  </details>
+                ) : msg.content.startsWith('[Tool:') ? (
                   (() => {
                     const tm = msg.content.match(/^\[Tool: ([^\]]+)\]/);
                     const name = tm?.[1] || t('chat.toolCall');
@@ -590,6 +600,10 @@ const ChatPage: React.FC = () => {
     let accumulated = '';
     let settled = false;
     let rafId: number | null = null;
+    // Thinking deltas arrive first and are folded into a collapsible box; they
+    // are shown but never persisted at full length or sent back to the model
+    // (iCode keeps them out of the paid context — a token saver, not a leak).
+    let thinkingBuf = '';
 
     // Coalesce token updates into at most one store write per animation frame.
     // This prevents the whole message list + sidebar from re-rendering on every
@@ -607,7 +621,16 @@ const ChatPage: React.FC = () => {
     const onEvent = (event: ChatEvent) => {
       if (settled) return;
       const ty = event?.type;
+      if (ty === 'thinking') {
+        thinkingBuf += event.content || '';
+        if (thinkingBuf.length > 3000) thinkingBuf = thinkingBuf.slice(0, 3000);
+        return;
+      }
       if (ty === 'text') {
+        if (thinkingBuf) {
+          accumulated += '\n[Thinking]\n' + thinkingBuf + '\n';
+          thinkingBuf = '';
+        }
         accumulated += event.content || '';
         scheduleFlush();
       } else if (ty === 'tool_use') {
@@ -620,6 +643,10 @@ const ChatPage: React.FC = () => {
         if (req?.request_id) setPendingPermission(req);
       } else if (ty === 'done') {
         settled = true;
+        if (thinkingBuf) {
+          accumulated += '\n[Thinking]\n' + thinkingBuf + '\n';
+          thinkingBuf = '';
+        }
         flushNow();
         setIsStreaming(false);
         setPendingPermission(null);
