@@ -112,6 +112,8 @@ func Execute(ctx context.Context, b *Backend, st *State, text string) Result {
 		return cmdFork(b, st, args)
 	case "/goal":
 		return cmdGoal(b, st, args)
+	case "/budget":
+		return cmdBudget(b, st, args)
 	case "/new", "/newsession":
 		archiveSession(b, st)
 		return ok("新会话已创建。").withNewSession()
@@ -268,7 +270,7 @@ func helpDefs() []helpItem {
 		{"/model [id]", "切换模型"}, {"/provider [名]", "切换提供商"},
 		{"/mode [agent|plan|yolo|auto|ask]", "切换模式"}, {"/models", "列出自定义模型"},
 		{"/session", "显示当前会话"}, {"/sessions", "列出已保存会话"},
-		{"/resume <id>", "载入历史会话"}, {"/fork <id>[@n]", "从历史会话分支出独立会话"}, {"/goal [set|show|clear]", "长目标模式"}, {"/new", "开启新会话"},
+		{"/resume <id>", "载入历史会话"}, {"/fork <id>[@n]", "从历史会话分支出独立会话"}, {"/goal [set|show|clear]", "长目标模式"}, {"/budget [set|show|clear]", "Token 预算护栏"}, {"/new", "开启新会话"},
 		{"/clear", "清空当前会话"}, {"/wipe", "清空会话上下文"},
 		{"/undo [N]", "回滚 N 步文件更改"}, {"/rewind [N]", "同上（检查点回滚）"},
 		{"/diff", "显示 git 工作区差异"}, {"/review [file]", "审查 diff 或指定文件"},
@@ -692,6 +694,70 @@ func cmdGoal(b *Backend, st *State, args []string) Result {
 			return errf("清除目标失败: %v", err)
 		}
 		return ok("已清除目标，退出长目标模式。")
+	default:
+		return errf("未知子命令: %s（支持 set / show / clear）", args[0])
+	}
+}
+
+// cmdBudget manages the session's hard token budget: /budget set <n> makes the
+// engine shrink the context to fit (archived summary + recent messages) on any
+// turn whose estimated size would exceed it. Pure local math — no model call.
+func cmdBudget(b *Backend, st *State, args []string) Result {
+	if b == nil || b.SessStore == nil || st.SessionID == "" {
+		return ok("没有活跃会话（先发一条消息）。")
+	}
+	load := func() (*types.Session, Result) {
+		sess, err := b.SessStore.Get(st.SessionID)
+		if err != nil {
+			return nil, errf("读取会话失败: %v", err)
+		}
+		return sess, Result{}
+	}
+	if len(args) == 0 {
+		sess, r := load()
+		if sess == nil {
+			return r
+		}
+		if bg := sessionum.BudgetMax(sess); bg > 0 {
+			return ok(fmt.Sprintf("当前 Token 预算: %d\n每次请求估算超限会自动压缩为摘要 + 最近消息。\n/budget clear 关闭。", bg))
+		}
+		return ok("当前没有 Token 预算。\n用法: /budget set <上限token数> — 超限自动压缩\n      /budget show — 查看\n      /budget clear — 关闭")
+	}
+	switch strings.ToLower(args[0]) {
+	case "set":
+		if len(args) < 2 {
+			return ok("用法: /budget set <上限token数>（如 /budget set 16000）")
+		}
+		n, err := strconv.Atoi(args[1])
+		if err != nil || n < 1000 {
+			return errf("预算应为 ≥1000 的 token 数。")
+		}
+		sess, r := load()
+		if sess == nil {
+			return r
+		}
+		if err := sessionum.SetBudget(b.SessStore, sess, n); err != nil {
+			return errf("保存预算失败: %v", err)
+		}
+		return ok(fmt.Sprintf("已设置 Token 预算: %d\n每次请求估算超限会自动压缩为摘要 + 最近消息，不会超预算。", n))
+	case "show":
+		sess, r := load()
+		if sess == nil {
+			return r
+		}
+		if bg := sessionum.BudgetMax(sess); bg > 0 {
+			return ok(fmt.Sprintf("当前 Token 预算: %d", bg))
+		}
+		return ok("当前没有 Token 预算。")
+	case "clear":
+		sess, r := load()
+		if sess == nil {
+			return r
+		}
+		if err := sessionum.SetBudget(b.SessStore, sess, 0); err != nil {
+			return errf("关闭预算失败: %v", err)
+		}
+		return ok("已关闭 Token 预算，恢复完整上下文。")
 	default:
 		return errf("未知子命令: %s（支持 set / show / clear）", args[0])
 	}

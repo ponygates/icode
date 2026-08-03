@@ -1163,6 +1163,61 @@ func (c *chatCallback) OnSlashCommand(cmd string, args []string) {
 		default:
 			c.tui.AddMessage(tui.RoleSystem, "用法: /goal set <目标> | /goal show | /goal clear")
 		}
+	case "/budget":
+		withSess := func(fn func(*types.Session)) {
+			if c.sessionID == "" || c.app == nil || c.app.SessStore == nil {
+				c.tui.AddMessage(tui.RoleSystem, "没有活跃会话。")
+				return
+			}
+			sess, err := c.app.SessStore.Get(c.sessionID)
+			if err != nil {
+				c.tui.AddMessage(tui.RoleSystem, "读取会话失败: "+err.Error())
+				return
+			}
+			fn(sess)
+		}
+		sub := "show"
+		if len(args) > 0 {
+			sub = strings.ToLower(args[0])
+		}
+		switch sub {
+		case "set":
+			if len(args) < 2 {
+				c.tui.AddMessage(tui.RoleSystem, "用法: /budget set <上限token数>（如 /budget set 16000）")
+				break
+			}
+			n := 0
+			fmt.Sscanf(args[1], "%d", &n)
+			if n < 1000 {
+				c.tui.AddMessage(tui.RoleSystem, "预算应为 ≥1000 的 token 数。")
+				break
+			}
+			withSess(func(sess *types.Session) {
+				if err := sessionum.SetBudget(c.app.SessStore, sess, n); err != nil {
+					c.tui.AddMessage(tui.RoleSystem, "保存预算失败: "+err.Error())
+				} else {
+					c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("已设置 Token 预算: %d\n每次请求估算超限会自动压缩为摘要 + 最近消息。", n))
+				}
+			})
+		case "show":
+			withSess(func(sess *types.Session) {
+				if bg := sessionum.BudgetMax(sess); bg > 0 {
+					c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("当前 Token 预算: %d", bg))
+				} else {
+					c.tui.AddMessage(tui.RoleSystem, "当前没有 Token 预算。\n用法: /budget set <上限> | /budget show | /budget clear")
+				}
+			})
+		case "clear":
+			withSess(func(sess *types.Session) {
+				if err := sessionum.SetBudget(c.app.SessStore, sess, 0); err != nil {
+					c.tui.AddMessage(tui.RoleSystem, "关闭预算失败: "+err.Error())
+				} else {
+					c.tui.AddMessage(tui.RoleSystem, "已关闭 Token 预算，恢复完整上下文。")
+				}
+			})
+		default:
+			c.tui.AddMessage(tui.RoleSystem, "用法: /budget set <上限> | /budget show | /budget clear")
+		}
 	case "/clear":
 		if c.sessionID != "" && c.app != nil && c.app.SessStore != nil {
 			c.app.SessStore.Delete(c.sessionID)

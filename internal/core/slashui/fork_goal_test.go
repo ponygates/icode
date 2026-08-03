@@ -161,6 +161,37 @@ func TestCmdResume_Lite(t *testing.T) {
 	}
 }
 
+func TestCmdBudget_SetShowClear(t *testing.T) {
+	b, store := testBackend()
+	seedSession(t, store, "b")
+	st := &State{SessionID: "b"}
+
+	res := cmdBudget(b, st, []string{"set", "16000"})
+	if res.IsError || !strings.Contains(res.Output, "16000") {
+		t.Fatalf("set failed: %s", res.Output)
+	}
+	sess, _ := store.Get("b")
+	if sessionum.BudgetMax(sess) != 16000 {
+		t.Fatalf("budget not persisted")
+	}
+	res = cmdBudget(b, st, []string{"show"})
+	if !strings.Contains(res.Output, "16000") {
+		t.Fatalf("show should report budget: %s", res.Output)
+	}
+	// Too small → rejected.
+	if r := cmdBudget(b, st, []string{"set", "500"}); !r.IsError {
+		t.Fatalf("budget < 1000 should be rejected")
+	}
+	res = cmdBudget(b, st, []string{"clear"})
+	if res.IsError {
+		t.Fatalf("clear failed: %s", res.Output)
+	}
+	sess, _ = store.Get("b")
+	if sessionum.BudgetMax(sess) != 0 {
+		t.Fatalf("budget should be cleared")
+	}
+}
+
 func TestCmdGoal_ArchivesOnExitPaths(t *testing.T) {
 	b, store := testBackend()
 	seedSession(t, store, "src")

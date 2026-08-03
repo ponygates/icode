@@ -151,6 +151,13 @@ func (t *TUI) handleSlash(text string) {
 			t.add(RoleSystem, "Usage: /goal set <目标> | /goal show | /goal clear")
 		}
 
+	case "/budget":
+		if t.callback != nil {
+			t.callback.OnSlashCommand("/budget", args)
+		} else {
+			t.add(RoleSystem, "Usage: /budget set <上限token数> | /budget show | /budget clear")
+		}
+
 	case "/clear":
 		t.mu.Lock()
 		t.messages = nil

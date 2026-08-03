@@ -184,6 +184,62 @@ func TestLite_SetReadClear(t *testing.T) {
 	}
 }
 
+func TestBudget_SetReadClear(t *testing.T) {
+	store := mkStore(t)
+	sess := mkSession(t, store, "b")
+	if BudgetMax(sess) != 0 {
+		t.Fatalf("new session should have no budget")
+	}
+	if err := SetBudget(store, sess, 16000); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	got, _ := store.Get(sess.ID)
+	if BudgetMax(got) != 16000 {
+		t.Fatalf("budget not persisted: %d", BudgetMax(got))
+	}
+	if err := SetBudget(store, sess, 0); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	got, _ = store.Get(sess.ID)
+	if BudgetMax(got) != 0 {
+		t.Fatalf("budget should be cleared")
+	}
+}
+
+func TestTrimToBudget_KeepsNewest(t *testing.T) {
+	// 10 messages, each ~60 runes → ~20 tokens each.
+	msgs := make([]types.Message, 10)
+	for i := range msgs {
+		msgs[i] = types.Message{Role: types.RoleUser, Content: strings.Repeat("x", 60)}
+	}
+
+	// Budget for ~5 messages (70% headroom → ~3 messages fit).
+	trimmed, didTrim := TrimToBudget(msgs, 300)
+	if !didTrim {
+		t.Fatalf("expected trim to happen")
+	}
+	if len(trimmed) == 0 || len(trimmed) >= len(msgs) {
+		t.Fatalf("trim should keep a strict subset, got %d", len(trimmed))
+	}
+	// The newest message must survive.
+	if trimmed[len(trimmed)-1].Content != msgs[len(msgs)-1].Content {
+		t.Fatalf("newest message must be kept")
+	}
+
+	// Huge budget → no trim.
+	all, did := TrimToBudget(msgs, 1<<30)
+	if did || len(all) != len(msgs) {
+		t.Fatalf("huge budget should not trim")
+	}
+	// Empty / non-positive budget → no trim.
+	if _, did := TrimToBudget(msgs, 0); did {
+		t.Fatalf("zero budget must not trim")
+	}
+	if _, did := TrimToBudget(nil, 1000); did {
+		t.Fatalf("empty messages must not trim")
+	}
+}
+
 func TestGoal_SetShowClear(t *testing.T) {
 	store := mkStore(t)
 	sess := mkSession(t, store, "goal")

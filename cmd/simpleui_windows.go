@@ -1271,7 +1271,7 @@ func simpleUIHTML(model, provider string) string {
   // actually work in this UI (CLI-terminal-only commands like /vim /history
   // are excluded).
   var CATALOG = [
-    {g:'会话', c:['/clear','/new','/sessions','/resume','/fork','/goal','/compact','/export','/share','/diff','/review','/summarize','/undo']},
+    {g:'会话', c:['/clear','/new','/sessions','/resume','/fork','/goal','/budget','/compact','/export','/share','/diff','/review','/summarize','/undo']},
     {g:'模型', c:['/model','/provider','/models','/keys','/update']},
     {g:'配置', c:['/config','/theme','/lang','/security','/permissions','/mcp','/output-style']},
     {g:'工具', c:['/init','/add-dir','/agents','/skills','/teams','/hooks','/todo']},

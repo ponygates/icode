@@ -739,8 +739,24 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 	// of the whole transcript. The summary is injected as a preset prefix (see
 	// getOrCreateOptimizer), so the model keeps the gist without the cost of
 	// replaying every old turn.
+	//
+	// Token budget guard (/budget): when a hard budget is set, shrink the
+	// context to fit it (summary + recent messages) instead of growing
+	// unbounded. The trim is re-computed every turn so it tracks the budget
+	// as the conversation grows.
 	msgs := sess.Messages
-	if n := sessionum.LiteN(sess); n > 0 && n < len(msgs) {
+	budget := sessionum.BudgetMax(sess)
+	trimmed := false
+	if budget > 0 {
+		if sessionum.Get(sess) == "" {
+			mode := ""
+			if e.gate != nil {
+				mode = string(e.gate.Mode())
+			}
+			_ = sessionum.Save(e.sessionSt, sess, sessionum.Generate(sess, modelID, sess.ProviderName, mode))
+		}
+		msgs, trimmed = sessionum.TrimToBudget(msgs, budget)
+	} else if n := sessionum.LiteN(sess); n > 0 && n < len(msgs) {
 		msgs = msgs[len(msgs)-n:]
 	}
 
@@ -840,6 +856,9 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 	}
 
 	out := make(chan types.StreamEvent, 64)
+	if trimmed {
+		out <- types.StreamEvent{Type: types.EventText, Content: "\nⓘ [预算护栏] 会话上下文超出预算，已自动压缩为摘要 + 最近消息（≤ 预算）。"}
+	}
 	go func() {
 		defer close(out)
 		defer cancel()
