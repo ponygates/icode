@@ -1,17 +1,20 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, Suspense } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import Sidebar from './components/Sidebar';
 import ChatPage from './pages/ChatPage';
-import ModelsPage from './pages/ModelsPage';
-import SettingsModal from './pages/SettingsPage';
-import AnalyticsPage from './pages/AnalyticsPage';
-import ModelCompare from './pages/ModelCompare';
 import SetupWizard from './components/SetupWizard';
 import BootSplash from './components/BootSplash';
 import ShortcutPanel from './components/ShortcutPanel';
 import { useAppStore } from './stores/appStore';
 import ErrorBoundary from './components/ErrorBoundary';
+
+// Non-initial pages load lazily so the first paint only ships ChatPage plus
+// shared vendor code. ChatPage stays eager because it is the landing route.
+const ModelsPage = React.lazy(() => import('./pages/ModelsPage'));
+const AnalyticsPage = React.lazy(() => import('./pages/AnalyticsPage'));
+const ModelCompare = React.lazy(() => import('./pages/ModelCompare'));
+const SettingsModal = React.lazy(() => import('./pages/SettingsPage'));
 
 function hasAnyKey(): boolean {
   try {
@@ -181,18 +184,22 @@ const App: React.FC = () => {
           }}>Menu</button>
         )}
 
-        <Routes>
-          <Route path="/" element={<ChatPage />} />
-          <Route path="/models" element={<ModelsPage />} />
-          <Route path="/analytics" element={<AnalyticsPage />} />
-          <Route path="/compare" element={<ModelCompare />} />
-          <Route path="/settings" element={<Navigate to="/" replace />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
+        <Suspense fallback={null}>
+          <Routes>
+            <Route path="/" element={<ChatPage />} />
+            <Route path="/models" element={<ModelsPage />} />
+            <Route path="/analytics" element={<AnalyticsPage />} />
+            <Route path="/compare" element={<ModelCompare />} />
+            <Route path="/settings" element={<Navigate to="/" replace />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </Suspense>
       </div>
 
       {/* Reasonix-style settings modal overlay (Ctrl+,) */}
-      <SettingsModal visible={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <Suspense fallback={null}>
+        <SettingsModal visible={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      </Suspense>
       {/* Keyboard shortcut reference overlay (?) */}
       <ShortcutPanel visible={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
       {/* Startup prompt — shows for ~3s then auto-closes (see BootSplash). */}
