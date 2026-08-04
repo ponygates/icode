@@ -29,5 +29,11 @@ const localStorageStub: Storage = {
 beforeEach(() => {
   storage.clear();
   (globalThis as Record<string, unknown>).localStorage = localStorageStub;
-  (globalThis as Record<string, unknown>).window = {};
+  // In the node environment there is no real DOM, so give components a bare
+  // window to keep window.icode feature-detection safe. In jsdom the real
+  // window (with HTMLIFrameElement, etc.) must be left intact or React DOM
+  // breaks inside component tests.
+  if (typeof window === 'undefined' || !('HTMLIFrameElement' in window)) {
+    (globalThis as Record<string, unknown>).window = {};
+  }
 });
