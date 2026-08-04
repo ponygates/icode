@@ -31,6 +31,10 @@ var desktopCmd = &cobra.Command{
 
 // runDesktop boots the backend and opens the native desktop window.
 func runDesktop() error {
+	// A console-subsystem build would flash a black window on double-click;
+	// hide it as early as possible (GUI builds have no console to hide).
+	hideConsoleWindow()
+
 	release, err := acquireSingleInstance()
 	if err != nil {
 		showDesktopError("iCode", "iCode 已在运行。\n\n本机已有一个 iCode 窗口，请勿重复启动（避免 WebView2 数据目录被占用导致卡死）。")

@@ -164,26 +164,31 @@ func isFreshConsole() bool {
 }
 
 // hideConsoleWindow hides the console window created when a console-subsystem
-// exe is double-clicked, so only the WebView2 chat window is visible.
+// exe is double-clicked, so only the WebView2 chat window is visible. It is
+// called by the simple-UI and desktop boot paths as a safety net — the GUI
+// builds link with -H windowsgui (no console at all), but a console-subsystem
+// build must not leave a black box on screen.
+//
+// LazyProc.Call resolves the address on first use (equivalent to a successful
+// Find), so we call directly instead of pre-checking Find — the old
+// `if gcw.Find() != nil` guard was always true on first call and silently
+// turned this helper into a no-op.
 func hideConsoleWindow() {
 	kernel32 := windows.NewLazySystemDLL("kernel32.dll")
 	gcw := kernel32.NewProc("GetConsoleWindow")
 	showW := kernel32.NewProc("ShowWindow")
-	freeC := kernel32.NewProc("FreeConsole")
-	if gcw.Find() != nil || showW.Find() != nil {
-		return
-	}
 	hwnd, _, _ := gcw.Call()
 	if hwnd == 0 {
 		return
 	}
-	// SW_HIDE handles most Windows builds. If it silently fails (some
-	// Windows 11 or Server editions), FreeConsole detaches from the
-	// console entirely as a permanent fallback — no black box flash.
-	showW.Call(hwnd, 0) // SW_HIDE
-	if freeC.Find() == nil {
-		freeC.Call()
+	// Only hide a console this process owns exclusively (a fresh one created
+	// by a double-click). When launched FROM a terminal, the shell shares the
+	// console (process list > 1) — hiding it would yank the user's cmd/Power
+	// window away. SW_HIDE alone suffices for the double-click case.
+	if !isFreshConsole() {
+		return
 	}
+	showW.Call(hwnd, 0) // SW_HIDE
 }
 
 // showCLIMessage displays a native message box telling the user this is a
