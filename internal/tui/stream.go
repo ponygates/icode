@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 )
+
 // ── StreamWriter ─────────────────────────────────────────────────
 
 // AddMessage renders a complete message (user/system/error/assistant).

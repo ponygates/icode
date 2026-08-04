@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 )
+
 func formatTokens(n int) string {
 	if n >= 1000000 {
 		return fmt.Sprintf("%.1fM", float64(n)/1000000)
@@ -100,10 +101,10 @@ func runeWidth(r rune) int {
 	// be over-counted and wrap one cell too early.
 	switch {
 	case r >= 0x0300 && r <= 0x036F, // Combining Diacritical Marks
-		r >= 0x1AB0 && r <= 0x1AFF, // Combining Diacritical Marks Extended
-		r >= 0x1DC0 && r <= 0x1DFF, // Combining Diacritical Marks Supplement
-		r >= 0x20D0 && r <= 0x20FF, // Combining Diacritical Marks for Symbols
-		r >= 0xFE00 && r <= 0xFE0F, // Variation Selectors
+		r >= 0x1AB0 && r <= 0x1AFF,   // Combining Diacritical Marks Extended
+		r >= 0x1DC0 && r <= 0x1DFF,   // Combining Diacritical Marks Supplement
+		r >= 0x20D0 && r <= 0x20FF,   // Combining Diacritical Marks for Symbols
+		r >= 0xFE00 && r <= 0xFE0F,   // Variation Selectors
 		r >= 0xE0100 && r <= 0xE01EF: // Variation Selectors Supplement
 		return 0
 	}

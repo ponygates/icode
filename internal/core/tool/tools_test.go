@@ -434,14 +434,14 @@ func TestRegistryConcurrentAccess(t *testing.T) {
 
 func TestValidateFetchURL_BlocksSSRF(t *testing.T) {
 	blocked := []string{
-		"http://127.0.0.1:8080/admin",      // loopback
+		"http://127.0.0.1:8080/admin",             // loopback
 		"http://169.254.169.254/latest/meta-data", // cloud metadata
-		"http://10.0.0.5/",                  // private
-		"http://192.168.1.1/",               // private
-		"http://172.16.0.1/",                // private
-		"http://localhost:3000",             // loopback hostname
-		"file:///etc/passwd",                // non-http scheme
-		"ftp://example.com/x",               // non-http scheme
+		"http://10.0.0.5/",                        // private
+		"http://192.168.1.1/",                     // private
+		"http://172.16.0.1/",                      // private
+		"http://localhost:3000",                   // loopback hostname
+		"file:///etc/passwd",                      // non-http scheme
+		"ftp://example.com/x",                     // non-http scheme
 	}
 	for _, u := range blocked {
 		if err := validateFetchURL(u); err == nil {

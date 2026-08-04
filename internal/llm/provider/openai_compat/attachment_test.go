@@ -86,9 +86,9 @@ func TestBuildRequestBody_ToolMessageIgnoresAttachment(t *testing.T) {
 		Model: "m",
 		Messages: []types.Message{
 			{
-				Role:      types.RoleTool,
-				Content:   "res",
-				ToolID:    "call1",
+				Role:    types.RoleTool,
+				Content: "res",
+				ToolID:  "call1",
 				Attachments: []types.Attachment{
 					{Type: "image", MIMEType: "image/png", Data: "ABC"},
 				},

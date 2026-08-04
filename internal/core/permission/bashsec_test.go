@@ -151,8 +151,8 @@ func TestBashSecurityEngine_GitForcePush(t *testing.T) {
 	engine := NewBashSecurityEngine()
 
 	tests := []struct {
-		cmd    string
-		ask    bool
+		cmd string
+		ask bool
 	}{
 		{"git push --force", false}, // SeverityAsk, not SeverityBlock
 		{"git status", false},

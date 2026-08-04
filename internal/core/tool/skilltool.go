@@ -68,7 +68,7 @@ func (t *UseSkillTool) Execute(ctx context.Context, args string) (*types.ToolRes
 	if !ok || strings.TrimSpace(body) == "" {
 		return &types.ToolResult{
 			Success: false,
-			Error: fmt.Sprintf("skill %q not found. Use the /skills command or the Available Skills index to see valid names.", name),
+			Error:   fmt.Sprintf("skill %q not found. Use the /skills command or the Available Skills index to see valid names.", name),
 		}, nil
 	}
 	var b strings.Builder

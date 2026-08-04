@@ -97,7 +97,7 @@ func DefaultModels() []types.ModelInfo {
 				Tools:     true,
 				Streaming: true,
 			},
-			UpdatedAt:      time.Now(),
+			UpdatedAt: time.Now(),
 		},
 		{
 			ID:              "doubao-pro-32k",

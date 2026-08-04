@@ -391,12 +391,12 @@ func (s *Store) TotalTokens() (types.TokenUsage, error) {
 // raw tokenopt.Stats JSON) lets the store SUM columns directly for the
 // global dashboard without parsing JSON per row.
 type SessionStatSnapshot struct {
-	SessionID         string
-	TokensSaved       int
-	CacheHitTokens    int
-	EstimatedCost     float64
+	SessionID          string
+	TokensSaved        int
+	CacheHitTokens     int
+	EstimatedCost      float64
 	EstimatedSavedCost float64
-	CacheHitRate      float64
+	CacheHitRate       float64
 }
 
 // UpsertSessionStats persists (or replaces) one session's token stats so the
@@ -430,13 +430,13 @@ type DayAgg struct {
 
 // GlobalAgg is the cross-session aggregate shown on the global dashboard tab.
 type GlobalAgg struct {
-	Sessions         int       `json:"sessions"`
-	TotalTokensSaved int       `json:"total_tokens_saved"`
-	TotalCacheHits   int       `json:"total_cache_hit_tokens"`
-	TotalCost        float64   `json:"total_cost"`
-	TotalSavedCost   float64   `json:"total_saved_cost"`
-	AvgCacheHitRate  float64   `json:"avg_cache_hit_rate"`
-	Trend            []DayAgg  `json:"trend"`
+	Sessions         int      `json:"sessions"`
+	TotalTokensSaved int      `json:"total_tokens_saved"`
+	TotalCacheHits   int      `json:"total_cache_hit_tokens"`
+	TotalCost        float64  `json:"total_cost"`
+	TotalSavedCost   float64  `json:"total_saved_cost"`
+	AvgCacheHitRate  float64  `json:"avg_cache_hit_rate"`
+	Trend            []DayAgg `json:"trend"`
 }
 
 // GlobalStats aggregates all persisted session stats into a single summary
@@ -510,10 +510,10 @@ func boolToInt(b bool) int {
 // the desktop analogue of an IDE project window. session_ids is a JSON array
 // so the (ordered) membership survives restarts.
 type Workspace struct {
-	ID         string   `json:"id"`
-	Name       string   `json:"name"`
-	Path       string   `json:"path"`
-	SessionIDs []string `json:"session_ids"`
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	Path       string    `json:"path"`
+	SessionIDs []string  `json:"session_ids"`
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
 }

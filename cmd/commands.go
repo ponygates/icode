@@ -13,8 +13,8 @@ import (
 	"github.com/ponygates/icode/internal/app"
 	"github.com/ponygates/icode/internal/config"
 	"github.com/ponygates/icode/internal/config/i18n"
-	"github.com/ponygates/icode/internal/core/permission"
 	"github.com/ponygates/icode/internal/core/checkpoint"
+	"github.com/ponygates/icode/internal/core/permission"
 	"github.com/ponygates/icode/internal/core/searchreplace"
 	"github.com/ponygates/icode/internal/core/sessionum"
 	"github.com/ponygates/icode/internal/core/todo"
@@ -513,9 +513,9 @@ func runConfigSet(cmd *cobra.Command, cfg *config.Config, key, value string) err
 		default:
 			return fmt.Errorf("syntax must be one of: on, off")
 		}
-		default:
-			return fmt.Errorf("unknown setting: %s (try: model, provider, mode, lang, theme, diff, syntax)", key)
-		}
+	default:
+		return fmt.Errorf("unknown setting: %s (try: model, provider, mode, lang, theme, diff, syntax)", key)
+	}
 
 	if err := cfg.Save(config.DefaultPath()); err != nil {
 		return fmt.Errorf("save config: %w", err)
@@ -551,9 +551,10 @@ func runConfigProviders(cmd *cobra.Command, cfg *config.Config) error {
 }
 
 // runConfigModel manages user-defined model entries.
-//   icode config model                       → list custom/override models
-//   icode config model add <p> <id> [name]   → add a custom model
-//   icode config model rm <id>               → remove a custom model (id = provider/model_id)
+//
+//	icode config model                       → list custom/override models
+//	icode config model add <p> <id> [name]   → add a custom model
+//	icode config model rm <id>               → remove a custom model (id = provider/model_id)
 func runConfigModel(cfg *config.Config, args []string) error {
 	if len(args) == 0 {
 		if len(cfg.Models) == 0 {
@@ -618,8 +619,9 @@ func runConfigModel(cfg *config.Config, args []string) error {
 }
 
 // runConfigKey sets (or shows) the API key for a provider.
-//   icode config key                 → list key status (same as `providers`)
-//   icode config key <p> <key>       → save API key for provider <p>
+//
+//	icode config key                 → list key status (same as `providers`)
+//	icode config key <p> <key>       → save API key for provider <p>
 func runConfigKey(cfg *config.Config, args []string) error {
 	if len(args) < 1 || args[0] == "" {
 		return runConfigProviders(nil, cfg)
@@ -713,7 +715,6 @@ func runConfigMCP(cmd *cobra.Command, cfg *config.Config, args []string) error {
 		return fmt.Errorf("unknown mcp subcommand: %s (try: add, rm)", args[0])
 	}
 }
-
 
 // renderConfigPanel builds a boxed, colored settings panel (plain text so it
 // also works in non-TTY / logged output; ANSI is applied via fmt).
@@ -1288,61 +1289,61 @@ func (c *chatCallback) OnSlashCommand(cmd string, args []string) {
 			}
 		}
 	case "/review":
-	  edits := searchreplace.StageList()
-	  if len(edits) == 0 {
-	   c.tui.AddMessage(tui.RoleSystem, "No staged edits. Use the search_replace tool to propose changes first.")
-	   break
-	  }
-	  var b strings.Builder
-	  b.WriteString(fmt.Sprintf("📋 Staged edits (%d):\n", len(edits)))
-	  for i, ed := range edits {
-	   status := "✓ valid"
-	   if !ed.Valid {
-	    status = "✗ invalid"
-	   }
-	   b.WriteString(fmt.Sprintf("\n── #%d %s [%s] ──\n", i, ed.FilePath, status))
-	   b.WriteString(fmt.Sprintf("   Reason: %s\n", ed.Reason))
-	   if ed.Valid && ed.Diff != "" {
-	    // Show diff with colored markers
-	    for _, line := range strings.Split(ed.Diff, "\n") {
-	     if strings.HasPrefix(line, "---") || strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "@@") {
-	      b.WriteString(fmt.Sprintf("  %s\n", line))
-	     } else if strings.HasPrefix(line, "-") {
-	      b.WriteString(fmt.Sprintf("  \033[31m%s\033[0m\n", line))
-	     } else if strings.HasPrefix(line, "+") {
-	      b.WriteString(fmt.Sprintf("  \033[32m%s\033[0m\n", line))
-	     } else {
-	      b.WriteString(fmt.Sprintf("  %s\n", line))
-	     }
-	    }
-	   } else if !ed.Valid {
-	    b.WriteString(fmt.Sprintf("  (search text not found — cannot generate diff)\n"))
-	   }
-	  }
-	  b.WriteString("\n/apply   — apply all valid staged edits")
-	  b.WriteString("\n/reject  — discard staged edits")
-	  c.tui.AddMessage(tui.RoleSystem, b.String())
-
-	 case "/undo":
-			steps := 1
-			if len(args) > 0 {
-				fmt.Sscanf(args[0], "%d", &steps)
+		edits := searchreplace.StageList()
+		if len(edits) == 0 {
+			c.tui.AddMessage(tui.RoleSystem, "No staged edits. Use the search_replace tool to propose changes first.")
+			break
+		}
+		var b strings.Builder
+		b.WriteString(fmt.Sprintf("📋 Staged edits (%d):\n", len(edits)))
+		for i, ed := range edits {
+			status := "✓ valid"
+			if !ed.Valid {
+				status = "✗ invalid"
 			}
-			if checkpoint.DefaultUndo != nil {
-				files, err := checkpoint.DefaultUndo.Undo(context.Background(), steps)
-				if err != nil {
-					c.tui.AddMessage(tui.RoleSystem, "撤销失败: "+err.Error())
-				} else if len(files) == 0 {
-					c.tui.AddMessage(tui.RoleSystem, "没有可撤销的更改")
-				} else {
-					c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("已撤销 %d 步，还原了 %d 个文件:", steps, len(files)))
-					for _, f := range files {
-						c.tui.AddMessage(tui.RoleSystem, "  - "+f)
+			b.WriteString(fmt.Sprintf("\n── #%d %s [%s] ──\n", i, ed.FilePath, status))
+			b.WriteString(fmt.Sprintf("   Reason: %s\n", ed.Reason))
+			if ed.Valid && ed.Diff != "" {
+				// Show diff with colored markers
+				for _, line := range strings.Split(ed.Diff, "\n") {
+					if strings.HasPrefix(line, "---") || strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "@@") {
+						b.WriteString(fmt.Sprintf("  %s\n", line))
+					} else if strings.HasPrefix(line, "-") {
+						b.WriteString(fmt.Sprintf("  \033[31m%s\033[0m\n", line))
+					} else if strings.HasPrefix(line, "+") {
+						b.WriteString(fmt.Sprintf("  \033[32m%s\033[0m\n", line))
+					} else {
+						b.WriteString(fmt.Sprintf("  %s\n", line))
 					}
 				}
-			} else {
-				c.tui.AddMessage(tui.RoleSystem, "撤销系统未初始化")
+			} else if !ed.Valid {
+				b.WriteString(fmt.Sprintf("  (search text not found — cannot generate diff)\n"))
 			}
+		}
+		b.WriteString("\n/apply   — apply all valid staged edits")
+		b.WriteString("\n/reject  — discard staged edits")
+		c.tui.AddMessage(tui.RoleSystem, b.String())
+
+	case "/undo":
+		steps := 1
+		if len(args) > 0 {
+			fmt.Sscanf(args[0], "%d", &steps)
+		}
+		if checkpoint.DefaultUndo != nil {
+			files, err := checkpoint.DefaultUndo.Undo(context.Background(), steps)
+			if err != nil {
+				c.tui.AddMessage(tui.RoleSystem, "撤销失败: "+err.Error())
+			} else if len(files) == 0 {
+				c.tui.AddMessage(tui.RoleSystem, "没有可撤销的更改")
+			} else {
+				c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("已撤销 %d 步，还原了 %d 个文件:", steps, len(files)))
+				for _, f := range files {
+					c.tui.AddMessage(tui.RoleSystem, "  - "+f)
+				}
+			}
+		} else {
+			c.tui.AddMessage(tui.RoleSystem, "撤销系统未初始化")
+		}
 	case "/apply":
 		n := searchreplace.StageCount()
 		if n == 0 {

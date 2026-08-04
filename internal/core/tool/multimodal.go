@@ -280,14 +280,14 @@ func (t *VideoGenTool) Execute(ctx context.Context, args string) (*types.ToolRes
 	// Tolerant parse: some backends return the video directly, others return
 	// an async task id to poll.
 	var submit struct {
-		ID        string `json:"id"`
-		TaskID    string `json:"task_id"`
-		RequestID string `json:"request_id"`
-		Status    string `json:"status"`
+		ID         string `json:"id"`
+		TaskID     string `json:"task_id"`
+		RequestID  string `json:"request_id"`
+		Status     string `json:"status"`
 		TaskStatus string `json:"task_status"`
-		VideoURL  string `json:"video_url"`
-		Data      []struct {
-			URL     string `json:"url"`
+		VideoURL   string `json:"video_url"`
+		Data       []struct {
+			URL      string `json:"url"`
 			VideoURL string `json:"video_url"`
 		} `json:"data"`
 		VideoResult []struct {

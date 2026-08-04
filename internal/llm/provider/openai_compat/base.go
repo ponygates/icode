@@ -178,9 +178,9 @@ func (p *BaseProvider) Health(ctx context.Context) error {
 func retryableStatus(code int) bool {
 	switch code {
 	case http.StatusTooManyRequests, // 429
-		http.StatusServiceUnavailable,          // 503
-		http.StatusBadGateway,                  // 502
-		http.StatusGatewayTimeout:              // 504
+		http.StatusServiceUnavailable, // 503
+		http.StatusBadGateway,         // 502
+		http.StatusGatewayTimeout:     // 504
 		return true
 	}
 	return false

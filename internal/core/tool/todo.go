@@ -37,7 +37,7 @@ func NewTodoWriteTool(store *todo.Store) *TodoWriteTool {
 
 func (t *TodoWriteTool) Def() types.ToolDef {
 	return types.ToolDef{
-		Name: "todo_write",
+		Name:        "todo_write",
 		Description: "Manage a session-scoped todo list. Pass the FULL current list on every call — items you omit are removed. Use `pending` for not-yet-started, `in_progress` for the item you are actively working on (only one at a time), and `completed` for finished work. Setting `activeForm` provides a present-continuous label shown in the UI while an item is in_progress.",
 		Parameters: map[string]any{
 			"type": "object",

@@ -28,13 +28,13 @@ type workBuddyMCPFile struct {
 }
 
 type workBuddyMCPServer struct {
-	Command string            `json:"command,omitempty"`
-	Args    []string          `json:"args,omitempty"`
-	Env     map[string]string `json:"env,omitempty"`
-	URL     string            `json:"url,omitempty"`
-	Headers map[string]string `json:"headers,omitempty"`
-	Type    string            `json:"type,omitempty"`
-	Disabled bool             `json:"disabled,omitempty"`
+	Command  string            `json:"command,omitempty"`
+	Args     []string          `json:"args,omitempty"`
+	Env      map[string]string `json:"env,omitempty"`
+	URL      string            `json:"url,omitempty"`
+	Headers  map[string]string `json:"headers,omitempty"`
+	Type     string            `json:"type,omitempty"`
+	Disabled bool              `json:"disabled,omitempty"`
 }
 
 // ImportWorkBuddyEnabled reports whether WorkBuddy MCP auto-import is on

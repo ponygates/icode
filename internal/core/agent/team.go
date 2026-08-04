@@ -17,9 +17,9 @@ import (
 type TeamRole string
 
 const (
-	RoleLeader    TeamRole = "leader"
+	RoleLeader     TeamRole = "leader"
 	RoleSpecialist TeamRole = "specialist"
-	RoleReviewer  TeamRole = "reviewer"
+	RoleReviewer   TeamRole = "reviewer"
 )
 
 // TeamDef defines a multi-agent team.
@@ -39,12 +39,12 @@ type TeamMember struct {
 
 // TeamResult captures the output of a team run.
 type TeamResult struct {
-	Name         string
-	LeaderOutput string
+	Name          string
+	LeaderOutput  string
 	MemberOutputs map[string]string
-	TotalTokens  int
-	Duration     time.Duration
-	Errors       []string
+	TotalTokens   int
+	Duration      time.Duration
+	Errors        []string
 }
 
 // TeamRunner orchestrates multi-agent teams.
@@ -275,8 +275,8 @@ type teamFile struct {
 		MaxTokens    int      `yaml:"max_tokens"`
 	} `yaml:"leader"`
 	Members []struct {
-		Name string `yaml:"name"`
-		Role string `yaml:"role"`
+		Name  string `yaml:"name"`
+		Role  string `yaml:"role"`
 		Agent struct {
 			Name         string   `yaml:"name"`
 			Description  string   `yaml:"description"`
@@ -416,8 +416,8 @@ func DefaultTeamDefs() []*TeamDef {
 			},
 			Members: []TeamMember{
 				{
-					Name:     "security",
-					Role:     RoleReviewer,
+					Name: "security",
+					Role: RoleReviewer,
 					AgentDef: AgentDef{
 						Name:         "security",
 						Description:  "安全审查专家",
@@ -428,8 +428,8 @@ func DefaultTeamDefs() []*TeamDef {
 					},
 				},
 				{
-					Name:     "performance",
-					Role:     RoleSpecialist,
+					Name: "performance",
+					Role: RoleSpecialist,
 					AgentDef: AgentDef{
 						Name:         "performance",
 						Description:  "性能审查专家",

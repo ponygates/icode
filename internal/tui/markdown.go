@@ -400,8 +400,12 @@ func renderTable(t *TUI, out *[]string, prefix, cont string, width int, rows []s
 	}
 	// Clamp: each column at least 4, max 30
 	for ci := range colW {
-		if colW[ci] < 4 { colW[ci] = 4 }
-		if colW[ci] > 30 { colW[ci] = 30 }
+		if colW[ci] < 4 {
+			colW[ci] = 4
+		}
+		if colW[ci] > 30 {
+			colW[ci] = 30
+		}
 	}
 
 	// Build header
@@ -409,7 +413,9 @@ func renderTable(t *TUI, out *[]string, prefix, cont string, width int, rows []s
 	headerLine.WriteString(t.paint("dim", "│"))
 	for ci := 0; ci < colCount; ci++ {
 		cell := ""
-		if ci < len(parsed[0]) { cell = parsed[0][ci] }
+		if ci < len(parsed[0]) {
+			cell = parsed[0][ci]
+		}
 		headerLine.WriteString(" ")
 		headerLine.WriteString(t.c("cyan") + "\x1b[1m")
 		headerLine.WriteString(padEnd(cell, colW[ci]))
@@ -423,7 +429,9 @@ func renderTable(t *TUI, out *[]string, prefix, cont string, width int, rows []s
 	sep.WriteString(t.paint("dim", "├"))
 	for ci := 0; ci < colCount; ci++ {
 		sep.WriteString(strings.Repeat("─", colW[ci]+2))
-		if ci < colCount-1 { sep.WriteString(t.paint("dim", "┼")) }
+		if ci < colCount-1 {
+			sep.WriteString(t.paint("dim", "┼"))
+		}
 	}
 	sep.WriteString(t.paint("dim", "┤"))
 	*out = append(*out, prefix+sep.String())
@@ -438,7 +446,9 @@ func renderTable(t *TUI, out *[]string, prefix, cont string, width int, rows []s
 		rowLine.WriteString(t.paint("dim", "│"))
 		for ci := 0; ci < colCount; ci++ {
 			cell := ""
-			if ci < len(parsed[ri]) { cell = parsed[ri][ci] }
+			if ci < len(parsed[ri]) {
+				cell = parsed[ri][ci]
+			}
 			rowLine.WriteString(" ")
 			rowLine.WriteString(t.paint("dim", padEnd(cell, colW[ci])))
 			rowLine.WriteString(" " + t.paint("dim", "│"))
@@ -501,6 +511,7 @@ func parseTaskItem(trim string) (taskItem, bool) {
 	text := strings.TrimSpace(trim[closeB+1:])
 	return taskItem{text: text, checked: inner != " "}, true
 }
+
 // total width, preserving inline styles across wrapped continuation lines.
 // prefix is the first-line indent; cont is the continuation indent.
 func (t *TUI) wrapANSI(prefix, cont, s string, width int) []string {
@@ -516,8 +527,8 @@ func (t *TUI) wrapANSI(prefix, cont, s string, width int) []string {
 	var out []string
 	var cur strings.Builder
 	curW := 0
-	active := ""          // ANSI codes currently open (since the last reset)
-	startStyle := ""      // style that was open when the current fragment began
+	active := ""     // ANSI codes currently open (since the last reset)
+	startStyle := "" // style that was open when the current fragment began
 
 	flush := func(first bool) {
 		p := prefix

@@ -264,54 +264,54 @@ func (t *TUI) handleKey(r rune) bool {
 				return true
 			}
 			// Alt+Enter (or Alt+Return): submit current input.
-		if ur == '\r' || ur == '\n' {
-			text := strings.TrimSpace(t.inputBuf)
-			t.inputBuf = ""
-			t.cursor = 0
-			if text != "" {
-				t.pushHistory(text)
-				t.submit(text)
+			if ur == '\r' || ur == '\n' {
+				text := strings.TrimSpace(t.inputBuf)
+				t.inputBuf = ""
+				t.cursor = 0
+				if text != "" {
+					t.pushHistory(text)
+					t.submit(text)
+				}
+				return true
 			}
-			return true
-		}
-		// Plain Esc (or any non-CSI key) cancels the model picker.
-		if t.modelPickerOpen && ur != '[' {
-			t.closeModelPicker()
-			return true
-		}
-		if ur == '[' {
+			// Plain Esc (or any non-CSI key) cancels the model picker.
+			if t.modelPickerOpen && ur != '[' {
+				t.closeModelPicker()
+				return true
+			}
+			if ur == '[' {
 				// CSI sequence: read the parameter/command byte.
 				c1, _, e2 := br.ReadRune()
 				if e2 != nil {
 					return true
 				}
-			switch c1 {
-			case 'A': // ↑ history prev OR move suggestion cursor up (Claude Code)
-				if t.modelPickerOpen {
-					t.movePicker(-1)
-					return true
-				}
-				if t.acOpen && len(t.acItems) > 0 {
-					if t.acIdx > 0 {
-						t.acIdx--
+				switch c1 {
+				case 'A': // ↑ history prev OR move suggestion cursor up (Claude Code)
+					if t.modelPickerOpen {
+						t.movePicker(-1)
+						return true
 					}
-					return true
-				}
-				t.historyPrev()
-				return true
-			case 'B': // ↓ history next OR move suggestion cursor down (Claude Code)
-				if t.modelPickerOpen {
-					t.movePicker(1)
-					return true
-				}
-				if t.acOpen && len(t.acItems) > 0 {
-					if t.acIdx < len(t.acItems)-1 {
-						t.acIdx++
+					if t.acOpen && len(t.acItems) > 0 {
+						if t.acIdx > 0 {
+							t.acIdx--
+						}
+						return true
 					}
+					t.historyPrev()
 					return true
-				}
-				t.historyNext()
-				return true
+				case 'B': // ↓ history next OR move suggestion cursor down (Claude Code)
+					if t.modelPickerOpen {
+						t.movePicker(1)
+						return true
+					}
+					if t.acOpen && len(t.acItems) > 0 {
+						if t.acIdx < len(t.acItems)-1 {
+							t.acIdx++
+						}
+						return true
+					}
+					t.historyNext()
+					return true
 				case 'C': // → cursor right
 					runes := []rune(t.inputBuf)
 					if t.cursor < len(runes) {

@@ -572,5 +572,3 @@ func TestSubmitSlashReleaseNotes(t *testing.T) {
 		t.Fatalf("/release-notes produced no system message")
 	}
 }
-
-

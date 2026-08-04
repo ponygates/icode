@@ -40,20 +40,20 @@ const (
 
 // ServerConfig defines the configuration for connecting to an MCP server.
 type ServerConfig struct {
-	Name    string    `json:"name" yaml:"name"`
-	Type    Transport `json:"type" yaml:"type"`
-	Command string    `json:"command,omitempty" yaml:"command,omitempty"`
-	Args    []string  `json:"args,omitempty" yaml:"args,omitempty"`
-	Env     []string  `json:"env,omitempty" yaml:"env,omitempty"`
-	URL     string    `json:"url,omitempty" yaml:"url,omitempty"`
+	Name    string            `json:"name" yaml:"name"`
+	Type    Transport         `json:"type" yaml:"type"`
+	Command string            `json:"command,omitempty" yaml:"command,omitempty"`
+	Args    []string          `json:"args,omitempty" yaml:"args,omitempty"`
+	Env     []string          `json:"env,omitempty" yaml:"env,omitempty"`
+	URL     string            `json:"url,omitempty" yaml:"url,omitempty"`
 	Headers map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
-	Enabled bool      `json:"enabled" yaml:"enabled"`
+	Enabled bool              `json:"enabled" yaml:"enabled"`
 }
 
 // Client manages a connection to a single MCP server.
 type Client struct {
-	config   ServerConfig
-	tools    []types.ToolDef
+	config    ServerConfig
+	tools     []types.ToolDef
 	resources []MCPResource
 
 	mu     sync.RWMutex

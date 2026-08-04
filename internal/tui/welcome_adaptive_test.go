@@ -29,7 +29,7 @@ func renderAt(w, h int) string {
 // sliced in half on a short terminal. It also verifies the full screen shows on
 // a roomy terminal and degrades gracefully when cramped.
 func TestWelcomeAdaptive(t *testing.T) {
-	welcomeTop := "Welcome back!" // first content row of the left panel
+	welcomeTop := "Welcome back!"            // first content row of the left panel
 	welcomeTip := "Tips for getting started" // right-column header
 
 	// Roomy terminal: the whole welcome box must be present.

@@ -213,16 +213,16 @@ func New(cfg Config) *Optimizer {
 	}
 
 	return &Optimizer{
-		systemPrompt:     cfg.SystemPrompt,
-		providerName:     cfg.ProviderName,
-		modelInfo:        cfg.ModelInfo,
-		compactThreshold: cfg.CompactThreshold,
-		strategy:         cfg.Strategy,
-		cacheStrategy:    cacheStrat,
-		stats:            Stats{},
-		snipConfig:       snipCfg,
-		snipFilter:       NewSnipFilter(snipCfg),
-		attachCfg:        attachCfg,
+		systemPrompt:      cfg.SystemPrompt,
+		providerName:      cfg.ProviderName,
+		modelInfo:         cfg.ModelInfo,
+		compactThreshold:  cfg.CompactThreshold,
+		strategy:          cfg.Strategy,
+		cacheStrategy:     cacheStrat,
+		stats:             Stats{},
+		snipConfig:        snipCfg,
+		snipFilter:        NewSnipFilter(snipCfg),
+		attachCfg:         attachCfg,
 		compactionSummary: cfg.PresetSummary,
 	}
 }

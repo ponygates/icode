@@ -19,8 +19,8 @@ import (
 // traces from the TUI) can't grow unbounded across many crashes. 1 MB cap —
 // crash dumps are infrequent but can be large; keep one backup.
 var (
-	cliLogOnce     sync.Once
-	cliLogRotator  *xgo.RotatingWriter
+	cliLogOnce    sync.Once
+	cliLogRotator *xgo.RotatingWriter
 )
 
 func cliLogWriter() *xgo.RotatingWriter {

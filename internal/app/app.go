@@ -17,7 +17,6 @@ import (
 	"github.com/ponygates/icode/internal/core/conversation"
 	"github.com/ponygates/icode/internal/core/hooks"
 	"github.com/ponygates/icode/internal/core/permission"
-	"github.com/ponygates/icode/internal/lsp"
 	"github.com/ponygates/icode/internal/core/router"
 	"github.com/ponygates/icode/internal/core/session"
 	"github.com/ponygates/icode/internal/core/skills"
@@ -34,19 +33,20 @@ import (
 	"github.com/ponygates/icode/internal/llm/provider/tencent"
 	"github.com/ponygates/icode/internal/llm/provider/volcengine"
 	"github.com/ponygates/icode/internal/llm/provider/zhipu"
+	"github.com/ponygates/icode/internal/lsp"
 	"github.com/ponygates/icode/internal/types"
 	"github.com/ponygates/icode/pkg/modelupdate"
 )
 
 // App is the top-level application container.
 type App struct {
-	Cfg       *config.Config
-	Reg       *registry.Impl
-	SessStore types.SessionStore
-	DB        *db.Store // SQLite-backed store (may be nil)
-	Engine    *conversation.Engine
-	Gate      *permission.Gate
-	Updater   *modelupdate.Service
+	Cfg        *config.Config
+	Reg        *registry.Impl
+	SessStore  types.SessionStore
+	DB         *db.Store // SQLite-backed store (may be nil)
+	Engine     *conversation.Engine
+	Gate       *permission.Gate
+	Updater    *modelupdate.Service
 	LSPManager *lsp.Manager // nil when LSP disabled
 }
 

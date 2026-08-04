@@ -8,6 +8,7 @@ import (
 
 	"github.com/ponygates/icode/internal/config"
 )
+
 // ── Helpers ──────────────────────────────────────────────────────
 
 // persistSetting loads config, applies fn, and writes it back to disk.

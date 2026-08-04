@@ -13,6 +13,7 @@ import (
 	"github.com/ponygates/icode/internal/core/permission"
 	"golang.org/x/term"
 )
+
 // ── Types ────────────────────────────────────────────────────────
 
 type Mode = string
@@ -145,7 +146,7 @@ type TUI struct {
 	dirEntries    []string // cached top-level cwd listing for the explorer pane
 
 	running bool
-	reader  io.Reader      // raw mode: *bufio.Reader
+	reader  io.Reader // raw mode: *bufio.Reader
 	writer  io.Writer
 
 	// raw-mode state
@@ -256,23 +257,23 @@ func New(cfg Config) *TUI {
 		}
 	}
 	return &TUI{
-		mode:           cfg.Mode,
-		model:          cfg.Model,
-		provider:       cfg.Provider,
-		lang:           cfg.Lang,
-		theme:          cfg.Theme,
-		securityLevel:  secLvl,
-		version:        cfg.Version,
-		callback:       cfg.Callback,
-		reader:         os.Stdin,
-		writer:         os.Stdout,
-		streamDone:     make(chan struct{}, 1),
-		width:          80,
-		height:         24,
-		lastRenderW:    80,
-		lastRenderH:    24,
-		histIdx:        -1,
-		dirEntries:     listCwd(),
+		mode:          cfg.Mode,
+		model:         cfg.Model,
+		provider:      cfg.Provider,
+		lang:          cfg.Lang,
+		theme:         cfg.Theme,
+		securityLevel: secLvl,
+		version:       cfg.Version,
+		callback:      cfg.Callback,
+		reader:        os.Stdin,
+		writer:        os.Stdout,
+		streamDone:    make(chan struct{}, 1),
+		width:         80,
+		height:        24,
+		lastRenderW:   80,
+		lastRenderH:   24,
+		histIdx:       -1,
+		dirEntries:    listCwd(),
 
 		welcomeVisible: true, // show the startup banner on a fresh session
 		vimMode:        vimMode,

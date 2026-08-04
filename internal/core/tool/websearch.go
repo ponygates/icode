@@ -373,9 +373,9 @@ func (s *TavilySearch) Search(ctx context.Context, query string, count int) ([]S
 	}
 
 	payload := map[string]any{
-		"api_key":    apiKey,
-		"query":      query,
-		"max_results": count,
+		"api_key":        apiKey,
+		"query":          query,
+		"max_results":    count,
 		"include_answer": false,
 	}
 

@@ -22,15 +22,15 @@ func hasSGR(b []byte) bool {
 func TestRenderRawNoPanic(t *testing.T) {
 	for _, w := range []int{20, 40, 80, 120} {
 		tui := &TUI{
-			mode:      ModeAgent,
-			model:     "deepseek-v4-flash",
-			provider:  "deepseek",
-			lang:      "zh-CN",
-			theme:     "dark",
-			rawMode:   true,
-			color:     true,
-			width:     w,
-			height:    30,
+			mode:       ModeAgent,
+			model:      "deepseek-v4-flash",
+			provider:   "deepseek",
+			lang:       "zh-CN",
+			theme:      "dark",
+			rawMode:    true,
+			color:      true,
+			width:      w,
+			height:     30,
 			streamDone: make(chan struct{}, 1),
 		}
 		tui.writer = &bytes.Buffer{}

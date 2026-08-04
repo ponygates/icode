@@ -62,9 +62,9 @@ func TestCursorColCJK(t *testing.T) {
 		// col = prefixW + visibleWidth(text-before-cursor) + 1 (1-based ANSI)
 		{"", 0, prefixW + 1},
 		{"a", 1, prefixW + 2},
-		{"中", 1, prefixW + 3},   // 中 width 2 → vw=2
-		{"中文", 1, prefixW + 3}, // cursor after 中 only
-		{"中文", 2, prefixW + 5}, // cursor after both (vw=4)
+		{"中", 1, prefixW + 3},    // 中 width 2 → vw=2
+		{"中文", 1, prefixW + 3},   // cursor after 中 only
+		{"中文", 2, prefixW + 5},   // cursor after both (vw=4)
 		{"你好世界", 3, prefixW + 7}, // 你好世: 3×2=6, col=prefixW+6+1=prefixW+7
 		{"你好世界", 4, prefixW + 9}, // all 4: vw=8, col=prefixW+9
 	}

@@ -26,22 +26,22 @@ const (
 // ============================================================================
 
 type Message struct {
-	ID          string        `json:"id"`
-	Role        Role          `json:"role"`
-	Content     string        `json:"content"`
-	ToolCalls   []ToolCall    `json:"tool_calls,omitempty"`
-	ToolID      string        `json:"tool_id,omitempty"`
-	Timestamp   time.Time     `json:"timestamp"`
-	Metadata    MessageMeta   `json:"metadata,omitempty"`
-	Attachments []Attachment  `json:"attachments,omitempty"`
+	ID          string       `json:"id"`
+	Role        Role         `json:"role"`
+	Content     string       `json:"content"`
+	ToolCalls   []ToolCall   `json:"tool_calls,omitempty"`
+	ToolID      string       `json:"tool_id,omitempty"`
+	Timestamp   time.Time    `json:"timestamp"`
+	Metadata    MessageMeta  `json:"metadata,omitempty"`
+	Attachments []Attachment `json:"attachments,omitempty"`
 }
 
 // Attachment represents inline content (images, PDFs, etc.) attached to
 // a message. Currently only image attachments are supported.
 type Attachment struct {
-	Type     string `json:"type"`     // "image", "pdf"
-	MIMEType string `json:"mime"`     // "image/png", "image/jpeg", …
-	Data     string `json:"data"`     // base64-encoded content
+	Type     string `json:"type"`               // "image", "pdf"
+	MIMEType string `json:"mime"`               // "image/png", "image/jpeg", …
+	Data     string `json:"data"`               // base64-encoded content
 	AltText  string `json:"alt_text,omitempty"` // optional description
 }
 
@@ -58,11 +58,11 @@ type MessageMeta struct {
 // ============================================================================
 
 type ToolCall struct {
-	ID         string       `json:"id"`
-	Type       string       `json:"type"`
-	Name       string       `json:"name"`
-	Arguments  string       `json:"arguments"`
-	Result     *ToolResult  `json:"result,omitempty"`
+	ID        string      `json:"id"`
+	Type      string      `json:"type"`
+	Name      string      `json:"name"`
+	Arguments string      `json:"arguments"`
+	Result    *ToolResult `json:"result,omitempty"`
 }
 
 // ============================================================================
@@ -125,11 +125,11 @@ type ChatRequest struct {
 
 // StreamEvent is pushed to the caller as the LLM responds.
 type StreamEvent struct {
-	Type      StreamEventType `json:"type"`
-	Content   string          `json:"content"`
-	ToolCall  *LiveToolCall   `json:"tool_call,omitempty"`
-	Meta      StreamMeta      `json:"meta,omitempty"`
-	Permission *PermissionReq `json:"permission,omitempty"`
+	Type       StreamEventType `json:"type"`
+	Content    string          `json:"content"`
+	ToolCall   *LiveToolCall   `json:"tool_call,omitempty"`
+	Meta       StreamMeta      `json:"meta,omitempty"`
+	Permission *PermissionReq  `json:"permission,omitempty"`
 }
 
 type StreamEventType string
@@ -164,9 +164,9 @@ type LiveToolCall struct {
 }
 
 type StreamMeta struct {
-	Usage       TokenUsage `json:"usage,omitempty"`
+	Usage        TokenUsage `json:"usage,omitempty"`
 	FinishReason string     `json:"finish_reason,omitempty"`
-	Model       string     `json:"model"`
+	Model        string     `json:"model"`
 }
 
 // ============================================================================
@@ -194,7 +194,7 @@ type TokenPlan struct {
 }
 
 type FreeTier struct {
-	DailyTokens  int  `json:"daily_tokens"`
+	DailyTokens   int `json:"daily_tokens"`
 	DailyRequests int `json:"daily_requests"`
 }
 
@@ -250,13 +250,13 @@ type ModelSetter interface {
 // ============================================================================
 
 type ModelInfo struct {
-	ID          string    `json:"id"`
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	Provider    string    `json:"provider"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Provider    string `json:"provider"`
 
-	ContextWindow  int       `json:"context_window"`
-	MaxOutputTokens int      `json:"max_output_tokens"`
+	ContextWindow   int `json:"context_window"`
+	MaxOutputTokens int `json:"max_output_tokens"`
 
 	// Plans lists available pricing plans (coding plan, token plan, etc.).
 	Plans []TokenPlan `json:"plans"`
@@ -283,10 +283,10 @@ type ModelInfo struct {
 }
 
 type ModelCap struct {
-	Tools      bool `json:"tools"`
-	Streaming  bool `json:"streaming"`
-	JSONMode   bool `json:"json_mode"`
-	Reasoning  bool `json:"reasoning"`
+	Tools     bool `json:"tools"`
+	Streaming bool `json:"streaming"`
+	JSONMode  bool `json:"json_mode"`
+	Reasoning bool `json:"reasoning"`
 }
 
 // ============================================================================
@@ -339,14 +339,14 @@ type ProviderRegistry interface {
 // ============================================================================
 
 type Session struct {
-	ID          string    `json:"id"`
-	Title       string    `json:"title"`
-	ModelID     string    `json:"model_id"`
-	ProviderName string   `json:"provider"`
-	Messages    []Message `json:"messages"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
-	Metadata    map[string]any `json:"metadata,omitempty"`
+	ID           string         `json:"id"`
+	Title        string         `json:"title"`
+	ModelID      string         `json:"model_id"`
+	ProviderName string         `json:"provider"`
+	Messages     []Message      `json:"messages"`
+	CreatedAt    time.Time      `json:"created_at"`
+	UpdatedAt    time.Time      `json:"updated_at"`
+	Metadata     map[string]any `json:"metadata,omitempty"`
 
 	// Total tokens consumed in this session.
 	TotalTokens TokenUsage `json:"total_tokens"`
@@ -354,13 +354,13 @@ type Session struct {
 
 // SearchResult represents a message found by SearchMessages.
 type SearchResult struct {
-	SessionID   string    `json:"session_id"`
-	SessionTitle string   `json:"session_title"`
-	MessageID   string    `json:"message_id"`
-	Role        Role      `json:"role"`
-	Content     string    `json:"content"`
-	Timestamp   time.Time `json:"timestamp"`
-	MatchPos    int       `json:"match_pos"` // character position of first match
+	SessionID    string    `json:"session_id"`
+	SessionTitle string    `json:"session_title"`
+	MessageID    string    `json:"message_id"`
+	Role         Role      `json:"role"`
+	Content      string    `json:"content"`
+	Timestamp    time.Time `json:"timestamp"`
+	MatchPos     int       `json:"match_pos"` // character position of first match
 }
 
 type SessionStore interface {

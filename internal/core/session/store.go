@@ -130,11 +130,11 @@ func (s *Store) SearchMessages(query string, limit int) ([]types.SearchResult, e
 				results = append(results, types.SearchResult{
 					SessionID:    sess.ID,
 					SessionTitle: title,
-					MessageID:   msg.ID,
-					Role:        msg.Role,
-					Content:     msg.Content,
-					Timestamp:   msg.Timestamp,
-					MatchPos:    pos,
+					MessageID:    msg.ID,
+					Role:         msg.Role,
+					Content:      msg.Content,
+					Timestamp:    msg.Timestamp,
+					MatchPos:     pos,
 				})
 			}
 		}

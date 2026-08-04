@@ -45,10 +45,10 @@ const (
 type Decision string
 
 const (
-	DecisionAllow      Decision = "allow"
-	DecisionDeny       Decision = "deny"
-	DecisionAllowAll   Decision = "allow_all_session"
-	DecisionAsk        Decision = "ask" // UI needs to prompt the user
+	DecisionAllow    Decision = "allow"
+	DecisionDeny     Decision = "deny"
+	DecisionAllowAll Decision = "allow_all_session"
+	DecisionAsk      Decision = "ask" // UI needs to prompt the user
 )
 
 // Action describes what the tool wants to do.
@@ -57,16 +57,16 @@ type Action struct {
 	Arguments string `json:"arguments"`
 
 	// Parsed from arguments for display
-	Command    string `json:"command,omitempty"`
-	Path       string `json:"path,omitempty"`
-	Pattern    string `json:"pattern,omitempty"`
-	URL        string `json:"url,omitempty"`
+	Command string `json:"command,omitempty"`
+	Path    string `json:"path,omitempty"`
+	Pattern string `json:"pattern,omitempty"`
+	URL     string `json:"url,omitempty"`
 }
 
 // Gate is the central permission controller.
 type Gate struct {
-	mu      sync.RWMutex
-	mode    Mode
+	mu   sync.RWMutex
+	mode Mode
 
 	// SecurityLevel controls data handling when communicating with external
 	// services. Always visible in the status bar — no hidden telemetry.
@@ -100,10 +100,10 @@ type HooksConfig struct {
 }
 
 type ToolRule struct {
-	Name    string   `yaml:"name"`
-	Allow   []string `yaml:"allow"`   // patterns that are always allowed
-	Deny    []string `yaml:"deny"`    // patterns that are always denied
-	Ask     []string `yaml:"ask"`     // patterns that require user approval
+	Name  string   `yaml:"name"`
+	Allow []string `yaml:"allow"` // patterns that are always allowed
+	Deny  []string `yaml:"deny"`  // patterns that are always denied
+	Ask   []string `yaml:"ask"`   // patterns that require user approval
 }
 
 // NewGate creates a permission gate with default settings.
@@ -112,13 +112,13 @@ type ToolRule struct {
 // telemetry, zero tracking, and zero "phone-home" baked in.
 func NewGate(mode Mode) *Gate {
 	return &Gate{
-		mode:             mode,
-		securityLevel:    config.SecLocal,
-		DeniedCommands:   defaultDeniedCommands(),
-		sessionAllows:    make(map[string]bool),
+		mode:              mode,
+		securityLevel:     config.SecLocal,
+		DeniedCommands:    defaultDeniedCommands(),
+		sessionAllows:     make(map[string]bool),
 		sessionToolAllows: make(map[string]map[string]bool),
-		hooks:            loadHooks(),
-		ToolRules:        make(map[string]string),
+		hooks:             loadHooks(),
+		ToolRules:         make(map[string]string),
 	}
 }
 

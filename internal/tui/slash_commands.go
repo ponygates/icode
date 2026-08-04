@@ -13,15 +13,16 @@ import (
 	"time"
 
 	"github.com/ponygates/icode/internal/config"
-	projectcontext "github.com/ponygates/icode/internal/core/context"
 	"github.com/ponygates/icode/internal/core/agent"
 	"github.com/ponygates/icode/internal/core/checkpoint"
+	projectcontext "github.com/ponygates/icode/internal/core/context"
 	"github.com/ponygates/icode/internal/core/permission"
 	"github.com/ponygates/icode/internal/core/searchreplace"
 	"github.com/ponygates/icode/internal/core/skills"
 	"github.com/ponygates/icode/internal/core/slashcmd"
 	"github.com/ponygates/icode/internal/executil"
 )
+
 // ── Slash commands ───────────────────────────────────────────────
 
 func (t *TUI) handleSlash(text string) {
@@ -183,11 +184,11 @@ func (t *TUI) handleSlash(text string) {
 	case "/compact":
 		t.compactCommand(args)
 
-  case "/export":
-    t.exportMarkdown(args)
+	case "/export":
+		t.exportMarkdown(args)
 
-  case "/copy":
-    t.copyLastAssistant(args)
+	case "/copy":
+		t.copyLastAssistant(args)
 
 	case "/share":
 		// Export the conversation to a timestamped Markdown file and print the
@@ -305,7 +306,10 @@ func (t *TUI) handleSlash(text string) {
 
 	case "/init":
 		cwd, err := os.Getwd()
-		if err != nil { t.add(RoleError, err.Error()); break }
+		if err != nil {
+			t.add(RoleError, err.Error())
+			break
+		}
 		if _, err := os.Stat(filepath.Join(cwd, "ICODE.md")); err == nil {
 			t.add(RoleSystem, "ICODE.md 已存在")
 			break
@@ -318,7 +322,9 @@ func (t *TUI) handleSlash(text string) {
 		v.RegisterDefaults()
 		var a strings.Builder
 		a.WriteString("子 agent:\n")
-		for _, d := range v.List() { a.WriteString(fmt.Sprintf("  %s — %s\n", d.Name, d.Description)) }
+		for _, d := range v.List() {
+			a.WriteString(fmt.Sprintf("  %s — %s\n", d.Name, d.Description))
+		}
 		t.add(RoleSystem, a.String())
 
 	case "/skills":
@@ -1413,7 +1419,7 @@ func (t *TUI) modelPickerOverlay(W, bodyH int) []string {
 		num := fmt.Sprintf("%-3d", i+1)
 		var row string
 		if i == t.modelPickerIdx {
-			row = "  " + t.paint("green", "▶ ")+" "+num+t.paint("green", t.models[i])
+			row = "  " + t.paint("green", "▶ ") + " " + num + t.paint("green", t.models[i])
 		} else {
 			row = "  " + "  " + num + t.models[i]
 		}

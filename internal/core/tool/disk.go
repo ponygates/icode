@@ -64,7 +64,7 @@ type DiskCleanupTool struct{}
 
 func (t *DiskCleanupTool) Def() types.ToolDef {
 	return types.ToolDef{
-		Name: "disk_cleanup",
+		Name:        "disk_cleanup",
 		Description: "Clean up disk space by removing temporary files, recycle bin, browser caches, and Windows update leftovers. Safe — only removes truly disposable files. Use disk_usage first to see what needs cleaning.",
 		Parameters: map[string]any{
 			"type": "object",

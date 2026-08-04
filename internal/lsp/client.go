@@ -236,11 +236,11 @@ type Client struct {
 
 // ServerCapabilities holds the capabilities of the language server.
 type ServerCapabilities struct {
-	TextDocumentSync int `json:"textDocumentSync,omitempty"`
-	HoverProvider    bool `json:"hoverProvider,omitempty"`
-	DefinitionProvider bool `json:"definitionProvider,omitempty"`
-	ReferencesProvider bool `json:"referencesProvider,omitempty"`
-	DiagnosticsProvider bool `json:"diagnosticsProvider,omitempty"`
+	TextDocumentSync        int  `json:"textDocumentSync,omitempty"`
+	HoverProvider           bool `json:"hoverProvider,omitempty"`
+	DefinitionProvider      bool `json:"definitionProvider,omitempty"`
+	ReferencesProvider      bool `json:"referencesProvider,omitempty"`
+	DiagnosticsProvider     bool `json:"diagnosticsProvider,omitempty"`
 	WorkspaceSymbolProvider bool `json:"workspaceSymbolProvider,omitempty"`
 }
 
@@ -267,13 +267,13 @@ func NewClient(ctx context.Context, rootURI, command string, args ...string) (*C
 		"rootUri":   rootURI,
 		"capabilities": map[string]any{
 			"textDocument": map[string]any{
-				"hover":                map[string]any{"contentFormat": []string{"markdown", "plaintext"}},
-				"definition":           map[string]any{},
-				"references":           map[string]any{},
-				"completion":           map[string]any{},
-				"diagnostics":          map[string]any{},
-				"documentSymbol":       map[string]any{},
-				"codeAction":           map[string]any{},
+				"hover":          map[string]any{"contentFormat": []string{"markdown", "plaintext"}},
+				"definition":     map[string]any{},
+				"references":     map[string]any{},
+				"completion":     map[string]any{},
+				"diagnostics":    map[string]any{},
+				"documentSymbol": map[string]any{},
+				"codeAction":     map[string]any{},
 			},
 			"workspace": map[string]any{
 				"symbol": map[string]any{},
@@ -344,8 +344,8 @@ func (c *Client) Hover(uri string, line, character int) (string, error) {
 
 	var hoverResp struct {
 		Contents struct {
-			Kind   string `json:"kind"`
-			Value  string `json:"value"`
+			Kind  string `json:"kind"`
+			Value string `json:"value"`
 		} `json:"contents"`
 	}
 	if err := json.Unmarshal(result, &hoverResp); err != nil {
@@ -524,8 +524,8 @@ type Position struct {
 // symbolKindString converts LSP symbol kind numbers to readable strings.
 func symbolKindString(kind int) string {
 	kinds := map[int]string{
-		1:  "File", 2: "Module", 3: "Namespace", 4: "Package", 5: "Class",
-		6:  "Method", 7: "Property", 8: "Field", 9: "Constructor",
+		1: "File", 2: "Module", 3: "Namespace", 4: "Package", 5: "Class",
+		6: "Method", 7: "Property", 8: "Field", 9: "Constructor",
 		10: "Enum", 11: "Interface", 12: "Function", 13: "Variable",
 		14: "Constant", 15: "String", 16: "Number", 17: "Boolean",
 		18: "Array", 19: "Object", 20: "Key", 21: "Null",

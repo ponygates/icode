@@ -13,9 +13,9 @@ import (
 	"time"
 
 	"github.com/ponygates/icode/internal/config"
-	projectcontext "github.com/ponygates/icode/internal/core/context"
 	"github.com/ponygates/icode/internal/core/agent"
 	"github.com/ponygates/icode/internal/core/checkpoint"
+	projectcontext "github.com/ponygates/icode/internal/core/context"
 	"github.com/ponygates/icode/internal/core/hooks"
 	"github.com/ponygates/icode/internal/core/permission"
 	"github.com/ponygates/icode/internal/core/privacy"
@@ -41,13 +41,13 @@ type Engine struct {
 	gate        *permission.Gate
 	permHandler PermissionHandler
 
-	mu          sync.Mutex
-	optimizers  map[string]*tokenopt.Optimizer
-	stopFns     map[string]context.CancelFunc
+	mu         sync.Mutex
+	optimizers map[string]*tokenopt.Optimizer
+	stopFns    map[string]context.CancelFunc
 
-	permMu       sync.Mutex
+	permMu        sync.Mutex
 	permRespChans map[string]chan permission.Decision
-	permSeq      uint64
+	permSeq       uint64
 
 	temperature    float64
 	maxTokens      int
@@ -840,14 +840,14 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 			p = provider
 		}
 		eventCh, err = p.ChatStream(ctx, types.ChatRequest{
-			SessionID:     sessionID,
-			Messages:      messages,
-			Model:         mt.modelID,
-			ProviderName:  mt.providerName,
-			SystemPrompt:  opt.BuildPrefix(),
-			Tools:         e.toolReg.ListDefs(),
-			MaxTokens:     orMaxTokens(e.maxTokens, mt.modelInfo.MaxOutputTokens),
-			Temperature:     e.temperature,
+			SessionID:        sessionID,
+			Messages:         messages,
+			Model:            mt.modelID,
+			ProviderName:     mt.providerName,
+			SystemPrompt:     opt.BuildPrefix(),
+			Tools:            e.toolReg.ListDefs(),
+			MaxTokens:        orMaxTokens(e.maxTokens, mt.modelInfo.MaxOutputTokens),
+			Temperature:      e.temperature,
 			CacheBreakpoints: opt.BuildCacheBreakpoints(),
 		})
 		if err == nil {
@@ -1001,14 +1001,14 @@ func (e *Engine) continueAgentLoop(
 	messages := opt.CompactRequest("")
 	startTime := time.Now()
 	eventCh, err := provider.ChatStream(ctx, types.ChatRequest{
-		SessionID:    sessionID,
-		Messages:     messages,
-		Model:        modelInfo.ID,
-		ProviderName: modelInfo.Provider,
-		SystemPrompt: opt.BuildPrefix(),
-		Tools:        e.toolReg.ListDefs(),
-		MaxTokens:    orMaxTokens(e.maxTokens, modelInfo.MaxOutputTokens),
-		Temperature:    e.temperature,
+		SessionID:        sessionID,
+		Messages:         messages,
+		Model:            modelInfo.ID,
+		ProviderName:     modelInfo.Provider,
+		SystemPrompt:     opt.BuildPrefix(),
+		Tools:            e.toolReg.ListDefs(),
+		MaxTokens:        orMaxTokens(e.maxTokens, modelInfo.MaxOutputTokens),
+		Temperature:      e.temperature,
 		CacheBreakpoints: opt.BuildCacheBreakpoints(),
 	})
 	if err != nil {
@@ -1218,10 +1218,10 @@ func (e *Engine) getOrCreateOptimizer(sessionID string, modelInfo types.ModelInf
 		return opt
 	}
 	opt := tokenopt.New(tokenopt.Config{
-		ModelInfo:      modelInfo,
-		SystemPrompt:   e.buildSystemPrompt(sessionID),
-		ProviderName:   modelInfo.Provider,
-		PresetSummary:  presetSummary,
+		ModelInfo:     modelInfo,
+		SystemPrompt:  e.buildSystemPrompt(sessionID),
+		ProviderName:  modelInfo.Provider,
+		PresetSummary: presetSummary,
 	})
 	opt.SetTools(e.toolReg.ListDefs())
 

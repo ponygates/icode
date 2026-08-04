@@ -16,12 +16,12 @@ import (
 type SymbolKind int
 
 const (
-	SymbolFunc    SymbolKind = iota // function / method
-	SymbolType                      // type definition
-	SymbolStruct                    // struct
-	SymbolInterface                 // interface
-	SymbolVar                       // variable / const
-	SymbolMethod                    // method on a type
+	SymbolFunc      SymbolKind = iota // function / method
+	SymbolType                        // type definition
+	SymbolStruct                      // struct
+	SymbolInterface                   // interface
+	SymbolVar                         // variable / const
+	SymbolMethod                      // method on a type
 )
 
 func (k SymbolKind) String() string {
@@ -153,7 +153,7 @@ var (
 
 // TS/JS patterns
 var (
-	tsFuncRe = regexp.MustCompile(`(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(`)
+	tsFuncRe  = regexp.MustCompile(`(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(`)
 	tsClassRe = regexp.MustCompile(`(?:export\s+)?(?:abstract\s+)?class\s+(\w+)`)
 	tsIntfRe  = regexp.MustCompile(`(?:export\s+)?interface\s+(\w+)`)
 	tsVarRe   = regexp.MustCompile(`(?:export\s+)?(?:const|let|var)\s+(\w+)`)
