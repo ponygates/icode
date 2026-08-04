@@ -715,6 +715,13 @@ func cmdGoal(b *Backend, st *State, args []string) Result {
 // cmdBudget manages the session's hard token budget: /budget set <n> makes the
 // engine shrink the context to fit (archived summary + recent messages) on any
 // turn whose estimated size would exceed it. Pure local math — no model call.
+func pctOf(used, total int) int {
+	if total <= 0 {
+		return 0
+	}
+	return used * 100 / total
+}
+
 func cmdBudget(b *Backend, st *State, args []string) Result {
 	if b == nil || b.SessStore == nil || st.SessionID == "" {
 		return ok("没有活跃会话（先发一条消息）。")
@@ -732,7 +739,8 @@ func cmdBudget(b *Backend, st *State, args []string) Result {
 			return r
 		}
 		if bg := sessionum.BudgetMax(sess); bg > 0 {
-			return ok(fmt.Sprintf("当前 Token 预算: %d\n每次请求估算超限会自动压缩为摘要 + 最近消息。\n/budget clear 关闭。", bg))
+			used := sessionum.EstimatedUsage(sess)
+			return ok(fmt.Sprintf("当前 Token 预算: %d\n当前估算用量: %d（%d%%）\n每次请求估算超限会自动压缩为摘要 + 最近消息。\n/budget clear 关闭。", bg, used, pctOf(used, bg)))
 		}
 		return ok("当前没有 Token 预算。\n用法: /budget set <上限token数> — 超限自动压缩\n      /budget show — 查看\n      /budget clear — 关闭")
 	}
@@ -759,7 +767,8 @@ func cmdBudget(b *Backend, st *State, args []string) Result {
 			return r
 		}
 		if bg := sessionum.BudgetMax(sess); bg > 0 {
-			return ok(fmt.Sprintf("当前 Token 预算: %d", bg))
+			used := sessionum.EstimatedUsage(sess)
+			return ok(fmt.Sprintf("当前 Token 预算: %d\n当前估算用量: %d（%d%%）", bg, used, pctOf(used, bg)))
 		}
 		return ok("当前没有 Token 预算。")
 	case "clear":

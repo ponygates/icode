@@ -41,6 +41,20 @@ func SetBudget(store types.SessionStore, sess *types.Session, n int) error {
 	return store.Update(sess)
 }
 
+// EstimatedUsage returns a cheap estimate of the session's current token
+// usage (same approximation TrimToBudget/BudgetWarning rely on), so /budget
+// show can report how close the conversation is to the limit.
+func EstimatedUsage(sess *types.Session) int {
+	if sess == nil {
+		return 0
+	}
+	n := 0
+	for _, m := range sess.Messages {
+		n += approxTokens(m)
+	}
+	return n
+}
+
 // WarnKey records that the 80% pre-budget warning has been emitted for this
 // session, so the user is nudged only once per budget period.
 const WarnKey = "budget_warned"
@@ -54,9 +68,7 @@ func BudgetWarning(store types.SessionStore, sess *types.Session) (warn bool, us
 	if budget <= 0 || sess == nil {
 		return false, 0, 0
 	}
-	for _, m := range sess.Messages {
-		used += approxTokens(m)
-	}
+	used = EstimatedUsage(sess)
 	if sess.Metadata == nil {
 		sess.Metadata = map[string]any{}
 	}

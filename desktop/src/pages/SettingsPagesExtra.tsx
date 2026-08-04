@@ -195,10 +195,14 @@ export function PageAbout({ store }: { store: StoreState }) {
     if (!window.confirm(t('settings.confirmClearAll'))) return;
     if (!store.backendUrl) return;
     try {
-      const resp = await fetch(`${store.backendUrl}/api/sessions`);
-      const sessions = (await resp.json()) as Array<{ id: string }>;
-      for (const s of sessions) {
-        await fetch(`${store.backendUrl}/api/sessions/${s.id}`, { method: 'DELETE' });
+      // Wipe active sessions AND the trash bin (soft-deleted sessions are not
+      // part of the default /api/sessions listing, so clear both).
+      for (const suffix of ['', '?trash=1']) {
+        const resp = await fetch(`${store.backendUrl}/api/sessions${suffix}`);
+        const sessions = (await resp.json()) as Array<{ id: string }>;
+        for (const s of sessions) {
+          await fetch(`${store.backendUrl}/api/sessions/${s.id}`, { method: 'DELETE' });
+        }
       }
     } catch {}
   };

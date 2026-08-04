@@ -1246,6 +1246,7 @@ func (c *chatCallback) OnSlashCommand(cmd string, args []string) {
 			}
 		}
 		c.sessionID = ""
+		c.tui.LoadSession(nil)
 		c.tui.AddMessage(tui.RoleSystem, "Session cleared (soft). /restore <id> 可恢复。")
 	case "/summarize":
 		if c.sessionID != "" && c.app != nil && c.app.SessStore != nil {
