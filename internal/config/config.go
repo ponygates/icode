@@ -2,6 +2,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -99,15 +100,19 @@ type HookRule struct {
 // MCPServerCfg describes a single Model Context Protocol server connection.
 // It mirrors mcp.ServerConfig so the desktop settings UI can fully manage it.
 type MCPServerCfg struct {
-	Name      string            `yaml:"name" json:"name"`
-	Type      string            `yaml:"type" json:"type"` // stdio | sse
-	Command   string            `yaml:"command,omitempty" json:"command,omitempty"`
-	Args      []string          `yaml:"args,omitempty" json:"args,omitempty"`
-	Env       []string          `yaml:"env,omitempty" json:"env,omitempty"`
-	URL       string            `yaml:"url,omitempty" json:"url,omitempty"`
-	Headers   map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
-	Enabled   bool              `yaml:"enabled" json:"enabled"`
-	TrustMode string            `yaml:"trust_mode,omitempty" json:"trust_mode,omitempty"` // ask | readonly | all
+	Name    string            `yaml:"name" json:"name"`
+	Type    string            `yaml:"type" json:"type"` // stdio | sse
+	Command string            `yaml:"command,omitempty" json:"command,omitempty"`
+	Args    []string          `yaml:"args,omitempty" json:"args,omitempty"`
+	Env     []string          `yaml:"env,omitempty" json:"env,omitempty"`
+	URL     string            `yaml:"url,omitempty" json:"url,omitempty"`
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+	// HeadersEnc holds the DPAPI-encrypted form of Headers (which may carry
+	// Authorization bearer tokens) for disk persistence. Only ciphertext
+	// reaches the disk; the plaintext map stays in memory at runtime.
+	HeadersEnc string `yaml:"headers_enc,omitempty" json:"-"`
+	Enabled    bool   `yaml:"enabled" json:"enabled"`
+	TrustMode  string `yaml:"trust_mode,omitempty" json:"trust_mode,omitempty"` // ask | readonly | all
 }
 
 // DefaultCfg holds the user's preferred model / provider / permission mode,
@@ -497,6 +502,13 @@ func encryptSecretFields(data []byte) ([]byte, error) {
 	if mm, ok := root["multimodal"].(map[string]any); ok {
 		encryptKey(mm)
 	}
+	if mcpList, ok := root["mcp"].([]any); ok {
+		for _, item := range mcpList {
+			if mm, ok := item.(map[string]any); ok {
+				encryptHeaders(mm)
+			}
+		}
+	}
 	return yaml.Marshal(root)
 }
 
@@ -513,6 +525,25 @@ func encryptKey(m map[string]any) {
 	delete(m, "api_key")
 }
 
+// encryptHeaders encrypts an MCP server's request headers map (frequently
+// holds Authorization bearer tokens) into the headers_enc ciphertext field.
+func encryptHeaders(m map[string]any) {
+	hdr, ok := m["headers"].(map[string]any)
+	if !ok || len(hdr) == 0 {
+		return
+	}
+	data, err := json.Marshal(hdr)
+	if err != nil {
+		return
+	}
+	enc, err := secure.Encrypt(string(data))
+	if err != nil {
+		return
+	}
+	m["headers_enc"] = enc
+	delete(m, "headers")
+}
+
 // decryptConfigKeys restores plaintext API keys from their encrypted disk form
 // after loading. Keys already set (e.g. by env overrides) are left untouched.
 func decryptConfigKeys(cfg *Config) {
@@ -527,6 +558,17 @@ func decryptConfigKeys(cfg *Config) {
 	if cfg.Multimodal.APIKey == "" && cfg.Multimodal.APIKeyEnc != "" {
 		if dec, err := secure.Decrypt(cfg.Multimodal.APIKeyEnc); err == nil {
 			cfg.Multimodal.APIKey = dec
+		}
+	}
+	for i := range cfg.MCP {
+		mc := &cfg.MCP[i]
+		if len(mc.Headers) == 0 && mc.HeadersEnc != "" {
+			if dec, err := secure.Decrypt(mc.HeadersEnc); err == nil {
+				var h map[string]string
+				if json.Unmarshal([]byte(dec), &h) == nil && len(h) > 0 {
+					mc.Headers = h
+				}
+			}
 		}
 	}
 }

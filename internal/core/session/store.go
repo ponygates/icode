@@ -1,5 +1,8 @@
-// Package session provides in-memory session management.
-// Phase 2 upgrade: SQLite-backed storage via internal/db package.
+// Package session provides session management.
+//
+// Persistent sessions are backed by the SQLite store (internal/db, wired in
+// internal/app). Store below is the in-memory fallback used when SQLite
+// init fails, and the backing store for CLI-mode sessions.
 package session
 
 import (

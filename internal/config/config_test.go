@@ -410,3 +410,43 @@ func TestEffectiveSystemPrompt(t *testing.T) {
 		t.Fatal("empty defaults should produce empty prompt")
 	}
 }
+
+// TestSaveEncryptsMCPHeaders verifies MCP request headers (e.g. Authorization
+// bearer tokens) never reach the config file in plaintext, and that a
+// Save → reload → decrypt round-trip restores them.
+func TestSaveEncryptsMCPHeaders(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	c := Default()
+	c.MCP = []MCPServerCfg{
+		{Name: "srv-a", Type: "sse", URL: "http://localhost:8080", Headers: map[string]string{"Authorization": "Bearer super-secret-token"}},
+		{Name: "srv-b", Type: "stdio", Command: "npx"},
+	}
+
+	if err := c.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if strings.Contains(string(data), "super-secret-token") {
+		t.Fatalf("plaintext MCP header persisted to disk:\n%s", data)
+	}
+	if !strings.Contains(string(data), "headers_enc") {
+		t.Fatalf("expected encrypted headers_enc in saved config:\n%s", data)
+	}
+
+	reloaded := Default()
+	if err := yaml.Unmarshal(data, reloaded); err != nil {
+		t.Fatalf("unmarshal saved config: %v", err)
+	}
+	decryptConfigKeys(reloaded)
+	if len(reloaded.MCP) != 2 {
+		t.Fatalf("expected 2 MCP servers, got %d", len(reloaded.MCP))
+	}
+	got := reloaded.MCP[0].Headers["Authorization"]
+	if got != "Bearer super-secret-token" {
+		t.Fatalf("round-trip header mismatch: %q", got)
+	}
+}
