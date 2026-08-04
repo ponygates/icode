@@ -47,6 +47,10 @@ type Callback interface {
 	OnSend(text string)
 	OnSlashCommand(cmd string, args []string)
 	OnPermissionResponse(decision string)
+	// OnPlanConfirm is called when the user accepts a plan-mode proposal:
+	// the implementation switches the gate out of read-only plan mode and
+	// starts executing the plan.
+	OnPlanConfirm()
 	// OnInterrupt is called when the user presses Esc or Ctrl+C during
 	// streaming to cancel the current LLM turn.
 	OnInterrupt()
@@ -119,6 +123,10 @@ type TUI struct {
 
 	// tool output folding (Claude Code-style)
 	toolFolded bool
+
+	// planPending is set when a plan-mode reply finished and awaits the user's
+	// go/no-go: Enter confirms and executes, Esc cancels.
+	planPending bool
 
 	mu       sync.Mutex
 	messages []Message
@@ -405,6 +413,22 @@ func (t *TUI) SetModels(models []string) {
 // notice sets a one-line flash message shown on the next render.
 func (t *TUI) notice(msg string) {
 	t.statusNotice = " " + t.paint("green", "[x]") + " " + msg
+}
+
+// SetPlanPending marks a plan-mode reply as awaiting confirmation. While set,
+// the next Enter confirms the plan (and starts execution) and Esc cancels it.
+func (t *TUI) SetPlanPending(pending bool) {
+	t.mu.Lock()
+	t.planPending = pending
+	t.mu.Unlock()
+	if pending {
+		t.notice("计划已生成 — Enter 确认执行 · Esc 放弃")
+	} else {
+		t.notice("计划已放弃")
+	}
+	if t.rawMode {
+		t.render()
+	}
 }
 
 // LoadSession replaces the visible message list (used by /resume).

@@ -380,6 +380,10 @@ func (b *simpleUIBridge) runPrompt(prompt string) {
 				}
 			case types.EventSystem:
 				b.push(fmt.Sprintf("uiAppend('system', %s)", jsStr(strings.TrimSpace(event.Content))))
+			case types.EventPlanProposal:
+				// Plan-mode turn finished — show the confirmation bar so the
+				// user can accept (switch to auto + continue) or discard.
+				b.push("uiPlanProposal()")
 			case types.EventToolUse:
 				b.mu.Lock()
 				b.lastTool = event.ToolCall.Name
@@ -1119,6 +1123,11 @@ func simpleUIHTML(model, provider string) string {
     </div>
     <div id="log"></div>
     <div id="status" title="模型 / 提供商 / 模式 / 安全等级 / Token / 缓存 / 费用"></div>
+    <div id="planBar" style="display:none; align-items:center; gap:10px; padding:6px 12px; margin:0 12px 6px; background:#1d2433; border:1px solid #4caf50; border-radius:8px; font-size:13px;">
+      <span style="flex:1; color:#e6e6e6;">📋 计划已生成 — 接受后开始执行</span>
+      <button id="planAccept" style="background:#4caf50; border:none; color:#fff; padding:4px 12px; border-radius:6px; cursor:pointer;">接受并执行</button>
+      <button id="planDiscard" style="background:transparent; border:1px solid #555; color:#aaa; padding:4px 10px; border-radius:6px; cursor:pointer;">放弃</button>
+    </div>
     <div id="inputbar">
       <textarea id="inp" placeholder="输入消息或 /命令，Enter 发送，Shift+Enter 换行…"></textarea>
       <button id="stopBtn" title="停止生成" style="display:none;">■ 停止</button>
@@ -1316,6 +1325,21 @@ func simpleUIHTML(model, provider string) string {
     inp.value = '';
     if (window.runCommand) window.runCommand(t);
   }
+
+  // Plan-mode confirmation bar: accept switches to auto mode and starts
+  // executing the plan; discard just hides the bar.
+  function uiPlanProposal() {
+    var bar = document.getElementById('planBar');
+    if (bar) bar.style.display = 'flex';
+  }
+  document.getElementById('planAccept').addEventListener('click', function(){
+    document.getElementById('planBar').style.display = 'none';
+    if (window.setMode) window.setMode('auto');
+    if (window.runCommand) window.runCommand('计划已确认。请按上述计划立即开始执行，不要再重复或重新规划，直接动手。');
+  });
+  document.getElementById('planDiscard').addEventListener('click', function(){
+    document.getElementById('planBar').style.display = 'none';
+  });
 
   document.getElementById('send').addEventListener('click', doSend);
   document.getElementById('clearBtn').addEventListener('click', function(){ if (window.clear) window.clear(); });

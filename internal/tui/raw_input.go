@@ -253,9 +253,15 @@ func (t *TUI) handleKey(r rune) bool {
 		if br, ok := t.reader.(*bufio.Reader); ok {
 			ur, _, err := br.ReadRune()
 			if err != nil {
-				// Lone Esc (no follow-up byte): cancel the model picker if
-				// open, otherwise switch back from vim normal mode.
-				if t.modelPickerOpen {
+				// Lone Esc (no follow-up byte): cancel a pending plan, close
+				// the model picker, or switch back from vim normal mode.
+				t.mu.Lock()
+				planPending := t.planPending
+				t.mu.Unlock()
+				if planPending {
+					t.SetPlanPending(false)
+					t.render()
+				} else if t.modelPickerOpen {
 					t.closeModelPicker()
 				} else if t.vimMode && !t.vimInsert {
 					t.vimInsert = true
@@ -615,6 +621,20 @@ func (t *TUI) pushHistory(s string) {
 }
 
 func (t *TUI) submit(text string) {
+	// Pending plan confirmation: Enter accepts the plan and starts execution
+	// instead of sending whatever is in the input box (Claude Code plan mode).
+	t.mu.Lock()
+	planPending := t.planPending
+	t.mu.Unlock()
+	if planPending {
+		t.SetPlanPending(false)
+		t.notice("计划已确认，开始执行")
+		if t.callback != nil {
+			t.callback.OnPlanConfirm()
+		}
+		return
+	}
+
 	// Shell mode (! prefix)
 	if strings.HasPrefix(text, "!") {
 		t.execShell(text[1:])

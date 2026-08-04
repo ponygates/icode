@@ -967,6 +967,10 @@ func (c *chatCallback) OnSend(text string) {
 			c.tui.AddMessage(tui.RoleThinking, event.Content)
 		case types.EventSystem:
 			c.tui.AddMessage(tui.RoleSystem, strings.TrimSpace(event.Content))
+		case types.EventPlanProposal:
+			// A plan-mode turn finished — arm the confirmation prompt so the
+			// next Enter executes the plan (Esc cancels).
+			c.tui.SetPlanPending(true)
 		case types.EventToolUse:
 			c.lastTool = event.ToolCall.Name
 			// Strip empty/no-op parameter objects so the conversation
@@ -1003,6 +1007,14 @@ func (c *chatCallback) OnSend(text string) {
 }
 
 // OnListSessions returns a formatted list of saved sessions.
+func (c *chatCallback) OnPlanConfirm() {
+	if c.app != nil && c.app.Gate != nil {
+		c.app.Gate.SetMode(permission.ModeAuto)
+	}
+	c.tui.SetPlanPending(false)
+	c.OnSend("计划已确认。请按上述计划立即开始执行，不要再重复或重新规划，直接动手。")
+}
+
 func (c *chatCallback) OnListSessions() string {
 	if c.app == nil || c.app.SessStore == nil {
 		return "No session store available."

@@ -57,6 +57,7 @@ type ChatEvent =
   | { type: 'system'; content: string }
   | { type: 'tool_use'; tool_call?: { name: string; arguments?: string }; ToolCall?: { Name: string; Arguments?: string } }
   | { type: 'permission'; permission?: PermissionRequest; Permission?: PermissionRequest }
+  | { type: 'plan_proposal' }
   | { type: 'done'; meta?: { usage?: UsageInfo } }
   | { type: 'error'; content: string };
 
@@ -258,6 +259,8 @@ const ChatPage: React.FC = () => {
   const { t } = useTranslation();
   const [input, setInput] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
+  // Set when a plan-mode turn finished and the plan awaits confirmation.
+  const [planPending, setPlanPending] = useState(false);
   // Interactive permission request pending an answer from the user. When set,
   // the conversation engine is blocked server-side until we respond.
   const [pendingPermission, setPendingPermission] = useState<PermissionRequest | null>(null);
@@ -510,17 +513,18 @@ const ChatPage: React.FC = () => {
     return () => clearInterval(interval);
   }, [backendUrl]);
 
-  const handleSend = useCallback(async () => {
-    if (!input.trim() || isStreaming) return;
+  const handleSend = useCallback(async (override?: string) => {
+    const text = (override ?? input).trim();
+    if (!text || isStreaming) return;
 
     // Record the submitted text in the input history (↑/↓ browser).
-    historyRef.current.push(input.trim());
+    historyRef.current.push(text);
     if (historyRef.current.length > 200) historyRef.current.shift();
     setHistoryIdx(-1);
 
     // Handle # memory append (like TUI)
-    if (input.trim().startsWith('#')) {
-      let memoryText = input.trim().slice(1).trim();
+    if (text.startsWith('#')) {
+      let memoryText = text.slice(1).trim();
       // `#user: ...` targets the cross-project memory file (~/.icode);
       // plain `#` targets the project ICODE.md — mirrors the TUI shortcut.
       let scope = 'project';
@@ -577,7 +581,6 @@ const ChatPage: React.FC = () => {
       }
     }
 
-    const text = input.trim();
     const userMsg: Message = {
       id: Date.now().toString(36),
       role: 'user', content: text, timestamp: Date.now(),
@@ -633,6 +636,12 @@ const ChatPage: React.FC = () => {
           id: (Date.now() + 1).toString(36) + 's',
           role: 'system', content: event.content || '', timestamp: Date.now(),
         });
+        return;
+      }
+      if (ty === 'plan_proposal') {
+        // Plan-mode turn finished — arm the confirmation bar so the user can
+        // accept the plan (switch to auto and start executing) or discard it.
+        setPlanPending(true);
         return;
       }
       if (ty === 'text') {
@@ -788,6 +797,14 @@ const ChatPage: React.FC = () => {
     if (!settled) { settled = true; setIsStreaming(false); }
   }, [input, activeSessionId, isStreaming, selectedModel, currentModel, attachedImages]);
   handleSendRef.current = handleSend;
+
+  // Accept a plan-mode proposal: leave read-only plan mode and start executing
+  // the plan in the continuation turn.
+  const confirmPlan = useCallback(() => {
+    setPlanPending(false);
+    useAppStore.getState().setMode('auto');
+    handleSend('计划已确认。请按上述计划立即开始执行，不要再重复或重新规划，直接动手。');
+  }, [handleSend]);
 
   const respondPermission = useCallback(async (requestId: string, decision: string) => {
     setPendingPermission(null);
@@ -1466,6 +1483,36 @@ const ChatPage: React.FC = () => {
         padding: '12px 24px', borderTop: '0.5px solid var(--border-color)',
         background: dragOver ? 'var(--accent-soft)' : 'var(--bg-secondary)',
       }}>
+        {planPending && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 10,
+            marginBottom: 10, padding: '8px 12px', borderRadius: 8,
+            background: 'var(--accent-soft)', border: '1px solid var(--accent)',
+          }}>
+            <span style={{ fontSize: 12, color: 'var(--text-primary)', flex: 1 }}>
+              📋 {t('chat.planReady', '计划已生成')} — {t('chat.planHint', '接受后开始执行')}
+            </span>
+            <button
+              onClick={confirmPlan}
+              style={{
+                background: 'var(--grad-accent)', border: 'none', color: '#fff',
+                padding: '4px 12px', borderRadius: 6, fontSize: 12, cursor: 'pointer',
+              }}
+            >
+              {t('chat.planAccept', '接受并执行')}
+            </button>
+            <button
+              onClick={() => setPlanPending(false)}
+              style={{
+                background: 'transparent', border: '1px solid var(--border-color)',
+                color: 'var(--text-muted)', padding: '4px 10px', borderRadius: 6,
+                fontSize: 12, cursor: 'pointer',
+              }}
+            >
+              {t('chat.planDiscard', '放弃')}
+            </button>
+          </div>
+        )}
         <div style={{
           display: 'flex', gap: 10, alignItems: 'flex-end',
           background: 'var(--bg-primary)', borderRadius: 10,
@@ -1541,7 +1588,7 @@ const ChatPage: React.FC = () => {
             </button>
           ) : (
             <button
-              onClick={handleSend}
+              onClick={() => handleSend()}
               disabled={!input.trim()}
               title={t('chat.send')}
               style={{

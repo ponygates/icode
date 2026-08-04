@@ -145,6 +145,9 @@ const (
 	// in) shown to the user as a system message — never folded into the
 	// assistant reply or persisted into the conversation.
 	EventSystem StreamEventType = "system"
+	// EventPlanProposal is emitted when a plan-mode turn finishes without tool
+	// calls — the reply is a plan awaiting the user's go/no-go confirmation.
+	EventPlanProposal StreamEventType = "plan_proposal"
 )
 
 // PermissionReq is emitted when the engine needs interactive approval for a

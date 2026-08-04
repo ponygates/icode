@@ -91,6 +91,11 @@ type Engine struct {
 	// Lifecycle hooks runner — fires PreToolUse/PostToolUse/Stop external
 	// commands (Claude Code parity). PreToolUse hooks can block a tool call.
 	hooksRunner *hooks.Runner
+
+	// truncDet detects responses cut off at max_tokens (finish_reason="length"
+	// or a clearly mid-sentence stop) so the engine can retry with a bigger
+	// output budget and a continuation hint (Claude Code parity).
+	truncDet *TruncationDetector
 }
 
 // NewEngine creates a conversation engine.
@@ -110,6 +115,7 @@ func NewEngine(
 		doomLoop:       NewDoomLoopDetector(),
 		teamRegistry:   make(map[string]*agent.TeamDef),
 		budgetEnforcer: tokenopt.NewBudgetEnforcer(tokenopt.DefaultBudgetConfig()),
+		truncDet:       NewTruncationDetector(DefaultTruncationRecoveryConfig()),
 	}
 	if gate != nil {
 		slashcmd.SetShellGate(&shellGateAdapter{gate: gate})
@@ -691,6 +697,171 @@ func orMaxTokens(cfg, modelDefault int) int {
 	return modelDefault
 }
 
+// runToolTurn persists the assistant message with its tool calls, executes the
+// batch (read-only tools concurrently, mutating tools sequentially), feeds any
+// generated images and LSP diagnostics back in, and resumes the agent loop.
+func (e *Engine) runToolTurn(
+	ctx context.Context,
+	sessionID string,
+	provider types.Provider,
+	opt *tokenopt.Optimizer,
+	modelInfo types.ModelInfo,
+	assistantMsg types.Message,
+	toolCalls []types.ToolCall,
+	out chan types.StreamEvent,
+	depth int,
+) {
+	assistantMsg.ToolCalls = toolCalls
+	opt.AddMessage(assistantMsg)
+	e.sessionSt.AppendMessage(sessionID, assistantMsg)
+
+	e.executeToolBatch(ctx, sessionID, toolCalls, out)
+	for _, tc := range toolCalls {
+		if tc.Result != nil {
+			opt.AddMessage(types.Message{
+				Role: types.RoleTool, Content: tc.Result.Content,
+				ToolID: tc.ID, Timestamp: time.Now(),
+			})
+		}
+	}
+	// Feed any generated images back into the conversation so vision-capable
+	// models can see them on the next turn.
+	e.ingestToolAttachments(sessionID, toolCalls, opt)
+	// LSP diagnostics: inject compile errors as auto-fix hints so the model
+	// can correct them in the continuation.
+	if e.lspManager != nil {
+		if diagnosticsMsg := e.collectDiagnostics(toolCalls); diagnosticsMsg != "" {
+			opt.AddMessage(types.Message{
+				Role: types.RoleSystem, Content: diagnosticsMsg, Timestamp: time.Now(),
+			})
+			out <- types.StreamEvent{Type: types.EventText, Content: diagnosticsMsg}
+		}
+	}
+	out <- types.StreamEvent{
+		Type:    types.EventText,
+		Content: "\n[Continuing with tool results...]\n\n",
+	}
+	e.continueAgentLoop(ctx, sessionID, provider, opt, modelInfo, out, depth+1)
+}
+
+// finishTextTurn closes out a turn that produced no tool calls. If the model
+// was cut off at max_tokens it transparently retries with a bigger budget and
+// a continuation hint (truncation recovery) before persisting the reply.
+func (e *Engine) finishTextTurn(
+	ctx context.Context,
+	sessionID string,
+	provider types.Provider,
+	opt *tokenopt.Optimizer,
+	modelInfo types.ModelInfo,
+	assistantMsg types.Message,
+	done types.StreamEvent,
+	startTime time.Time,
+	out chan types.StreamEvent,
+	depth int,
+) {
+	opt.RecordUsage(done.Meta.Usage, calculateCost(done.Meta.Usage, modelInfo), startTime)
+	if e.truncDet != nil && e.truncDet.IsTruncated(done.Meta.FinishReason, assistantMsg.Content) && ctx.Err() == nil {
+		if recovered := e.recoverTruncation(ctx, sessionID, provider, opt, modelInfo, &assistantMsg, out); recovered {
+			if len(assistantMsg.ToolCalls) > 0 {
+				e.runToolTurn(ctx, sessionID, provider, opt, modelInfo, assistantMsg, assistantMsg.ToolCalls, out, depth)
+				return
+			}
+		}
+	}
+	opt.AddMessage(assistantMsg)
+	e.sessionSt.AppendMessage(sessionID, assistantMsg)
+	// Plan mode: the finished reply is a proposal, so surface it as a pending
+	// plan the UI can offer to confirm (Enter) or discard (Esc). Confirmation
+	// switches the gate out of read-only plan and continues execution.
+	if e.gate != nil && e.gate.Mode() == permission.ModePlan {
+		out <- types.StreamEvent{Type: types.EventPlanProposal}
+	}
+	out <- done
+}
+
+// recoverTruncation retries a truncated assistant reply with a larger
+// max_tokens and a continuation hint (Claude Code parity). The continuation
+// text is appended to msg; if the model instead emits tool calls they are
+// returned on msg.ToolCalls for normal batch execution. Escalates through
+// 8K→16K→32K→64K up to MaxRetries.
+func (e *Engine) recoverTruncation(
+	ctx context.Context,
+	sessionID string,
+	provider types.Provider,
+	opt *tokenopt.Optimizer,
+	modelInfo types.ModelInfo,
+	msg *types.Message,
+	out chan types.StreamEvent,
+) bool {
+	tr := e.truncDet
+	if tr == nil {
+		return false
+	}
+	maxTokens := orMaxTokens(e.maxTokens, modelInfo.MaxOutputTokens)
+	recovered := false
+	for attempt := 0; attempt < tr.config.MaxRetries && ctx.Err() == nil; attempt++ {
+		nextMax := tr.config.NextTokens(maxTokens)
+		if nextMax <= maxTokens {
+			return recovered // already at the ceiling, nothing more to escalate
+		}
+		maxTokens = nextMax
+
+		// Continue from the cut-off tail — never apologise or restart.
+		opt.AddMessage(types.Message{
+			Role:      types.RoleUser,
+			Content:   tr.config.BuildRetryPrompt(firstN(msg.Content, 1500)),
+			Timestamp: time.Now(),
+		})
+
+		ch, err := provider.ChatStream(ctx, types.ChatRequest{
+			SessionID:        sessionID,
+			Messages:         opt.CompactRequest(""),
+			Model:            modelInfo.ID,
+			ProviderName:     modelInfo.Provider,
+			SystemPrompt:     opt.BuildPrefix(),
+			Tools:            e.toolReg.ListDefs(),
+			MaxTokens:        maxTokens,
+			Temperature:      e.temperature,
+			CacheBreakpoints: opt.BuildCacheBreakpoints(),
+		})
+		if err != nil {
+			out <- types.StreamEvent{Type: types.EventError, Content: err.Error()}
+			return recovered
+		}
+		recovered = true
+
+		var contCalls []types.ToolCall
+		stillTruncated := false
+		for ev := range ch {
+			switch ev.Type {
+			case types.EventText:
+				msg.Content += ev.Content
+				out <- ev
+			case types.EventThinking:
+				out <- ev
+			case types.EventToolUse:
+				contCalls = append(contCalls, types.ToolCall{
+					ID: ev.ToolCall.ID, Name: ev.ToolCall.Name, Arguments: ev.ToolCall.Arguments,
+				})
+				out <- ev
+			case types.EventError:
+				out <- ev
+				stillTruncated = false
+			case types.EventDone:
+				stillTruncated = tr.IsTruncated(ev.Meta.FinishReason, msg.Content)
+			}
+		}
+		if len(contCalls) > 0 {
+			msg.ToolCalls = contCalls
+			return recovered
+		}
+		if !stillTruncated {
+			return recovered
+		}
+	}
+	return recovered
+}
+
 // Send starts a conversation turn and returns a stream of events.
 // Security level is checked here to enforce the user's privacy boundary.
 // Unlike Claude Code, iCode NEVER sends data externally without the user
@@ -912,50 +1083,9 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 				// in parallel — Claude Code parallel tool use parity).
 			case types.EventDone:
 				if len(toolCalls) > 0 {
-					assistantMsg.ToolCalls = toolCalls
-					opt.AddMessage(assistantMsg)
-					e.sessionSt.AppendMessage(sessionID, assistantMsg)
-
-					// Execute the batch: read-only tools concurrently,
-					// mutating tools sequentially in original order.
-					e.executeToolBatch(ctx, sessionID, toolCalls, out)
-					for _, tc := range toolCalls {
-						if tc.Result != nil {
-							toolMsg := types.Message{
-								Role:      types.RoleTool,
-								Content:   tc.Result.Content,
-								ToolID:    tc.ID,
-								Timestamp: time.Now(),
-							}
-							opt.AddMessage(toolMsg)
-							e.sessionSt.AppendMessage(sessionID, toolMsg)
-						}
-					}
-					// Feed any generated images back into the conversation so
-					// vision-capable models can see them on the next turn.
-					e.ingestToolAttachments(sessionID, toolCalls, opt)
-					// LSP diagnostics: inject compile errors as auto-fix hints,
-					// mirroring the continuation loop.
-					if e.lspManager != nil {
-						if diagnosticsMsg := e.collectDiagnostics(toolCalls); diagnosticsMsg != "" {
-							opt.AddMessage(types.Message{
-								Role:      types.RoleSystem,
-								Content:   diagnosticsMsg,
-								Timestamp: time.Now(),
-							})
-							out <- types.StreamEvent{Type: types.EventText, Content: diagnosticsMsg}
-						}
-					}
-					out <- types.StreamEvent{
-						Type:    types.EventText,
-						Content: "\n[Continuing with tool results...]\n\n",
-					}
-					e.continueAgentLoop(ctx, sessionID, provider, opt, modelInfo, out, 0)
+					e.runToolTurn(ctx, sessionID, provider, opt, modelInfo, assistantMsg, toolCalls, out, 0)
 				} else {
-					opt.RecordUsage(event.Meta.Usage, calculateCost(event.Meta.Usage, modelInfo), startTime)
-					opt.AddMessage(assistantMsg)
-					e.sessionSt.AppendMessage(sessionID, assistantMsg)
-					out <- event
+					e.finishTextTurn(ctx, sessionID, provider, opt, modelInfo, assistantMsg, event, startTime, out, 0)
 				}
 				// Stop lifecycle hook — the agent has finished responding.
 				if hr := e.getHooksRunner(); hr.HasHooks(hooks.Stop) {
@@ -1044,47 +1174,9 @@ func (e *Engine) continueAgentLoop(
 			// NOTE: tool execution deferred — see parallel execution below
 		case types.EventDone:
 			if len(toolCalls) > 0 {
-				assistantMsg.ToolCalls = toolCalls
-				opt.AddMessage(assistantMsg)
-				e.sessionSt.AppendMessage(sessionID, assistantMsg)
-
-				// Execute the batch: read-only tools run concurrently
-				// (Claude Code parallel tool use parity), mutating tools run
-				// sequentially in their original order so permission prompts
-				// and file writes never interleave.
-				e.executeToolBatch(ctx, sessionID, toolCalls, out)
-				for _, tc := range toolCalls {
-					if tc.Result != nil {
-						opt.AddMessage(types.Message{
-							Role: types.RoleTool, Content: tc.Result.Content,
-							ToolID: tc.ID, Timestamp: time.Now(),
-						})
-					}
-				}
-				// Feed any generated images back into the conversation so
-				// vision-capable models can see them on the next turn.
-				e.ingestToolAttachments(sessionID, toolCalls, opt)
-				// LSP diagnostics check: after tool execution, check for
-				// compilation errors and inject auto-fix hints.
-				if e.lspManager != nil {
-					diagnosticsMsg := e.collectDiagnostics(toolCalls)
-					if diagnosticsMsg != "" {
-						opt.AddMessage(types.Message{
-							Role:      types.RoleSystem,
-							Content:   diagnosticsMsg,
-							Timestamp: time.Now(),
-						})
-						out <- types.StreamEvent{
-							Type:    types.EventText,
-							Content: diagnosticsMsg,
-						}
-					}
-				}
-				e.continueAgentLoop(ctx, sessionID, provider, opt, modelInfo, out, depth+1)
+				e.runToolTurn(ctx, sessionID, provider, opt, modelInfo, assistantMsg, toolCalls, out, depth)
 			} else {
-				opt.RecordUsage(event.Meta.Usage, calculateCost(event.Meta.Usage, modelInfo), startTime)
-				opt.AddMessage(assistantMsg)
-				e.sessionSt.AppendMessage(sessionID, assistantMsg)
+				e.finishTextTurn(ctx, sessionID, provider, opt, modelInfo, assistantMsg, event, startTime, out, depth)
 			}
 			return
 		case types.EventError:
