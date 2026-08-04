@@ -165,17 +165,15 @@ const MessageList = React.memo(({ messages, isStreaming, onRegenerate, onZoom }:
           }}
         >
           {msg.role === 'assistant' && (
-            <div style={{
-              width: 30, height: 30, borderRadius: '50%', background: 'var(--accent)',
+            <div className="grad-avatar" style={{
+              width: 30, height: 30, borderRadius: '50%',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: 13, fontWeight: 600, color: '#fff', flexShrink: 0,
+              fontSize: 13, fontWeight: 600, flexShrink: 0,
+              boxShadow: '0 2px 8px rgba(88,166,255,0.25)',
             }}>i</div>
           )}
-          <div className={msg.role === 'assistant' ? 'msg-bubble' : ''} style={{
+          <div className={msg.role === 'assistant' ? 'msg-bubble' : 'msg-bubble msg-user'} style={{
             maxWidth: '75%', padding: '12px 16px',
-            background: msg.role === 'user' ? 'var(--accent-soft)' : undefined,
-            border: msg.role === 'user' ? '0.5px solid var(--accent)' : undefined,
-            borderRadius: msg.role === 'user' ? 'var(--r-xl)' : undefined,
             color: 'var(--text-primary)', fontSize: 13,
             lineHeight: 1.7, wordBreak: 'break-word',
             position: 'relative',
@@ -240,11 +238,11 @@ const MessageList = React.memo(({ messages, isStreaming, onRegenerate, onZoom }:
             )}
           </div>
           {msg.role === 'user' && (
-            <div style={{
+            <div className="grad-avatar" style={{
               width: 30, height: 30, borderRadius: '50%',
-              background: 'var(--warning)', display: 'flex',
-              alignItems: 'center', justifyContent: 'center',
-              fontSize: 13, fontWeight: 600, color: '#fff', flexShrink: 0,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 13, fontWeight: 600, flexShrink: 0,
+              boxShadow: '0 2px 8px rgba(210,153,29,0.3)',
             }}>U</div>
           )}
         </div>
@@ -900,7 +898,7 @@ const ChatPage: React.FC = () => {
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
+    <div className="page-enter" style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
       {/* Header — Apple style */}
       <div style={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -1451,7 +1449,7 @@ const ChatPage: React.FC = () => {
           display: 'flex', gap: 10, alignItems: 'flex-end',
           background: 'var(--bg-primary)', borderRadius: 10,
           border: '1px solid var(--border-color)', padding: '6px 8px',
-        }}>
+        }} className="composer">
           <div style={{ position: 'relative', flex: 1 }}>
             {slashMenu.length > 0 && (
               <div style={{
@@ -1526,11 +1524,13 @@ const ChatPage: React.FC = () => {
               disabled={!input.trim()}
               title={t('chat.send')}
               style={{
-                background: input.trim() ? 'var(--accent)' : 'var(--border-color)',
-                border: 'none', color: input.trim() ? '#000' : 'var(--text-muted)',
+                background: input.trim() ? 'var(--grad-accent)' : 'var(--border-color)',
+                border: 'none', color: input.trim() ? '#fff' : 'var(--text-muted)',
                 padding: '6px 10px', borderRadius: 8, cursor: input.trim() ? 'pointer' : 'default',
-                display: 'flex', alignItems: 'center', transition: 'background 0.15s',
+                display: 'flex', alignItems: 'center', transition: 'filter 0.15s, opacity 0.15s',
               }}
+              onMouseEnter={(e) => { if (input.trim()) (e.currentTarget as HTMLElement).style.filter = 'brightness(1.1)'; }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.filter = ''; }}
             >
               <Send size={16} />
             </button>

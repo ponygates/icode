@@ -20,8 +20,8 @@ import (
 	"github.com/ponygates/icode/internal/config"
 	projectcontext "github.com/ponygates/icode/internal/core/context"
 	"github.com/ponygates/icode/internal/core/permission"
-	"github.com/ponygates/icode/internal/core/slashui"
 	"github.com/ponygates/icode/internal/core/sessionum"
+	"github.com/ponygates/icode/internal/core/slashui"
 	"github.com/ponygates/icode/internal/executil"
 	"github.com/ponygates/icode/internal/types"
 	"github.com/ponygates/icode/internal/xgo"
@@ -899,57 +899,85 @@ func simpleUIHTML(model, provider string) string {
   html, body { margin: 0; height: 100%; }
   body {
     font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
-    background: #0f1115; color: #e6e6e6; display: flex; flex-direction: row; height: 100vh; overflow: hidden;
+    background: linear-gradient(160deg, #0b0e14 0%, #0f1521 45%, #101a2b 100%);
+    color: #e6e6e6; display: flex; flex-direction: row; height: 100vh; overflow: hidden;
   }
   #main { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; height: 100%; }
   #bar {
-    display: flex; align-items: center; gap: 10px; padding: 8px 12px;
-    background: #161922; border-bottom: 1px solid #262b36; flex: 0 0 auto;
+    display: flex; align-items: center; gap: 10px; padding: 9px 14px;
+    background: rgba(22, 25, 34, 0.82); backdrop-filter: blur(10px);
+    border-bottom: 1px solid #2a3140; flex: 0 0 auto;
   }
-  #bar .logo { color: #ff7a45; font-weight: 700; }
+  #bar .logo {
+    color: #fff; font-weight: 800; font-size: 15px; letter-spacing: .5px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  #bar .logo::before {
+    content: ""; width: 22px; height: 22px; border-radius: 7px;
+    background: linear-gradient(135deg, #ff7a45, #ff5f6d);
+    display: inline-block; box-shadow: 0 2px 8px rgba(255, 122, 69, .45);
+  }
   #bar select {
-    background: #0f1115; color: #e6e6e6; border: 1px solid #313846;
-    border-radius: 6px; padding: 4px 8px; max-width: 320px;
+    background: #141922; color: #e6e6e6; border: 1px solid #2f3850;
+    border-radius: 8px; padding: 5px 10px; max-width: 320px;
+    outline: none; transition: border-color .15s;
   }
+  #bar select:focus { border-color: #ff7a45; }
   #bar button {
-    background: #1f2530; color: #e6e6e6; border: 1px solid #313846;
-    border-radius: 6px; padding: 4px 10px; cursor: pointer;
+    background: #1c2332; color: #e6e6e6; border: 1px solid #2f3850;
+    border-radius: 8px; padding: 5px 12px; cursor: pointer;
+    transition: background .15s, transform .1s, border-color .15s;
   }
-  #bar button:hover { background: #2a3140; }
+  #bar button:hover { background: #28304a; border-color: #3c4a6b; }
+  #bar button:active { transform: translateY(1px); }
   #bar .spacer { flex: 1; }
   #log {
-    flex: 1 1 auto; overflow-y: auto; padding: 14px 16px; scrollbar-width: thin;
-    scrollbar-color: #3a4151 #0f1115;
+    flex: 1 1 auto; overflow-y: auto; padding: 16px 18px; scrollbar-width: thin;
+    scrollbar-color: #3a4151 transparent;
   }
   #log::-webkit-scrollbar { width: 12px; }
-  #log::-webkit-scrollbar-track { background: #0f1115; }
-  #log::-webkit-scrollbar-thumb { background: #3a4151; border-radius: 8px; border: 3px solid #0f1115; }
-  #log::-webkit-scrollbar-thumb:hover { background: #4a5366; }
-  .msg { position: relative; margin: 0 0 12px; padding: 10px 12px; border-radius: 10px; white-space: pre-wrap; word-break: break-word; max-width: 92%; }
-  .user { background: #1d3a5f; margin-left: auto; }
-  .assistant { background: #1a1f29; border: 1px solid #262b36; }
-  .system { background: #20242e; color: #9aa4b2; font-size: 13px; }
+  #log::-webkit-scrollbar-track { background: transparent; }
+  #log::-webkit-scrollbar-thumb { background: #39425c; border-radius: 8px; border: 3px solid transparent; background-clip: content-box; }
+  #log::-webkit-scrollbar-thumb:hover { background: #4a546e; background-clip: content-box; }
+  .msg {
+    position: relative; margin: 0 0 14px; padding: 11px 14px; border-radius: 12px;
+    white-space: pre-wrap; word-break: break-word; max-width: 92%;
+    animation: msgIn .18s ease-out;
+    box-shadow: 0 1px 3px rgba(0,0,0,.35);
+  }
+  @keyframes msgIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+  .user { background: linear-gradient(135deg, #1c3a63, #1d3a5f); margin-left: auto; }
+  .assistant { background: #161b26; border: 1px solid #262d3e; }
+  .system { background: #1a1f2c; color: #98a3b5; font-size: 13px; }
   .error { background: #3a1d1d; color: #ffb4b4; border: 1px solid #5a2a2a; }
-  .tool { background: #16202a; border: 1px solid #223; color: #9ecbff; font-size: 13px; }
+  .tool { background: #131e2b; border: 1px solid #223140; color: #9ecbff; font-size: 13px; }
   .tool .name { font-weight: 700; color: #7fd1ff; }
   .tool pre { margin: 6px 0 0; white-space: pre-wrap; word-break: break-word; color: #c7d2e0; }
-  .thinking { background: #1c2026; border: 1px dashed #334; color: #9aa4b2; font-size: 12px; }
-  .thinking summary { cursor: pointer; color: #9ecbff; font-weight: 600; }
+  .thinking { background: #1a1f2c; border: 1px dashed #2f3a52; color: #98a3b5; font-size: 12px; }
+  .thinking summary { cursor: pointer; color: #7fd1ff; font-weight: 600; }
   .thinking pre { margin: 6px 0 0; white-space: pre-wrap; word-break: break-word; color: #8a93a3; }
   .role { font-size: 11px; color: #6b7484; margin-bottom: 3px; }
-  #inputbar { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid #262b36; background: #161922; flex: 0 0 auto; }
+  #inputbar { display: flex; gap: 8px; padding: 12px 14px; border-top: 1px solid #2a3140; background: rgba(22, 25, 34, 0.82); backdrop-filter: blur(10px); flex: 0 0 auto; }
   #inp {
-    flex: 1; resize: none; height: 42px; background: #0f1115; color: #e6e6e6;
-    border: 1px solid #313846; border-radius: 8px; padding: 10px 12px; font: inherit;
+    flex: 1; resize: none; height: 44px; background: #10141d; color: #e6e6e6;
+    border: 1px solid #2f3850; border-radius: 10px; padding: 11px 14px; font: inherit;
+    outline: none; transition: border-color .15s, box-shadow .15s;
   }
-  #send { background: #ff7a45; color: #1a1205; border: none; border-radius: 8px; padding: 0 18px; font-weight: 700; cursor: pointer; }
-  #send:hover { background: #ff9166; }
-  #stopBtn { background: #b53a3a; color: #fff; border: none; border-radius: 8px; padding: 0 16px; font-weight: 700; cursor: pointer; }
-  #stopBtn:hover { background: #cf4a4a; }
+  #inp:focus { border-color: #ff7a45; box-shadow: 0 0 0 3px rgba(255, 122, 69, .15); }
+  #inp::placeholder { color: #55607a; }
+  #send {
+    background: linear-gradient(135deg, #ff7a45, #ff5f6d); color: #fff;
+    border: none; border-radius: 10px; padding: 0 20px; font-weight: 700; cursor: pointer;
+    box-shadow: 0 3px 10px rgba(255, 95, 109, .35); transition: transform .1s, box-shadow .15s, filter .15s;
+  }
+  #send:hover { filter: brightness(1.08); box-shadow: 0 4px 14px rgba(255, 95, 109, .45); }
+  #send:active { transform: translateY(1px); }
+  #stopBtn { background: #b53a3a; color: #fff; border: none; border-radius: 10px; padding: 0 16px; font-weight: 700; cursor: pointer; transition: filter .15s; }
+  #stopBtn:hover { filter: brightness(1.15); }
   /* Bottom status bar: model/provider/mode/security/tokens/cache/cost */
   #status {
-    flex: 0 0 auto; padding: 5px 12px; font-size: 12px; color: #6b7484;
-    background: #12151c; border-top: 1px solid #262b36; white-space: nowrap;
+    flex: 0 0 auto; padding: 6px 14px; font-size: 12px; color: #6b7484;
+    background: rgba(12, 15, 22, .7); border-top: 1px solid #232a3a; white-space: nowrap;
     overflow-x: auto; scrollbar-width: none;
   }
   #status::-webkit-scrollbar { display: none; }
@@ -961,20 +989,22 @@ func simpleUIHTML(model, provider string) string {
   #grip:hover, #grip.dragging { background: #ff7a45; }
   #side {
     flex: 0 0 280px; width: 280px; min-width: 180px; max-width: 60%;
-    background: #12151c; border-left: 1px solid #262b36; display: flex; flex-direction: column;
+    background: rgba(16, 19, 27, .9); border-left: 1px solid #232a3a; display: flex; flex-direction: column;
     height: 100%;
   }
-  #side .side-head { padding: 10px 12px; font-weight: 700; color: #ff7a45; border-bottom: 1px solid #262b36; flex: 0 0 auto; }
-  #side .side-list { overflow-y: auto; padding: 8px; scrollbar-width: thin; scrollbar-color: #3a4151 #12151c; flex: 1 1 auto; }
+  #side .side-head { padding: 11px 14px; font-weight: 700; color: #ff7a45; border-bottom: 1px solid #232a3a; flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; }
+  #side .side-list { overflow-y: auto; padding: 8px; scrollbar-width: thin; scrollbar-color: #39425c transparent; flex: 1 1 auto; }
   #side .side-list::-webkit-scrollbar { width: 10px; }
-  #side .side-list::-webkit-scrollbar-thumb { background: #3a4151; border-radius: 8px; border: 2px solid #12151c; }
-  #side .grp { color: #6b7484; font-size: 12px; margin: 10px 4px 4px; }
+  #side .side-list::-webkit-scrollbar-thumb { background: #39425c; border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
+  #side .grp { color: #6b7484; font-size: 12px; margin: 12px 6px 5px; letter-spacing: .3px; }
   #side .cmd {
-    padding: 5px 8px; margin: 2px 0; border-radius: 6px; cursor: pointer; color: #cdd6e2;
+    padding: 6px 10px; margin: 2px 0; border-radius: 7px; cursor: pointer; color: #cdd6e2;
     font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 13px;
+    transition: background .12s, color .12s;
   }
-  #side .cmd:hover { background: #1f2530; color: #fff; }
-  #side .collapse { background: #1f2530; color: #e6e6e6; border: 1px solid #313846; border-radius: 6px; padding: 2px 8px; cursor: pointer; }
+  #side .cmd:hover { background: #232c40; color: #fff; }
+  #side .collapse { background: #232c40; color: #e6e6e6; border: 1px solid #2f3850; border-radius: 6px; padding: 2px 10px; cursor: pointer; }
+  #side .collapse:hover { background: #2b3650; }
   /* Markdown rendering inside chat bubbles */
   .content { line-height: 1.55; }
   .md-h { display: block; font-weight: 700; margin: 6px 0 2px; color: #ffd9c2; }
@@ -1005,13 +1035,14 @@ func simpleUIHTML(model, provider string) string {
   .msg:hover .msg-copy { opacity: 1; }
   .msg-copy:hover { background: #2a3140; color: #fff; }
   /* Light theme */
-  html.light, html.light body { background: #f7f7f9; color: #1a1a1f; }
-  html.light #bar { background: #fff; border-color: #e0e0e5; }
+  html.light, html.light body { background: linear-gradient(160deg, #f2f3f7 0%, #f8f8fb 55%, #eef2f9 100%); color: #1a1a1f; }
+  html.light #bar { background: rgba(255, 255, 255, .85); backdrop-filter: blur(10px); border-color: #e0e0e5; }
+  html.light #bar .logo { color: #1a1a1f; }
   html.light #bar select, html.light #bar button { background: #f4f4f7; color: #1a1a1f; border-color: #d0d0da; }
-  html.light #log { background: #f7f7f9; scrollbar-color: #c5c5ce #f7f7f9; }
-  html.light #log::-webkit-scrollbar-thumb { background: #c5c5ce; }
-  html.light .msg { border-radius: 10px; }
-  html.light .user { background: #dae8fc; }
+  html.light #log { scrollbar-color: #c5c5ce transparent; }
+  html.light #log::-webkit-scrollbar-thumb { background: #c5c5ce; background-clip: content-box; }
+  html.light .msg { border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+  html.light .user { background: linear-gradient(135deg, #d5e4fb, #dae8fc); }
   html.light .assistant { background: #fff; border-color: #e0e0e5; }
   html.light .system { background: #eeeef2; color: #6b6b7a; }
   html.light .error { background: #fce0e0; color: #b52424; border-color: #f0c0c0; }
@@ -1021,12 +1052,12 @@ func simpleUIHTML(model, provider string) string {
   html.light .thinking { background: #f4f6f8; border-color: #cfd6e2; color: #5a6270; }
   html.light .thinking summary { color: #1a5acc; }
   html.light .thinking pre { color: #5a6270; }
-  html.light #inputbar { background: #fff; border-color: #e0e0e5; }
+  html.light #inputbar { background: rgba(255, 255, 255, .85); backdrop-filter: blur(10px); border-color: #e0e0e5; }
   html.light #inp { background: #f7f7f9; color: #1a1a1f; border-color: #d0d0da; }
-  html.light #send { background: #ff7a45; color: #fff; }
+  html.light #send { background: linear-gradient(135deg, #ff7a45, #ff5f6d); color: #fff; }
   html.light #stopBtn { background: #c0392b; }
-  html.light #status { background: #f4f4f7; border-color: #e0e0e5; color: #888; }
-  html.light #side { background: #f4f4f7; border-color: #e0e0e5; }
+  html.light #status { background: rgba(244, 244, 247, .8); border-color: #e0e0e5; color: #888; }
+  html.light #side { background: rgba(244, 244, 247, .92); border-color: #e0e0e5; }
   html.light #grip { background: #d0d0da; }
   html.light #grip:hover { background: #ff7a45; }
   html.light #side .cmd { color: #3a3a4a; }

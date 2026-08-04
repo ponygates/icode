@@ -49,7 +49,9 @@
   --text-muted: #484f58;
   --accent: #58a6ff;
   --accent-soft: rgba(88,166,255,0.12);
+  --accent-soft-2: rgba(139,108,255,0.05);
   --accent-hover: #79c0ff;
+  --grad-accent: linear-gradient(135deg, #58a6ff 0%, #8b6cff 100%);
   --success: #3fb950;
   --success-soft: rgba(63,185,80,0.12);
   --warning: #d2991d;
@@ -81,7 +83,9 @@
   --text-muted: #aeaeb2;
   --accent: #0071e3;
   --accent-soft: rgba(0,113,227,0.08);
+  --accent-soft-2: rgba(131,56,236,0.04);
   --accent-hover: #0066cc;
+  --grad-accent: linear-gradient(135deg, #0071e3 0%, #8338ec 100%);
   --success: #248a3d;
   --success-soft: rgba(36,138,61,0.08);
   --warning: #b25000;
@@ -100,7 +104,10 @@ body {
   font-size: var(--text-base);
   line-height: 1.6;
   overflow: hidden;
-  background: var(--bg-primary);
+  background:
+    radial-gradient(1200px 600px at 85% -10%, var(--accent-soft-2), transparent 60%),
+    radial-gradient(900px 500px at -10% 110%, rgba(139,108,255,0.06), transparent 55%),
+    var(--bg-primary);
   color: var(--text-primary);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -210,6 +217,34 @@ hr { border: none; border-top: 0.5px solid var(--border-color); margin: var(--s3
   border: 0.5px solid var(--border-color);
   border-radius: var(--r-lg);
   animation: fadeIn var(--t-slow) ease-out;
+}
+
+/* User bubble — soft accent gradient for a warm "outgoing" feel */
+.msg-user {
+  background: linear-gradient(135deg, var(--accent-soft), var(--accent-soft-2));
+  border: 0.5px solid var(--accent);
+  border-radius: var(--r-xl) var(--r-xl) 6px var(--r-xl);
+}
+
+/* Composer — the input row glows with the accent on focus */
+.composer {
+  transition: border-color var(--t-normal), box-shadow var(--t-normal);
+}
+.composer:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+/* Accent gradient helper (avatars, brand marks) */
+.grad-avatar {
+  background: var(--grad-accent);
+  background-size: 160% 160%;
+  color: #fff;
+}
+
+/* Page transition — subtle fade/slide for route content */
+.page-enter {
+  animation: slideIn var(--t-slow) ease-out;
 }
 
 /* Action buttons — hidden until parent hover */
