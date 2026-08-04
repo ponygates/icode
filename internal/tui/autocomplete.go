@@ -221,6 +221,42 @@ func (t *TUI) allSuggestions() []acItem {
 	return items
 }
 
+// completeSlashCommand expands an incomplete slash-command prefix when the
+// user presses Enter, so a dangling "/x" or a bare "/" can never submit as an
+// empty or unknown command. It completes to the FIRST command that matches the
+// typed prefix (same order as Tab completion / the /help list), keeps any
+// trailing arguments, and leaves exact commands untouched.
+func (t *TUI) completeSlashCommand(text string) (string, bool) {
+	if !strings.HasPrefix(text, "/") {
+		return text, false
+	}
+	token, rest := text, ""
+	if i := strings.IndexByte(text, ' '); i >= 0 {
+		token, rest = text[:i], text[i:]
+	}
+	// Bare "/" — can't dispatch an empty command; fall back to the first one.
+	if token == "/" {
+		if len(slashDefs) == 0 {
+			return text, false
+		}
+		return slashDefs[0].Name + rest, true
+	}
+	var first string
+	for _, d := range slashDefs {
+		if d.Name == token {
+			// Exact command — already complete, never rewrite it.
+			return text, false
+		}
+		if first == "" && strings.HasPrefix(d.Name, token) {
+			first = d.Name
+		}
+	}
+	if first != "" {
+		return first + rest, true
+	}
+	return text, false
+}
+
 // acceptSuggestion replaces the input with the highlighted autocomplete
 // entry. For slash commands this inserts the command name. For @file refs
 // it replaces the "@prefix" with the file path and the file content.

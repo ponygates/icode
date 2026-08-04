@@ -427,6 +427,12 @@ func (t *TUI) handleKey(r rune) bool {
 			}
 			return true
 		}
+		// Auto-complete an incomplete slash-command prefix on Enter: "/c"
+		// runs the first matching command (e.g. /compact), a bare "/" never
+		// dispatches an empty command.
+		if full, ok := t.completeSlashCommand(text); ok {
+			text = full
+		}
 		t.pushHistory(text)
 		t.submit(text)
 		return true

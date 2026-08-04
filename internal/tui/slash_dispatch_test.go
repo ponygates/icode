@@ -45,6 +45,67 @@ func TestSubmitSlashHelp(t *testing.T) {
 	}
 }
 
+func TestCompleteSlashCommand(t *testing.T) {
+	tu := newTestTUI()
+	// Exact command passes through untouched.
+	if got, ok := tu.completeSlashCommand("/model gpt-4o"); ok || got != "/model gpt-4o" {
+		t.Fatalf("exact command should pass through, got %q ok=%v", got, ok)
+	}
+	// Prefix "/c" completes to the first "/c*" command in slashDefs order.
+	got, ok := tu.completeSlashCommand("/c")
+	if !ok {
+		t.Fatalf("prefix /c should complete, got ok=%v", ok)
+	}
+	if !strings.HasPrefix(got, "/c") || got == "/c" {
+		t.Fatalf("completed /c should expand to a full command, got %q", got)
+	}
+	// Trailing arguments are preserved.
+	got, ok = tu.completeSlashCommand("/m claude")
+	if !ok {
+		t.Fatalf("/m should complete with args, got ok=%v", ok)
+	}
+	if !strings.HasPrefix(got, "/m") || !strings.HasSuffix(got, "claude") {
+		t.Fatalf("completed /m claude should keep args, got %q", got)
+	}
+	// Bare "/" never dispatches an empty command.
+	got, ok = tu.completeSlashCommand("/")
+	if !ok || !strings.HasPrefix(got, "/") || got == "/" {
+		t.Fatalf("bare / should complete to a real command, got %q ok=%v", got, ok)
+	}
+	// Unknown commands are left alone (still routed to custom/callback paths).
+	if got, ok := tu.completeSlashCommand("/zzznope"); ok || got != "/zzznope" {
+		t.Fatalf("unknown command should pass through, got %q ok=%v", got, ok)
+	}
+	// Non-slash text is never touched.
+	if got, ok := tu.completeSlashCommand("hello world"); ok || got != "hello world" {
+		t.Fatalf("plain text should pass through, got %q ok=%v", got, ok)
+	}
+}
+
+func TestEnterCompletesSlashPrefix(t *testing.T) {
+	tu := newTestTUI()
+	// Type "/mo" then press Enter — the dispatch must receive the completed
+	// command ("/mode" is the first "/mo*" match), never a dangling "/mo".
+	// handleKey swallows Enter for the welcome screen if open; dismiss first.
+	tu.dismissWelcome()
+	for _, ch := range "/mo" {
+		if !tu.handleKey(ch) {
+			t.Fatalf("handleKey(%q) returned false", string(ch))
+		}
+	}
+	if tu.inputBuf != "/mo" {
+		t.Fatalf("inputBuf = %q, want /mo", tu.inputBuf)
+	}
+	if !tu.handleKey('\r') {
+		t.Fatalf("handleKey(Enter) returned false")
+	}
+	// The completed command should have produced a system response, proving
+	// a full command (not "/mo") was dispatched.
+	if countSystem(tu) == 0 {
+		t.Fatalf("Enter on /mo produced no system response — a dangling prefix may have been submitted; messages=%d", len(tu.messages))
+	}
+}
+
 func TestSubmitSlashModel(t *testing.T) {
 	tu := newTestTUI()
 	tu.submit("/model claude-3-opus")
