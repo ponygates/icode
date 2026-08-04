@@ -66,6 +66,15 @@ jobs:
         env:
           CGO_ENABLED: ${{ runner.os == 'Windows' && '0' || '1' }}
 
+      - name: Check gofmt
+        run: |
+          UNFORMATTED="$(gofmt -l .)"
+          if [ -n "$UNFORMATTED" ]; then
+            echo "Files not gofmt-formatted:"
+            echo "$UNFORMATTED"
+            exit 1
+          fi
+
       - name: Run all tests
         run: go test -count=1 -timeout=180s ./...
         env:
@@ -113,11 +122,21 @@ jobs:
           cache: npm
           cache-dependency-path: desktop/package-lock.json
 
+      - name: Install dependencies
+        working-directory: desktop
+        run: npm ci
+
+      - name: Type-check frontend
+        working-directory: desktop
+        run: npx tsc --noEmit
+
+      - name: Run frontend tests
+        working-directory: desktop
+        run: npm test
+
       - name: Build frontend
         working-directory: desktop
-        run: |
-          npm ci
-          npx vite build
+        run: npx vite build
 
       - name: Upload frontend dist
         uses: actions/upload-artifact@v4
