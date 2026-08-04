@@ -39,8 +39,63 @@ func TestSaveCreatesFileWithPersistedContent(t *testing.T) {
 	if reloaded.Language != "en" || reloaded.Defaults.Mode != "plan" {
 		t.Fatalf("reloaded mismatch: lang=%q mode=%q", reloaded.Language, reloaded.Defaults.Mode)
 	}
-	if p, ok := reloaded.Provider("deepseek"); !ok || p.APIKey != "sk-test" || p.Timeout != 99 {
-		t.Fatalf("reloaded deepseek provider mismatch: %+v ok=%v", p, ok)
+	if p, ok := reloaded.Provider("deepseek"); !ok {
+		t.Fatalf("deepseek provider missing")
+	} else if p.APIKey != "" {
+		t.Fatalf("plaintext api_key persisted: %q", p.APIKey)
+	} else if p.APIKeyEnc == "" {
+		t.Fatalf("expected api_key_enc in persisted config")
+	} else if p.Timeout != 99 {
+		t.Fatalf("reloaded deepseek timeout mismatch: %d", p.Timeout)
+	}
+	// The plaintext is recovered by the decrypt pass used during Load.
+	decryptConfigKeys(reloaded)
+	if p, ok := reloaded.Provider("deepseek"); !ok || p.APIKey != "sk-test" {
+		t.Fatalf("reloaded deepseek key after decrypt: %+v ok=%v", p, ok)
+	}
+}
+
+// TestSaveEncryptsAPIKeys verifies the plaintext key never reaches the config
+// file and that a Save → reload → decrypt round-trip restores it.
+func TestSaveEncryptsAPIKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	c := Default()
+	c.Providers["deepseek"] = ProviderCfg{APIKey: "sk-super-secret", APIBase: "https://example.com"}
+
+	if err := c.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if strings.Contains(string(data), "sk-super-secret") {
+		t.Fatalf("plaintext API key persisted to disk:\n%s", data)
+	}
+	if !strings.Contains(string(data), "api_key_enc") {
+		t.Fatalf("expected encrypted api_key_enc in saved config:\n%s", data)
+	}
+
+	reloaded := Default()
+	if err := yaml.Unmarshal(data, reloaded); err != nil {
+		t.Fatalf("unmarshal saved config: %v", err)
+	}
+	decryptConfigKeys(reloaded)
+	if p, ok := reloaded.Provider("deepseek"); !ok || p.APIKey != "sk-super-secret" {
+		t.Fatalf("round-trip failed: %+v ok=%v", p, ok)
+	}
+}
+
+// TestDecryptIgnoresMissingCiphertext guards against decryptConfigKeys wiping
+// keys that were never encrypted (e.g. env-var overrides or plaintext legacy
+// configs still on disk).
+func TestDecryptIgnoresMissingCiphertext(t *testing.T) {
+	c := Default()
+	c.Providers["zhipu"] = ProviderCfg{APIKey: "env-key"}
+	decryptConfigKeys(c)
+	if p, ok := c.Provider("zhipu"); !ok || p.APIKey != "env-key" {
+		t.Fatalf("env key clobbered: %+v ok=%v", p, ok)
 	}
 }
 
@@ -218,8 +273,8 @@ func TestJSONDoesNotLeakAPIKeys(t *testing.T) {
 	}
 }
 
-// TestYAMLKeepsAPIKeysRoundTrip ensures the persisted YAML keeps keys
-// (necessary for auth) and they survive a save → load cycle.
+// TestYAMLKeepsAPIKeysRoundTrip ensures encrypted keys survive a save → load
+// cycle (decryption restores the plaintext needed for auth).
 func TestYAMLKeepsAPIKeysRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	c := Default()
@@ -233,6 +288,7 @@ func TestYAMLKeepsAPIKeysRoundTrip(t *testing.T) {
 	if err := yaml.Unmarshal(data, reloaded); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
+	decryptConfigKeys(reloaded)
 	if got := reloaded.APIKey("openrouter"); got != "sk-yaml-secret" {
 		t.Fatalf("expected key round-trip, got %q", got)
 	}

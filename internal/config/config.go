@@ -10,6 +10,8 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"gopkg.in/yaml.v3"
+
+	"github.com/ponygates/icode/internal/secure"
 )
 
 // SecurityLevel controls how data is handled when sent to external services.
@@ -19,11 +21,11 @@ import (
 type SecurityLevel string
 
 const (
-	SecLocal        SecurityLevel = "local"         // 本地处理: no API calls at all, pure local
-	SecDesensitize  SecurityLevel = "desensitize"   // 脱敏处理: sanitize PII before sending
-	SecLocalLLM     SecurityLevel = "local-llm"     // 本地大模型: local models only (Ollama etc)
-	SecForeignLLM   SecurityLevel = "foreign-llm"   // 国外大模型: international API providers allowed
-	SecUnrestricted SecurityLevel = "unrestricted"  // 无限制: all providers, no restrictions
+	SecLocal        SecurityLevel = "local"        // 本地处理: no API calls at all, pure local
+	SecDesensitize  SecurityLevel = "desensitize"  // 脱敏处理: sanitize PII before sending
+	SecLocalLLM     SecurityLevel = "local-llm"    // 本地大模型: local models only (Ollama etc)
+	SecForeignLLM   SecurityLevel = "foreign-llm"  // 国外大模型: international API providers allowed
+	SecUnrestricted SecurityLevel = "unrestricted" // 无限制: all providers, no restrictions
 )
 
 func ParseSecurityLevel(s string) SecurityLevel {
@@ -51,17 +53,17 @@ func boolPtr(b bool) *bool { return &b }
 type Config struct {
 	mu sync.RWMutex
 
-	Language      string              `yaml:"language" json:"language"`
-	SecurityLevel SecurityLevel       `yaml:"security_level" json:"security_level"`
+	Language      string                 `yaml:"language" json:"language"`
+	SecurityLevel SecurityLevel          `yaml:"security_level" json:"security_level"`
 	Providers     map[string]ProviderCfg `yaml:"providers" json:"providers"`
-	Models        []ModelCfg          `yaml:"models" json:"models"`
-	Defaults      DefaultCfg          `yaml:"defaults" json:"defaults"`
-	TUI           TUICfg              `yaml:"tui" json:"tui"`
-	Tools         ToolsCfg            `yaml:"tools" json:"tools"`
-	Server        ServerCfg           `yaml:"server" json:"server"`
-	Update        UpdateCfg           `yaml:"update" json:"update"`
-	LSP           LSPCfg              `yaml:"lsp" json:"lsp"`
-	MCP           []MCPServerCfg      `yaml:"mcp" json:"mcp"`
+	Models        []ModelCfg             `yaml:"models" json:"models"`
+	Defaults      DefaultCfg             `yaml:"defaults" json:"defaults"`
+	TUI           TUICfg                 `yaml:"tui" json:"tui"`
+	Tools         ToolsCfg               `yaml:"tools" json:"tools"`
+	Server        ServerCfg              `yaml:"server" json:"server"`
+	Update        UpdateCfg              `yaml:"update" json:"update"`
+	LSP           LSPCfg                 `yaml:"lsp" json:"lsp"`
+	MCP           []MCPServerCfg         `yaml:"mcp" json:"mcp"`
 	// MCPImportWorkBuddy controls whether MCP servers configured in
 	// WorkBuddy's ~/.workbuddy/mcp.json are auto-imported at startup
 	// (explicit iCode entries always win on name conflicts). Default: true.
@@ -97,15 +99,15 @@ type HookRule struct {
 // MCPServerCfg describes a single Model Context Protocol server connection.
 // It mirrors mcp.ServerConfig so the desktop settings UI can fully manage it.
 type MCPServerCfg struct {
-	Name    string            `yaml:"name" json:"name"`
-	Type    string            `yaml:"type" json:"type"` // stdio | sse
-	Command string            `yaml:"command,omitempty" json:"command,omitempty"`
-	Args    []string          `yaml:"args,omitempty" json:"args,omitempty"`
-	Env     []string          `yaml:"env,omitempty" json:"env,omitempty"`
-	URL     string            `yaml:"url,omitempty" json:"url,omitempty"`
-	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
-	Enabled   bool   `yaml:"enabled" json:"enabled"`
-	TrustMode string `yaml:"trust_mode,omitempty" json:"trust_mode,omitempty"` // ask | readonly | all
+	Name      string            `yaml:"name" json:"name"`
+	Type      string            `yaml:"type" json:"type"` // stdio | sse
+	Command   string            `yaml:"command,omitempty" json:"command,omitempty"`
+	Args      []string          `yaml:"args,omitempty" json:"args,omitempty"`
+	Env       []string          `yaml:"env,omitempty" json:"env,omitempty"`
+	URL       string            `yaml:"url,omitempty" json:"url,omitempty"`
+	Headers   map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+	Enabled   bool              `yaml:"enabled" json:"enabled"`
+	TrustMode string            `yaml:"trust_mode,omitempty" json:"trust_mode,omitempty"` // ask | readonly | all
 }
 
 // DefaultCfg holds the user's preferred model / provider / permission mode,
@@ -133,7 +135,10 @@ type DefaultCfg struct {
 }
 
 type ProviderCfg struct {
-	APIKey    string `yaml:"api_key" json:"-"`
+	APIKey string `yaml:"api_key,omitempty" json:"-"`
+	// APIKeyEnc holds the DPAPI-encrypted form of APIKey for disk persistence.
+	// It is the only key representation written to disk; APIKey stays in memory.
+	APIKeyEnc string `yaml:"api_key_enc,omitempty" json:"-"`
 	APIBase   string `yaml:"api_base" json:"api_base,omitempty"`
 	Timeout   int    `yaml:"timeout_sec" json:"timeout_sec,omitempty"`
 	Disabled  bool   `yaml:"disabled" json:"disabled,omitempty"`
@@ -143,10 +148,10 @@ type ProviderCfg struct {
 // come from the provider registry; users can add custom models or override the
 // display name of a built-in one. `ID` is the stable key "provider/model_id".
 type ModelCfg struct {
-	ID            string `yaml:"id" json:"id"`                                     // stable key: provider/model_id
+	ID            string `yaml:"id" json:"id"` // stable key: provider/model_id
 	Provider      string `yaml:"provider" json:"provider"`
 	ModelID       string `yaml:"model_id" json:"model_id"`
-	Name          string `yaml:"name" json:"name"`                                 // editable display name
+	Name          string `yaml:"name" json:"name"` // editable display name
 	BaseURL       string `yaml:"base_url,omitempty" json:"base_url,omitempty"`
 	ContextWindow int    `yaml:"context_window,omitempty" json:"context_window,omitempty"`
 	MaxOutput     int    `yaml:"max_output_tokens,omitempty" json:"max_output_tokens,omitempty"`
@@ -160,9 +165,9 @@ func ModelKey(provider, modelID string) string {
 }
 
 type TUICfg struct {
-	Theme     string `yaml:"theme" json:"theme"`
-	SyntaxHL  bool   `yaml:"syntax_highlight" json:"syntax_highlight"`
-	DiffMode  string `yaml:"diff_mode" json:"diff_mode"`
+	Theme    string `yaml:"theme" json:"theme"`
+	SyntaxHL bool   `yaml:"syntax_highlight" json:"syntax_highlight"`
+	DiffMode string `yaml:"diff_mode" json:"diff_mode"`
 	// Vim toggles vi-style key bindings in the CLI TUI (mirrors Claude Code's
 	// /vim). Off by default.
 	Vim bool `yaml:"vim" json:"vim"`
@@ -193,7 +198,7 @@ type UpdateCfg struct {
 // injected after tool execution). When Enabled, the engine lazily starts the
 // matching language server (gopls/pyright/...) on first file edit.
 type LSPCfg struct {
-	Enabled  bool     `yaml:"enabled" json:"enabled"`
+	Enabled   bool     `yaml:"enabled" json:"enabled"`
 	AutoStart []string `yaml:"auto_start" json:"auto_start"` // language IDs to start eagerly (e.g. ["go","python"])
 }
 
@@ -230,6 +235,8 @@ type MultimodalCfg struct {
 	// APIKey authenticates both endpoints (Bearer). Falls back to the
 	// ICODE_MULTIMODAL_API_KEY / OPENAI_API_KEY environment variables.
 	APIKey string `yaml:"api_key,omitempty" json:"-"`
+	// APIKeyEnc holds the DPAPI-encrypted form of APIKey for disk persistence.
+	APIKeyEnc string `yaml:"api_key_enc,omitempty" json:"-"`
 	// OutputDir is where generated media is saved. Defaults to ./.icode/generated.
 	OutputDir string `yaml:"output_dir,omitempty" json:"output_dir,omitempty"`
 }
@@ -292,9 +299,9 @@ func Default() *Config {
 			"nvidia":     {APIBase: "https://integrate.api.nvidia.com/v1", Timeout: 120},
 		},
 		TUI: TUICfg{
-			Theme:         "auto",
-			SyntaxHL:      true,
-			DiffMode:      "unified",
+			Theme:          "auto",
+			SyntaxHL:       true,
+			DiffMode:       "unified",
 			ShowStatusLine: boolPtr(true),
 		},
 		Tools: ToolsCfg{
@@ -389,6 +396,10 @@ func Load() (*Config, error) {
 	// 3. Environment variable overrides
 	applyEnvOverrides(cfg)
 
+	// 4. Restore plaintext API keys from their encrypted disk form. Runs after
+	// env overrides so an explicit env key wins over a persisted one.
+	decryptConfigKeys(cfg)
+
 	return cfg, nil
 }
 
@@ -455,11 +466,69 @@ func (c *Config) SaveLocked(path string) error {
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
+	data, err = encryptSecretFields(data)
+	if err != nil {
+		return fmt.Errorf("encrypt secrets: %w", err)
+	}
 
-	// 0600: config.yaml contains plaintext API keys. Group-readable (0640) or
-	// world-readable (0644) would leak credentials to other users on shared
-	// machines. Keep it owner-only until keychain migration lands.
+	// 0600: config.yaml holds encrypted API keys. Group-readable (0640) or
+	// world-readable (0644) would expose them on shared machines; DPAPI also
+	// binds them to the current user, so owner-only mode matches the trust.
 	return os.WriteFile(path, data, 0600)
+}
+
+// encryptSecretFields rewrites every plaintext api_key in the marshalled YAML
+// into its DPAPI-encrypted api_key_enc form. It operates on the marshalled
+// bytes rather than the in-memory Config so the plaintext keys stay available
+// at runtime while only ciphertext reaches the disk.
+func encryptSecretFields(data []byte) ([]byte, error) {
+	var root map[string]any
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return nil, err
+	}
+	if providers, ok := root["providers"].(map[string]any); ok {
+		for name, v := range providers {
+			if pm, ok := v.(map[string]any); ok {
+				encryptKey(pm)
+				providers[name] = pm
+			}
+		}
+	}
+	if mm, ok := root["multimodal"].(map[string]any); ok {
+		encryptKey(mm)
+	}
+	return yaml.Marshal(root)
+}
+
+func encryptKey(m map[string]any) {
+	key, ok := m["api_key"].(string)
+	if !ok || key == "" {
+		return
+	}
+	enc, err := secure.Encrypt(key)
+	if err != nil {
+		return
+	}
+	m["api_key_enc"] = enc
+	delete(m, "api_key")
+}
+
+// decryptConfigKeys restores plaintext API keys from their encrypted disk form
+// after loading. Keys already set (e.g. by env overrides) are left untouched.
+func decryptConfigKeys(cfg *Config) {
+	for name, p := range cfg.Providers {
+		if p.APIKey == "" && p.APIKeyEnc != "" {
+			if dec, err := secure.Decrypt(p.APIKeyEnc); err == nil {
+				p.APIKey = dec
+			}
+			cfg.Providers[name] = p
+		}
+	}
+	if cfg.Multimodal.APIKey == "" && cfg.Multimodal.APIKeyEnc != "" {
+		if dec, err := secure.Decrypt(cfg.Multimodal.APIKeyEnc); err == nil {
+			cfg.Multimodal.APIKey = dec
+		}
+	}
 }
 
 // WithLock runs fn while holding the config write lock. Mutations to config
