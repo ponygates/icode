@@ -19,7 +19,7 @@ interface ModelSettings {
 const ModelSettingsModal: React.FC<{
   model: Model;
   onClose: () => void;
-  onSave: (settings: ModelSettings) => void;
+  onSave: (settings: ModelSettings) => Promise<string> | void;
   onSetDefault: (modelId: string) => void;
   isDefault: boolean;
 }> = ({ model, onClose, onSave, onSetDefault, isDefault }) => {
@@ -32,6 +32,7 @@ const ModelSettingsModal: React.FC<{
   });
   const { t } = useTranslation();
   const [saved, setSaved] = useState(false);
+  const [error, setError] = useState('');
 
   const providerColors: Record<string, string> = {
     deepseek: '#4F46E5', zhipu: '#7C3AED', kimi: '#0891B2',
@@ -229,8 +230,16 @@ const ModelSettingsModal: React.FC<{
         {/* Modal Footer */}
         <div style={{
           padding: '16px 24px', borderTop: '1px solid var(--border-color)',
-          display: 'flex', gap: 8, justifyContent: 'flex-end',
+          display: 'flex', gap: 8, justifyContent: 'flex-end', alignItems: 'center',
         }}>
+          {error && (
+            <span style={{
+              fontSize: 11, color: '#F87171', marginRight: 'auto', maxWidth: 280,
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}>
+              {error}
+            </span>
+          )}
           {!isDefault && (
             <button onClick={() => onSetDefault(model.id)} style={{
               padding: '8px 16px', borderRadius: 8, cursor: 'pointer', fontSize: 12,
@@ -248,7 +257,14 @@ const ModelSettingsModal: React.FC<{
           }}>
             {t('settings.cancel')}
           </button>
-          <button onClick={() => { onSave(settings); setSaved(true); setTimeout(() => setSaved(false), 2000); }} style={{
+          <button onClick={async () => {
+            setError('');
+            setSaved(false);
+            const err = await onSave(settings);
+            if (err) { setError(err); return; }
+            setSaved(true);
+            setTimeout(() => setSaved(false), 2000);
+          }} style={{
             padding: '8px 20px', borderRadius: 8, cursor: 'pointer', fontSize: 12,
             background: saved ? 'var(--success)' : color,
             border: 'none', color: '#fff', fontWeight: 600,
@@ -340,24 +356,27 @@ const ModelsPage: React.FC = () => {
     });
   };
 
-  const handleSaveModelSettings = useCallback(async (modelId: string, settings: ModelSettings) => {
-    if (backendUrl) {
-      try {
-        await fetch(`${backendUrl}/api/config/key`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            provider: selectedSettingsModel?.provider,
-            api_key: settings.apiKey,
-            api_base: settings.apiBase,
-            model_id: modelId,
-            temperature: settings.temperature,
-            max_tokens: settings.maxTokens,
-            top_p: settings.topP,
-          }),
-        });
-        if (settings.apiKey) await refreshModels();
-      } catch {}
+  const handleSaveModelSettings = useCallback(async (modelId: string, settings: ModelSettings): Promise<string> => {
+    if (!backendUrl) return 'Backend not connected';
+    try {
+      const res = await fetch(`${backendUrl}/api/config/key`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: selectedSettingsModel?.provider,
+          api_key: settings.apiKey,
+          api_base: settings.apiBase,
+          model_id: modelId,
+          temperature: settings.temperature,
+          max_tokens: settings.maxTokens,
+          top_p: settings.topP,
+        }),
+      });
+      if (!res.ok) return `HTTP ${res.status}`;
+      if (settings.apiKey) await refreshModels();
+      return '';
+    } catch (e) {
+      return String(e);
     }
   }, [backendUrl, selectedSettingsModel, refreshModels]);
 

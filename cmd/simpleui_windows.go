@@ -917,12 +917,12 @@ func simpleUIHTML(model, provider string) string {
     background: linear-gradient(135deg, #ff7a45, #ff5f6d);
     display: inline-block; box-shadow: 0 2px 8px rgba(255, 122, 69, .45);
   }
-  #bar select {
+  #bar select, #bar input.listbar {
     background: #141922; color: #e6e6e6; border: 1px solid #2f3850;
     border-radius: 8px; padding: 5px 10px; max-width: 320px;
     outline: none; transition: border-color .15s;
   }
-  #bar select:focus { border-color: #ff7a45; }
+  #bar select:focus, #bar input.listbar:focus { border-color: #ff7a45; }
   #bar button {
     background: #1c2332; color: #e6e6e6; border: 1px solid #2f3850;
     border-radius: 8px; padding: 5px 12px; cursor: pointer;
@@ -1038,7 +1038,7 @@ func simpleUIHTML(model, provider string) string {
   html.light, html.light body { background: linear-gradient(160deg, #f2f3f7 0%, #f8f8fb 55%, #eef2f9 100%); color: #1a1a1f; }
   html.light #bar { background: rgba(255, 255, 255, .85); backdrop-filter: blur(10px); border-color: #e0e0e5; }
   html.light #bar .logo { color: #1a1a1f; }
-  html.light #bar select, html.light #bar button { background: #f4f4f7; color: #1a1a1f; border-color: #d0d0da; }
+  html.light #bar select, html.light #bar input.listbar, html.light #bar button { background: #f4f4f7; color: #1a1a1f; border-color: #d0d0da; }
   html.light #log { scrollbar-color: #c5c5ce transparent; }
   html.light #log::-webkit-scrollbar-thumb { background: #c5c5ce; background-clip: content-box; }
   html.light .msg { border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
@@ -1088,9 +1088,11 @@ func simpleUIHTML(model, provider string) string {
   <div id="main">
     <div id="bar">
       <span class="logo">iCode</span>
-      <select id="session" title="切换会话"></select>
+      <input id="session" class="listbar" list="sessionList" autocomplete="off" title="搜索/切换会话" placeholder="会话…" />
+      <datalist id="sessionList"></datalist>
       <button id="newBtn" title="开启新会话（旧会话保留在下拉列表中）">新会话</button>
-      <select id="model" title="模型"></select>
+      <input id="model" class="listbar" list="modelList" autocomplete="off" title="搜索/切换模型" placeholder="模型…" />
+      <datalist id="modelList"></datalist>
       <button id="updateBtn" title="一键刷新所有提供商模型列表" class="theme-btn" style="font-size:13px;">↻</button>
       <span class="spacer"></span>
       <button id="themeBtn" title="切换主题" class="theme-btn">☀</button>
@@ -1351,37 +1353,42 @@ func simpleUIHTML(model, provider string) string {
   document.getElementById('collapseBtn').addEventListener('click', togglePanel);
   document.getElementById('panelBtn').addEventListener('click', togglePanel);
 
-  // Populate the model selector from the engine.
+  // Populate the model input from the engine. The input is a text box backed
+  // by a <datalist>, so typing filters the candidate list as you go.
+  function fillModelList(list, cur) {
+    var dl = document.getElementById('modelList');
+    dl.innerHTML = '';
+    (list || []).forEach(function(id){
+      var o = document.createElement('option'); o.value = id; dl.appendChild(o);
+    });
+    if (cur !== undefined && cur !== null) document.getElementById('model').value = cur;
+  }
   if (window.models) {
     window.models().then(function(list){
-      var s = document.getElementById('model');
-      (list || []).forEach(function(id){
-        var o = document.createElement('option'); o.value = id; o.textContent = id; s.appendChild(o);
-      });
-      s.value = ` + jsStr(model) + `;
+      fillModelList(list, ` + jsStr(model) + `);
     }).catch(function(){});
   }
   document.getElementById('model').addEventListener('change', function(e){
-    if (window.setModel) window.setModel(e.target.value);
+    var v = e.target.value;
+    if (v && window.setModel) window.setModel(v);
+  });
+  document.getElementById('model').addEventListener('keydown', function(e){
+    if (e.key === 'Enter' && e.target.value && window.setModel) {
+      e.preventDefault(); window.setModel(e.target.value);
+    }
   });
 
   // Refresh all provider model catalogs.
   document.getElementById('updateBtn').addEventListener('click', function(){
     var btn = this;
     btn.disabled = true; btn.textContent = '…';
-    if (window.refreshModels) {
+      if (window.refreshModels) {
       window.refreshModels().then(function(result){
         addBlock('system', result, true);
-        // Re-populate model dropdown
+        // Re-populate model input
         if (window.models) {
           window.models().then(function(list){
-            var s = document.getElementById('model');
-            var cur = s.value;
-            s.innerHTML = '';
-            (list || []).forEach(function(id){
-              var o = document.createElement('option'); o.value = id; o.textContent = id; s.appendChild(o);
-            });
-            if (cur) s.value = cur;
+            fillModelList(list, document.getElementById('model').value);
           }).catch(function(){});
         }
         btn.disabled = false; btn.textContent = '↻';
@@ -1395,22 +1402,28 @@ func simpleUIHTML(model, provider string) string {
     }
   });
 
-  // Populate the session dropdown; select → open that session.
+  // Populate the session input; selecting an entry opens that session.
   function fillSessions(list) {
-    var s = document.getElementById('session');
-    var cur = s.value;
-    s.innerHTML = '';
+    var dl = document.getElementById('sessionList');
+    var cur = document.getElementById('session').value;
+    dl.innerHTML = '';
     (list || []).forEach(function(e){
-      var o = document.createElement('option'); o.value = e.id; o.textContent = e.title; s.appendChild(o);
+      var o = document.createElement('option');
+      o.value = e.id; o.label = e.title; dl.appendChild(o);
     });
-    if (cur) s.value = cur;
+    if (cur) document.getElementById('session').value = cur;
   }
   function refreshSessions() {
     if (window.sessions) window.sessions().then(fillSessions).catch(function(){});
   }
   refreshSessions();
   document.getElementById('session').addEventListener('change', function(e){
-    if (window.openSession) window.openSession(e.target.value);
+    if (e.target.value && window.openSession) window.openSession(e.target.value);
+  });
+  document.getElementById('session').addEventListener('keydown', function(e){
+    if (e.key === 'Enter' && e.target.value && window.openSession) {
+      e.preventDefault(); window.openSession(e.target.value);
+    }
   });
   document.getElementById('newBtn').addEventListener('click', function(){
     if (window.newSession) window.newSession();
