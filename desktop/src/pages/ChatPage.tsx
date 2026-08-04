@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next';
 import i18n from '../i18n';
 import { useAppStore, Message, Attachment, type Model } from '../stores/appStore';
-import { Send, Plus, Trash2, MessageSquare, Cpu, Shield, Square, ShieldAlert, GitBranch, FileText, RefreshCw, Folder, Edit3, Download } from 'lucide-react';
+import { Send, Plus, Trash2, MessageSquare, Cpu, Shield, Square, ShieldAlert, GitBranch, FileText, RefreshCw, Folder, Edit3, Download, ChevronDown } from 'lucide-react';
 import Markdown from '../components/Markdown';
 import CommandPalette, { useCommandPalette } from '../components/CommandPalette';
 import TodoPanel from '../components/TodoPanel';
@@ -10,6 +10,7 @@ import TokenBar from '../components/TokenBar';
 import TabBar from '../components/TabBar';
 import CheckpointPanel from '../components/CheckpointPanel';
 import FilePicker from '../components/FilePicker';
+import ModelPicker from '../components/ModelPicker';
 import PlumBlossom from '../components/PlumBlossom';
 import { executeSlash, filterSlash, type SlashCommand } from '../lib/slashCommands';
 
@@ -837,6 +838,8 @@ const ChatPage: React.FC = () => {
 
   // File picker state - triggered by @ in input
   const [pickerOpen, setPickerOpen] = useState(false);
+  // Model picker popover - triggered by clicking the model name in the header.
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
 
   // Slash autocomplete list — derived from the input, empty once args are typed.
   const slashMenu = useMemo(() => filterSlash(input), [input]);
@@ -937,13 +940,20 @@ const ChatPage: React.FC = () => {
           >
             <Edit3 size={14} />
           </button>
-          <span style={{
-            fontSize: 11, color: 'var(--text-muted)', fontWeight: 500,
-            background: 'var(--bg-tertiary)', padding: '3px 10px',
-            borderRadius: 'var(--r-full)',
-          }}>
+          <button
+            onClick={() => setModelPickerOpen(true)}
+            className="interactive"
+            title={t('shortcuts.switchModel', '切换模型')}
+            style={{
+              fontSize: 11, color: 'var(--text-muted)', fontWeight: 500,
+              background: 'var(--bg-tertiary)', border: '0.5px solid var(--border-color)',
+              padding: '3px 10px', borderRadius: 'var(--r-full)', cursor: 'pointer',
+              display: 'flex', alignItems: 'center', gap: 4,
+            }}
+          >
             {currentModel?.name || selectedModel}
-          </span>
+            <ChevronDown size={10} />
+          </button>
           <button className="interactive" title={t('shortcuts.refreshModels', '刷新模型列表')}
             onClick={async () => {
               const btn = document.getElementById('hdr-refresh-btn');
@@ -1651,6 +1661,7 @@ const ChatPage: React.FC = () => {
 
       {palette.open && <CommandPalette onClose={() => palette.setOpen(false)} />}
       <FilePicker visible={pickerOpen} onClose={() => setPickerOpen(false)} onSelect={handleFileSelect} />
+  <ModelPicker open={modelPickerOpen} onClose={() => setModelPickerOpen(false)} />
       <TokenBar />
     </div>
   );

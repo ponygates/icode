@@ -1436,13 +1436,18 @@ func simpleUIHTML(model, provider string) string {
   // Initial status-bar fill.
   if (window.stats) window.stats().then(uiStats).catch(function(){});
 
-  // Dark / light theme toggle.
+  // Dark / light theme toggle. localStorage on an about:blank WebView2 page
+  // can throw a SecurityError, which would abort the whole inline script and
+  // leave every later handler unbound — so all storage access goes through
+  // safe wrappers.
+  function loadTheme() { try { return localStorage.getItem('icode.simpleui.theme') || 'dark'; } catch (e) { return 'dark'; } }
+  function saveTheme(t) { try { localStorage.setItem('icode.simpleui.theme', t); } catch (e) {} }
   var themeBtn = document.getElementById('themeBtn');
-  var curTheme = localStorage.getItem('icode.simpleui.theme') || 'dark';
+  var curTheme = loadTheme();
   function applyTheme(t) {
     document.documentElement.className = t;
     themeBtn.textContent = t === 'dark' ? '☀' : '☾';
-    localStorage.setItem('icode.simpleui.theme', t);
+    saveTheme(t);
   }
   applyTheme(curTheme);
   themeBtn.addEventListener('click', function(){
