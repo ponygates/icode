@@ -62,6 +62,7 @@ interface ApiSession {
   model_id?: string;
   provider_name?: string;
   created_at?: string | number;
+  metadata?: Record<string, unknown>;
 }
 interface ApiModelRef { id: string; name?: string; }
 interface ApiRefreshResult {
@@ -173,6 +174,7 @@ interface AppStore {
   loadTrash: () => Promise<void>;
   restoreSession: (id: string) => Promise<void>;
   deleteForever: (id: string) => Promise<void>;
+  purgeTrash: () => Promise<void>;
 
   // Workspaces (project containers grouping sessions)
   workspaces: Workspace[];
@@ -445,6 +447,27 @@ export const useAppStore = create<AppStore>()(
     // Lazily load one session's messages (the list API returns metadata only,
     // so opening a session / restoring the last active one needs a follow-up
     // GET /api/sessions/{id}). Without this, history would render blank.
+    // Soft-deleted sessions must never surface: the HTTP path already filters
+    // via ?trash, but the Electron IPC bridge (window.icode.listSessions) may
+    // return the full list, so the metadata.deleted marker is honoured here as
+    // a defensive fallback for every source.
+    const mapSession = (s: ApiSession): Session | null => {
+      if (s.metadata && s.metadata.deleted === true) return null;
+      return {
+        id: s.id,
+        title: s.title || '会话',
+        messages: (s.messages || []).map((m) => ({
+          id: m.id || Math.random().toString(36).slice(2),
+          role: (m.role as Message['role']) || 'assistant',
+          content: m.content || '',
+          attachments: m.attachments || [],
+          timestamp: m.timestamp ? new Date(m.timestamp).getTime() : Date.now(),
+        })),
+        modelId: s.model_id || 'openrouter/free',
+        provider: s.provider_name || 'openrouter',
+        createdAt: s.created_at ? new Date(s.created_at).getTime() : Date.now(),
+      };
+    };
     const loadActive = (aid: string) => {
       const { backendUrl } = get();
       if (!backendUrl) return;
@@ -470,20 +493,9 @@ export const useAppStore = create<AppStore>()(
       if (window.icode && window.icode.listSessions) {
         const list = await window.icode.listSessions();
         if (Array.isArray(list) && list.length > 0) {
-          const loaded: Session[] = list.map((s: ApiSession) => ({
-            id: s.id,
-            title: s.title || '会话',
-            messages: (s.messages || []).map((m) => ({
-              id: m.id || Math.random().toString(36).slice(2),
-              role: (m.role as Message['role']) || 'assistant',
-              content: m.content || '',
-              attachments: m.attachments || [],
-              timestamp: m.timestamp ? new Date(m.timestamp).getTime() : Date.now(),
-            })),
-            modelId: s.model_id || 'openrouter/free',
-            provider: s.provider_name || 'openrouter',
-            createdAt: s.created_at ? new Date(s.created_at).getTime() : Date.now(),
-          }));
+          const loaded: Session[] = (list as ApiSession[])
+            .map(mapSession)
+            .filter((s): s is Session => s !== null);
           set((state) => ({
             sessions: loaded,
             openTabIds: state.openTabIds.length > 0 ? state.openTabIds : loaded.map((s) => s.id),
@@ -505,19 +517,9 @@ export const useAppStore = create<AppStore>()(
           const data = await res.json();
           const list = data.sessions || data || [];
           if (Array.isArray(list) && list.length > 0) {
-            const loaded: Session[] = list.map((s: ApiSession) => ({
-              id: s.id,
-              title: s.title || '会话',
-              messages: (s.messages || []).map((m) => ({
-                id: m.id || Math.random().toString(36).slice(2),
-                role: (m.role as Message['role']) || 'assistant',
-                content: m.content || '',
-                timestamp: m.timestamp ? new Date(m.timestamp).getTime() : Date.now(),
-              })),
-              modelId: s.model_id || 'openrouter/free',
-              provider: s.provider_name || 'openrouter',
-              createdAt: s.created_at ? new Date(s.created_at).getTime() : Date.now(),
-            }));
+            const loaded: Session[] = (list as ApiSession[])
+              .map(mapSession)
+              .filter((s): s is Session => s !== null);
             set({ sessions: loaded });
             saveToLocal(loaded);
             if (loaded.length > 0) {
@@ -730,6 +732,16 @@ export const useAppStore = create<AppStore>()(
       } catch { /* ignore */ }
     }
     set((state) => ({ trash: state.trash.filter((s) => s.id !== id) }));
+  },
+
+  purgeTrash: async () => {
+    const { backendUrl } = get();
+    if (backendUrl) {
+      try {
+        await fetch(`${backendUrl}/api/sessions/trash/purge`, { method: 'POST' });
+      } catch { /* ignore */ }
+    }
+    set({ trash: [] });
   },
 
   // closeTab removes a session from the open-tab strip WITHOUT deleting it.

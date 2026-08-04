@@ -26,6 +26,7 @@ import (
 	"github.com/ponygates/icode/internal/config"
 	"github.com/ponygates/icode/internal/core/conversation"
 	"github.com/ponygates/icode/internal/core/permission"
+	"github.com/ponygates/icode/internal/core/sessionum"
 	"github.com/ponygates/icode/internal/db"
 	"github.com/ponygates/icode/internal/mcp"
 	"github.com/ponygates/icode/internal/types"
@@ -96,6 +97,11 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 	// Apply the configured proxy to the process environment before any
 	// provider request can fire (harmless no-op when unset).
 	s.cfg.WithRLock(func() { applyProxyEnv(s.cfg.Proxy) })
+	// Purge soft-deleted sessions past their restore window so the trash
+	// never grows unbounded across restarts.
+	if removed, err := sessionum.PurgeExpiredTrash(s.store, 0); err == nil && removed > 0 {
+		log.Printf("[iCode] purged %d expired trash session(s)", removed)
+	}
 	mux := http.NewServeMux()
 
 	// Health & status
@@ -111,6 +117,7 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 	mux.HandleFunc("/api/sessions", s.handleSessions)
 	mux.HandleFunc("/api/sessions/restore", s.handleSessionRestore)
 	mux.HandleFunc("/api/sessions/trash", s.handleSessionTrash)
+	mux.HandleFunc("/api/sessions/trash/purge", s.handleTrashPurge)
 	mux.HandleFunc("/api/sessions/", s.handleSessionByID)
 	mux.HandleFunc("/api/search", s.handleSearch)
 

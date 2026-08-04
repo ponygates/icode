@@ -30,6 +30,7 @@ const Sidebar: React.FC<Props> = ({ onToggle }) => {
   const loadTrash = useAppStore(s => s.loadTrash);
   const restoreSession = useAppStore(s => s.restoreSession);
   const deleteForever = useAppStore(s => s.deleteForever);
+  const purgeTrash = useAppStore(s => s.purgeTrash);
   const currentModel = useAppStore((s) => s.models.find((m) => m.id === s.selectedModel));
   const backendConnected = useAppStore((s) => s.backendConnected);
   const backendChecking = useAppStore((s) => s.backendChecking);
@@ -242,6 +243,12 @@ const Sidebar: React.FC<Props> = ({ onToggle }) => {
             fontSize: 9, letterSpacing: 1, textTransform: 'uppercase', fontWeight: 600,
           }}>
             <span>{t('sidebar.trash')} ({trash.length})</span>
+            <button
+              onClick={() => { if (window.confirm(t('sidebar.purgeTrashConfirm'))) purgeTrash(); }}
+              title={t('sidebar.purgeTrash')}
+              className="interactive"
+              style={{ background: 'none', border: 'none', color: 'var(--text-muted)', padding: 2, display: 'flex', borderRadius: 4, fontSize: 9 }}
+            ><Trash2 size={11} /></button>
           </div>
           {trash.map((s) => (
             <div

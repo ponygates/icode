@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"strconv"
 
 	"github.com/ponygates/icode/internal/core/sessionum"
 	"github.com/ponygates/icode/internal/types"
@@ -38,20 +39,24 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		trash := r.URL.Query().Get("trash") == "1"
-		sessions, err := s.store.List(100, 0)
+		limit := 100
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 500 {
+				limit = n
+			}
+		}
+		var sessions []types.Session
+		var err error
+		if trash {
+			sessions, err = sessionum.ListDeleted(s.store, limit)
+		} else {
+			sessions, err = sessionum.ListNonDeleted(s.store, limit)
+		}
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
 		}
-		kept := sessions[:0]
-		for _, sess := range sessions {
-			isDel := sessionum.IsDeleted(&sess)
-			if isDel != trash {
-				continue
-			}
-			kept = append(kept, sess)
-		}
-		writeJSON(w, http.StatusOK, kept)
+		writeJSON(w, http.StatusOK, sessions)
 
 	case http.MethodPost:
 		var sess types.Session
@@ -206,4 +211,19 @@ func (s *Server) handleSessionTrash(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "trashed": true})
+}
+
+// handleTrashPurge permanently deletes every soft-deleted session
+// (POST /api/sessions/trash/purge). Irreversible.
+func (s *Server) handleTrashPurge(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	removed, err := sessionum.PurgeAllTrash(s.store)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed})
 }

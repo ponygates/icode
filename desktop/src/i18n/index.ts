@@ -6,7 +6,7 @@ i18n.use(initReactI18next).init({
     'zh-CN': {
       translation: {
         app: { name: 'iCode', tagline: '多模型 AI 编程 Agent', subtitle: '多模型 AI 编程助手' },
-        sidebar: { chat: '对话', models: '模型', analytics: '分析', compare: '对比', settings: '设置', sessions: '会话', noSessions: '暂无会话', rename: '重命名', delete: '删除', connecting: '连接中…', trash: '最近删除', restore: '恢复', deleteForever: '彻底删除' },
+        sidebar: { chat: '对话', models: '模型', analytics: '分析', compare: '对比', settings: '设置', sessions: '会话', noSessions: '暂无会话', rename: '重命名', delete: '删除', connecting: '连接中…', trash: '最近删除', restore: '恢复', deleteForever: '彻底删除', purgeTrash: '清空回收站', purgeTrashConfirm: '确定清空回收站？已删除的会话将被永久销毁，无法恢复。' },
         workspace: { title: '工作区', new: '新建工作区', empty: '暂无工作区，点击 + 创建', newPrompt: '工作区名称', pathPrompt: '关联目录路径（可选）' },
         chat: {
           placeholder: '输入编程问题... (# 追加记忆, ! 执行命令)',
@@ -446,7 +446,7 @@ i18n.use(initReactI18next).init({
     'zh-TW': {
       translation: {
         app: { name: 'iCode', tagline: '多模型 AI 程式開發 Agent', subtitle: '多模型 AI 編程助手' },
-        sidebar: { chat: '對話', models: '模型', analytics: '分析', compare: '對比', settings: '設定', sessions: '對話', noSessions: '暫無對話', rename: '重新命名', delete: '刪除', connecting: '連線中…', trash: '最近刪除', restore: '恢復', deleteForever: '徹底刪除' },
+        sidebar: { chat: '對話', models: '模型', analytics: '分析', compare: '對比', settings: '設定', sessions: '對話', noSessions: '暫無對話', rename: '重新命名', delete: '刪除', connecting: '連線中…', trash: '最近刪除', restore: '恢復', deleteForever: '徹底刪除', purgeTrash: '清空回收站', purgeTrashConfirm: '確定清空回收站？已刪除的對話將被永久銷毀，無法復原。' },
         workspace: { title: '工作區', new: '新建工作區', empty: '暫無工作區，點擊 + 建立', newPrompt: '工作區名稱', pathPrompt: '關聯目錄路徑（選填）' },
         chat: {
           placeholder: '輸入編程問題... (# 追加記憶, ! 執行命令)',
@@ -886,7 +886,7 @@ i18n.use(initReactI18next).init({
     en: {
       translation: {
         app: { name: 'iCode', tagline: 'Multi-Model AI Coding Agent', subtitle: 'Multi-Model AI Coding Assistant' },
-        sidebar: { chat: 'Chat', models: 'Models', analytics: 'Analytics', compare: 'Compare', settings: 'Settings', sessions: 'Sessions', noSessions: 'No sessions', rename: 'Rename', delete: 'Delete', connecting: 'Connecting…', trash: 'Recently removed', restore: 'Restore', deleteForever: 'Delete forever' },
+        sidebar: { chat: 'Chat', models: 'Models', analytics: 'Analytics', compare: 'Compare', settings: 'Settings', sessions: 'Sessions', noSessions: 'No sessions', rename: 'Rename', delete: 'Delete', connecting: 'Connecting…', trash: 'Recently removed', restore: 'Restore', deleteForever: 'Delete forever', purgeTrash: 'Empty trash', purgeTrashConfirm: 'Empty the trash? Deleted sessions will be permanently destroyed and cannot be recovered.' },
         workspace: { title: 'Workspaces', new: 'New Workspace', empty: 'No workspaces yet — click + to create', newPrompt: 'Workspace name', pathPrompt: 'Associated directory path (optional)' },
         chat: {
           placeholder: 'Enter coding question... (# memory, ! shell)',

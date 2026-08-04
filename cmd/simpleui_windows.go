@@ -447,15 +447,12 @@ func (b *simpleUIBridge) Sessions() []SessionEntry {
 	if b.app == nil || b.app.SessStore == nil {
 		return nil
 	}
-	list, err := b.app.SessStore.List(50, 0)
+	list, err := sessionum.ListNonDeleted(b.app.SessStore, 50)
 	if err != nil {
 		return nil
 	}
 	out := make([]SessionEntry, 0, len(list))
 	for _, s := range list {
-		if sessionum.IsDeleted(&s) {
-			continue
-		}
 		title := s.Title
 		if title == "" {
 			title = s.ID
