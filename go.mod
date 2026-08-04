@@ -2,6 +2,8 @@ module github.com/ponygates/icode
 
 go 1.25.0
 
+toolchain go1.26.5
+
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/getlantern/systray v1.2.2
