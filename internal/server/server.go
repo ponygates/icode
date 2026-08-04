@@ -30,6 +30,7 @@ import (
 	"github.com/ponygates/icode/internal/db"
 	"github.com/ponygates/icode/internal/mcp"
 	"github.com/ponygates/icode/internal/types"
+	"github.com/ponygates/icode/internal/update"
 	"github.com/ponygates/icode/pkg/modelupdate"
 )
 
@@ -107,6 +108,9 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 	// Health & status
 	mux.HandleFunc("/api/health", s.handleHealth)
 	mux.HandleFunc("/api/status", s.handleStatus)
+
+	// App update check
+	mux.HandleFunc("/api/update/check", s.handleUpdateCheck)
 
 	// Provider & models
 	mux.HandleFunc("/api/providers", s.handleListProviders)
@@ -313,6 +317,20 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"version": s.version,
 		"uptime":  time.Now().Format(time.RFC3339),
 	})
+}
+
+// handleUpdateCheck reports whether a newer release is available on GitHub.
+// Failures (offline, rate limit) return 200 with available=false so the UI
+// never shows a scary error for a background check.
+func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
+	info, err := update.Check(s.version)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"available": false, "current": strings.TrimPrefix(s.version, "v"), "error": err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {

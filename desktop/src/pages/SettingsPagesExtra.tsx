@@ -158,9 +158,40 @@ export function PageUpdates({ store }: { store: StoreState }) {
   const { t } = useTranslation();
   const [autoUpdate, setAutoUpdate] = useState(true);
   const [channel, setChannel] = useState('stable');
+  const [checking, setChecking] = useState(false);
+  const [result, setResult] = useState<{ available: boolean; current: string; latest?: string; html_url?: string; error?: string } | null>(null);
   const saveConfig = async (patch: ConfigPatch) => {
     if (!store.backendUrl) return;
     try { await fetch(`${store.backendUrl}/api/config`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) }); } catch {}
+  };
+
+  // Load persisted update settings from the backend.
+  useEffect(() => {
+    if (!store.backendUrl) return;
+    fetch(`${store.backendUrl}/api/config`)
+      .then(r => r.json())
+      .then(cfg => {
+        const u = cfg?.update;
+        if (!u) return;
+        if (typeof u.auto_update === 'boolean') setAutoUpdate(u.auto_update);
+        if (typeof u.channel === 'string' && u.channel) setChannel(u.channel);
+      })
+      .catch(() => {});
+  }, [store.backendUrl]);
+
+  const checkUpdate = async () => {
+    if (!store.backendUrl) return;
+    setChecking(true);
+    setResult(null);
+    try {
+      const res = await fetch(`${store.backendUrl}/api/update/check`, { cache: 'no-cache' });
+      if (res.ok) setResult(await res.json());
+      else setResult({ available: false, current: '', error: `HTTP ${res.status}` });
+    } catch (e) {
+      setResult({ available: false, current: '', error: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setChecking(false);
+    }
   };
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:20 }}>
@@ -183,6 +214,32 @@ export function PageUpdates({ store }: { store: StoreState }) {
               {o.text}
             </button>
           ))}
+        </div>
+      </Section>
+      <Section title={t('updates.checkNow')}>
+        <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+          <button onClick={checkUpdate} disabled={checking}
+            style={{ padding:'6px 14px', borderRadius:6, fontSize:11, cursor:'pointer', border:'1px solid var(--accent)', background:'var(--accent-soft)', color:'var(--accent)' }}>
+            {checking ? t('updates.checking') : t('updates.checkNow')}
+          </button>
+          {result && (
+            <div style={{ fontSize:12, color:'var(--text-secondary)', display:'flex', alignItems:'center', gap:8 }}>
+              <span>当前 v{result.current || '?'}</span>
+              {result.error ? (
+                <span style={{ color:'var(--danger,#e05)' }}>{result.error}</span>
+              ) : result.available ? (
+                <>
+                  <span style={{ color:'var(--accent)' }}>→ v{result.latest} 可用</span>
+                  <a href={result.html_url} target="_blank" rel="noreferrer"
+                    style={{ color:'var(--accent)', textDecoration:'underline', fontSize:12 }}>
+                    {t('updates.openDownload')}
+                  </a>
+                </>
+              ) : (
+                <span>{t('updates.upToDate')}</span>
+              )}
+            </div>
+          )}
         </div>
       </Section>
     </div>

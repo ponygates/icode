@@ -274,6 +274,10 @@ i18n.use(initReactI18next).init({
           channel: '更新频道',
           stable: '稳定版',
           nightly: '每夜构建',
+          checkNow: '检查更新',
+          checking: '检查中…',
+          openDownload: '打开下载页',
+          upToDate: '已是最新版本',
         },
         about: {
           version: '版本：',
@@ -714,6 +718,10 @@ i18n.use(initReactI18next).init({
           channel: '更新頻道',
           stable: '穩定版',
           nightly: '每夜建構',
+          checkNow: '檢查更新',
+          checking: '檢查中…',
+          openDownload: '打開下載頁',
+          upToDate: '已是最新版本',
         },
         about: {
           version: '版本：',
@@ -1154,6 +1162,10 @@ i18n.use(initReactI18next).init({
           channel: 'Update Channel',
           stable: 'Stable',
           nightly: 'Nightly Build',
+          checkNow: 'Check for updates',
+          checking: 'Checking…',
+          openDownload: 'Open download page',
+          upToDate: 'You are up to date',
         },
         about: {
           version: 'Version:',
