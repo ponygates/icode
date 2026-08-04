@@ -417,6 +417,7 @@ func (g *Gate) Check(sessionID string, action Action) CheckResult {
 func (g *Gate) isReadOnly(action Action) bool {
 	readOnlyTools := map[string]bool{
 		"read_file":  true,
+		"read_image": true,
 		"ls":         true,
 		"grep":       true,
 		"glob":       true,

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +34,7 @@ func NewRegistry() *Registry {
 	// Register built-in tools
 	r.Register(&BashTool{})
 	r.Register(&ReadFileTool{})
+	r.Register(&ReadImageTool{})
 	r.Register(&WriteFileTool{})
 	r.Register(&EditTool{})
 	r.Register(&GrepTool{})
@@ -42,6 +44,8 @@ func NewRegistry() *Registry {
 	r.Register(&GitDiffTool{})
 	r.Register(&GitCommitTool{})
 	r.Register(&GitStatusTool{})
+	r.Register(&GitLogTool{})
+	r.Register(&GitBranchTool{})
 	r.Register(&SearchReplaceTool{})
 	r.Register(NewWebSearchTool())
 	// CodeGraph symbol search (Claude Code parity — definition lookup)
@@ -854,6 +858,87 @@ func (t *GitStatusTool) Execute(ctx context.Context, args string) (*types.ToolRe
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return &types.ToolResult{Success: false, Error: fmt.Sprintf("git status: %v", err)}, nil
+	}
+
+	return &types.ToolResult{Success: true, Content: string(output)}, nil
+}
+
+type GitLogTool struct{}
+
+func (t *GitLogTool) Def() types.ToolDef {
+	return types.ToolDef{
+		Name:        "git_log",
+		Description: "Show recent commit history (hash, date, message).",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"n": map[string]any{
+					"type":        "integer",
+					"description": "Number of commits to show. Default: 20.",
+				},
+			},
+		},
+	}
+}
+
+func (t *GitLogTool) Execute(ctx context.Context, args string) (*types.ToolResult, error) {
+	n := 20
+	if nStr, err := parseArg(args, "n"); err == nil {
+		if v, convErr := strconv.Atoi(strings.TrimSpace(nStr)); convErr == nil && v > 0 && v <= 200 {
+			n = v
+		}
+	}
+
+	ctx2, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	cmd := executil.CommandContext(ctx2, "git", "log",
+		"--pretty=format:%h %ad %s", "--date=short", "-n", strconv.Itoa(n))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return &types.ToolResult{Success: false, Error: fmt.Sprintf("git log: %v", err)}, nil
+	}
+
+	return &types.ToolResult{Success: true, Content: string(output)}, nil
+}
+
+type GitBranchTool struct{}
+
+func (t *GitBranchTool) Def() types.ToolDef {
+	return types.ToolDef{
+		Name:        "git_branch",
+		Description: "List local/remote branches (current marked with *), or switch to an existing branch by name.",
+		Parameters: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"branch": map[string]any{
+					"type":        "string",
+					"description": "Branch name to switch to. Omit to list branches.",
+				},
+			},
+		},
+	}
+}
+
+func (t *GitBranchTool) Execute(ctx context.Context, args string) (*types.ToolResult, error) {
+	branch, _ := parseArg(args, "branch")
+
+	ctx2, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	if branch != "" {
+		cmd := executil.CommandContext(ctx2, "git", "checkout", branch)
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return &types.ToolResult{Success: false, Error: fmt.Sprintf("git checkout: %v\n%s", err, string(output))}, nil
+		}
+		return &types.ToolResult{Success: true, Content: string(output)}, nil
+	}
+
+	cmd := executil.CommandContext(ctx2, "git", "branch", "-a", "-vv")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return &types.ToolResult{Success: false, Error: fmt.Sprintf("git branch: %v", err)}, nil
 	}
 
 	return &types.ToolResult{Success: true, Content: string(output)}, nil

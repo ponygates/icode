@@ -2,6 +2,8 @@ package tool
 
 import (
 	"context"
+	"encoding/base64"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -457,5 +459,44 @@ func TestValidateFetchURL_AllowsPublic(t *testing.T) {
 		if blockedBySSRF(net.ParseIP(s)) {
 			t.Errorf("blockedBySSRF(%q) = true, want false", s)
 		}
+	}
+}
+
+// TestReadImageTool verifies the read_image tool loads a local PNG into a
+// vision attachment and rejects missing/unsupported files.
+func TestReadImageTool(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "pixel.png")
+	img, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+	if err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	if err := os.WriteFile(path, img, 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	res, err := (&ReadImageTool{}).Execute(context.Background(), fmt.Sprintf(`{"path": %q}`, path))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !res.Success {
+		t.Fatalf("expected success, got error: %s", res.Error)
+	}
+	if len(res.Attachments) != 1 {
+		t.Fatalf("expected 1 attachment, got %d", len(res.Attachments))
+	}
+	att := res.Attachments[0]
+	if att.Type != "image" || att.MIMEType != "image/png" {
+		t.Fatalf("unexpected attachment: type=%q mime=%q", att.Type, att.MIMEType)
+	}
+	if att.Data == "" || !strings.HasPrefix(att.Data, "iVBOR") {
+		t.Fatalf("expected base64 PNG payload in attachment")
+	}
+
+	if res, _ := (&ReadImageTool{}).Execute(context.Background(), `{"path": "definitely-missing.png"}`); res.Success {
+		t.Fatal("missing file should fail")
+	}
+	if res, _ := (&ReadImageTool{}).Execute(context.Background(), `{"path": "not-an-image.txt"}`); res.Success {
+		t.Fatal("unsupported format should fail")
 	}
 }
