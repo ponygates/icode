@@ -147,11 +147,31 @@ const App: React.FC = () => {
     };
   }, [loadSecurityLevel]);
 
-  // Periodic backend health check
+  // Periodic backend health check with auto-reconnect: probe every 15s, and
+  // when the backend comes back online (e.g. it was restarted) refresh the
+  // data that went stale while it was down. The first tick only records the
+  // baseline so a normal launch doesn't trigger a redundant refresh.
   useEffect(() => {
-    const interval = setInterval(() => checkBackend(), 30000);
+    let prevConnected = useAppStore.getState().backendConnected;
+    let firstTick = true;
+    const interval = setInterval(async () => {
+      await checkBackend();
+      const after = useAppStore.getState();
+      if (firstTick) {
+        firstTick = false;
+        prevConnected = after.backendConnected;
+        return;
+      }
+      if (after.backendConnected && !prevConnected) {
+        if (after.sessions.length === 0) loadSessions().catch(() => {});
+        loadWorkspaces().catch(() => {});
+        fetchMode().catch(() => {});
+        refreshModels().catch(() => {});
+      }
+      prevConnected = after.backendConnected;
+    }, 15000);
     return () => clearInterval(interval);
-  }, [checkBackend]);
+  }, [checkBackend, loadSessions, loadWorkspaces, refreshModels, fetchMode]);
 
   return (
     <div style={{ display: 'flex', height: '100vh', background: 'var(--bg-primary)', color: 'var(--text-primary)' }}>
