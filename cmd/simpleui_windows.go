@@ -86,6 +86,23 @@ func (b *simpleUIBridge) SetModel(id string) {
 	b.push(fmt.Sprintf("uiStatus('model', %s)", jsStr(id)))
 }
 
+// SetMode switches the permission mode (Tab/Shift+Tab cycle) and persists it
+// to the config file so it survives restarts.
+func (b *simpleUIBridge) SetMode(m string) {
+	if m == "" {
+		return
+	}
+	if b.app != nil && b.app.Gate != nil {
+		b.app.Gate.SetMode(permission.Mode(m))
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return
+	}
+	cfg.Defaults.Mode = m
+	_ = cfg.Save(config.DefaultPath())
+}
+
 // Send submits a user message and streams the assistant response into the UI.
 func (b *simpleUIBridge) Send(text string) {
 	text = strings.TrimSpace(text)
@@ -866,6 +883,7 @@ func runSimpleUI() error {
 	w.Bind("send", func(text string) { b.Send(text) })
 	w.Bind("models", func() []string { return b.Models() })
 	w.Bind("setModel", func(id string) { b.SetModel(id) })
+	w.Bind("setMode", func(m string) { b.SetMode(m) })
 	w.Bind("clear", func() { b.Clear() })
 	w.Bind("runCommand", func(text string) { b.RunCommand(text) })
 	w.Bind("stop", func() { b.Stop() })
@@ -1278,13 +1296,14 @@ func simpleUIHTML(model, provider string) string {
   }
 
   // Status bar rendering (model/provider/mode/security/tokens/cache/cost).
+  var currentMode = 'auto';
   function fmtTok(n) { n = n || 0; return n >= 1000 ? (n/1000).toFixed(1) + 'k' : '' + n; }
   function uiStats(s) {
     var el = document.getElementById('status'); if (!el) return;
     var parts = [];
     if (s.model) parts.push('模型 ' + s.model);
     if (s.provider) parts.push('提供商 ' + s.provider);
-    if (s.mode) parts.push('模式 ' + s.mode);
+    if (s.mode) { parts.push('模式 ' + s.mode); currentMode = s.mode; }
     if (s.security) parts.push('安全 ' + s.security);
     if (s.total !== undefined && s.total > 0) parts.push('↑' + fmtTok(s.prompt_tokens) + ' ↓' + fmtTok(s.completion_tokens) + ' = ' + fmtTok(s.total));
     if (s.cache_hit_rate > 0) parts.push('缓存 ' + Math.round(s.cache_hit_rate * 100) + '%');
@@ -1302,7 +1321,18 @@ func simpleUIHTML(model, provider string) string {
   document.getElementById('clearBtn').addEventListener('click', function(){ if (window.clear) window.clear(); });
   stopBtn.addEventListener('click', function(){ if (window.stop) window.stop(); });
   inp.addEventListener('keydown', function(e){
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); return; }
+    // Tab / Shift+Tab cycle the permission mode (Claude Code style): Tab
+    // moves forward, Shift+Tab backwards. Backend vocabulary is plan/agent/
+    // auto/yolo; "ask" from the desktop UI maps to agent on the gate.
+    if (e.key === 'Tab' && !e.altKey) {
+      e.preventDefault();
+      var MODES = ['plan', 'auto', 'agent', 'yolo'];
+      var i = MODES.indexOf(currentMode);
+      var next = MODES[(i < 0 ? 0 : i + (e.shiftKey ? -1 : 1) + MODES.length) % MODES.length];
+      currentMode = next;
+      if (window.setMode) window.setMode(next);
+    }
   });
 
   // Command catalog — rendered into the right panel. Only lists commands that

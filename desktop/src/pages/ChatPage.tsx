@@ -865,6 +865,17 @@ const ChatPage: React.FC = () => {
         return;
       }
     }
+    // Tab / Shift+Tab cycle the agent mode (Claude Code style): Tab moves to
+    // the next mode, Shift+Tab to the previous. The slash-menu completion
+    // above already claims Tab while a slash command is open.
+    if (e.key === 'Tab' && !e.altKey) {
+      e.preventDefault();
+      const modes = ['plan', 'auto', 'ask', 'yolo'];
+      const idx = modes.indexOf(mode);
+      const next = modes[(idx + (e.shiftKey ? -1 : 1) + modes.length) % modes.length];
+      useAppStore.getState().setMode(next);
+      return;
+    }
     // ↑/↓ browse the input history — only in single-line input, where the
     // arrows don't need to move the caret (multi-line keeps native behaviour).
     if (!e.shiftKey && !e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
