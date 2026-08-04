@@ -37,6 +37,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		trash := r.URL.Query().Get("trash") == "1"
 		sessions, err := s.store.List(100, 0)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
@@ -44,7 +45,8 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 		}
 		kept := sessions[:0]
 		for _, sess := range sessions {
-			if sessionum.IsDeleted(&sess) {
+			isDel := sessionum.IsDeleted(&sess)
+			if isDel != trash {
 				continue
 			}
 			kept = append(kept, sess)
@@ -130,4 +132,78 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// handleSessionRestore revives a soft-deleted session (POST /api/sessions/restore).
+// It is registered with a longer path than /api/sessions/ so ServeMux's
+// longest-pattern-wins rule routes it here instead of handleSessionByID.
+func (s *Server) handleSessionRestore(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		SessionID string `json:"session_id"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		_ = r.Body.Close()
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	if body.SessionID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing session_id"})
+		return
+	}
+	sess, err := s.store.Get(body.SessionID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
+		return
+	}
+	if !sessionum.IsDeleted(sess) {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "restored": false})
+		return
+	}
+	if err := sessionum.Restore(s.store, sess); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "restored": true})
+}
+
+// handleSessionTrash soft-deletes a session (POST /api/sessions/trash): the
+// transcript is archived with a summary and hidden from lists, recoverable via
+// restore. Registered as a longer path than /api/sessions/ like restore.
+func (s *Server) handleSessionTrash(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		SessionID string `json:"session_id"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		_ = r.Body.Close()
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	if body.SessionID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing session_id"})
+		return
+	}
+	sess, err := s.store.Get(body.SessionID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
+		return
+	}
+	if sessionum.IsDeleted(sess) {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "trashed": false})
+		return
+	}
+	if err := sessionum.MarkDeleted(s.store, sess); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "trashed": true})
 }

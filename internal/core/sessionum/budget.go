@@ -40,3 +40,40 @@ func SetBudget(store types.SessionStore, sess *types.Session, n int) error {
 	}
 	return store.Update(sess)
 }
+
+// WarnKey records that the 80% pre-budget warning has been emitted for this
+// session, so the user is nudged only once per budget period.
+const WarnKey = "budget_warned"
+
+// BudgetWarning reports whether the session has crossed the 80% warning
+// threshold of its budget. On the first crossing it marks the session (via
+// store.Update) so the nudge fires exactly once; when usage drops back below
+// the threshold the mark is cleared so a future climb warns again.
+func BudgetWarning(store types.SessionStore, sess *types.Session) (warn bool, used, budget int) {
+	budget = BudgetMax(sess)
+	if budget <= 0 || sess == nil {
+		return false, 0, 0
+	}
+	for _, m := range sess.Messages {
+		used += approxTokens(m)
+	}
+	if sess.Metadata == nil {
+		sess.Metadata = map[string]any{}
+	}
+	warned, _ := sess.Metadata[WarnKey].(bool)
+	atThreshold := used*100 >= budget*80
+	switch {
+	case atThreshold && !warned:
+		sess.Metadata[WarnKey] = true
+		if store != nil {
+			_ = store.Update(sess)
+		}
+		return true, used, budget
+	case !atThreshold && warned:
+		delete(sess.Metadata, WarnKey)
+		if store != nil {
+			_ = store.Update(sess)
+		}
+	}
+	return false, used, budget
+}

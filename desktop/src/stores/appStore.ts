@@ -162,12 +162,17 @@ interface AppStore {
   // Open tabs (multi-session) — kept in the store (not ChatPage local state)
   // so they survive route changes and restarts.
   openTabIds: string[];
+  // Trash holds soft-deleted sessions (recoverable via restoreSession).
+  trash: Session[];
   createSession: (modelId: string, provider: string) => void;
   setActiveSession: (id: string) => void;
   deleteSession: (id: string) => void;
   closeTab: (id: string) => void;
   renameSession: (id: string, title: string) => void;
   loadSessions: () => Promise<void>;
+  loadTrash: () => Promise<void>;
+  restoreSession: (id: string) => Promise<void>;
+  deleteForever: (id: string) => Promise<void>;
 
   // Workspaces (project containers grouping sessions)
   workspaces: Workspace[];
@@ -431,6 +436,7 @@ export const useAppStore = create<AppStore>()(
   sessions: [],
   activeSessionId: null,
   openTabIds: loadOpenTabs(),
+  trash: [],
 
   workspaces: [],
   activeWorkspaceId: loadActiveWorkspace(),
@@ -650,9 +656,9 @@ export const useAppStore = create<AppStore>()(
   },
 
   deleteSession: (id) => {
-    // Debounce rapid re-clicks of the same session's delete button — each
-    // click would otherwise trigger an optimistic set() + a DELETE round-trip,
-    // and a fast double-click could fire two writes.
+    // Soft delete: the transcript is archived + hidden (recoverable from the
+    // sidebar trash section via restoreSession). Debounce rapid re-clicks so
+    // a fast double-click does not fire two writes.
     const now = Date.now();
     if (now - (deleteDebounce.get(id) || 0) < 500) return;
     deleteDebounce.set(id, now);
@@ -669,11 +675,61 @@ export const useAppStore = create<AppStore>()(
         openTabIds: state.openTabIds.filter((t) => t !== id),
       };
     });
-    // Also delete from backend
+    // Soft-delete on backend, then refresh the trash list.
     const { backendUrl } = get();
     if (backendUrl) {
-      fetch(`${backendUrl}/api/sessions/${id}`, { method: 'DELETE' }).catch(() => {});
+      fetch(`${backendUrl}/api/sessions/trash`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: id }),
+      }).then(() => { get().loadTrash(); }).catch(() => {});
     }
+  },
+
+  loadTrash: async () => {
+    const { backendUrl } = get();
+    if (!backendUrl) return;
+    try {
+      const res = await fetch(`${backendUrl}/api/sessions?trash=1`, { cache: 'no-cache' });
+      if (!res.ok) return;
+      const data = await res.json();
+      const list = data.sessions || data || [];
+      if (!Array.isArray(list)) return;
+      const loaded: Session[] = list.map((s: ApiSession) => ({
+        id: s.id,
+        title: s.title || '会话',
+        messages: [],
+        modelId: s.model_id || 'openrouter/free',
+        provider: s.provider_name || 'openrouter',
+        createdAt: s.created_at ? new Date(s.created_at).getTime() : Date.now(),
+      }));
+      set({ trash: loaded });
+    } catch { /* ignore */ }
+  },
+
+  restoreSession: async (id) => {
+    const { backendUrl } = get();
+    if (backendUrl) {
+      try {
+        await fetch(`${backendUrl}/api/sessions/restore`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: id }),
+        });
+      } catch { /* ignore */ }
+    }
+    set((state) => ({ trash: state.trash.filter((s) => s.id !== id) }));
+    await get().loadSessions();
+  },
+
+  deleteForever: async (id) => {
+    const { backendUrl } = get();
+    if (backendUrl) {
+      try {
+        await fetch(`${backendUrl}/api/sessions/${id}`, { method: 'DELETE' });
+      } catch { /* ignore */ }
+    }
+    set((state) => ({ trash: state.trash.filter((s) => s.id !== id) }));
   },
 
   // closeTab removes a session from the open-tab strip WITHOUT deleting it.

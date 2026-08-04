@@ -747,6 +747,7 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 	msgs := sess.Messages
 	budget := sessionum.BudgetMax(sess)
 	trimmed := false
+	var warnMsg string
 	if budget > 0 {
 		if sessionum.Get(sess) == "" {
 			mode := ""
@@ -756,6 +757,9 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 			_ = sessionum.Save(e.sessionSt, sess, sessionum.Generate(sess, modelID, sess.ProviderName, mode))
 		}
 		msgs, trimmed = sessionum.TrimToBudget(msgs, budget)
+		if warn, used, b := sessionum.BudgetWarning(e.sessionSt, sess); warn {
+			warnMsg = fmt.Sprintf("ⓘ [预算护栏] 已用约 %d/%d tokens（%d%%），接近上限，即将自动压缩。", used, b, used*100/b)
+		}
 	} else if n := sessionum.LiteN(sess); n > 0 && n < len(msgs) {
 		msgs = msgs[len(msgs)-n:]
 	}
@@ -858,6 +862,8 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 	out := make(chan types.StreamEvent, 64)
 	if trimmed {
 		out <- types.StreamEvent{Type: types.EventSystem, Content: "ⓘ [预算护栏] 会话上下文超出预算，已自动压缩为摘要 + 最近消息（≤ 预算）。"}
+	} else if warnMsg != "" {
+		out <- types.StreamEvent{Type: types.EventSystem, Content: warnMsg}
 	}
 	go func() {
 		defer close(out)

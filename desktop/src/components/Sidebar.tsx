@@ -1,8 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../stores/appStore';
-import { MessageSquare, Cpu, Settings, BarChart, ArrowLeftRight, PanelLeftClose, Github, Plus, Server, Pencil } from 'lucide-react';
+import { MessageSquare, Cpu, Settings, BarChart, ArrowLeftRight, PanelLeftClose, Github, Plus, Server, Pencil, RotateCcw, Trash2 } from 'lucide-react';
 import PlumBlossom from './PlumBlossom';
 import WorkspaceSidebar from './WorkspaceSidebar';
 
@@ -26,10 +26,20 @@ const Sidebar: React.FC<Props> = ({ onToggle }) => {
   const createSession = useAppStore(s => s.createSession);
   const deleteSession = useAppStore(s => s.deleteSession);
   const renameSession = useAppStore(s => s.renameSession);
+  const trash = useAppStore(s => s.trash);
+  const loadTrash = useAppStore(s => s.loadTrash);
+  const restoreSession = useAppStore(s => s.restoreSession);
+  const deleteForever = useAppStore(s => s.deleteForever);
   const currentModel = useAppStore((s) => s.models.find((m) => m.id === s.selectedModel));
   const backendConnected = useAppStore((s) => s.backendConnected);
   const backendChecking = useAppStore((s) => s.backendChecking);
   const backendVersion = useAppStore((s) => s.backendVersion);
+
+  // Load the soft-deleted ("recently removed") sessions whenever the backend
+  // connects, so the trash section stays in sync with /clear on other surfaces.
+  useEffect(() => {
+    if (backendConnected) loadTrash();
+  }, [backendConnected, loadTrash]);
 
   const navItems = [
     { path: '/', icon: MessageSquare, label: t('sidebar.chat') },
@@ -222,6 +232,56 @@ const Sidebar: React.FC<Props> = ({ onToggle }) => {
           );
         })}
       </div>
+
+      {/* Trash — soft-deleted sessions, restorable */}
+      {!collapsed && trash.length > 0 && (
+        <div style={{ borderTop: '0.5px solid var(--border-color)', padding: '6px 6px' }}>
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            padding: '4px 8px', color: 'var(--text-muted)',
+            fontSize: 9, letterSpacing: 1, textTransform: 'uppercase', fontWeight: 600,
+          }}>
+            <span>{t('sidebar.trash')} ({trash.length})</span>
+          </div>
+          {trash.map((s) => (
+            <div
+              key={s.id}
+              className="sidebar-item"
+              title={s.title || s.id.slice(0, 6)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6,
+                padding: '6px 8px', opacity: 0.75,
+              }}
+            >
+              <div style={{
+                width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
+                background: 'var(--text-muted)',
+              }} />
+              <div style={{
+                flex: 1, overflow: 'hidden', textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap', fontSize: 11.5, lineHeight: 1.3,
+                textDecoration: 'line-through', color: 'var(--text-muted)',
+              }}>
+                {s.title || t('chat.sessionN', { n: s.id.slice(0, 6) })}
+              </div>
+              <button className="action-hidden"
+                onClick={() => restoreSession(s.id)}
+                title={t('sidebar.restore')}
+                style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: 2, display: 'flex', fontSize: 10 }}
+                onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--success)'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--text-muted)'; }}
+              ><RotateCcw size={11} /></button>
+              <button className="action-hidden"
+                onClick={() => deleteForever(s.id)}
+                title={t('sidebar.deleteForever')}
+                style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: 2, display: 'flex', fontSize: 10 }}
+                onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--error)'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--text-muted)'; }}
+              ><Trash2 size={11} /></button>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Footer */}
       <div style={{

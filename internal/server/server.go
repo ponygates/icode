@@ -109,6 +109,8 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 
 	// Sessions
 	mux.HandleFunc("/api/sessions", s.handleSessions)
+	mux.HandleFunc("/api/sessions/restore", s.handleSessionRestore)
+	mux.HandleFunc("/api/sessions/trash", s.handleSessionTrash)
 	mux.HandleFunc("/api/sessions/", s.handleSessionByID)
 	mux.HandleFunc("/api/search", s.handleSearch)
 
