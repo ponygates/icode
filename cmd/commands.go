@@ -1221,9 +1221,35 @@ func (c *chatCallback) OnSlashCommand(cmd string, args []string) {
 		case "show":
 			withSess(func(sess *types.Session) {
 				if bg := sessionum.BudgetMax(sess); bg > 0 {
-					c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("当前 Token 预算: %d", bg))
+					line := fmt.Sprintf("当前 Token 预算: %d\n预警阈值: %d%%（/budget warn <50-95> 调整）", bg, sessionum.BudgetWarnPct(sess))
+					if cnt, last, wc := sessionum.TrimStats(sess); cnt > 0 || wc > 0 {
+						line += fmt.Sprintf("\n护栏记录: 自动压缩 %d 次", cnt)
+						if last != "" {
+							line += fmt.Sprintf("（最近 %s）", last)
+						}
+						if wc > 0 {
+							line += fmt.Sprintf("，提前预警 %d 次", wc)
+						}
+					}
+					c.tui.AddMessage(tui.RoleSystem, line)
 				} else {
-					c.tui.AddMessage(tui.RoleSystem, "当前没有 Token 预算。\n用法: /budget set <上限> | /budget show | /budget clear")
+					c.tui.AddMessage(tui.RoleSystem, "当前没有 Token 预算。\n用法: /budget set <上限> | /budget show | /budget warn <50-95> | /budget clear")
+				}
+			})
+		case "warn":
+			if len(args) < 2 {
+				withSess(func(sess *types.Session) {
+					c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("当前预警阈值: %d%%\n用法: /budget warn <50-95> — 调整提前预警线", sessionum.BudgetWarnPct(sess)))
+				})
+				break
+			}
+			n := 0
+			fmt.Sscanf(args[1], "%d", &n)
+			withSess(func(sess *types.Session) {
+				if err := sessionum.SetWarnPct(c.app.SessStore, sess, n); err != nil {
+					c.tui.AddMessage(tui.RoleSystem, "设置预警阈值失败: "+err.Error())
+				} else {
+					c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("已设置预算预警阈值: %d%%", n))
 				}
 			})
 		case "clear":
@@ -1235,7 +1261,7 @@ func (c *chatCallback) OnSlashCommand(cmd string, args []string) {
 				}
 			})
 		default:
-			c.tui.AddMessage(tui.RoleSystem, "用法: /budget set <上限> | /budget show | /budget clear")
+			c.tui.AddMessage(tui.RoleSystem, "用法: /budget set <上限> | /budget show | /budget warn <50-95> | /budget clear")
 		}
 	case "/clear":
 		if c.sessionID != "" && c.app != nil && c.app.SessStore != nil {

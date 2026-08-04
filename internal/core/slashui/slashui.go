@@ -502,7 +502,7 @@ func cmdSessions(b *Backend, st *State, _ []string) Result {
 	if st.SessionID != "" {
 		return ok("活跃会话: " + st.SessionID)
 	}
-	sessions, err := b.SessStore.List(20, 0)
+	sessions, err := sessionum.ListNonDeleted(b.SessStore, 20)
 	if err != nil || len(sessions) == 0 {
 		return ok("暂无已保存会话。开始对话后自动创建。")
 	}
@@ -510,9 +510,6 @@ func cmdSessions(b *Backend, st *State, _ []string) Result {
 	kept := 0
 	sb.WriteString(fmt.Sprintf("已保存会话 (%d):\n", len(sessions)))
 	for _, s := range sessions {
-		if sessionum.IsDeleted(&s) {
-			continue
-		}
 		kept++
 		title := s.Title
 		if title == "" {
@@ -768,9 +765,40 @@ func cmdBudget(b *Backend, st *State, args []string) Result {
 		}
 		if bg := sessionum.BudgetMax(sess); bg > 0 {
 			used := sessionum.EstimatedUsage(sess)
-			return ok(fmt.Sprintf("当前 Token 预算: %d\n当前估算用量: %d（%d%%）", bg, used, pctOf(used, bg)))
+			line := fmt.Sprintf("当前 Token 预算: %d\n当前估算用量: %d（%d%%）\n预警阈值: %d%%（/budget warn <50-95> 调整）", bg, used, pctOf(used, bg), sessionum.BudgetWarnPct(sess))
+			if cnt, last, wc := sessionum.TrimStats(sess); cnt > 0 || wc > 0 {
+				line += fmt.Sprintf("\n护栏记录: 自动压缩 %d 次", cnt)
+				if last != "" {
+					line += fmt.Sprintf("（最近 %s）", last)
+				}
+				if wc > 0 {
+					line += fmt.Sprintf("，提前预警 %d 次", wc)
+				}
+			}
+			return ok(line)
 		}
 		return ok("当前没有 Token 预算。")
+	case "warn":
+		if len(args) < 2 {
+			if sess, r := load(); sess != nil {
+				return ok(fmt.Sprintf("当前预警阈值: %d%%\n用法: /budget warn <50-95> — 调整提前预警线", sessionum.BudgetWarnPct(sess)))
+			} else if r.Output != "" {
+				return r
+			}
+			return ok("当前预警阈值: 80%\n用法: /budget warn <50-95> — 调整提前预警线")
+		}
+		sess, r := load()
+		if sess == nil {
+			return r
+		}
+		n, err := strconv.Atoi(args[1])
+		if err != nil {
+			return errf("阈值应为 50-95 的百分比数。")
+		}
+		if err := sessionum.SetWarnPct(b.SessStore, sess, n); err != nil {
+			return errf("%v", err)
+		}
+		return ok(fmt.Sprintf("已设置预算预警阈值: %d%%", n))
 	case "clear":
 		sess, r := load()
 		if sess == nil {
@@ -781,7 +809,7 @@ func cmdBudget(b *Backend, st *State, args []string) Result {
 		}
 		return ok("已关闭 Token 预算，恢复完整上下文。")
 	default:
-		return errf("未知子命令: %s（支持 set / show / clear）", args[0])
+		return errf("未知子命令: %s（支持 set / show / warn / clear）", args[0])
 	}
 }
 

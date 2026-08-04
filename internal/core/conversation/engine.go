@@ -757,7 +757,11 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 			_ = sessionum.Save(e.sessionSt, sess, sessionum.Generate(sess, modelID, sess.ProviderName, mode))
 		}
 		msgs, trimmed = sessionum.TrimToBudget(msgs, budget)
+		if trimmed {
+			_ = sessionum.RecordTrim(e.sessionSt, sess)
+		}
 		if warn, used, b := sessionum.BudgetWarning(e.sessionSt, sess); warn {
+			_ = sessionum.RecordWarn(e.sessionSt, sess)
 			warnMsg = fmt.Sprintf("ⓘ [预算护栏] 已用约 %d/%d tokens（%d%%），接近上限，即将自动压缩。", used, b, used*100/b)
 		}
 	} else if n := sessionum.LiteN(sess); n > 0 && n < len(msgs) {
