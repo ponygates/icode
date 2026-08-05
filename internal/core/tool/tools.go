@@ -34,7 +34,6 @@ func NewRegistry() *Registry {
 	// Register built-in tools
 	r.Register(&BashTool{})
 	r.Register(&ReadFileTool{})
-	r.Register(&ReadImageTool{})
 	r.Register(&WriteFileTool{})
 	r.Register(&EditTool{})
 	r.Register(&GrepTool{})
@@ -255,7 +254,7 @@ type ReadFileTool struct{}
 func (t *ReadFileTool) Def() types.ToolDef {
 	return types.ToolDef{
 		Name:        "read_file",
-		Description: "Read the contents of a file at a given path.",
+		Description: "Read the contents of a file at a given path. Image files (png/jpeg/gif/webp/bmp) are attached for vision-capable models.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -273,6 +272,11 @@ func (t *ReadFileTool) Execute(ctx context.Context, args string) (*types.ToolRes
 	path, err := parseArg(args, "path")
 	if err != nil {
 		return nil, err
+	}
+
+	// Images are attached as vision payloads (read_image merged into read_file).
+	if res, isImage := loadImageAttachment(path); isImage {
+		return res, nil
 	}
 
 	data, err := os.ReadFile(path)
@@ -494,38 +498,36 @@ type editInput struct {
 
 func (t *EditTool) Def() types.ToolDef {
 	return types.ToolDef{
-		Name: "edit",
-		Description: "Edit a file by replacing exact string matches. Preserves indentation. " +
-			"Two modes: (1) single edit via file_path+old_string+new_string, or " +
-			"(2) MultiEdit via file_path+edits[] for multiple replacements on one file.",
+		Name:        "edit",
+		Description: "Edit a file by replacing exact matching strings, preserving indentation. Single edit (file_path+old_string+new_string) or MultiEdit (file_path+edits[]) for one file.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"file_path": map[string]any{
 					"type":        "string",
-					"description": "Path to the file to edit",
+					"description": "File to edit",
 				},
 				"old_string": map[string]any{
 					"type":        "string",
-					"description": "[single mode] Exact string to find and replace",
+					"description": "[single mode] Exact text to find",
 				},
 				"new_string": map[string]any{
 					"type":        "string",
-					"description": "[single mode] Replacement string",
+					"description": "[single mode] Replacement text",
 				},
 				"replace_all": map[string]any{
 					"type":        "boolean",
-					"description": "[single mode] Replace all occurrences (default: false, fails on multiple matches)",
+					"description": "[single mode] Replace all matches (default: false)",
 				},
 				"edits": map[string]any{
 					"type":        "array",
-					"description": "[MultiEdit mode] Ordered list of replacements to apply to the same file",
+					"description": "[MultiEdit mode] Ordered replacements for one file",
 					"items": map[string]any{
 						"type": "object",
 						"properties": map[string]any{
 							"old_string": map[string]any{
 								"type":        "string",
-								"description": "Exact text to find",
+								"description": "Text to find",
 							},
 							"new_string": map[string]any{
 								"type":        "string",
@@ -533,7 +535,7 @@ func (t *EditTool) Def() types.ToolDef {
 							},
 							"replace_all": map[string]any{
 								"type":        "boolean",
-								"description": "Replace all occurrences of old_string",
+								"description": "Replace all matches",
 							},
 						},
 						"required": []string{"old_string", "new_string"},

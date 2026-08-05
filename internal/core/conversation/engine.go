@@ -79,6 +79,12 @@ type Engine struct {
 	// automatically injects fix hints to the model.
 	lspManager *lsp.Manager
 
+	// diagCache remembers the last LSP diagnostics text injected per file so
+	// unchanged compile errors are not re-injected on every tool turn
+	// (they would bloat the context and alert the model to errors it already
+	// saw). Keyed by file path.
+	diagCache map[string]string
+
 	// Multi-agent team registry — teams defined via TeamDef are registered
 	// here and dispatched by the task tool, just like single agents.
 	teamRegistry map[string]*agent.TeamDef
@@ -111,6 +117,7 @@ func NewEngine(
 		gate:           gate,
 		optimizers:     make(map[string]*tokenopt.Optimizer),
 		stopFns:        make(map[string]context.CancelFunc),
+		diagCache:      make(map[string]string),
 		permRespChans:  make(map[string]chan permission.Decision),
 		doomLoop:       NewDoomLoopDetector(),
 		teamRegistry:   make(map[string]*agent.TeamDef),
@@ -940,6 +947,13 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 	}
 
 	opt := e.getOrCreateOptimizer(sessionID, modelInfo, msgs, sessionum.Get(sess))
+	// A hard /budget trim computed above must be reflected in the cached
+	// optimizer's log; getOrCreateOptimizer only seeds a fresh optimizer, so
+	// on trimmed turns we replace the log with the trimmed subset to make the
+	// budget actually bind for in-progress sessions.
+	if trimmed {
+		opt.ReplaceMessages(msgs)
+	}
 
 	// Long-goal mode: when the session has a goal, re-inject it into the
 	// system prompt every turn so the model keeps working toward it. The
@@ -1250,7 +1264,9 @@ func (e *Engine) checkDiagnosticsAfterTool(filePath string) string {
 
 // collectDiagnostics checks all tool calls for file modifications and
 // queries LSP diagnostics for each modified file. Returns a combined
-// diagnostics message for all files, or "" if no errors found.
+// diagnostics message for all files, or "" if no errors found. A file whose
+// diagnostics are unchanged since the last injection is skipped (G1) so the
+// model is only alerted to new or changed compile errors.
 func (e *Engine) collectDiagnostics(toolCalls []types.ToolCall) string {
 	checked := make(map[string]bool)
 	var parts []string
@@ -1262,7 +1278,10 @@ func (e *Engine) collectDiagnostics(toolCalls []types.ToolCall) string {
 		}
 		checked[filePath] = true
 		msg := e.checkDiagnosticsAfterTool(filePath)
-		if msg != "" {
+		if msg == "" {
+			continue
+		}
+		if e.rememberDiagnostics(filePath, msg) {
 			parts = append(parts, msg)
 		}
 	}
@@ -1270,6 +1289,23 @@ func (e *Engine) collectDiagnostics(toolCalls []types.ToolCall) string {
 		return ""
 	}
 	return "🔧 以下文件存在编译错误，请修复:\n" + strings.Join(parts, "")
+}
+
+// rememberDiagnostics records the diagnostics text for a file and reports
+// whether it is new (should be injected). Identical re-runs are suppressed to
+// avoid re-alerting the model every turn.
+func (e *Engine) rememberDiagnostics(filePath, msg string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if msg == "" {
+		delete(e.diagCache, filePath)
+		return false
+	}
+	if e.diagCache[filePath] == msg {
+		return false
+	}
+	e.diagCache[filePath] = msg
+	return true
 }
 
 // extractFilePath extracts the file path from a tool call's arguments.

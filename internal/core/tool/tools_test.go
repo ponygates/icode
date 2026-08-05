@@ -462,9 +462,9 @@ func TestValidateFetchURL_AllowsPublic(t *testing.T) {
 	}
 }
 
-// TestReadImageTool verifies the read_image tool loads a local PNG into a
-// vision attachment and rejects missing/unsupported files.
-func TestReadImageTool(t *testing.T) {
+// TestReadFileTool_Image verifies read_file attaches a local PNG for vision
+// models (read_image merged into read_file, E2) and leaves text as content.
+func TestReadFileTool_Image(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "pixel.png")
 	img, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
@@ -475,7 +475,7 @@ func TestReadImageTool(t *testing.T) {
 		t.Fatalf("write fixture: %v", err)
 	}
 
-	res, err := (&ReadImageTool{}).Execute(context.Background(), fmt.Sprintf(`{"path": %q}`, path))
+	res, err := (&ReadFileTool{}).Execute(context.Background(), fmt.Sprintf(`{"path": %q}`, path))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -493,10 +493,7 @@ func TestReadImageTool(t *testing.T) {
 		t.Fatalf("expected base64 PNG payload in attachment")
 	}
 
-	if res, _ := (&ReadImageTool{}).Execute(context.Background(), `{"path": "definitely-missing.png"}`); res.Success {
+	if res, _ := (&ReadFileTool{}).Execute(context.Background(), `{"path": "definitely-missing.png"}`); res.Success {
 		t.Fatal("missing file should fail")
-	}
-	if res, _ := (&ReadImageTool{}).Execute(context.Background(), `{"path": "not-an-image.txt"}`); res.Success {
-		t.Fatal("unsupported format should fail")
 	}
 }

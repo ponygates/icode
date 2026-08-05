@@ -346,6 +346,17 @@ func (o *Optimizer) foldVolatileLocked() {
 	}
 }
 
+// ReplaceMessages swaps the entire conversation log (keeping stats and the
+// immutable prefix intact). Used by the hard /budget guard: when TrimToBudget
+// drops older turns, the cached optimizer must be brought in line with the
+// trimmed set instead of holding the full transcript.
+func (o *Optimizer) ReplaceMessages(msgs []types.Message) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.messageLog = append([]types.Message(nil), msgs...)
+	o.turnStartIdx = len(o.messageLog)
+}
+
 // RecordUsage updates running stats.
 func (o *Optimizer) RecordUsage(usage types.TokenUsage, cost float64, startTime time.Time) {
 	o.mu.Lock()

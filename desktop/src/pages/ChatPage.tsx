@@ -13,6 +13,7 @@ import FilePicker from '../components/FilePicker';
 import ModelPicker from '../components/ModelPicker';
 import PlumBlossom from '../components/PlumBlossom';
 import { executeSlash, filterSlash, type SlashCommand } from '../lib/slashCommands';
+import { apiAppendMessage, apiUpdateMessage, apiClearSession } from '../lib/sessionMessages';
 
 // Shorten a path to its last 2 segments for display.
 function shortDir(p: string): string {
@@ -548,10 +549,8 @@ const ChatPage: React.FC = () => {
           });
           // Persist so the CLI/simpleui see the same memory entry.
           if (activeSessionId) {
-            fetch(`${backendUrl}/api/sessions/${activeSessionId}/messages`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ id: msgId, role: 'system', content: `📝 ${t('chat.copied')}: ${memoryText}` }),
+            apiAppendMessage(backendUrl, activeSessionId, {
+              id: msgId, role: 'system', content: `📝 ${t('chat.copied')}: ${memoryText}`,
             }).catch(() => {});
           }
         } catch {}
@@ -707,18 +706,10 @@ const ChatPage: React.FC = () => {
       // Persist the placeholder immediately so all UIs share this turn.
       const persistMsg = (content: string) => {
         if (!url || !sid) return;
-        fetch(`${url}/api/sessions/${sid}/messages/${toolMsg.id}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ role: 'assistant', content }),
-        }).catch(() => {});
+        apiUpdateMessage(url, sid, toolMsg.id, 'assistant', content).catch(() => {});
       };
       if (url && sid) {
-        fetch(`${url}/api/sessions/${sid}/messages`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: toolMsg.id, role: 'assistant', content: toolMsg.content }),
-        }).catch(() => {});
+        apiAppendMessage(url, sid, toolMsg).catch(() => {});
       }
       try {
         const res = await fetch(`${url}/api/shell`, {
@@ -1142,18 +1133,13 @@ const ChatPage: React.FC = () => {
                     const copy: Message = { ...m, id: Math.random().toString(36).slice(2) };
                     addMessage(newId, copy);
                     if (base) {
-                      fetch(`${base}/api/sessions/${newId}/messages`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ id: copy.id, role: copy.role, content: copy.content }),
-                      }).catch(() => {});
+                      apiAppendMessage(base, newId, copy).catch(() => {});
                     }
                   });
                 }
               }, 100);
             }}
               title={t('chat.fork')}
-              className="interactive"
               style={{
                 background: 'none', border: '0.5px solid var(--border-color)',
                 color: 'var(--text-secondary)', padding: '4px 10px',
@@ -1182,7 +1168,7 @@ const ChatPage: React.FC = () => {
                 // Wipe messages in the shared SQLite history too, so the
                 // cleared chat does not resurrect in the CLI/simpleui.
                 if (backendUrl && activeSessionId) {
-                  fetch(`${backendUrl}/api/sessions/${activeSessionId}/clear`, { method: 'POST' }).catch(() => {});
+                  apiClearSession(backendUrl, activeSessionId).catch(() => {});
                 }
                 clearMessages(activeSessionId);
               }}
@@ -1520,11 +1506,7 @@ const ChatPage: React.FC = () => {
                     const copy: Message = { ...m, id: Math.random().toString(36).slice(2) };
                     addMessage(newId, copy);
                     if (base) {
-                      fetch(`${base}/api/sessions/${newId}/messages`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ id: copy.id, role: copy.role, content: copy.content }),
-                      }).catch(() => {});
+                      apiAppendMessage(base, newId, copy).catch(() => {});
                     }
                   });
                 }
