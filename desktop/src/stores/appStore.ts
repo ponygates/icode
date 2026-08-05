@@ -163,6 +163,9 @@ interface AppStore {
   // Open tabs (multi-session) — kept in the store (not ChatPage local state)
   // so they survive route changes and restarts.
   openTabIds: string[];
+  // Visual order of tabs (independent of openTabIds). Persisted to localStorage.
+  // When null (pre-migration), openTabIds is used as the display order.
+  tabOrder: string[] | null;
   // Trash holds soft-deleted sessions (recoverable via restoreSession).
   trash: Session[];
   createSession: (modelId: string, provider: string) => void;
@@ -175,6 +178,8 @@ interface AppStore {
   restoreSession: (id: string) => Promise<void>;
   deleteForever: (id: string) => Promise<void>;
   purgeTrash: () => Promise<void>;
+  // Drag-drop tab reordering
+  reorderTab: (dragId: string, dropId: string) => void;
 
   // Workspaces (project containers grouping sessions)
   workspaces: Workspace[];
@@ -438,6 +443,7 @@ export const useAppStore = create<AppStore>()(
   sessions: [],
   activeSessionId: null,
   openTabIds: loadOpenTabs(),
+  tabOrder: loadTabOrder(),
   trash: [],
 
   workspaces: [],
@@ -755,10 +761,28 @@ export const useAppStore = create<AppStore>()(
       state.createSession(active?.modelId || state.selectedModel, active?.provider || 'openrouter');
       return;
     }
-    set({ openTabIds: remaining });
+    const nextOrder = state.tabOrder
+      ? state.tabOrder.filter((t) => t !== id)
+      : null;
+    set({ openTabIds: remaining, tabOrder: nextOrder });
     if (state.activeSessionId === id) {
       set({ activeSessionId: remaining[remaining.length - 1] });
     }
+  },
+
+  // Drag-drop reordering: moves `dragId` to the position where `dropId`
+  // currently sits, preserving all other entries' relative order.
+  reorderTab: (dragId, dropId) => {
+    const state = get();
+    const current = state.tabOrder ?? state.openTabIds;
+    if (!current.includes(dragId) || !current.includes(dropId)) return;
+    const fromIdx = current.indexOf(dragId);
+    const toIdx = current.indexOf(dropId);
+    if (fromIdx === toIdx) return;
+    const next = [...current];
+    const [moved] = next.splice(fromIdx, 1);
+    next.splice(toIdx, 0, moved);
+    set({ tabOrder: next });
   },
 
   // ── Workspaces ──
@@ -889,6 +913,7 @@ function flushPersist() {
   saveToLocal(state.sessions || []);
   try {
     localStorage.setItem(LS_TABS, JSON.stringify(state.openTabIds || []));
+    localStorage.setItem(LS_TAB_ORDER, JSON.stringify(state.tabOrder ?? null));
     if (state.activeSessionId) localStorage.setItem(LS_ACTIVE, state.activeSessionId);
     if (state.activeWorkspaceId) localStorage.setItem(LS_WORKSPACE, state.activeWorkspaceId);
   } catch { /* quota / serialization error — ignore */ }
@@ -902,11 +927,11 @@ function schedulePersist() {
 // Only persist when the actually-persisted slices change (not on backend
 // connection state, models, token usage, etc.).
 useAppStore.subscribe(
-  (s) => [s.sessions, s.openTabIds, s.activeSessionId, s.activeWorkspaceId] as const,
+  (s) => [s.sessions, s.openTabIds, s.tabOrder, s.activeSessionId, s.activeWorkspaceId] as const,
   () => schedulePersist(),
   {
     equalityFn: (a, b) =>
-      a[0] === b[0] && a[1] === b[1] && a[2] === b[2] && a[3] === b[3],
+      a[0] === b[0] && a[1] === b[1] && a[2] === b[2] && a[3] === b[3] && a[4] === b[4],
   }
 );
 
@@ -919,6 +944,7 @@ if (typeof window !== 'undefined') {
 
 const LS_KEY = 'icode.sessions';
 const LS_TABS = 'icode.openTabIds';
+const LS_TAB_ORDER = 'icode.tabOrder';
 const LS_ACTIVE = 'icode.activeSessionId';
 const LS_WORKSPACE = 'icode.activeWorkspaceId';
 
@@ -961,6 +987,16 @@ function loadOpenTabs(): string[] {
     return Array.isArray(arr) ? arr : [];
   } catch {
     return [];
+  }
+}
+
+function loadTabOrder(): string[] | null {
+  try {
+    const raw = localStorage.getItem(LS_TAB_ORDER);
+    const arr = raw ? JSON.parse(raw) : null;
+    return Array.isArray(arr) ? arr : null;
+  } catch {
+    return null;
   }
 }
 
