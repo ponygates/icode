@@ -1126,6 +1126,47 @@ func (c *chatCallback) OnSlashCommand(cmd string, args []string) {
 		} else {
 			c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("已恢复会话 %s — %d 条消息", sess.ID, len(sess.Messages)))
 		}
+	case "/export":
+		if len(args) == 0 || c.app == nil || c.app.SessStore == nil {
+			c.tui.AddMessage(tui.RoleSystem, "Usage: /export <session-id> [output.json]")
+			break
+		}
+		sess, err := c.app.SessStore.Get(args[0])
+		if err != nil {
+			c.tui.AddMessage(tui.RoleSystem, "会话不存在: "+args[0])
+			break
+		}
+		data, err := sessionum.Export(sess)
+		if err != nil {
+			c.tui.AddMessage(tui.RoleSystem, "导出失败: "+err.Error())
+			break
+		}
+		path := fmt.Sprintf("icode-%s.json", sess.ID)
+		if len(args) > 1 {
+			path = args[1]
+		}
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			c.tui.AddMessage(tui.RoleSystem, "写入失败: "+err.Error())
+			break
+		}
+		c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("已导出会话 %s（%d 条消息）到 %s", sess.ID, len(sess.Messages), path))
+	case "/import":
+		if len(args) == 0 || c.app == nil || c.app.SessStore == nil {
+			c.tui.AddMessage(tui.RoleSystem, "Usage: /import <session.json>")
+			break
+		}
+		data, err := os.ReadFile(args[0])
+		if err != nil {
+			c.tui.AddMessage(tui.RoleSystem, "读取失败: "+err.Error())
+			break
+		}
+		sess, imported, err := sessionum.Import(c.app.SessStore, data)
+		if err != nil {
+			c.tui.AddMessage(tui.RoleSystem, "导入失败: "+err.Error())
+			break
+		}
+		c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("已导入会话 %s（%d 条消息），正在切换…", sess.ID, imported))
+		c.tui.AddMessage(tui.RoleSystem, c.OnResume(sess.ID))
 	case "/fork":
 		if len(args) > 0 && c.app != nil && c.app.SessStore != nil {
 			spec := args[0]
