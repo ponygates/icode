@@ -466,3 +466,51 @@ func TestStreamChunk_Unmarshal(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildRequestBody_CacheBreakpointsShift(t *testing.T) {
+	cases := []struct {
+		name   string
+		sys    string
+		bps    []int
+		want   []int
+		hasKey bool
+	}{
+		{name: "system prefix shifts non-zero breakpoints", sys: "SYS", bps: []int{0, 20, 40}, want: []int{0, 21, 41}, hasKey: true},
+		{name: "no system prefix keeps indices", sys: "", bps: []int{0, 20}, want: []int{0, 20}, hasKey: true},
+		{name: "no breakpoints omits key", sys: "SYS", bps: nil, want: nil, hasKey: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := New(Config{Name: "cache", APIKey: "sk-test", CacheSupport: true})
+			req := types.ChatRequest{
+				SystemPrompt:     tc.sys,
+				Messages:         []types.Message{{Role: types.RoleUser, Content: "hi"}},
+				CacheBreakpoints: tc.bps,
+			}
+			body, err := p.buildRequestBody(req, false)
+			if err != nil {
+				t.Fatalf("buildRequestBody: %v", err)
+			}
+			var m map[string]any
+			if err := json.NewDecoder(body).Decode(&m); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			raw, has := m["cache_breakpoints"]
+			if has != tc.hasKey {
+				t.Fatalf("has cache_breakpoints = %v, want %v", has, tc.hasKey)
+			}
+			if !has {
+				return
+			}
+			arr := raw.([]any)
+			if len(arr) != len(tc.want) {
+				t.Fatalf("len = %d, want %d (%v)", len(arr), len(tc.want), arr)
+			}
+			for i, v := range arr {
+				if int(v.(float64)) != tc.want[i] {
+					t.Fatalf("idx %d = %v, want %d", i, v, tc.want[i])
+				}
+			}
+		})
+	}
+}

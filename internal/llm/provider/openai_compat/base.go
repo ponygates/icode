@@ -457,7 +457,8 @@ func (p *BaseProvider) buildRequestBody(req types.ChatRequest, stream bool) (io.
 	messages := make([]map[string]any, 0, len(req.Messages)+1)
 
 	// Immutable prefix: system message at position 0 for cache stability
-	if req.SystemPrompt != "" {
+	hadSystem := req.SystemPrompt != ""
+	if hadSystem {
 		messages = append(messages, map[string]any{
 			"role":    "system",
 			"content": req.SystemPrompt,
@@ -501,7 +502,23 @@ func (p *BaseProvider) buildRequestBody(req types.ChatRequest, stream bool) (io.
 		"stream":   stream,
 	}
 
-	if len(req.CacheBreakpoints) > 0 {
+	// cache_breakpoints are message-log indices produced by the optimizer, where
+	// 0 marks the immutable prefix boundary. buildRequestBody inserts the system
+	// prompt at index 0 when present, so any breakpoint past the prefix must be
+	// shifted +1 to still point at the intended conversation message on the
+	// wire. The prefix marker (0) already coincides with the system message and
+	// needs no shift.
+	if hadSystem && len(req.CacheBreakpoints) > 0 {
+		shifted := make([]int, 0, len(req.CacheBreakpoints))
+		for _, bp := range req.CacheBreakpoints {
+			if bp == 0 {
+				shifted = append(shifted, 0)
+			} else {
+				shifted = append(shifted, bp+1)
+			}
+		}
+		body["cache_breakpoints"] = shifted
+	} else if !hadSystem && len(req.CacheBreakpoints) > 0 {
 		body["cache_breakpoints"] = req.CacheBreakpoints
 	}
 
