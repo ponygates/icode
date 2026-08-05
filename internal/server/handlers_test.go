@@ -9,6 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/ponygates/icode/internal/types"
 )
 
 // httpDo performs a request and decodes the response body into out (when
@@ -256,4 +259,67 @@ func TestSkillsListEndpoint(t *testing.T) {
 	if _, ok := body["skills"]; !ok {
 		t.Fatalf("GET /api/skills missing skills field: %v", body)
 	}
+}
+
+// TestSessionImportRoundTrip validates that a session exported as JSON via
+// GET /api/sessions/{id} can be re-imported with a fresh identity and its
+// messages restored intact.
+func TestSessionImportRoundTrip(t *testing.T) {
+	srv, base := newSecurityTestServer(t)
+
+	// Seed a session with a couple of messages directly through the store.
+	sess := &types.Session{Title: "seed", ModelID: "m1", ProviderName: "openrouter"}
+	if err := srv.Store().Create(sess); err != nil {
+		t.Fatalf("create seed session: %v", err)
+	}
+	msgs := []types.Message{
+		{ID: "m1", Role: "user", Content: "hello", Timestamp: time.Now()},
+		{ID: "m2", Role: "assistant", Content: "hi there", Timestamp: time.Now()},
+	}
+	for _, m := range msgs {
+		if err := srv.Store().AppendMessage(sess.ID, m); err != nil {
+			t.Fatalf("append message: %v", err)
+		}
+	}
+
+	// Export it.
+	var exported types.Session
+	httpDo(t, http.MethodGet, base+"/api/sessions/"+sess.ID, "", http.StatusOK, &exported)
+	if len(exported.Messages) != 2 {
+		t.Fatalf("exported messages = %d, want 2", len(exported.Messages))
+	}
+
+	// Reset state so the imported copy must stand alone (no shared identity).
+	exported.ID = ""
+
+	// Import it back.
+	raw, err := json.Marshal(exported)
+	if err != nil {
+		t.Fatalf("marshal export: %v", err)
+	}
+	var imp map[string]any
+	httpDo(t, http.MethodPost, base+"/api/sessions/import", string(raw), http.StatusOK, &imp)
+	impSess, ok := imp["session"].(map[string]any)
+	if !ok {
+		t.Fatalf("import response missing session: %v", imp)
+	}
+	newID, _ := impSess["id"].(string)
+	if newID == "" || newID == sess.ID {
+		t.Fatalf("imported session id = %q (want fresh)", newID)
+	}
+
+	// Verify the imported copy round-trips the messages.
+	var got types.Session
+	httpDo(t, http.MethodGet, base+"/api/sessions/"+newID, "", http.StatusOK, &got)
+	if len(got.Messages) != 2 {
+		t.Fatalf("re-imported messages = %d, want 2", len(got.Messages))
+	}
+	if got.Messages[1].Content != "hi there" {
+		t.Fatalf("re-imported message content = %q", got.Messages[1].Content)
+	}
+}
+
+func TestSessionImportRejectsBadJSON(t *testing.T) {
+	_, base := newSecurityTestServer(t)
+	httpDo(t, http.MethodPost, base+"/api/sessions/import", `{not json`, http.StatusBadRequest, nil)
 }

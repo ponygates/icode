@@ -56,6 +56,10 @@ type Server struct {
 	apiToken string
 }
 
+// Store exposes the session store, used by handlers and external consumers
+// (e.g. tests) that need to seed or inspect sessions directly.
+func (s *Server) Store() types.SessionStore { return s.store }
+
 // Config configures the API server.
 type ServerConfig struct {
 	Config   *config.Config
@@ -119,6 +123,7 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 
 	// Sessions
 	mux.HandleFunc("/api/sessions", s.handleSessions)
+	mux.HandleFunc("/api/sessions/import", s.handleSessionImport)
 	mux.HandleFunc("/api/sessions/restore", s.handleSessionRestore)
 	mux.HandleFunc("/api/sessions/trash", s.handleSessionTrash)
 	mux.HandleFunc("/api/sessions/trash/purge", s.handleTrashPurge)

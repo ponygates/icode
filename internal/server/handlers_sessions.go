@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/ponygates/icode/internal/core/sessionum"
 	"github.com/ponygates/icode/internal/types"
@@ -137,6 +138,55 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// handleSessionImport creates a new session from an exported JSON document
+// (POST /api/sessions/import). The imported payload is treated as a fresh
+// session: a new identity is assigned and stale counters/metadata are dropped
+// so the copy works even when two exports collide.
+func (s *Server) handleSessionImport(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<20)
+	var sess types.Session
+	if err := json.NewDecoder(r.Body).Decode(&sess); err != nil {
+		_ = r.Body.Close()
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid session JSON: " + err.Error()})
+		return
+	}
+	_ = r.Body.Close()
+
+	if sess.Title == "" {
+		sess.Title = "Imported session"
+	}
+	msgs := sess.Messages
+	sess.ID = "" // assign a fresh identity
+	sess.Messages = nil
+	sess.Metadata = nil
+	sess.TotalTokens = types.TokenUsage{}
+
+	if err := s.store.Create(&sess); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+
+	imported := 0
+	for _, m := range msgs {
+		// Message ids are globally unique, so every imported message gets a
+		// fresh id (content and ordering via timestamp are preserved).
+		m.ID = fmt.Sprintf("%x", time.Now().UnixNano()+int64(imported))
+		if err := s.store.AppendMessage(sess.ID, m); err != nil {
+			_ = s.store.Delete(sess.ID) // roll back the partial import
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "import message: " + err.Error()})
+			return
+		}
+		imported++
+	}
+
+	got, err := s.store.Get(sess.ID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "session": got, "imported": imported})
 }
 
 // handleSessionRestore revives a soft-deleted session (POST /api/sessions/restore).

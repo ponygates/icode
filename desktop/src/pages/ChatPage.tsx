@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next';
 import i18n from '../i18n';
 import { useAppStore, Message, Attachment, type Model } from '../stores/appStore';
-import { Send, Plus, Trash2, MessageSquare, Cpu, Shield, Square, ShieldAlert, GitBranch, FileText, RefreshCw, Folder, Edit3, Download, ChevronDown } from 'lucide-react';
+import { Send, Plus, Trash2, MessageSquare, Cpu, Shield, Square, ShieldAlert, GitBranch, FileText, RefreshCw, Folder, Edit3, Download, FileJson, Upload, ChevronDown } from 'lucide-react';
 import Markdown from '../components/Markdown';
 import CommandPalette, { useCommandPalette } from '../components/CommandPalette';
 import TodoPanel from '../components/TodoPanel';
@@ -1036,6 +1036,66 @@ const ChatPage: React.FC = () => {
               display: 'flex', alignItems: 'center', gap: 4, fontSize: 11,
             }}>
             <Download size={12} />
+          </button>
+          {/* Export session as JSON */}
+          <button className="interactive" title={t('chat.exportJson')}
+            onClick={async () => {
+              if (!activeSessionId || !backendUrl) return;
+              try {
+                const res = await fetch(`${backendUrl}/api/sessions/${activeSessionId}`);
+                if (!res.ok) return;
+                const data = await res.json();
+                const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `icode-${data.title || 'session'}.json`;
+                a.click();
+                URL.revokeObjectURL(url);
+              } catch { /* ignore */ }
+            }}
+            style={{
+              background: 'none', border: '0.5px solid var(--border-color)',
+              color: 'var(--text-muted)', padding: '4px 8px', borderRadius: 6,
+              display: 'flex', alignItems: 'center', gap: 4, fontSize: 11,
+            }}>
+            <FileJson size={12} />
+          </button>
+          {/* Import session from JSON */}
+          <button className="interactive" title={t('chat.import')}
+            onClick={() => {
+              const input = document.createElement('input');
+              input.type = 'file';
+              input.accept = '.json,application/json';
+              input.onchange = async () => {
+                const file = input.files?.[0];
+                if (!file || !backendUrl) return;
+                try {
+                  const body = JSON.parse(await file.text());
+                  const res = await fetch(`${backendUrl}/api/sessions/import`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                  });
+                  const result = await res.json();
+                  if (res.ok && result?.session?.id) {
+                    await useAppStore.getState().loadSessions();
+                    useAppStore.getState().setActiveSession(result.session.id);
+                  } else {
+                    alert(result?.error || t('chat.importFailed'));
+                  }
+                } catch {
+                  alert(t('chat.importFailed'));
+                }
+              };
+              input.click();
+            }}
+            style={{
+              background: 'none', border: '0.5px solid var(--border-color)',
+              color: 'var(--text-muted)', padding: '4px 8px', borderRadius: 6,
+              display: 'flex', alignItems: 'center', gap: 4, fontSize: 11,
+            }}>
+            <Upload size={12} />
           </button>
           {/* Branch session */}
           {activeSessionId && activeSession?.messages && activeSession.messages.length > 0 && (
