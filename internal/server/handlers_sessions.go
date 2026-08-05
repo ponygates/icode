@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/ponygates/icode/internal/core/sessionum"
 	"github.com/ponygates/icode/internal/types"
@@ -163,6 +164,96 @@ func (s *Server) handleSessionImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "session": sess, "imported": imported})
+}
+
+// handleSessionMessages appends, updates or deletes a single message in a
+// session so desktop-local helpers (# memory, ! shell, fork) persist to the
+// same SQLite history the CLI and simpleui read.
+//   - POST /api/sessions/{id}/messages            append a message
+//   - PUT   /api/sessions/{id}/messages/{msgID}   update a message's content
+//   - DELETE /api/sessions/{id}/messages/{msgID}  remove a message
+func (s *Server) handleSessionMessages(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	msgID := r.PathValue("msgID")
+
+	switch r.Method {
+	case http.MethodDelete:
+		if msgID == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing message id"})
+			return
+		}
+		if err := s.store.DeleteMessage(id, msgID); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		return
+
+	case http.MethodPost, http.MethodPut:
+		r.Body = http.MaxBytesReader(w, r.Body, 8<<20)
+		var body struct {
+			ID      string `json:"id"`
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			_ = r.Body.Close()
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid body: " + err.Error()})
+			return
+		}
+		_ = r.Body.Close()
+
+		if r.Method == http.MethodPost {
+			if body.Role == "" || body.Content == "" {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "role and content are required"})
+				return
+			}
+			if body.ID == "" {
+				body.ID = fmt.Sprintf("%x", time.Now().UnixNano())
+			}
+			if err := s.store.AppendMessage(id, types.Message{
+				ID: body.ID, Role: types.Role(body.Role), Content: body.Content,
+				Timestamp: time.Now(),
+			}); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": body.ID})
+			return
+		}
+
+		// PUT
+		if msgID == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing message id"})
+			return
+		}
+		if err := s.store.UpdateMessage(id, types.Message{
+			ID: msgID, Role: types.Role(body.Role), Content: body.Content,
+			Timestamp: time.Now(),
+		}); err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		return
+
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleSessionClear wipes a session's messages but keeps the session shell,
+// matching the shared history semantics across all three UIs.
+func (s *Server) handleSessionClear(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := s.store.ClearMessages(r.PathValue("id")); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // handleSessionRestore revives a soft-deleted session (POST /api/sessions/restore).

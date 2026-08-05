@@ -128,6 +128,9 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 	mux.HandleFunc("/api/sessions/trash", s.handleSessionTrash)
 	mux.HandleFunc("/api/sessions/trash/purge", s.handleTrashPurge)
 	mux.HandleFunc("/api/sessions/", s.handleSessionByID)
+	mux.HandleFunc("/api/sessions/{id}/messages", s.handleSessionMessages)
+	mux.HandleFunc("/api/sessions/{id}/messages/{msgID}", s.handleSessionMessages)
+	mux.HandleFunc("/api/sessions/{id}/clear", s.handleSessionClear)
 	mux.HandleFunc("/api/search", s.handleSearch)
 
 	// Chat

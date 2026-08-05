@@ -298,6 +298,52 @@ func (s *Store) AppendMessage(sessionID string, msg types.Message) error {
 	return err
 }
 
+// UpdateMessage updates a single message's role/content in place. It is used
+// by the desktop "shell" helper to persist a tool message after its result
+// arrives, so the same edit shows up in the CLI and simpleui.
+func (s *Store) UpdateMessage(sessionID string, msg types.Message) error {
+	now := msg.Timestamp.Format(time.RFC3339)
+	if msg.Timestamp.IsZero() {
+		now = time.Now().UTC().Format(time.RFC3339)
+	}
+
+	toolCallsJSON, err := json.Marshal(msg.ToolCalls)
+	if err != nil {
+		return fmt.Errorf("marshal message tool calls: %w", err)
+	}
+
+	res, err := s.db.Exec(`UPDATE messages SET role=?, content=?, tool_calls=?, tool_id=?, timestamp=?,
+		token_count=?, cache_hit=?, model=?, finish_reason=? WHERE id=? AND session_id=?`,
+		string(msg.Role), msg.Content, string(toolCallsJSON), msg.ToolID, now,
+		msg.Metadata.TokenCount, boolToInt(msg.Metadata.CacheHit), msg.Metadata.Model,
+		msg.Metadata.FinishReason, msg.ID, sessionID)
+	if err != nil {
+		return fmt.Errorf("update message: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("message %q not found in session %q", msg.ID, sessionID)
+	}
+	return nil
+}
+
+// DeleteMessage removes a single message from a session (used by desktop
+// regenerate to drop the stale assistant reply before re-sending).
+func (s *Store) DeleteMessage(sessionID, msgID string) error {
+	if _, err := s.db.Exec(`DELETE FROM messages WHERE id=? AND session_id=?`, msgID, sessionID); err != nil {
+		return fmt.Errorf("delete message: %w", err)
+	}
+	return nil
+}
+
+// ClearMessages wipes every message of a session but keeps the session shell,
+// so the cleared conversation is shared identically across all three UIs.
+func (s *Store) ClearMessages(sessionID string) error {
+	if _, err := s.db.Exec(`DELETE FROM messages WHERE session_id=?`, sessionID); err != nil {
+		return fmt.Errorf("clear messages: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) loadMessages(sessionID string) ([]types.Message, error) {
 	rows, err := s.db.Query(`SELECT id, role, content, tool_calls, tool_id, timestamp,
 		token_count, cache_hit, model, finish_reason

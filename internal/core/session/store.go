@@ -110,6 +110,63 @@ func (s *Store) AppendMessage(sessionID string, msg types.Message) error {
 	return nil
 }
 
+// UpdateMessage replaces a message's role/content in place.
+func (s *Store) UpdateMessage(sessionID string, msg types.Message) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sess, ok := s.sessions[sessionID]
+	if !ok {
+		return fmt.Errorf("session %q not found", sessionID)
+	}
+	for i := range sess.Messages {
+		if sess.Messages[i].ID == msg.ID {
+			if msg.Role != "" {
+				sess.Messages[i].Role = msg.Role
+			}
+			sess.Messages[i].Content = msg.Content
+			sess.Messages[i].Timestamp = time.Now()
+			sess.UpdatedAt = time.Now()
+			return nil
+		}
+	}
+	return fmt.Errorf("message %q not found in session %q", msg.ID, sessionID)
+}
+
+// DeleteMessage removes a single message from a session.
+func (s *Store) DeleteMessage(sessionID, msgID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sess, ok := s.sessions[sessionID]
+	if !ok {
+		return fmt.Errorf("session %q not found", sessionID)
+	}
+	kept := sess.Messages[:0]
+	for _, m := range sess.Messages {
+		if m.ID != msgID {
+			kept = append(kept, m)
+		}
+	}
+	sess.Messages = kept
+	sess.UpdatedAt = time.Now()
+	return nil
+}
+
+// ClearMessages empties a session's messages, keeping the session shell.
+func (s *Store) ClearMessages(sessionID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sess, ok := s.sessions[sessionID]
+	if !ok {
+		return fmt.Errorf("session %q not found", sessionID)
+	}
+	sess.Messages = nil
+	sess.UpdatedAt = time.Now()
+	return nil
+}
+
 // SearchMessages performs a simple case-insensitive content search across all sessions.
 func (s *Store) SearchMessages(query string, limit int) ([]types.SearchResult, error) {
 	s.mu.RLock()

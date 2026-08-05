@@ -1019,7 +1019,7 @@ func (c *chatCallback) OnListSessions() string {
 	if c.app == nil || c.app.SessStore == nil {
 		return "No session store available."
 	}
-	sessions, err := c.app.SessStore.List(20, 0)
+	sessions, err := sessionum.ListNonDeleted(c.app.SessStore, 20)
 	if err != nil || len(sessions) == 0 {
 		return "No saved sessions yet. Start chatting to create one."
 	}

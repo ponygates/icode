@@ -323,3 +323,59 @@ func TestSessionImportRejectsBadJSON(t *testing.T) {
 	_, base := newSecurityTestServer(t)
 	httpDo(t, http.MethodPost, base+"/api/sessions/import", `{not json`, http.StatusBadRequest, nil)
 }
+
+// TestSessionMessageEndpoints verifies the append/update/delete/clear message
+// endpoints that let desktop-local helpers share the same persisted history.
+func TestSessionMessageEndpoints(t *testing.T) {
+	srv, base := newSecurityTestServer(t)
+	sess := &types.Session{Title: "msg", ModelID: "m1", ProviderName: "p"}
+	if err := srv.Store().Create(sess); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// Append two messages.
+	var post struct {
+		OK bool   `json:"ok"`
+		ID string `json:"id"`
+	}
+	httpDo(t, http.MethodPost, base+"/api/sessions/"+sess.ID+"/messages",
+		`{"id":"a1","role":"user","content":"hello"}`, http.StatusOK, &post)
+	if post.ID != "a1" {
+		t.Fatalf("appended id = %q, want a1", post.ID)
+	}
+	httpDo(t, http.MethodPost, base+"/api/sessions/"+sess.ID+"/messages",
+		`{"id":"a2","role":"assistant","content":"hi"}`, http.StatusOK, nil)
+
+	var got types.Session
+	httpDo(t, http.MethodGet, base+"/api/sessions/"+sess.ID, "", http.StatusOK, &got)
+	if len(got.Messages) != 2 {
+		t.Fatalf("messages = %d, want 2", len(got.Messages))
+	}
+
+	// Update a message in place (shell result arrives after the placeholder).
+	httpDo(t, http.MethodPut, base+"/api/sessions/"+sess.ID+"/messages/a1",
+		`{"role":"user","content":"hello updated"}`, http.StatusOK, nil)
+	httpDo(t, http.MethodGet, base+"/api/sessions/"+sess.ID, "", http.StatusOK, &got)
+	if got.Messages[0].Content != "hello updated" {
+		t.Fatalf("updated content = %q", got.Messages[0].Content)
+	}
+
+	// Delete one message.
+	httpDo(t, http.MethodDelete, base+"/api/sessions/"+sess.ID+"/messages/a2", "", http.StatusOK, nil)
+	httpDo(t, http.MethodGet, base+"/api/sessions/"+sess.ID, "", http.StatusOK, &got)
+	if len(got.Messages) != 1 {
+		t.Fatalf("after delete messages = %d, want 1", len(got.Messages))
+	}
+
+	// Clear all messages, keeping the session shell.
+	httpDo(t, http.MethodPost, base+"/api/sessions/"+sess.ID+"/clear", "", http.StatusOK, nil)
+	httpDo(t, http.MethodGet, base+"/api/sessions/"+sess.ID, "", http.StatusOK, &got)
+	if len(got.Messages) != 0 {
+		t.Fatalf("after clear messages = %d, want 0", len(got.Messages))
+	}
+}
+
+func TestSessionMessageAppendRejectsInvalid(t *testing.T) {
+	_, base := newSecurityTestServer(t)
+	httpDo(t, http.MethodPost, base+"/api/sessions/x/messages", `{}`, http.StatusBadRequest, nil)
+}

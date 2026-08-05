@@ -373,6 +373,9 @@ type SessionStore interface {
 	Update(s *Session) error
 	Delete(id string) error
 	AppendMessage(sessionID string, msg Message) error
+	UpdateMessage(sessionID string, msg Message) error
+	DeleteMessage(sessionID, msgID string) error
+	ClearMessages(sessionID string) error
 	SearchMessages(query string, limit int) ([]SearchResult, error)
 }
 

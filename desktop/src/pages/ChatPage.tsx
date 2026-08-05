@@ -539,12 +539,21 @@ const ChatPage: React.FC = () => {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ text: memoryText, scope }),
           });
+          const msgId = Date.now().toString(36);
           addMessage(activeSessionId || '', {
-            id: Date.now().toString(36),
+            id: msgId,
             role: 'system',
             content: `📝 ${t('chat.copied')}: ${memoryText}`,
             timestamp: Date.now(),
           });
+          // Persist so the CLI/simpleui see the same memory entry.
+          if (activeSessionId) {
+            fetch(`${backendUrl}/api/sessions/${activeSessionId}/messages`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ id: msgId, role: 'system', content: `📝 ${t('chat.copied')}: ${memoryText}` }),
+            }).catch(() => {});
+          }
         } catch {}
       }
       setInput('');
@@ -695,6 +704,22 @@ const ChatPage: React.FC = () => {
         role: 'assistant', content: `[Tool: bash]\n$ ${cmd}`, timestamp: Date.now(),
       };
       addMessage(sid, toolMsg);
+      // Persist the placeholder immediately so all UIs share this turn.
+      const persistMsg = (content: string) => {
+        if (!url || !sid) return;
+        fetch(`${url}/api/sessions/${sid}/messages/${toolMsg.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ role: 'assistant', content }),
+        }).catch(() => {});
+      };
+      if (url && sid) {
+        fetch(`${url}/api/sessions/${sid}/messages`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: toolMsg.id, role: 'assistant', content: toolMsg.content }),
+        }).catch(() => {});
+      }
       try {
         const res = await fetch(`${url}/api/shell`, {
           method: 'POST',
@@ -705,9 +730,13 @@ const ChatPage: React.FC = () => {
         let detail = (data?.output || '(无输出)');
         if (data?.error) detail += `\n❌ ${data.error}`;
         if (data?.exit_code && data.exit_code !== 0) detail += `\n[exit ${data.exit_code}]`;
-        updateMessage(sid, { ...toolMsg, content: `[Tool: bash]\n$ ${cmd}\n${detail}` });
+        const content = `[Tool: bash]\n$ ${cmd}\n${detail}`;
+        updateMessage(sid, { ...toolMsg, content });
+        persistMsg(content);
       } catch (e) {
-        updateMessage(sid, { ...toolMsg, content: `[Tool: bash]\n$ ${cmd}\n❌ 执行失败: ${String(e)}` });
+        const content = `[Tool: bash]\n$ ${cmd}\n❌ 执行失败: ${String(e)}`;
+        updateMessage(sid, { ...toolMsg, content });
+        persistMsg(content);
       }
       return;
     }
@@ -1107,9 +1136,18 @@ const ChatPage: React.FC = () => {
               setTimeout(() => {
                 const st = useAppStore.getState();
                 const newId = st.sessions[st.sessions.length - 1]?.id;
+                const base = st.backendUrl;
                 if (newId && activeSession?.messages) {
                   activeSession.messages.forEach((m: Message) => {
-                    addMessage(newId, { ...m, id: Math.random().toString(36).slice(2) });
+                    const copy: Message = { ...m, id: Math.random().toString(36).slice(2) };
+                    addMessage(newId, copy);
+                    if (base) {
+                      fetch(`${base}/api/sessions/${newId}/messages`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ id: copy.id, role: copy.role, content: copy.content }),
+                      }).catch(() => {});
+                    }
                   });
                 }
               }, 100);
@@ -1140,7 +1178,14 @@ const ChatPage: React.FC = () => {
           </button>
           {activeSessionId && (
             <button
-              onClick={() => clearMessages(activeSessionId)}
+              onClick={() => {
+                // Wipe messages in the shared SQLite history too, so the
+                // cleared chat does not resurrect in the CLI/simpleui.
+                if (backendUrl && activeSessionId) {
+                  fetch(`${backendUrl}/api/sessions/${activeSessionId}/clear`, { method: 'POST' }).catch(() => {});
+                }
+                clearMessages(activeSessionId);
+              }}
               title={t('chat.clearChat')}
               style={{
                 background: 'none', border: '1px solid var(--border-color)',
@@ -1469,9 +1514,18 @@ const ChatPage: React.FC = () => {
               setTimeout(() => {
                 const st = useAppStore.getState();
                 const newId = st.sessions[st.sessions.length - 1]?.id;
+                const base = st.backendUrl;
                 if (newId && activeSession?.messages) {
                   activeSession.messages.forEach((m: Message) => {
-                    addMessage(newId, { ...m, id: Math.random().toString(36).slice(2) });
+                    const copy: Message = { ...m, id: Math.random().toString(36).slice(2) };
+                    addMessage(newId, copy);
+                    if (base) {
+                      fetch(`${base}/api/sessions/${newId}/messages`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ id: copy.id, role: copy.role, content: copy.content }),
+                      }).catch(() => {});
+                    }
                   });
                 }
               }, 100);
