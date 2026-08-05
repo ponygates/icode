@@ -121,6 +121,12 @@ type Optimizer struct {
 	compactThreshold float64
 	strategy         CompactionStrategy
 
+	// maxCompactTokens caps the effective compaction threshold so that
+	// models with very large context windows (e.g. 1M tokens) still trigger
+	// compaction at a practical size instead of only when ~80% of the window
+	// is full. 0 means "no ceiling" (fall back to window fraction only).
+	maxCompactTokens int
+
 	// The last compaction summary — injected into prefix for cache stability.
 	compactionSummary string
 
@@ -157,6 +163,11 @@ type Config struct {
 	// CompactThreshold is the fraction of context window that triggers compaction.
 	CompactThreshold float64
 
+	// MaxCompactTokens, when non-zero, caps the effective compaction
+	// threshold. This prevents huge-window models from growing forever and
+	// forces compaction at a practical size (e.g. 128k tokens).
+	MaxCompactTokens int
+
 	// MinKeepMessages is the minimum number of recent messages to always keep.
 	MinKeepMessages int
 
@@ -181,9 +192,14 @@ func DefaultConfig(model types.ModelInfo) Config {
 		ModelInfo:        model,
 		CompactThreshold: 0.80,
 		MinKeepMessages:  4,
+		MaxCompactTokens: 128000,
 		Strategy:         StrategySummarize,
 	}
 }
+
+// MaxCompactTokensDefault is the ceiling applied when a model's window-based
+// threshold would exceed it.
+const MaxCompactTokensDefault = 128000
 
 // New creates an optimizer for a given model.
 func New(cfg Config) *Optimizer {
@@ -192,6 +208,9 @@ func New(cfg Config) *Optimizer {
 	}
 	if cfg.MinKeepMessages <= 0 {
 		cfg.MinKeepMessages = 4
+	}
+	if cfg.MaxCompactTokens <= 0 && cfg.Strategy != StrategyNone {
+		cfg.MaxCompactTokens = MaxCompactTokensDefault
 	}
 	if cfg.Strategy == "" {
 		cfg.Strategy = StrategySummarize
@@ -218,6 +237,7 @@ func New(cfg Config) *Optimizer {
 		modelInfo:         cfg.ModelInfo,
 		compactThreshold:  cfg.CompactThreshold,
 		strategy:          cfg.Strategy,
+		maxCompactTokens:  cfg.MaxCompactTokens,
 		cacheStrategy:     cacheStrat,
 		stats:             Stats{},
 		snipConfig:        snipCfg,
@@ -375,14 +395,12 @@ func (o *Optimizer) buildPrefixLocked() string {
 	// message at position 0 in CompactRequest(). This makes it part of the
 	// conversation log, NOT the prefix, so the immutable prefix stays
 	// cached across compactions.
-
-	if len(o.toolSchemas) > 0 {
-		sb.WriteString("\n\n## Available Tools\n\n")
-		for i, t := range o.toolSchemas {
-			sb.WriteString(fmt.Sprintf("- **%s**: %s\n", t.Name, t.Description))
-			_ = i
-		}
-	}
+	//
+	// Tool definitions are NOT listed here: they are already sent natively
+	// via the provider `tools` array (see engine.go CompactRequest wiring).
+	// A plain-text duplicate listing would only re-bill ~300-600 tokens of
+	// fixed input on every request while adding nothing the schema array
+	// doesn't already tell the model.
 
 	return sb.String()
 }
@@ -401,6 +419,11 @@ func (o *Optimizer) shouldCompactLocked() bool {
 		limit = 128000
 	}
 	threshold := int(float64(limit) * o.compactThreshold)
+	if o.maxCompactTokens > 0 && threshold > o.maxCompactTokens {
+		// Clamp to the effective ceiling so huge-window models don't grow
+		// unbounded before compaction fires.
+		threshold = o.maxCompactTokens
+	}
 	return estimated >= threshold
 }
 

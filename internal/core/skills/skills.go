@@ -265,11 +265,21 @@ func FormatIndex(skills []*Skill) string {
 	for _, s := range skills {
 		trig := ""
 		if len(s.Triggers) > 0 {
-			trig = " [triggers: " + strings.Join(s.Triggers, ", ") + "]"
+			trigs := s.Triggers
+			if len(trigs) > 3 {
+				trigs = trigs[:3]
+			}
+			trig = " [triggers: " + strings.Join(trigs, ", ") + "]"
 		}
 		desc := s.Description
 		if desc == "" {
 			desc = "(no description)"
+		}
+		// Clip long descriptions so the always-present skill index stays
+		// small (long descriptions are the biggest fixed-input cost of the
+		// prefix; full instructions are loaded on demand via use_skill).
+		if r := []rune(desc); len(r) > 80 {
+			desc = string(r[:80]) + "…"
 		}
 		b.WriteString(fmt.Sprintf("\n- **%s**: %s%s", s.Name, desc, trig))
 	}
