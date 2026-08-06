@@ -508,8 +508,12 @@ export const useAppStore = create<AppStore>()(
           }));
           saveToLocal(loaded);
           if (loaded.length > 0) {
-            set({ activeSessionId: loaded[loaded.length - 1].id });
-            loadActive(loaded[loaded.length - 1].id);
+            // The backend list is ordered by updated_at DESC, so the most
+            // recently used session (i.e. whatever desktop/CLI/simpleui last
+            // touched) is FIRST. Resume it so all three ends land on the same
+            // conversation — this is what makes history "sync" across them.
+            set({ activeSessionId: loaded[0].id });
+            loadActive(loaded[0].id);
           }
           return;
         }
@@ -529,8 +533,8 @@ export const useAppStore = create<AppStore>()(
             set({ sessions: loaded });
             saveToLocal(loaded);
             if (loaded.length > 0) {
-              set({ activeSessionId: loaded[loaded.length - 1].id });
-              loadActive(loaded[loaded.length - 1].id);
+              set({ activeSessionId: loaded[0].id });
+              loadActive(loaded[0].id);
             }
             return;
           }
@@ -543,9 +547,9 @@ export const useAppStore = create<AppStore>()(
         set((state) => ({
           sessions: local,
           openTabIds: state.openTabIds.length > 0 ? state.openTabIds : local.map((s) => s.id),
-          activeSessionId: local[local.length - 1].id,
+          activeSessionId: local[0].id,
         }));
-        loadActive(local[local.length - 1].id);
+        loadActive(local[0].id);
       }
     } catch { /* ignore */ }
   },

@@ -128,6 +128,18 @@ func startChat(provider, model, mode string) error {
 
 	fmt.Fprintln(os.Stdout)
 
+	// Auto-resume the most recently updated session so the CLI continues the
+	// conversation desktop / simpleui last touched — the three ends share one
+	// history store, and ListNonDeleted is newest-first. `t.LoadSession` just
+	// buffers the transcript here; it is painted when the raw loop starts.
+	// Only in interactive mode: piped one-shot prompts must not pollute the
+	// most recent session (use `icode exec` for scripting instead).
+	if a != nil && a.SessStore != nil && term.IsTerminal(int(os.Stdin.Fd())) {
+		if sessions, err := sessionum.ListNonDeleted(a.SessStore, 1); err == nil && len(sessions) > 0 {
+			cb.OnResume(sessions[0].ID)
+		}
+	}
+
 	// Show the ASCII logo at startup when not attached to a TTY (pipe /
 	// logged output). In raw mode the logo is rendered inside the TUI
 	// banner instead.

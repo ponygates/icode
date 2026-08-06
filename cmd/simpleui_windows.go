@@ -1484,7 +1484,19 @@ func simpleUIHTML(model, provider string) string {
     if (cur) document.getElementById('session').value = cur;
   }
   function refreshSessions() {
-    if (window.sessions) window.sessions().then(fillSessions).catch(function(){});
+    if (window.sessions) window.sessions().then(function(list){
+      fillSessions(list);
+      // Cross-UI history sync: on a fresh load nothing is selected yet, so
+      // resume the most recently updated session (the backend list is
+      // newest-first) — the same behaviour as desktop/CLI. When the user has
+      // explicitly switched sessions or pressed "新会话" the dropdown already
+      // holds a value, so we never override their choice.
+      var v = document.getElementById('session');
+      if (!v.value && list && list.length > 0) {
+        v.value = list[0].id;
+        if (window.openSession) window.openSession(list[0].id);
+      }
+    }).catch(function(){});
   }
   refreshSessions();
   document.getElementById('session').addEventListener('change', function(e){
