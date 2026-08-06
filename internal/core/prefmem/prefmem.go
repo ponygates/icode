@@ -78,30 +78,81 @@ func normalize(s string) string {
 // containing one of these are candidates for memory — everything else (task
 // instructions, code, file paths) is deliberately ignored, matching the
 // book's "remember preferences, never code" rule.
+//
+// Ordered longest-first so overlapping markers (e.g. "以后都用" vs "以后都")
+// resolve to the most specific one instead of emitting near-duplicate
+// phrases.
 var preferenceMarkers = []struct {
 	marker string
 	tip    string // if non-empty, keep only text after this marker
 }{
 	{"以后都用", ""},
-	{"以后都", ""},
+	{"以后我都要", ""},
+	{"以后都要", ""},
+	{"以后请务必", ""},
 	{"以后请", ""},
+	{"以后都", ""},
 	{"请总是", ""},
 	{"请一直", ""},
+	{"请务必", ""},
 	{"我总是", ""},
+	{"我一直", ""},
 	{"我习惯", ""},
 	{"我偏好", ""},
 	{"我更喜欢", ""},
+	{"我喜欢", ""},
 	{"我喜欢用", ""},
-	{"别用", ""},
-	{"不要用", ""},
+	{"我更爱用", ""},
+	{"我会优先", ""},
+	{"优先使用", ""},
 	{"优先用", ""},
+	{"尽量使用", ""},
+	{"尽量用", ""},
+	{"习惯用", ""},
+	{"偏好看", ""},
+	{"我喜欢看", ""},
+	{"通常用", ""},
+	{"一贯用", ""},
+	{"始终用", ""},
+	{"请用", ""},
+	{"别再用", ""},
+	{"不要用", ""},
+	{"别用", ""},
+	{"不要再", ""},
+	{"废弃用", ""},
 	{"always use", ""},
 	{"always ", ""},
+	{"from now on always ", ""},
+	{"i prefer to ", ""},
 	{"prefer ", ""},
 	{"never use ", ""},
 	{"i like to use ", ""},
 	{"please always ", ""},
+	{"i always use ", ""},
 	{"i always ", ""},
+}
+
+// sortMarkersPreference orders markers by descending length so the longest,
+// most specific match wins when several match at the same position.
+func sortMarkersPreference(list []struct {
+	marker string
+	tip    string
+}) []struct {
+	marker string
+	tip    string
+} {
+	out := make([]struct {
+		marker string
+		tip    string
+	}, len(list))
+	copy(out, list)
+	// stable insertion sort by rune length desc; ties keep original order.
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && len([]rune(out[j].marker)) > len([]rune(out[j-1].marker)); j-- {
+			out[j], out[j-1] = out[j-1], out[j]
+		}
+	}
+	return out
 }
 
 // maxPrefLen caps how long a remembered statement may be. Anything longer is
@@ -111,12 +162,13 @@ const maxPrefLen = 120
 // Extract scans user text for explicit preference statements and returns
 // normalized, deduplicated candidates. It is intentionally cheap and
 // deterministic (no LLM): each result is a short phrase suitable for
-// Store.Remember.
+// Store.Remember. Overlapping markers (e.g. "以后都用" vs "以后都") yield only
+// the longest match, so no near-duplicate phrases are produced.
 func Extract(text string) []string {
 	lower := strings.ToLower(text)
 	seen := make(map[string]bool)
 	var out []string
-	for _, m := range preferenceMarkers {
+	for _, m := range sortMarkersPreference(preferenceMarkers) {
 		idx := strings.Index(lower, m.marker)
 		if idx < 0 {
 			continue
@@ -139,13 +191,30 @@ func Extract(text string) []string {
 		if phrase == "" || len([]rune(phrase)) > maxPrefLen {
 			continue
 		}
-		if seen[phrase] {
+		// Skip if an already-collected phrase is a suffix/prefix near-duplicate
+		// of this one (handles "以后都用X" vs "以后都X" style overlaps).
+		if isNearDuplicate(seen, phrase) {
 			continue
 		}
 		seen[phrase] = true
 		out = append(out, phrase)
 	}
 	return out
+}
+
+// isNearDuplicate reports whether phrase is empty or is a suffix of an
+// already-seen candidate (e.g. "用简体中文回答" is a suffix of "简体中文回答"
+// from the shorter "以后都" marker — keep the longer/more complete one).
+func isNearDuplicate(seen map[string]bool, phrase string) bool {
+	if seen[phrase] {
+		return true
+	}
+	for existing := range seen {
+		if strings.HasSuffix(existing, phrase) || strings.HasSuffix(phrase, existing) {
+			return true
+		}
+	}
+	return false
 }
 
 // Remember records a stated preference, refreshing its SeenAt/Seen counters.

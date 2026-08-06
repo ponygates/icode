@@ -126,3 +126,60 @@ func TestForgetAndPurge(t *testing.T) {
 		t.Fatal("render should be empty after purge")
 	}
 }
+
+// TestExtract_OverlapDedup verifies overlapping markers ("以后都用" vs
+// "以后都") do not emit near-duplicate phrases — only the longest match wins.
+func TestExtract_OverlapDedup(t *testing.T) {
+	got := Extract("以后都用简体中文回答我")
+	// "以后都用" (longest) yields "简体中文回答我". The shorter "以后都" would
+	// yield "用简体中文回答我" which is a suffix-duplicate and must be dropped.
+	for _, g := range got {
+		if strings.HasSuffix(g, "用简体中文回答我") {
+			t.Fatalf("near-duplicate phrase leaked: %q (all: %v)", g, got)
+		}
+	}
+	if len(got) == 0 {
+		t.Fatal("expected at least one extracted phrase")
+	}
+}
+
+// TestExtract_NewMarkers verifies expanded Chinese markers are recognized.
+func TestExtract_NewMarkers(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"以后请务必用 markdown 写文档", "用 markdown 写文档"},
+		{"请务必先跑测试", "先跑测试"},
+		{"我会优先用 sqlite 存数据", "用 sqlite 存数据"},
+		{"尽量使用小写命名", "小写命名"},
+		{"我习惯用 tab 缩进", "用 tab 缩进"},
+		{"别再用 eslint", "eslint"},
+		{"请用中文回复我", "中文回复我"},
+	}
+	for _, c := range cases {
+		got := Extract(c.in)
+		found := false
+		for _, g := range got {
+			if strings.Contains(g, strings.TrimPrefix(c.want, "")) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Extract(%q) = %v, want containing %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestExtract_EnglishNewMarkers verifies the expanded English markers.
+func TestExtract_EnglishNewMarkers(t *testing.T) {
+	got := Extract("from now on always use tabs for indentation")
+	if len(got) == 0 {
+		t.Fatal("expected extraction for from now on always")
+	}
+	got = Extract("i prefer to write tests first")
+	if len(got) == 0 {
+		t.Fatal("expected extraction for i prefer to")
+	}
+}

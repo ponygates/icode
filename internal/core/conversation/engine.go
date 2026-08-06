@@ -109,6 +109,13 @@ type Engine struct {
 	// work. Stale entries age out automatically (prefmem.TTL). Book-inspired:
 	// "remember preferences, never code."
 	prefMem *prefmem.Store
+
+	// prefSavePath is where prefMem is persisted. When set, learnPreferences
+	// schedules a debounced auto-save so preferences survive a crash even if
+	// App.Close() is never reached.
+	prefSavePath string
+	prefSaveTimer *time.Timer
+	prefSaveMu    sync.Mutex
 }
 
 // NewEngine creates a conversation engine.
@@ -152,10 +159,60 @@ func (e *Engine) SetPreferenceMemory(s *prefmem.Store) {
 	e.prefMem = s
 }
 
+// SetPreferenceSavePath enables debounced auto-persistence of preference
+// memory to path. Called after SetPreferenceMemory so a crash mid-session
+// does not lose learned preferences.
+func (e *Engine) SetPreferenceSavePath(path string) {
+	e.prefSaveMu.Lock()
+	defer e.prefSaveMu.Unlock()
+	e.prefSavePath = path
+}
+
+// schedulePrefSave debounces preference persistence: at most one timer is
+// armed, and it fires `delay` after the most recent learn so rapid turns
+// coalesce into a single disk write.
+func (e *Engine) schedulePrefSave(delay time.Duration) {
+	if e.prefSavePath == "" || e.prefMem == nil {
+		return
+	}
+	e.prefSaveMu.Lock()
+	if e.prefSaveTimer != nil {
+		e.prefSaveTimer.Stop()
+	}
+	e.prefSaveTimer = time.AfterFunc(delay, func() {
+		if e.prefSavePath != "" && e.prefMem != nil {
+			_ = e.prefMem.SaveFile(e.prefSavePath)
+		}
+	})
+	e.prefSaveMu.Unlock()
+}
+
+// FlushPreferenceSave performs an immediate synchronous save, cancelling any
+// pending debounce timer. Called on shutdown paths (App.Close) and available
+// for tests.
+func (e *Engine) FlushPreferenceSave() {
+	e.prefSaveMu.Lock()
+	if e.prefSaveTimer != nil {
+		e.prefSaveTimer.Stop()
+		e.prefSaveTimer = nil
+	}
+	path := e.prefSavePath
+	e.prefSaveMu.Unlock()
+	if path != "" && e.prefMem != nil {
+		_ = e.prefMem.SaveFile(path)
+	}
+}
+
 // PreferenceMemory exposes the engine's preference memory Store so the caller
 // can persist (Snapshot) or clear (Purge) it independently of the session.
 func (e *Engine) PreferenceMemory() *prefmem.Store {
 	return e.prefMem
+}
+
+// CircuitBreakerStatus returns a snapshot of every tool's circuit breaker for
+// the UI layer (diagnostics panel, /status, server API).
+func (e *Engine) CircuitBreakerStatus() []CircuitStatus {
+	return e.doomLoop.CircuitStatus()
 }
 
 // learnPreferences scans a user message for explicit preference statements
@@ -165,8 +222,14 @@ func (e *Engine) learnPreferences(content string) {
 	if e.prefMem == nil {
 		return
 	}
+	learned := false
 	for _, pref := range prefmem.Extract(content) {
 		e.prefMem.Remember(pref)
+		learned = true
+	}
+	if learned {
+		// Debounced persistence: crash-safe without spamming disk per turn.
+		e.schedulePrefSave(2 * time.Second)
 	}
 }
 
@@ -633,32 +696,60 @@ func (e *Engine) executeTool(
 func (e *Engine) applyDecision(ctx context.Context, sessionID string, tc types.ToolCall, decision permission.Decision) *types.ToolResult {
 	switch decision {
 	case permission.DecisionAllow:
+		e.rememberConnectDomain(tc)
 		return e.runTool(ctx, tc)
 	case permission.DecisionAllowAll:
 		if e.gate != nil {
 			e.gate.SetSessionAllow(sessionID, true)
 		}
+		e.rememberConnectDomain(tc)
 		return e.runTool(ctx, tc)
 	default:
 		return &types.ToolResult{Success: false, Error: "Permission denied by user"}
 	}
 }
 
+// rememberConnectDomain adds an approved Connect-tier destination (fetch, etc.)
+// to the gate's silent whitelist so Auto mode won't re-prompt for it later.
+// Called only after the user explicitly approves the call.
+func (e *Engine) rememberConnectDomain(tc types.ToolCall) {
+	if e.gate == nil || permission.AccessLevelOf(tc.Name) != permission.AccessConnect {
+		return
+	}
+	a := buildAction(tc.Name, tc.Arguments)
+	if a.URL == "" {
+		return
+	}
+	e.gate.TrustDomain(a.URL)
+}
+
 func (e *Engine) runTool(ctx context.Context, tc types.ToolCall) *types.ToolResult {
+	// Circuit breaker check BEFORE executing (本书 ch.23 三态熔断): an open
+	// breaker blocks the tool until its cooldown elapses, then admits exactly
+	// one probe. This prevents the model from hammering a broken tool every
+	// turn while still auto-healing after the failure storm passes.
+	if allowed, retryIn := e.doomLoop.CheckBreaker(tc.Name); !allowed {
+		msg := fmt.Sprintf("工具「%s」正处于熔断状态，请更换方案（换工具/换参数），不要再调用它。", tc.Name)
+		if retryIn > 0 {
+			msg = fmt.Sprintf("工具「%s」已熔断，约 %s 后可重试一次。请先检查失败原因或更换方案。", tc.Name, retryIn.Round(time.Second))
+		}
+		return &types.ToolResult{Success: false, Error: msg}
+	}
+
 	e.snapshotBeforeTool(ctx, tc)
 	res, err := e.toolReg.Execute(ctx, tc.Name, tc.Arguments)
 	if err != nil {
 		return &types.ToolResult{Success: false, Error: err.Error()}
 	}
 
-	// Circuit breaker (本书 ch.23 熔断): a tool that keeps failing — bash
-	// build errors, fetch timeouts, read errors — trips after
+	// Circuit breaker POST-execution (本书 ch.23 熔断): a tool that keeps
+	// failing — bash build errors, fetch timeouts, read errors — trips after
 	// maxFailuresPerTool consecutive failures so the model is forced to
-	// change strategy instead of retrying the same broken call forever.
-	// A success resets the counter so a flaky tool that recovers is not
-	// kept tripped. Doom-loop signature detection already covers the
-	// "same call repeated" case; this covers "different calls, same tool,
-	// all failing".
+	// change strategy instead of retrying the same broken call forever. A
+	// success closes the breaker (and, if it was half-open, heals it) so a
+	// flaky tool that recovers is not kept tripped. Doom-loop signature
+	// detection already covers the "same call repeated" case; this covers
+	// "different calls, same tool, all failing".
 	if !res.Success {
 		if e.doomLoop.RecordFailure(tc.Name) {
 			return &types.ToolResult{
@@ -774,10 +865,13 @@ func (e *Engine) stashIfPivot(ctx context.Context, sess *types.Session, newConte
 	if lastUser == "" || newContent == "" || !hasToolActivity {
 		return
 	}
-	// Is this actually a pivot? Not if the new message is a short follow-up
-	// that keeps the same task. We treat an explicit new-goal opener as a
-	// pivot. Keep it cheap and deterministic.
-	if !isNewTaskPrompt(newContent) {
+	// Is this actually a pivot? Two complementary signals:
+	//  1. an explicit new-goal opener ("另外…", "顺便…", "新任务:"), or
+	//  2. a topic switch — the new request shares almost no vocabulary with
+	//     the last user request, so it is very likely a different task rather
+	//     than a continuation ("帮我修个 bug" right after "写个报告").
+	// Both are cheap and deterministic; no LLM call.
+	if !isNewTaskPrompt(newContent) && !diverges(newContent, lastUser) {
 		return
 	}
 
@@ -798,6 +892,83 @@ func (e *Engine) stashIfPivot(ctx context.Context, sess *types.Session, newConte
 		summary += fmt.Sprintf("\n\n(stash) 上个任务未完成: %s — 检查点已保存，可 /rewind 恢复。", truncStashMsg(lastUser))
 		_ = sessionum.Save(e.sessionSt, sess, summary)
 	}
+}
+
+// diverges reports whether newMsg is a different task than lastMsg by the
+// share of significant tokens they have in common. Short follow-ups like
+// "继续", "还有", "另外补一句" share little vocabulary but are continuations,
+// so we require the new message to be long enough to be a real request and
+// to share essentially no content words.
+func diverges(newMsg, lastMsg string) bool {
+	na := tokenizeForPivot(newMsg)
+	la := tokenizeForPivot(lastMsg)
+	if len(na) < 4 || len(la) < 4 {
+		// Too short to judge by vocabulary — fall back to opener detection.
+		return false
+	}
+	laSet := make(map[string]bool, len(la))
+	for _, w := range la {
+		laSet[w] = true
+	}
+	shared := 0
+	for _, w := range na {
+		if laSet[w] {
+			shared++
+		}
+	}
+	// <30% shared content vocabulary = a different topic.
+	return float64(shared)/float64(len(na)) < 0.3
+}
+
+// tokenizeForPivot yields content tokens: whole ASCII words plus individual
+// CJK characters (Chinese has no spaces, so character-level is the honest
+// granularity here). Pure connectors/particles and single-char filler are
+// dropped so overlap reflects real topic words.
+func tokenizeForPivot(s string) []string {
+	lower := strings.ToLower(s)
+	stop := map[rune]bool{
+		'的': true, '了': true, '是': true, '我': true, '你': true, '他': true, '她': true, '它': true,
+		'们': true, '在': true, '和': true, '与': true, '或': true, '就': true, '都': true, '也': true,
+		'还': true, '又': true, '要': true, '会': true, '能': true, '很': true, '更': true, '最': true,
+		'吧': true, '吗': true, '呢': true, '啊': true, '嗯': true, '这': true, '那': true, '个': true,
+		'有': true, '做': true, '用': true, '给': true, '让': true, '把': true, '被': true, '帮': true,
+		'请': true, '下': true, '一': true, '并': true, '么': true, '些': true, '里': true,
+		'来': true, '去': true, '到': true, '从': true, '对': true, '为': true, '上': true, '中': true,
+		'等': true, '以': true, '可': true, '好': true, '大': true, '小': true, '新': true, '旧': true,
+	}
+	stopWord := map[string]bool{
+		"the": true, "a": true, "an": true, "to": true, "of": true, "in": true, "on": true,
+		"and": true, "or": true, "for": true, "with": true, "at": true, "it": true, "is": true,
+		"are": true, "was": true, "i": true, "you": true, "me": true, "my": true, "please": true,
+		"help": true, "do": true,
+	}
+	var out []string
+	var word []rune
+	flush := func() {
+		if len(word) == 0 {
+			return
+		}
+		w := string(word)
+		if len(word) >= 2 && !stopWord[w] {
+			out = append(out, w)
+		}
+		word = word[:0]
+	}
+	for _, r := range lower {
+		switch {
+		case r >= 'a' && r <= 'z' || r >= '0' && r <= '9':
+			word = append(word, r)
+		case r >= 0x4e00 && r <= 0x9fff:
+			flush()
+			if !stop[r] {
+				out = append(out, string(r))
+			}
+		default:
+			flush()
+		}
+	}
+	flush()
+	return out
 }
 
 // isNewTaskPrompt is a conservative heuristic: does this user message OPEN a

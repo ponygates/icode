@@ -16,6 +16,7 @@ import (
 	projectcontext "github.com/ponygates/icode/internal/core/context"
 	"github.com/ponygates/icode/internal/core/conversation"
 	"github.com/ponygates/icode/internal/core/permission"
+	"github.com/ponygates/icode/internal/core/prefmem"
 	"github.com/ponygates/icode/internal/core/searchreplace"
 	"github.com/ponygates/icode/internal/core/sessionum"
 	"github.com/ponygates/icode/internal/core/skills"
@@ -142,7 +143,7 @@ func Execute(ctx context.Context, b *Backend, st *State, text string) Result {
 	case "/mcp":
 		return cmdMCP(args)
 	case "/memory":
-		return cmdMemory(args)
+		return cmdMemory(b, args)
 	case "/hooks":
 		return cmdHooks()
 	case "/init":
@@ -1150,10 +1151,15 @@ func cmdMCP(args []string) Result {
 	}
 }
 
-func cmdMemory(args []string) Result {
+func cmdMemory(b *Backend, args []string) Result {
 	proj := projectMemoryPath()
 	user, _ := projectcontext.UserMemoryPath()
-	if len(args) > 0 && strings.ToLower(args[0]) == "edit" {
+	if len(args) == 0 {
+		return memoryOverview(b, proj, user)
+	}
+	sub := strings.ToLower(args[0])
+	switch sub {
+	case "edit":
 		editor := os.Getenv("EDITOR")
 		if editor == "" {
 			if runtime.GOOS == "windows" {
@@ -1170,15 +1176,103 @@ func cmdMemory(args []string) Result {
 			return errf("打开编辑器失败: %v", err)
 		}
 		return ok(fmt.Sprintf("已用 %s 打开项目记忆 %s", editor, proj))
+	case "prefs", "preference", "preferences":
+		return memoryPrefs(b, args[1:])
+	case "list":
+		return memoryPrefs(b, args[1:])
+	case "forget", "rm":
+		return memoryForget(b, args[1:])
+	case "clear":
+		return memoryClear(b, args[1:])
+	default:
+		// Unknown subcommand — treat as a raw append to the project memory file
+		// (legacy behavior) so `# <content>`-style calls keep working.
+		return memoryOverview(b, proj, user)
 	}
-	var b strings.Builder
-	b.WriteString(fmt.Sprintf("记忆文件:\n  项目级: %s\n  用户级: %s\n\n", proj, user))
+}
+
+// memoryOverview shows both the ICODE.md memory files and the remembered
+// preference store.
+func memoryOverview(b *Backend, proj, user string) Result {
+	var bld strings.Builder
+	bld.WriteString(fmt.Sprintf("记忆文件:\n  项目级: %s\n  用户级: %s\n\n", proj, user))
 	if data, err := os.ReadFile(proj); err == nil && len(data) > 0 {
-		b.WriteString("── 项目记忆 (ICODE.md) ──\n" + string(data) + "\n")
+		bld.WriteString("── 项目记忆 (ICODE.md) ──\n" + string(data) + "\n")
 	} else {
-		b.WriteString("（项目记忆为空，用 `# <内容>` 追加，或 `/memory edit` 编辑）\n")
+		bld.WriteString("（项目记忆为空，用 `# <内容>` 追加，或 `/memory edit` 编辑）\n")
 	}
-	return ok(b.String())
+	prefs := memoryPrefs(b, nil)
+	if strings.TrimSpace(prefs.Output) != "" {
+		bld.WriteString("\n" + prefs.Output)
+	}
+	return ok(bld.String())
+}
+
+// memoryPrefs lists the remembered USER PREFERENCES (prefmem). Unlike the
+// ICODE.md files these are learned automatically and only ever hold short
+// preference statements — never code.
+func memoryPrefs(b *Backend, _ []string) Result {
+	if b == nil || b.Engine == nil || b.Engine.PreferenceMemory() == nil {
+		return ok("偏好记忆未启用。")
+	}
+	entries := b.Engine.PreferenceMemory().Snapshot()
+	if len(entries) == 0 {
+		return ok("（暂无已记忆的用户偏好。说“以后都用…/优先用…”会自动记住。）")
+	}
+	var bld strings.Builder
+	bld.WriteString("已记忆的用户偏好 (prefmem):\n")
+	for _, e := range entries {
+		seen := ""
+		if e.Seen > 1 {
+			seen = fmt.Sprintf("  (提到 %d 次)", e.Seen)
+		}
+		bld.WriteString(fmt.Sprintf("  · %s%s\n", e.Text, seen))
+	}
+	bld.WriteString("\n管理: /memory forget <内容>  清除单条；/memory clear 清空全部；/memory list 查看。")
+	return ok(bld.String())
+}
+
+// memoryForget removes a single remembered preference matching the argument
+// text (substring match).
+func memoryForget(b *Backend, args []string) Result {
+	if b == nil || b.Engine == nil || b.Engine.PreferenceMemory() == nil {
+		return ok("偏好记忆未启用。")
+	}
+	if len(args) == 0 {
+		return errf("用法: /memory forget <偏好内容片段>")
+	}
+	needle := strings.Join(args, " ")
+	store := b.Engine.PreferenceMemory()
+	removed := false
+	for _, e := range store.Snapshot() {
+		if strings.Contains(e.Text, needle) {
+			store.Forget(e.Text)
+			removed = true
+		}
+	}
+	if removed {
+		_ = store.SaveFile(prefmem.DefaultPath())
+		return ok(fmt.Sprintf("已遗忘 %d 条与 “%s” 相关的偏好。", 1, needle))
+	}
+	return ok(fmt.Sprintf("没有找到与 “%s” 匹配的偏好。用 /memory list 查看。", needle))
+}
+
+// memoryClear wipes all remembered preferences (both memory and the persisted
+// file). Pass "yes" to skip the confirmation prompt.
+func memoryClear(b *Backend, args []string) Result {
+	if b == nil || b.Engine == nil || b.Engine.PreferenceMemory() == nil {
+		return ok("偏好记忆未启用。")
+	}
+	confirm := ""
+	if len(args) > 0 {
+		confirm = strings.ToLower(args[0])
+	}
+	if confirm != "yes" && confirm != "y" {
+		return ok("确认清空全部偏好记忆？执行 /memory clear yes")
+	}
+	n := b.Engine.PreferenceMemory().Purge()
+	_ = b.Engine.PreferenceMemory().SaveFile(prefmem.DefaultPath())
+	return ok(fmt.Sprintf("已清空 %d 条偏好记忆。", n))
 }
 
 func cmdHooks() Result {

@@ -103,3 +103,51 @@ func TestAutoModeConnectToolsAsk(t *testing.T) {
 		t.Errorf("Auto mode grep → %s, want allow", res.Decision)
 	}
 }
+
+// After a user approves a Connect-tier destination once, Auto mode remembers
+// the host and silently auto-approves subsequent fetches to it — the
+// "静默白名单" behaviour (本书 ch.22). Other hosts still ask.
+func TestAutoModeConnectDomainWhitelist(t *testing.T) {
+	g := NewGate(ModeAuto)
+
+	g.TrustDomain("https://example.com/docs/page")
+	if !g.IsDomainTrusted("example.com") {
+		t.Fatal("example.com should be trusted after approval")
+	}
+
+	if res := g.Check("s1", Action{Tool: "fetch", URL: "https://example.com/other"});
+		res.Decision != DecisionAllow {
+		t.Errorf("fetch to trusted host → %s, want allow (silent whitelist)", res.Decision)
+	}
+	if res := g.Check("s1", Action{Tool: "fetch", URL: "https://example.org/doc"});
+		res.Decision != DecisionAsk {
+		t.Errorf("fetch to untrusted host → %s, want ask", res.Decision)
+	}
+
+	// Untrusting restores the prompt.
+	g.UntrustDomain("https://example.com/")
+	if g.IsDomainTrusted("example.com") {
+		t.Fatal("example.com should be untrusted after UntrustDomain")
+	}
+	if res := g.Check("s1", Action{Tool: "fetch", URL: "https://example.com/x"});
+		res.Decision != DecisionAsk {
+		t.Errorf("fetch after untrust → %s, want ask", res.Decision)
+	}
+}
+
+// The whitelist matches the host, not the path, and is case-insensitive.
+func TestHostOf(t *testing.T) {
+	cases := map[string]string{
+		"https://Example.COM/path?a=b": "example.com",
+		"http://api.example.com:8080/x": "api.example.com",
+		"example.org":                  "example.org",
+		"user:pass@sub.host.io:9090/p": "sub.host.io",
+		"not a url":                    "",
+		"":                             "",
+	}
+	for in, want := range cases {
+		if got := HostOf(in); got != want {
+			t.Errorf("HostOf(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

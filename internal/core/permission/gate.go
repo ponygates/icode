@@ -22,6 +22,7 @@ package permission
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -127,6 +128,12 @@ type Gate struct {
 	// "allow" → always allow, "deny" → always deny, "" or "ask" → use normal flow.
 	// Saved to config.yaml and survives restarts.
 	ToolRules map[string]string // toolName → "allow" | "deny" | "ask"
+
+	// connectDomains is the Connect-tier silent whitelist (本书 ch.22 静默白名单):
+	// hosts the user has explicitly approved at least once. In Auto mode a
+	// subsequent fetch to a trusted host is granted without re-prompting —
+	// the user already confirmed that destination.
+	connectDomains map[string]bool // host → trusted
 }
 
 // HooksConfig represents the hooks.yaml configuration.
@@ -154,6 +161,7 @@ func NewGate(mode Mode) *Gate {
 		sessionToolAllows: make(map[string]map[string]bool),
 		hooks:             loadHooks(),
 		ToolRules:         make(map[string]string),
+		connectDomains:    make(map[string]bool),
 	}
 }
 
@@ -343,6 +351,94 @@ func (g *Gate) GetToolRules() map[string]string {
 	return out
 }
 
+// TrustDomain records that the user has approved a Connect-tier destination.
+// Pass a full URL or a bare host; the host is normalised (lowercase, port
+// preserved) and remembered so Auto mode stops re-asking for it.
+func (g *Gate) TrustDomain(raw string) {
+	host := HostOf(raw)
+	if host == "" {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.connectDomains[host] = true
+}
+
+// UntrustDomain removes a host from the Connect-tier whitelist. A future fetch
+// to it will be prompted again.
+func (g *Gate) UntrustDomain(raw string) {
+	host := HostOf(raw)
+	if host == "" {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.connectDomains, host)
+}
+
+// IsDomainTrusted reports whether the given URL/host is in the Connect-tier
+// whitelist.
+func (g *Gate) IsDomainTrusted(raw string) bool {
+	host := HostOf(raw)
+	if host == "" {
+		return false
+	}
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.connectDomains[host]
+}
+
+// TrustedDomains returns a copy of the current whitelist (for diagnostics/UI).
+func (g *Gate) TrustedDomains() []string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	out := make([]string, 0, len(g.connectDomains))
+	for h := range g.connectDomains {
+		out = append(out, h)
+	}
+	return out
+}
+
+// HostOf extracts a normalised host (lowercase, port preserved) from a full
+// URL or bare host string. Returns "" for unparseable input.
+func HostOf(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	host := u.Host
+	if i := strings.IndexByte(host, '@'); i >= 0 {
+		host = host[i+1:]
+	}
+	host = strings.ToLower(host)
+	if i := strings.LastIndexByte(host, ':'); i >= 0 && !strings.Contains(host[i:], "]") {
+		// Trailing :port, but never split a bracketed IPv6 literal like "[::1]".
+		host = host[:i]
+	}
+	return strings.Trim(host, "[]")
+}
+
+// connectDomainTrusted is the non-locking form used inside Check (which already
+// holds the read lock). Empty-URL tools (web_search by query) have no fixed
+// destination and therefore never match.
+func (g *Gate) connectDomainTrusted(action Action) bool {
+	if action.URL == "" {
+		return false
+	}
+	host := HostOf(action.URL)
+	if host == "" {
+		return false
+	}
+	return g.connectDomains[host]
+}
+
 // ============================================================================
 // Check — determines whether a tool action needs approval
 // ============================================================================
@@ -384,6 +480,12 @@ func (g *Gate) Check(sessionID string, action Action) CheckResult {
 		// Check session-level per-tool allow
 		if g.sessionToolAllows[sessionID] != nil && g.sessionToolAllows[sessionID][action.Tool] {
 			return CheckResult{Decision: DecisionAllow, Reason: "Tool allowed for this session", Prompt: prompt}
+		}
+		// Connect-tier silent whitelist (本书 ch.22 静默白名单): a destination
+		// the user approved once is auto-allowed on subsequent visits without a
+		// re-prompt. Requires the URL field (web_search-by-query never matches).
+		if level == AccessConnect && g.connectDomainTrusted(action) {
+			return CheckResult{Decision: DecisionAllow, Reason: "Connect tier: domain already approved by user", Prompt: prompt}
 		}
 		return CheckResult{
 			Decision: DecisionAsk,

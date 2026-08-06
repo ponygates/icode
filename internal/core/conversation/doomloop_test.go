@@ -2,6 +2,7 @@ package conversation
 
 import (
 	"testing"
+	"time"
 )
 
 func TestDoomLoopDetector_NoLoop(t *testing.T) {
@@ -185,4 +186,118 @@ func TestDoomLoopDetector_FailuresIndependentPerTool(t *testing.T) {
 	if s := d.FailureStatus(); s["fetch"] != 3 || s["grep"] != 1 {
 		t.Errorf("unexpected failure status: %#v", s)
 	}
+}
+
+// TestCircuitBreaker_OpenBlocksCalls verifies that once tripped, the breaker
+// blocks further calls until the cooldown elapses.
+func TestCircuitBreaker_OpenBlocksCalls(t *testing.T) {
+	d := NewDoomLoopDetector()
+	d.breakerCooldown = time.Minute
+	for i := 0; i < 3; i++ {
+		d.RecordFailure("bash")
+	}
+	// Tripped → CheckBreaker must block with a positive retryIn.
+	allowed, retryIn := d.CheckBreaker("bash")
+	if allowed {
+		t.Fatal("open breaker must block calls")
+	}
+	if retryIn <= 0 {
+		t.Fatalf("open breaker must report retryIn > 0, got %v", retryIn)
+	}
+	// Other tools are unaffected.
+	if a, _ := d.CheckBreaker("read_file"); !a {
+		t.Fatal("untouched tool must stay allowed")
+	}
+}
+
+// TestCircuitBreaker_HalfOpenProbe verifies the cooldown-elapsed transition:
+// the breaker admits exactly ONE probe call, and a failed probe re-opens it.
+func TestCircuitBreaker_HalfOpenProbe(t *testing.T) {
+	d := NewDoomLoopDetector()
+	d.breakerCooldown = time.Minute
+	for i := 0; i < 3; i++ {
+		d.RecordFailure("fetch")
+	}
+	// Fast-forward past the cooldown.
+	d.mu.Lock()
+	d.breakers["fetch"].trippedAt = time.Now().Add(-2 * time.Minute)
+	d.mu.Unlock()
+
+	// First call after cooldown = the probe, allowed.
+	allowed, _ := d.CheckBreaker("fetch")
+	if !allowed {
+		t.Fatal("half-open breaker must admit the probe call")
+	}
+	// A second call before the probe resolves must be blocked (probe consumed).
+	if a, _ := d.CheckBreaker("fetch"); a {
+		t.Fatal("only one probe may be admitted per half-open window")
+	}
+	// Probe fails → breaker re-opens with a fresh cooldown.
+	if !d.RecordFailure("fetch") {
+		t.Fatal("failed probe should re-open the breaker")
+	}
+	if a, retryIn := d.CheckBreaker("fetch"); a || retryIn <= 0 {
+		t.Fatalf("re-opened breaker must block with cooldown, got allowed=%v retryIn=%v", a, retryIn)
+	}
+}
+
+// TestCircuitBreaker_ProbeSuccessHeals verifies a successful probe closes the
+// breaker: subsequent calls flow normally and the failure count is reset.
+func TestCircuitBreaker_ProbeSuccessHeals(t *testing.T) {
+	d := NewDoomLoopDetector()
+	d.breakerCooldown = time.Minute
+	for i := 0; i < 3; i++ {
+		d.RecordFailure("bash")
+	}
+	d.mu.Lock()
+	d.breakers["bash"].trippedAt = time.Now().Add(-2 * time.Minute)
+	d.mu.Unlock()
+
+	if a, _ := d.CheckBreaker("bash"); !a {
+		t.Fatal("probe should be admitted after cooldown")
+	}
+	// Success closes the breaker.
+	d.ResetToolFailures("bash")
+
+	if s := d.FailureStatus(); s["bash"] != 0 {
+		t.Fatalf("expected failures reset after heal, got %d", s["bash"])
+	}
+	if a, _ := d.CheckBreaker("bash"); !a {
+		t.Fatal("closed breaker must allow calls again")
+	}
+}
+
+// TestCircuitBreaker_StatusExposesState verifies CircuitStatus surfaces
+// open/half_open/closed for the UI layer.
+func TestCircuitBreaker_StatusExposesState(t *testing.T) {
+	d := NewDoomLoopDetector()
+	d.breakerCooldown = time.Hour
+
+	d.RecordFailure("bash")
+	d.RecordFailure("bash")
+	statuses := d.CircuitStatus()
+	if len(statuses) == 0 {
+		t.Fatal("expected circuit status entries")
+	}
+	// bash has 2 failures but is still closed (under threshold) — status shows
+	// failures but state closed.
+	found := false
+	for _, st := range statuses {
+		if st.Tool == "bash" && st.State == "closed" && st.Failures == 2 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected closed bash with 2 failures, got %+v", statuses)
+	}
+
+	// Trip it → open with RetryIn.
+	d.RecordFailure("bash")
+	statuses = d.CircuitStatus()
+	for _, st := range statuses {
+		if st.Tool == "bash" && st.State == "open" && st.RetryIn > 0 {
+			return
+		}
+	}
+	t.Fatalf("expected open bash with RetryIn, got %+v", statuses)
 }

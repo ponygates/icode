@@ -2,8 +2,11 @@ package conversation
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ponygates/icode/internal/core/agent"
 	"github.com/ponygates/icode/internal/core/permission"
@@ -240,5 +243,83 @@ func TestStashIfPivot_IgnoresContinuation(t *testing.T) {
 	got, _ := store.Get("sess-cont")
 	if s := sessionum.Get(got); strings.Contains(s, "(stash)") {
 		t.Fatalf("continuation must not stash, got:\n%s", s)
+	}
+}
+
+// TestStashIfPivot_DivergentTopicTriggers verifies that a long request with
+// almost no vocabulary overlap with the previous task is treated as a pivot
+// even without an explicit opener marker.
+func TestStashIfPivot_DivergentTopicTriggers(t *testing.T) {
+	store := session.NewStore()
+	sess := &types.Session{ID: "sess-div", ModelID: "m", ProviderName: "deepseek"}
+	if err := store.Create(sess); err != nil {
+		t.Fatal(err)
+	}
+	sess.Messages = []types.Message{
+		{Role: types.RoleUser, Content: "帮我写一篇关于人工智能的读书报告"},
+		{Role: types.RoleTool, Content: "Edited report.md"},
+	}
+	if err := store.Update(sess); err != nil {
+		t.Fatal(err)
+	}
+
+	e := NewEngine(nil, store, nil)
+	e.stashIfPivot(context.Background(), sess, "帮我修一下前端登录页面的按钮样式")
+
+	got, _ := store.Get("sess-div")
+	if summary := sessionum.Get(got); !strings.Contains(summary, "(stash)") {
+		t.Fatalf("divergent topic should stash, got summary:\n%s", summary)
+	}
+}
+
+// TestEngineCircuitBreakerStatus_ExposesTrip verifies the engine accessor
+// surfaces a tripped breaker to the UI layer.
+func TestEngineCircuitBreakerStatus_ExposesTrip(t *testing.T) {
+	e := newTestEngine()
+	e.doomLoop.RecordFailure("bash")
+	e.doomLoop.RecordFailure("bash")
+	e.doomLoop.RecordFailure("bash")
+
+	got := e.CircuitBreakerStatus()
+	found := false
+	for _, st := range got {
+		if st.Tool == "bash" && st.State == "open" && st.RetryIn > 0 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected tripped bash in circuit status, got %+v", got)
+	}
+}
+
+// TestEnginePreferenceAutoSave verifies that learning a preference schedules a
+// debounced disk write and that FlushPreferenceSave writes synchronously.
+func TestEnginePreferenceAutoSave(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "prefs.json")
+
+	e := newTestEngine()
+	e.SetPreferenceSavePath(path)
+	e.learnPreferences("以后都用简体中文回答")
+
+	// Fresh flush (without waiting for the 2s debounce) must persist.
+	e.FlushPreferenceSave()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("expected persisted prefs file, err=%v", err)
+	}
+	if !strings.Contains(string(data), "简体中文回答") {
+		t.Fatalf("persisted prefs missing learned entry: %s", string(data))
+	}
+
+	// The debounce timer itself: a simulated wait should also write.
+	e.learnPreferences("优先用 Go 写后台服务")
+	time.Sleep(2200 * time.Millisecond)
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("expected auto-save after debounce, err=%v", err)
+	}
+	if !strings.Contains(string(data), "优先用 Go") && !strings.Contains(string(data), "Go 写后台服务") {
+		t.Fatalf("auto-save missing second pref, got: %s", string(data))
 	}
 }
