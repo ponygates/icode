@@ -18,6 +18,7 @@ import (
 	projectcontext "github.com/ponygates/icode/internal/core/context"
 	"github.com/ponygates/icode/internal/core/hooks"
 	"github.com/ponygates/icode/internal/core/permission"
+	"github.com/ponygates/icode/internal/core/prefmem"
 	"github.com/ponygates/icode/internal/core/privacy"
 	"github.com/ponygates/icode/internal/core/router"
 	"github.com/ponygates/icode/internal/core/sessionum"
@@ -102,6 +103,12 @@ type Engine struct {
 	// or a clearly mid-sentence stop) so the engine can retry with a bigger
 	// output budget and a continuation hint (Claude Code parity).
 	truncDet *TruncationDetector
+
+	// prefMem remembers USER PREFERENCES (never code) across turns, injecting
+	// them into the system prompt so the model respects how the user likes to
+	// work. Stale entries age out automatically (prefmem.TTL). Book-inspired:
+	// "remember preferences, never code."
+	prefMem *prefmem.Store
 }
 
 // NewEngine creates a conversation engine.
@@ -123,6 +130,7 @@ func NewEngine(
 		teamRegistry:   make(map[string]*agent.TeamDef),
 		budgetEnforcer: tokenopt.NewBudgetEnforcer(tokenopt.DefaultBudgetConfig()),
 		truncDet:       NewTruncationDetector(DefaultTruncationRecoveryConfig()),
+		prefMem:        prefmem.New(prefmem.Options{}),
 	}
 	if gate != nil {
 		slashcmd.SetShellGate(&shellGateAdapter{gate: gate})
@@ -133,6 +141,33 @@ func NewEngine(
 
 func (e *Engine) SetPermissionHandler(fn PermissionHandler) {
 	e.permHandler = fn
+}
+
+// SetPreferenceMemory replaces the engine's preference memory Store, e.g.
+// with one that has been Restore()d from disk. Pass nil to disable memory.
+func (e *Engine) SetPreferenceMemory(s *prefmem.Store) {
+	if s == nil {
+		s = prefmem.New(prefmem.Options{})
+	}
+	e.prefMem = s
+}
+
+// PreferenceMemory exposes the engine's preference memory Store so the caller
+// can persist (Snapshot) or clear (Purge) it independently of the session.
+func (e *Engine) PreferenceMemory() *prefmem.Store {
+	return e.prefMem
+}
+
+// learnPreferences scans a user message for explicit preference statements
+// and records them in memory (book: prefer a repeated, explicit statement;
+// ignore everything else, especially code).
+func (e *Engine) learnPreferences(content string) {
+	if e.prefMem == nil {
+		return
+	}
+	for _, pref := range prefmem.Extract(content) {
+		e.prefMem.Remember(pref)
+	}
 }
 
 func (e *Engine) SetPermissionResponse(requestID string, decision permission.Decision) {
@@ -615,6 +650,29 @@ func (e *Engine) runTool(ctx context.Context, tc types.ToolCall) *types.ToolResu
 	if err != nil {
 		return &types.ToolResult{Success: false, Error: err.Error()}
 	}
+
+	// Circuit breaker (本书 ch.23 熔断): a tool that keeps failing — bash
+	// build errors, fetch timeouts, read errors — trips after
+	// maxFailuresPerTool consecutive failures so the model is forced to
+	// change strategy instead of retrying the same broken call forever.
+	// A success resets the counter so a flaky tool that recovers is not
+	// kept tripped. Doom-loop signature detection already covers the
+	// "same call repeated" case; this covers "different calls, same tool,
+	// all failing".
+	if !res.Success {
+		if e.doomLoop.RecordFailure(tc.Name) {
+			return &types.ToolResult{
+				Success: false,
+				Error: fmt.Sprintf(
+					"工具「%s」已连续失败，触发熔断。请立即更换方案（换个参数、换工具、或先检查原因），不要再调用此工具。最近错误：%s",
+					tc.Name, firstN(res.Error, 160),
+				),
+			}
+		}
+	} else {
+		e.doomLoop.ResetToolFailures(tc.Name)
+	}
+
 	// Tool output dedup: if the same (tool + args) produced the same
 	// content before, replace the result with a short placeholder to keep
 	// the context lean. The model already saw this data on the previous
@@ -687,6 +745,88 @@ func (e *Engine) snapshotBeforeTool(ctx context.Context, tc types.ToolCall) {
 		return // silently skip — checkpoints are best-effort
 	}
 	_, _ = store.Snapshot(ctx, "before "+tc.Name)
+}
+
+// stashIfPivot inspects the session before a new user message and, if the
+// user is continuing a DIFFERENT task (a pivot) rather than answering the
+// current one, snapshots a checkpoint and refreshes the archived summary so
+// the interrupted task stays recoverable. Best-effort: failures are ignored.
+func (e *Engine) stashIfPivot(ctx context.Context, sess *types.Session, newContent string) {
+	if e.sessionSt == nil || sess == nil {
+		return
+	}
+
+	// "In progress" = we have at least one prior user turn AND some tool
+	// activity after it. Without both there is nothing worth stashing.
+	lastUser := ""
+	hasToolActivity := false
+	for _, m := range sess.Messages {
+		switch m.Role {
+		case types.RoleUser:
+			if t := strings.TrimSpace(m.Content); t != "" {
+				lastUser = t
+			}
+		case types.RoleTool:
+			hasToolActivity = true
+		}
+	}
+	newContent = strings.TrimSpace(newContent)
+	if lastUser == "" || newContent == "" || !hasToolActivity {
+		return
+	}
+	// Is this actually a pivot? Not if the new message is a short follow-up
+	// that keeps the same task. We treat an explicit new-goal opener as a
+	// pivot. Keep it cheap and deterministic.
+	if !isNewTaskPrompt(newContent) {
+		return
+	}
+
+	// Snapshot a checkpoint labeled with the *interrupted* task so /rewind can
+	// return here. Best-effort: an empty shadow repo yields no commit, which
+	// is fine — the summary note below is the authoritative stash record.
+	store, err := checkpoint.GetOrOpen(sess.ID)
+	if err == nil {
+		_, _ = store.Snapshot(ctx, "stash before: "+truncStashMsg(lastUser))
+	}
+	// Refresh the archived summary so the resume layer sees the interrupted
+	// work at a glance.
+	summary := sessionum.Get(sess)
+	if g := sessionum.Generate(sess, sess.ModelID, sess.ProviderName, ""); g != "" {
+		summary = g
+	}
+	if strings.TrimSpace(summary) != "" {
+		summary += fmt.Sprintf("\n\n(stash) 上个任务未完成: %s — 检查点已保存，可 /rewind 恢复。", truncStashMsg(lastUser))
+		_ = sessionum.Save(e.sessionSt, sess, summary)
+	}
+}
+
+// isNewTaskPrompt is a conservative heuristic: does this user message OPEN a
+// new/parallel task rather than continue the current one? It matches short
+// command-like openers ("另外…", "顺便…", "新任务:", "同时…"). Plain
+// continuation sentences are NOT treated as pivots.
+func isNewTaskPrompt(s string) bool {
+	if s == "" {
+		return false
+	}
+	lower := strings.ToLower(s)
+	for _, m := range []string{
+		"另外", "顺便", "与此同时", "同时", "接着", "然后", "新任务", "换个", "另外帮我",
+		"紧接着", "另外，", "还有", "以及", "aside", "by the way", "also, ", "next: ",
+	} {
+		if strings.HasPrefix(lower, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// truncStashMsg shortens a task reference used in stash labels/notes.
+func truncStashMsg(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= 60 {
+		return s
+	}
+	return s[:57] + "..."
 }
 
 func (e *Engine) genPermID() string {
@@ -882,6 +1022,12 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 		return nil, fmt.Errorf("get session: %w", err)
 	}
 
+	// Stash-and-continue audit: if the user pivots to a (different) task while
+	// in-progress work exists in this session, snapshot a checkpoint + refresh
+	// the archived summary so the old task remains recoverable. This is
+	// best-effort — it must never block the conversation.
+	e.stashIfPivot(ctx, sess, content)
+
 	// Smart model routing: only engage when the user has NOT explicitly
 	// chosen a model (session model empty or "auto"). An explicit selection
 	// made in the UI/config (e.g. openrouter/free) is always respected, so
@@ -980,6 +1126,11 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 	}
 	opt.AddMessage(userMsg)
 	e.sessionSt.AppendMessage(sessionID, userMsg)
+
+	// Preference memory: learn from what the user just said (only explicit
+	// preference statements — never code). The block is injected into the
+	// system prompt on subsequent turns.
+	e.learnPreferences(sendContent)
 
 	messages := opt.CompactRequest("")
 
@@ -1454,6 +1605,16 @@ Session: %s`, sessionID)
 			if skillBlock := skills.FormatIndex(ptrs); skillBlock != "" {
 				result += skillBlock
 			}
+		}
+	}
+
+	// Remembered user preferences (prefmem): a short list of the user's
+	// durable work-style facts, e.g. "用简体中文回答" or "优先用 Go 写后台
+	// 服务". Injected last so they are near the model's focus; empty when
+	// nothing is remembered so the cache prefix stays stable.
+	if e.prefMem != nil {
+		if prefs := e.prefMem.Render(); prefs != "" {
+			result += prefs
 		}
 	}
 	return result

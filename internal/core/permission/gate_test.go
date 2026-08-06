@@ -64,3 +64,42 @@ func TestAllowedPathsIgnoresNonFileTools(t *testing.T) {
 		t.Errorf("non-path tool affected by sandbox: %s", res.Decision)
 	}
 }
+
+// Four-tier permission classification (本书 ch.22).
+func TestAccessLevelOf(t *testing.T) {
+	cases := map[string]AccessLevel{
+		"read_file":     AccessRead,
+		"grep":          AccessRead,
+		"git_diff":      AccessRead,
+		"write_file":    AccessWrite,
+		"edit":          AccessWrite,
+		"search_replace": AccessWrite,
+		"bash":          AccessExecute,
+		"git_commit":    AccessExecute,
+		"fetch":         AccessConnect,
+		"web_search":    AccessConnect,
+		"image_gen":     AccessConnect,
+		"unknown_tool":  AccessRead,
+	}
+	for tool, want := range cases {
+		if got := AccessLevelOf(tool); got != want {
+			t.Errorf("AccessLevelOf(%q) = %v, want %v", tool, got, want)
+		}
+	}
+}
+
+// In Auto mode, Connect-tier tools (fetch/web_search) reach external
+// networks, so they must be asked rather than silently auto-approved even
+// though they are logically read-only.
+func TestAutoModeConnectToolsAsk(t *testing.T) {
+	g := NewGate(ModeAuto)
+	for _, tool := range []string{"fetch", "web_search"} {
+		if res := g.Check("s1", Action{Tool: tool, URL: "https://example.com"}); res.Decision != DecisionAsk {
+			t.Errorf("Auto mode %s → %s, want ask (Connect tier)", tool, res.Decision)
+		}
+	}
+	// Read tier still auto-approves.
+	if res := g.Check("s1", Action{Tool: "grep", Path: "."}); res.Decision != DecisionAllow {
+		t.Errorf("Auto mode grep → %s, want allow", res.Decision)
+	}
+}

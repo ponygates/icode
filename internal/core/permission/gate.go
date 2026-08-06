@@ -41,6 +41,41 @@ const (
 	ModeYOLO  Mode = "yolo"
 )
 
+// AccessLevel classifies a tool action into Claude Code's four-tier
+// permission model (本书 ch.22):
+//
+//	Read    — low risk, changes nothing (read_file, grep, git_diff…)
+//	Write   — mid/high risk, changes files or workspace (edit, write_file…)
+//	Execute — mid/high risk, runs commands / changes system state (bash)
+//	Connect — reaches external networks / services (fetch, web_search, …)
+//
+// Read is safe to auto-approve in Auto mode. Write/Execute/Connect are
+// treated as mutating-or-external and require confirmation.
+type AccessLevel int
+
+const (
+	AccessRead    AccessLevel = iota // observe only, no side effects
+	AccessWrite                      // mutates local files/workspace
+	AccessExecute                    // runs commands, changes system state
+	AccessConnect                    // touches external network/services
+)
+
+// String returns a short human-readable label for a level.
+func (l AccessLevel) String() string {
+	switch l {
+	case AccessRead:
+		return "Read"
+	case AccessWrite:
+		return "Write"
+	case AccessExecute:
+		return "Execute"
+	case AccessConnect:
+		return "Connect"
+	default:
+		return "?"
+	}
+}
+
 // Decision represents the outcome of a permission check.
 type Decision string
 
@@ -328,10 +363,13 @@ func (g *Gate) Check(sessionID string, action Action) CheckResult {
 
 	switch g.mode {
 	case ModeAuto:
-		// Read-only / safe operations are auto-approved; anything that could
-		// mutate state still asks the user (unless it is on the deny list).
-		if g.isReadOnly(action) {
-			return CheckResult{Decision: DecisionAllow, Reason: "Auto mode: read-only operation", Prompt: prompt}
+		// Four-tier permission (本书 ch.22): Read is auto-approved; Write,
+		// Execute, and Connect all require confirmation — Connect tools
+		// (fetch/web_search) touch external networks, so even though they
+		// don't mutate local state they are NOT silently auto-approved.
+		level := AccessLevelOf(action.Tool)
+		if level == AccessRead && g.isReadOnly(action) {
+			return CheckResult{Decision: DecisionAllow, Reason: "Auto mode: Read-tier operation", Prompt: prompt}
 		}
 		if g.isDenied(action) {
 			return CheckResult{Decision: DecisionDeny, Reason: "Command is in the deny list", Prompt: prompt}
@@ -347,7 +385,11 @@ func (g *Gate) Check(sessionID string, action Action) CheckResult {
 		if g.sessionToolAllows[sessionID] != nil && g.sessionToolAllows[sessionID][action.Tool] {
 			return CheckResult{Decision: DecisionAllow, Reason: "Tool allowed for this session", Prompt: prompt}
 		}
-		return CheckResult{Decision: DecisionAsk, Prompt: prompt}
+		return CheckResult{
+			Decision: DecisionAsk,
+			Prompt:   prompt,
+			Reason:   fmt.Sprintf("Auto mode: %s-tier operation needs confirmation", level),
+		}
 
 	case ModePlan:
 		if g.isReadOnly(action) {
@@ -435,6 +477,36 @@ func (g *Gate) isReadOnly(action Action) bool {
 		"todo_write": true,
 	}
 	return readOnlyTools[action.Tool]
+}
+
+// AccessLevelOf classifies a tool into the four-tier permission model
+// (Read / Write / Execute / Connect). Used by the gate to decide how a tool
+// is treated in Auto mode: Connect tools (fetch, web_search) reach external
+// networks, so they are NOT silently auto-approved even though they are
+// logically "read-only" — the model must justify the network call (本书
+// ch.22: "Connect 涉及外部交互").
+func AccessLevelOf(toolName string) AccessLevel {
+	switch toolName {
+	// Connect — external network / services. Even though fetch and web_search
+	// don't mutate local state, they exfiltrate a URL/keyword to a remote
+	// service, so they get their own tier above Read.
+	case "fetch", "web_search", "web_fetch", "search_web",
+		"image_gen", "video_gen", "mcp_call":
+		return AccessConnect
+
+	// Execute — runs commands / changes system state.
+	case "bash", "run_command", "cmd", "git_commit":
+		return AccessExecute
+
+	// Write — mutates local files or workspace.
+	case "write_file", "edit", "search_replace", "git_branch",
+		"disk_cleanup", "todo_write":
+		return AccessWrite
+
+	// Everything else is observation-only.
+	default:
+		return AccessRead
+	}
 }
 
 // outsideAllowedPaths reports whether a path-bearing tool targets a location

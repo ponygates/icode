@@ -2,10 +2,14 @@ package conversation
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/ponygates/icode/internal/core/agent"
 	"github.com/ponygates/icode/internal/core/permission"
+	"github.com/ponygates/icode/internal/core/prefmem"
+	"github.com/ponygates/icode/internal/core/session"
+	"github.com/ponygates/icode/internal/core/sessionum"
 	"github.com/ponygates/icode/internal/types"
 )
 
@@ -153,5 +157,88 @@ func TestEngineSetters(t *testing.T) {
 	}
 	if len(e.fallbackModels) != 1 || e.fallbackModels[0] != "model-b" {
 		t.Fatalf("fallback models not set: %v", e.fallbackModels)
+	}
+}
+
+// TestLearnPreferences_HonorsExplicit verifies the engine records explicit
+// user preferences while ignoring plain task text and code.
+func TestLearnPreferences_HonorsExplicit(t *testing.T) {
+	e := newTestEngine()
+	e.learnPreferences("帮我重构一下 engine.go，给它加快点")
+	if n := e.PreferenceMemory().Snapshot(); len(n) != 0 {
+		t.Fatalf("plain task must not be remembered, got %v", n)
+	}
+	e.learnPreferences("以后都用简体中文回答我")
+	found := false
+	for _, ent := range e.PreferenceMemory().Snapshot() {
+		if strings.Contains(ent.Text, "简体中文回答") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("explicit preference should be remembered: %v", e.PreferenceMemory().Snapshot())
+	}
+}
+
+// TestLearnPreferences_InjectIntoBuild verifies buildSystemPrompt appends
+// remembered preferences.
+func TestLearnPreferences_InjectIntoBuild(t *testing.T) {
+	e := newTestEngine()
+	e.SetPreferenceMemory(prefmem.New(prefmem.Options{}))
+	e.PreferenceMemory().Remember("优先用 Go 写后台服务")
+	prompt := e.buildSystemPrompt("sess-x")
+	if !strings.Contains(prompt, "优先用 Go 写后台服务") {
+		t.Fatalf("buildSystemPrompt should inject remembered preference, got:\n%s", prompt)
+	}
+}
+
+// TestStashIfPivot_SnapshotsOnPivot verifies that when in-progress work exists
+// and the user opens a NEW task, the engine snapshots a stash checkpoint and
+// appends a recovery note to the archived summary.
+func TestStashIfPivot_SnapshotsOnPivot(t *testing.T) {
+	store := session.NewStore()
+	sess := &types.Session{ID: "sess-stash", ModelID: "m", ProviderName: "deepseek"}
+	if err := store.Create(sess); err != nil {
+		t.Fatal(err)
+	}
+	sess.Messages = []types.Message{
+		{Role: types.RoleUser, Content: "重构 engine.go 让缓存更好"},
+		{Role: types.RoleTool, Content: "Edited engine.go"},
+	}
+	if err := store.Update(sess); err != nil {
+		t.Fatal(err)
+	}
+
+	e := NewEngine(nil, store, nil)
+	e.stashIfPivot(context.Background(), sess, "另外帮我写个新工具 readfile2")
+
+	got, _ := store.Get("sess-stash")
+	if summary := sessionum.Get(got); !strings.Contains(summary, "(stash)") {
+		t.Fatalf("expected stash note in summary, got:\n%s", summary)
+	}
+}
+
+// TestStashIfPivot_IgnoresContinuation verifies a plain follow-up ("继续")
+// does NOT create a stash point — only genuine pivots do.
+func TestStashIfPivot_IgnoresContinuation(t *testing.T) {
+	store := session.NewStore()
+	sess := &types.Session{ID: "sess-cont", ModelID: "m", ProviderName: "deepseek"}
+	if err := store.Create(sess); err != nil {
+		t.Fatal(err)
+	}
+	sess.Messages = []types.Message{
+		{Role: types.RoleUser, Content: "重构 engine.go"},
+		{Role: types.RoleTool, Content: "Edited engine.go"},
+	}
+	if err := store.Update(sess); err != nil {
+		t.Fatal(err)
+	}
+
+	e := NewEngine(nil, store, nil)
+	e.stashIfPivot(context.Background(), sess, "继续")
+
+	got, _ := store.Get("sess-cont")
+	if s := sessionum.Get(got); strings.Contains(s, "(stash)") {
+		t.Fatalf("continuation must not stash, got:\n%s", s)
 	}
 }

@@ -32,9 +32,17 @@ type DoomLoopDetector struct {
 	rejections      map[string]int // tool name → consecutive rejections
 	rejectionsTotal int            // total rejections across all tools
 
+	// Track consecutive execution failures per tool (熔断/circuit breaker).
+	// Unlike rejections (user said no), failures mean the tool itself keeps
+	// erroring — bash build errors, fetch timeouts, read errors. Without a
+	// breaker the model would retry the same broken call forever, burning
+	// tokens and stalling the loop (Claude Code harness ch.23).
+	failures map[string]int
+
 	// Thresholds
 	maxRejectionsPerTool int // per-tool max consecutive rejections
 	maxRejectionsTotal   int // total rejections before forcing strategy change
+	maxFailuresPerTool   int // per-tool max consecutive failures before trip
 }
 
 // NewDoomLoopDetector creates a detector with sensible defaults.
@@ -45,6 +53,8 @@ func NewDoomLoopDetector() *DoomLoopDetector {
 		rejections:           make(map[string]int),
 		maxRejectionsPerTool: 3,
 		maxRejectionsTotal:   20,
+		failures:             make(map[string]int),
+		maxFailuresPerTool:   3,
 	}
 }
 
@@ -115,6 +125,7 @@ func (d *DoomLoopDetector) Reset() {
 	d.signatures = make([]string, 0, 10)
 	d.rejections = make(map[string]int)
 	d.rejectionsTotal = 0
+	d.failures = make(map[string]int)
 }
 
 // ResetToolRejections resets rejections for a specific tool.
@@ -122,6 +133,36 @@ func (d *DoomLoopDetector) ResetToolRejections(toolName string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	delete(d.rejections, toolName)
+}
+
+// RecordFailure records a consecutive execution failure for a tool and
+// returns true once the per-tool failure threshold is reached — tripping the
+// circuit breaker so the model is forced to change strategy instead of
+// retrying the same broken tool call forever (本书 ch.23 熔断机制).
+func (d *DoomLoopDetector) RecordFailure(toolName string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.failures[toolName]++
+	return d.failures[toolName] >= d.maxFailuresPerTool
+}
+
+// ResetToolFailures clears the failure counter for a tool. Called when a
+// tool finally succeeds, so a flaky tool that recovers is not kept tripped.
+func (d *DoomLoopDetector) ResetToolFailures(toolName string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.failures, toolName)
+}
+
+// FailureStatus returns the current consecutive-failure counts per tool.
+func (d *DoomLoopDetector) FailureStatus() map[string]int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	result := make(map[string]int, len(d.failures))
+	for k, v := range d.failures {
+		result[k] = v
+	}
+	return result
 }
 
 // DoomLoopStatus returns a human-readable status of the current loop state.

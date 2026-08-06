@@ -134,3 +134,55 @@ func TestDoomLoopDetector_RejectionStatus(t *testing.T) {
 		t.Errorf("expected edit=1, got %d", status["edit"])
 	}
 }
+
+func TestDoomLoopDetector_FailureBreaker(t *testing.T) {
+	d := NewDoomLoopDetector()
+
+	// A tool failing maxFailuresPerTool (3) times consecutively trips
+	// the circuit breaker.
+	for i := 0; i < 3; i++ {
+		tripped := d.RecordFailure("bash")
+		if i < 2 && tripped {
+			t.Errorf("expected no trip after %d failures", i+1)
+		}
+	}
+	// The 3rd record trips.
+	if !d.RecordFailure("bash") {
+		t.Error("expected breaker trip after 3 consecutive bash failures")
+	}
+	if status := d.FailureStatus(); status["bash"] != 4 {
+		t.Errorf("expected bash failures = 4, got %d", status["bash"])
+	}
+}
+
+func TestDoomLoopDetector_FailureSuccessResets(t *testing.T) {
+	d := NewDoomLoopDetector()
+
+	// Two failures then a success resets the counter; the breaker must
+	// not trip immediately afterwards.
+	d.RecordFailure("read_file")
+	d.RecordFailure("read_file")
+	d.ResetToolFailures("read_file")
+
+	tripped := d.RecordFailure("read_file")
+	if tripped {
+		t.Error("after reset, a single failure should not trip the breaker")
+	}
+	if status := d.FailureStatus(); status["read_file"] != 1 {
+		t.Errorf("expected read_file failures = 1 after reset+1, got %d", status["read_file"])
+	}
+}
+
+func TestDoomLoopDetector_FailuresIndependentPerTool(t *testing.T) {
+	d := NewDoomLoopDetector()
+
+	// 3 failures of "fetch" trip only "fetch", not "grep".
+	for i := 0; i < 3; i++ {
+		d.RecordFailure("fetch")
+	}
+	d.RecordFailure("grep")
+
+	if s := d.FailureStatus(); s["fetch"] != 3 || s["grep"] != 1 {
+		t.Errorf("unexpected failure status: %#v", s)
+	}
+}

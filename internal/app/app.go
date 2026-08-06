@@ -17,6 +17,7 @@ import (
 	"github.com/ponygates/icode/internal/core/conversation"
 	"github.com/ponygates/icode/internal/core/hooks"
 	"github.com/ponygates/icode/internal/core/permission"
+	"github.com/ponygates/icode/internal/core/prefmem"
 	"github.com/ponygates/icode/internal/core/router"
 	"github.com/ponygates/icode/internal/core/session"
 	"github.com/ponygates/icode/internal/core/skills"
@@ -101,6 +102,9 @@ func Bootstrap() (*App, error) {
 	app.Engine.SetGenerationParams(cfg.Defaults.Temperature, cfg.Defaults.MaxTokens)
 	app.Engine.SetSystemPrompt(config.EffectiveSystemPrompt(cfg))
 	app.Engine.SetFallbackModels(cfg.Defaults.FallbackModels)
+	// Load remembered user preferences from disk (persisted on Close) so they
+	// survive restarts. Empty on first run.
+	app.Engine.SetPreferenceMemory(prefmem.LoadFile(prefmem.DefaultPath()))
 	log.Printf("[iCode] bootstrap: engine ready (t=%dms)", time.Since(t0).Milliseconds())
 
 	// 5b. Wire smart model router (simple → cheap, complex → powerful)
@@ -316,6 +320,13 @@ func hasExternalKeys(cfg *config.Config) bool {
 // Close shuts down all subsystems gracefully.
 func (app *App) Close() error {
 	tool.KillAllBgTasks()
+	// Persist remembered preferences so they survive restarts. A failure here
+	// is non-fatal — memory is an enhancement, not a requirement.
+	if app.Engine != nil && app.Engine.PreferenceMemory() != nil {
+		if err := app.Engine.PreferenceMemory().SaveFile(prefmem.DefaultPath()); err != nil {
+			log.Printf("[iCode] warn: failed to persist preferences: %v", err)
+		}
+	}
 	if app.LSPManager != nil {
 		app.LSPManager.CloseAll()
 	}

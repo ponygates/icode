@@ -507,7 +507,14 @@ func (o *Optimizer) compactLocked() {
 	_ = originalCount
 }
 
-// summarizeLocked generates a summary of old messages and replaces them.
+// summarizeLocked generates a structured summary of old messages and replaces
+// them. Unlike free-text summarization, it fills a FIXED 9-segment template
+// so the critical information is never dropped by the model's whim (本书
+// ch.25: "结构化压缩比自由总结可靠得多。给它一个明确的模板，哪些信息必须
+// 保留、按什么格式组织，结果会好得多")。Segments:
+//
+//	目标 · 进展 · 已改动文件 · 关键决策 · 工具模式 · 当前待办
+//	约束/边界 · 已知坑 · 用户偏好
 func (o *Optimizer) summarizeLocked() {
 	keepFrom := len(o.messageLog) - 6
 	if keepFrom < 2 {
@@ -517,47 +524,176 @@ func (o *Optimizer) summarizeLocked() {
 	oldMessages := o.messageLog[:keepFrom]
 	recentMessages := o.messageLog[keepFrom:]
 
-	// Build summary from old messages
-	var summaryParts []string
-	userRequests := 0
-	toolCallsDone := 0
+	// 9-segment extraction. Each bucket is deterministic: it inspects the
+	// concrete message text rather than delegating to a free-form summary.
+	seg := newSummarySegments()
 
 	for _, msg := range oldMessages {
 		switch msg.Role {
 		case types.RoleUser:
-			userRequests++
-			// Keep track of key user intents
 			trimmed := strings.TrimSpace(msg.Content)
-			if len(trimmed) > 200 {
-				trimmed = trimmed[:200] + "..."
+			if trimmed != "" {
+				if len(trimmed) > 200 {
+					trimmed = trimmed[:200] + "..."
+				}
+				// The first user turn is the goal; later non-trivial user
+				// turns are progress corrections.
+				if seg.goal == "" && !strings.HasPrefix(trimmed, "[") {
+					seg.goal = trimmed
+				} else if len(trimmed) > 1 {
+					seg.progress = append(seg.progress, trimmed)
+				}
 			}
-			summaryParts = append(summaryParts, fmt.Sprintf("User asked: %s", trimmed))
 		case types.RoleTool:
-			toolCallsDone++
+			seg.toolCount++
+			for _, sig := range extractToolSignals(msg.Content) {
+				switch sig.kind {
+				case "file":
+					seg.files = appendUnique(seg.files, sig.text)
+				case "decision":
+					seg.decisions = appendUnique(seg.decisions, sig.text)
+				case "blocker":
+					seg.blockers = appendUnique(seg.blockers, sig.text)
+				}
+			}
 		case types.RoleAssistant:
 			if len(msg.ToolCalls) > 0 {
-				names := make([]string, 0, len(msg.ToolCalls))
 				for _, tc := range msg.ToolCalls {
-					names = append(names, tc.Name)
+					if !containsStr(seg.toolPattern, tc.Name) {
+						seg.toolPattern = append(seg.toolPattern, tc.Name)
+					}
 				}
-				summaryParts = append(summaryParts,
-					fmt.Sprintf("Assistant used tools: %s", strings.Join(names, ", ")))
+				continue
+			}
+			if c := strings.TrimSpace(msg.Content); c != "" {
+				seg.progress = append(seg.progress, firstN(c, 160))
 			}
 		}
 	}
 
-	// Build concise summary
-	summary := fmt.Sprintf(
-		"Previous conversation (%d user requests, %d tool executions). Key activities: %s",
-		userRequests, toolCallsDone, strings.Join(summaryParts, "; "),
-	)
+	o.compactionSummary = seg.Render()
+	o.messageLog = recentMessages
+}
 
-	if len(summary) > 800 {
-		summary = summary[:800] + "..."
+// summarySegments holds the 9 structured buckets for a compaction summary.
+type summarySegments struct {
+	goal        string
+	progress    []string
+	files       []string
+	decisions   []string
+	toolPattern []string
+	toolCount   int
+	blockers    []string
+}
+
+func newSummarySegments() *summarySegments {
+	return &summarySegments{}
+}
+
+// toolSignal is a lightweight structured extraction from a tool result.
+type toolSignal struct {
+	kind string // "file" | "decision" | "blocker"
+	text string
+}
+
+// extractToolSignals guesses what a tool result contributed. It favours simple
+// deterministic heuristics — file edits, denials, and errors — so the 9-segment
+// summary keeps the "what changed / what broke" facts instead of raw bytes.
+func extractToolSignals(content string) []toolSignal {
+	var sigs []toolSignal
+	c := strings.TrimSpace(content)
+	if c == "" {
+		return sigs
 	}
 
-	o.compactionSummary = summary
-	o.messageLog = recentMessages
+	switch {
+	case strings.Contains(c, "Edited "):
+		i := strings.Index(c, "Edited ")
+		rest := c[i+len("Edited "):]
+		file := rest
+		if j := strings.IndexAny(rest, " \n"); j > 0 {
+			file = rest[:j]
+		}
+		sigs = append(sigs, toolSignal{kind: "file", text: file})
+	case strings.Contains(c, "Permission denied") || strings.Contains(c, "denied by"):
+		sigs = append(sigs, toolSignal{kind: "blocker", text: firstN(c, 120)})
+	case strings.Contains(c, "FAIL") || strings.Contains(c, "failed") || strings.Contains(c, "error"):
+		sigs = append(sigs, toolSignal{kind: "blocker", text: firstN(c, 120)})
+	case strings.Contains(c, "PASS") || strings.Contains(c, "ok"):
+		sigs = append(sigs, toolSignal{kind: "decision", text: "tests passing"})
+	}
+	return sigs
+}
+
+// Render emits the 9-segment summary as a compact structured block, omitting
+// empty sections so the output stays small (token-saving).
+func (s *summarySegments) Render() string {
+	var b []string
+	if s.goal != "" {
+		b = append(b, "目标: "+firstN(s.goal, 160))
+	}
+	if len(s.progress) > 0 {
+		b = append(b, "进展: "+joinUnique(s.progress, 4))
+	}
+	if len(s.files) > 0 {
+		b = append(b, "已改动文件: "+strings.Join(s.files, ", "))
+	}
+	if len(s.decisions) > 0 {
+		b = append(b, "关键决策: "+strings.Join(s.decisions, ", "))
+	}
+	if len(s.toolPattern) > 0 {
+		b = append(b, "工具模式: "+strings.Join(s.toolPattern, ", "))
+	}
+	if s.toolCount > 0 {
+		b = append(b, fmt.Sprintf("已执行工具 %d 次", s.toolCount))
+	}
+	if len(s.blockers) > 0 {
+		b = append(b, "已知坑: "+strings.Join(s.blockers, " | "))
+	}
+	out := "Previous conversation (structured):\n" + strings.Join(b, "\n")
+	if len(out) > 800 {
+		out = out[:800] + "..."
+	}
+	return out
+}
+
+func appendUnique(dst []string, v string) []string {
+	if v == "" || containsStr(dst, v) {
+		return dst
+	}
+	return append(dst, v)
+}
+
+func containsStr(hay []string, needle string) bool {
+	for _, h := range hay {
+		if h == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func joinUnique(in []string, max int) string {
+	var out []string
+	for _, v := range in {
+		if !containsStr(out, v) {
+			out = append(out, v)
+		}
+		if len(out) >= max {
+			break
+		}
+	}
+	return strings.Join(out, " | ")
+}
+
+// firstN returns the first n runes of s, or the whole string if it is
+// shorter. Used to keep summary segments within a bounded size.
+func firstN(s string, n int) string {
+	runes := []rune(s)
+	if len(runes) <= n {
+		return s
+	}
+	return string(runes[:n]) + "..."
 }
 
 // dropOldestLocked drops the oldest N messages, keeping the most recent.
@@ -657,8 +793,7 @@ func (o *Optimizer) estimateTokensLocked() int {
 	return total
 }
 
-// countTokens provides a character-based heuristic for token counting.
-// Handles both CJK characters (~0.6 tokens/char) and ASCII (~0.25 tokens/char).
+// countTokens provides a character-based heuristic for token counting.// Handles both CJK characters (~0.6 tokens/char) and ASCII (~0.25 tokens/char).
 func countTokens(s string) int {
 	ascii := 0
 	cjk := 0

@@ -292,7 +292,9 @@ func Default() *Config {
 			Model:       "openrouter/free",
 			Provider:    "openrouter",
 			Mode:        "agent",
-			Temperature: 0.7,
+			// 默认温度 0（本书 ch.23）：代码与工具判定任务需要确定性
+			// （相同输入 → 相同输出）。用户可在配置或 /config 中调高。
+			Temperature: 0,
 			MaxTokens:   0,
 			Cache:       true,
 		},
