@@ -7,23 +7,30 @@ import (
 	"strings"
 )
 
-// enableMouse turns on SGR mouse tracking (button events + drag, encoding 1006)
-// and bracketed paste mode (?2004). With these on, the TUI can react to clicks,
-// wheel scrolling, drag-to-scroll on the scrollbar, and pasted blocks without
-// the terminal echoing raw sequences.
+// enableMouse turns on SGR mouse tracking (clicks + wheel, encoding 1006) and
+// bracketed paste mode (?2004). With these on, the TUI can react to clicks,
+// wheel scrolling, and pasted blocks without the terminal echoing raw sequences.
+//
+// We deliberately use button-event tracking (?1000h) rather than the drag/motion
+// modes (?1002h/?1003h): motion tracking forces the terminal into "app captures
+// the mouse" state, which disables the user's native click-drag text selection
+// (and therefore Ctrl+Shift+C copy) in Windows Terminal and most emulators.
+// Mode 1000 only reports button presses, releases and wheel scrolls — the app
+// still reacts to clicks, the scrollbar, wheel, and right-click paste, while the
+// terminal keeps its normal text-selection behaviour for dragging.
 func (t *TUI) enableMouse() {
-	fmt.Fprint(t.writer, "\x1b[?2004h\x1b[?1002h\x1b[?1006h")
+	fmt.Fprint(t.writer, "\x1b[?2004h\x1b[?1000h\x1b[?1006h")
 }
 
 // disableMouse turns off the mouse + paste modes enabled by enableMouse.
 func (t *TUI) disableMouse() {
-	fmt.Fprint(t.writer, "\x1b[?1006l\x1b[?1002l\x1b[?2004l")
+	fmt.Fprint(t.writer, "\x1b[?1006l\x1b[?1000l\x1b[?2004l")
 }
 
 // handleMouse parses and acts on one SGR mouse report whose leading "ESC[<"
 // has already been consumed. br is positioned at the first byte after '<'.
 func (t *TUI) handleMouse(br *bufio.Reader) {
-	button, x, y, _, ok := parseSGRMouse(br)
+	button, x, y, released, ok := parseSGRMouse(br)
 	if !ok {
 		return
 	}
@@ -40,6 +47,14 @@ func (t *TUI) handleMouse(br *bufio.Reader) {
 		case button == 65 || button == 97:
 			t.scrollDownSmall()
 		}
+		return
+	}
+
+	// Right-click → paste the clipboard into the input line. SGR mouse capture
+	// otherwise intercepts the terminal's native right-click paste, so we must
+	// do it ourselves (the terminal sends the press, not a paste).
+	if button&3 == 2 && !released {
+		t.pasteFromClipboard()
 		return
 	}
 
@@ -130,6 +145,20 @@ func (t *TUI) scrollToRow(row int) {
 	t.mu.Lock()
 	t.scrollOffset = off
 	t.mu.Unlock()
+	t.scheduleRender()
+}
+
+// pasteFromClipboard reads the system clipboard and inserts it at the input
+// cursor. Used by right-click (see handleMouse). No-op when the clipboard is
+// empty or unreadable — the user can always fall back to Ctrl+Shift+V.
+func (t *TUI) pasteFromClipboard() {
+	text, err := readClipboard()
+	if err != nil || strings.TrimSpace(text) == "" {
+		return
+	}
+	t.dismissWelcome()
+	t.insertAtCursor(text)
+	t.updateSuggestions()
 	t.scheduleRender()
 }
 
