@@ -916,19 +916,35 @@ func simpleUIHTML(model, provider string) string {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>iCode — 简易聊天</title>
 <style>
-  :root { color-scheme: dark; }
+  :root {
+    color-scheme: dark;
+    /* Shared design tokens — aligned with desktop (global.css) & TUI palette */
+    --bg-app: #0b0e14;
+    --bg-panel: #161926;
+    --bg-elev: #10141d;
+    --border: #2a3140;
+    --border-strong: #3c4a6b;
+    --text: #e6e6e6;
+    --text-muted: #6b7484;
+    --accent: #ff7a45;
+    --accent-2: #ff5f6d;
+    --r-sm: 8px;
+    --r-md: 10px;
+    --r-lg: 12px;
+    --shadow-glow: 0 2px 8px rgba(255, 122, 69, .45);
+  }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; }
   body {
     font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
     background: linear-gradient(160deg, #0b0e14 0%, #0f1521 45%, #101a2b 100%);
-    color: #e6e6e6; display: flex; flex-direction: row; height: 100vh; overflow: hidden;
+    color: var(--text); display: flex; flex-direction: row; height: 100vh; overflow: hidden;
   }
   #main { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; height: 100%; }
   #bar {
     display: flex; align-items: center; gap: 10px; padding: 9px 14px;
     background: rgba(22, 25, 34, 0.82); backdrop-filter: blur(10px);
-    border-bottom: 1px solid #2a3140; flex: 0 0 auto;
+    border-bottom: 1px solid var(--border); flex: 0 0 auto;
   }
   #bar .logo {
     color: #fff; font-weight: 800; font-size: 15px; letter-spacing: .5px;
@@ -936,21 +952,21 @@ func simpleUIHTML(model, provider string) string {
   }
   #bar .logo::before {
     content: ""; width: 22px; height: 22px; border-radius: 7px;
-    background: linear-gradient(135deg, #ff7a45, #ff5f6d);
-    display: inline-block; box-shadow: 0 2px 8px rgba(255, 122, 69, .45);
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    display: inline-block; box-shadow: var(--shadow-glow);
   }
   #bar select, #bar input.listbar {
-    background: #141922; color: #e6e6e6; border: 1px solid #2f3850;
-    border-radius: 8px; padding: 5px 10px; max-width: 320px;
+    background: var(--bg-elev); color: var(--text); border: 1px solid #2f3850;
+    border-radius: var(--r-sm); padding: 5px 10px; max-width: 320px;
     outline: none; transition: border-color .15s;
   }
-  #bar select:focus, #bar input.listbar:focus { border-color: #ff7a45; }
+  #bar select:focus, #bar input.listbar:focus { border-color: var(--accent); }
   #bar button {
-    background: #1c2332; color: #e6e6e6; border: 1px solid #2f3850;
-    border-radius: 8px; padding: 5px 12px; cursor: pointer;
+    background: #1c2332; color: var(--text); border: 1px solid #2f3850;
+    border-radius: var(--r-sm); padding: 5px 12px; cursor: pointer;
     transition: background .15s, transform .1s, border-color .15s;
   }
-  #bar button:hover { background: #28304a; border-color: #3c4a6b; }
+  #bar button:hover { background: #28304a; border-color: var(--border-strong); }
   #bar button:active { transform: translateY(1px); }
   #bar .spacer { flex: 1; }
   #log {
@@ -979,17 +995,17 @@ func simpleUIHTML(model, provider string) string {
   .thinking summary { cursor: pointer; color: #7fd1ff; font-weight: 600; }
   .thinking pre { margin: 6px 0 0; white-space: pre-wrap; word-break: break-word; color: #8a93a3; }
   .role { font-size: 11px; color: #6b7484; margin-bottom: 3px; }
-  #inputbar { display: flex; gap: 8px; padding: 12px 14px; border-top: 1px solid #2a3140; background: rgba(22, 25, 34, 0.82); backdrop-filter: blur(10px); flex: 0 0 auto; }
+  #inputbar { display: flex; gap: 8px; padding: 12px 14px; border-top: 1px solid var(--border); background: rgba(22, 25, 34, 0.82); backdrop-filter: blur(10px); flex: 0 0 auto; }
   #inp {
-    flex: 1; resize: none; height: 44px; background: #10141d; color: #e6e6e6;
-    border: 1px solid #2f3850; border-radius: 10px; padding: 11px 14px; font: inherit;
+    flex: 1; resize: none; height: 44px; background: var(--bg-elev); color: var(--text);
+    border: 1px solid #2f3850; border-radius: var(--r-md); padding: 11px 14px; font: inherit;
     outline: none; transition: border-color .15s, box-shadow .15s;
   }
-  #inp:focus { border-color: #ff7a45; box-shadow: 0 0 0 3px rgba(255, 122, 69, .15); }
+  #inp:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(255, 122, 69, .15); }
   #inp::placeholder { color: #55607a; }
   #send {
-    background: linear-gradient(135deg, #ff7a45, #ff5f6d); color: #fff;
-    border: none; border-radius: 10px; padding: 0 20px; font-weight: 700; cursor: pointer;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff;
+    border: none; border-radius: var(--r-md); padding: 0 20px; font-weight: 700; cursor: pointer;
     box-shadow: 0 3px 10px rgba(255, 95, 109, .35); transition: transform .1s, box-shadow .15s, filter .15s;
   }
   #send:hover { filter: brightness(1.08); box-shadow: 0 4px 14px rgba(255, 95, 109, .45); }
@@ -998,7 +1014,7 @@ func simpleUIHTML(model, provider string) string {
   #stopBtn:hover { filter: brightness(1.15); }
   /* Bottom status bar: model/provider/mode/security/tokens/cache/cost */
   #status {
-    flex: 0 0 auto; padding: 6px 14px; font-size: 12px; color: #6b7484;
+    flex: 0 0 auto; padding: 6px 14px; font-size: 12px; color: var(--text-muted);
     background: rgba(12, 15, 22, .7); border-top: 1px solid #232a3a; white-space: nowrap;
     overflow-x: auto; scrollbar-width: none;
   }
@@ -1008,13 +1024,13 @@ func simpleUIHTML(model, provider string) string {
     flex: 0 0 6px; cursor: col-resize; background: #262b36;
     transition: background .15s;
   }
-  #grip:hover, #grip.dragging { background: #ff7a45; }
+  #grip:hover, #grip.dragging { background: var(--accent); }
   #side {
     flex: 0 0 280px; width: 280px; min-width: 180px; max-width: 60%;
     background: rgba(16, 19, 27, .9); border-left: 1px solid #232a3a; display: flex; flex-direction: column;
     height: 100%;
   }
-  #side .side-head { padding: 11px 14px; font-weight: 700; color: #ff7a45; border-bottom: 1px solid #232a3a; flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; }
+  #side .side-head { padding: 11px 14px; font-weight: 700; color: var(--accent); border-bottom: 1px solid #232a3a; flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; }
   #side .side-list { overflow-y: auto; padding: 8px; scrollbar-width: thin; scrollbar-color: #39425c transparent; flex: 1 1 auto; }
   #side .side-list::-webkit-scrollbar { width: 10px; }
   #side .side-list::-webkit-scrollbar-thumb { background: #39425c; border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }

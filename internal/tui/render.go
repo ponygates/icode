@@ -715,7 +715,7 @@ func (t *TUI) messageLinesW(m Message, width int) []string {
 	case RoleThinking:
 		return thinkingLines(m.Content, width)
 	case RoleUser:
-		return wrapPrefixed(t.paint("cyan", "❯ ")+"  ", "    ", m.Content, width)
+		return wrapPrefixed(t.paint("orange", "❯ ")+"  ", "    ", m.Content, width)
 	case RoleAssistant:
 		if t.rawMode {
 			return t.renderMarkdown(m.Content, "", "  ", width)

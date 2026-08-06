@@ -1,6 +1,11 @@
 // Package tui — localized UI strings and slash-command definitions.
 package tui
 
+import (
+	"os"
+	"strings"
+)
+
 const (
 	langZhCN = "zh-CN"
 	langZhTW = "zh-TW"
@@ -396,6 +401,11 @@ func (t *TUI) c(name string) string {
 	if !t.color {
 		return ""
 	}
+	if trueColorTerm() {
+		if code, ok := trueColorOverrides[name]; ok {
+			return code
+		}
+	}
 	if p, ok := palettes[t.activeTheme()]; ok {
 		if code, ok := p[name]; ok {
 			return code
@@ -407,6 +417,24 @@ func (t *TUI) c(name string) string {
 		}
 	}
 	return ""
+}
+
+// trueColorOverrides promotes just the brand hues to 24-bit RGB when the
+// terminal advertises truecolor. Everything else stays in the universally-safe
+// 256/16-colour codes, so an 8-bit terminal never renders garbage — it simply
+// keeps the fallback palette.
+var trueColorOverrides = map[string]string{
+	"orange":  "\x1b[38;2;255;122;69m",  // brand orange ~#ff7a45
+	"purple":  "\x1b[38;2;139;108;255m", // brighter violet ~#8b6cff
+	"magenta": "\x1b[38;2;255;94;190m",  // warm pink
+}
+
+// trueColorTerm reports whether the terminal supports 24-bit colour, decided
+// via COLORTERM. iCode never auto-enables it; it only enhances existing colour
+// when the environment explicitly advertises support.
+func trueColorTerm() bool {
+	ct := strings.ToLower(os.Getenv("COLORTERM"))
+	return ct != "" && (strings.Contains(ct, "truecolor") || strings.Contains(ct, "24bit"))
 }
 
 func (t *TUI) paint(name, text string) string {

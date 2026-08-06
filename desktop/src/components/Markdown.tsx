@@ -67,8 +67,11 @@ const codeHead: React.CSSProperties = {
   fontFamily: 'var(--font-mono)', letterSpacing: '0.02em',
 };
 const icoStyle: React.CSSProperties = {
-  background: 'var(--bg-primary)', border: '0.5px solid var(--border-color)',
-  borderRadius: 5, padding: '1px 6px', fontSize: '0.92em', fontFamily: 'var(--font-mono)',
+  background: 'var(--accent-soft)',
+  border: '0.5px solid var(--accent-soft)',
+  borderRadius: 5, padding: '1px 6px', fontSize: '0.92em',
+  fontFamily: 'var(--font-mono)', color: 'var(--accent)',
+  whiteSpace: 'pre-wrap', wordBreak: 'break-word',
 };
 const copyBtn: React.CSSProperties = {
   background: 'transparent', border: '0.5px solid var(--border-color)',

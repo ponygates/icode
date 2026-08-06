@@ -124,12 +124,11 @@ const CommandPalette: React.FC<{ onClose: () => void }> = ({ onClose }) => {
       }}
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
-      <div style={{
+      <div className="elevated" style={{
         width: 520, maxWidth: '90vw', maxHeight: '60vh',
-        background: 'var(--bg-secondary)',
-        border: '1px solid var(--border-color)',
         borderRadius: 12, boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
         display: 'flex', flexDirection: 'column',
+        animation: 'scaleIn 0.18s ease-out',
       }}>
         <input
           ref={inputRef}

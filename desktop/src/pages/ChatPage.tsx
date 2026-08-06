@@ -144,12 +144,32 @@ const MessageList = React.memo(({ messages, isStreaming, onRegenerate, onZoom }:
   const { t } = useTranslation();
   return (
     <>
-      {messages.map((msg, idx) => {
+{messages.map((msg, idx) => {
         // Only the final assistant message is "streaming" — passing this down
         // lets Markdown skip expensive highlightAuto on every token frame and
         // do it once on the final render instead.
         const isLast = idx === messages.length - 1;
         const msgStreaming = isStreaming && isLast && msg.role === 'assistant';
+        // System messages (engine notices) render as a centered, muted banner —
+        // not a side-aligned bubble like a user/assistant turn.
+        if (msg.role === 'system') {
+          return (
+            <div key={msg.id} className="msg-system" style={{
+              display: 'flex', justifyContent: 'center', padding: '6px 24px',
+            }}>
+              <div style={{
+                maxWidth: '85%', textAlign: 'center',
+                fontSize: 12, lineHeight: 1.6, wordBreak: 'break-word',
+                color: 'var(--text-muted)',
+                background: 'var(--bg-tertiary)',
+                border: '0.5px dashed var(--border-color)',
+                borderRadius: 'var(--r-full)',
+                padding: '5px 14px',
+                animation: 'fadeIn var(--t-slow) ease-out',
+              }}>{msg.content}</div>
+            </div>
+          );
+        }
         return (
         <div
           key={msg.id}
@@ -157,6 +177,7 @@ const MessageList = React.memo(({ messages, isStreaming, onRegenerate, onZoom }:
             display: 'flex', gap: 10, padding: '6px 24px',
             justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
             alignItems: 'flex-start',
+            animation: 'fadeIn var(--t-slow) ease-out',
             // content-visibility: auto lets the browser skip rendering work
             // for messages outside the viewport — the cheapest form of list
             // virtualisation, with zero scroll/height regressions (unlike a
@@ -229,8 +250,9 @@ const MessageList = React.memo(({ messages, isStreaming, onRegenerate, onZoom }:
                   </>
                 )
               ) : (isStreaming ? (
-                <span style={{ color: 'var(--text-muted)' }}>
-                  {t('chat.generatingShort')}<span style={{ animation: 'pulse 1.5s infinite' }}>...</span>
+                <span style={{ color: 'var(--text-muted)', display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                  {t('chat.generatingShort')}
+                  <span className="typing-dots"><span /><span /><span /></span>
                 </span>
               ) : '')
             ) : (
@@ -285,6 +307,9 @@ const ChatPage: React.FC = () => {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const scrollRafRef = useRef<number | null>(null);
+  // Whether the user is scrolled near the bottom of the message list — used to
+  // show/hide the floating "back to latest" affordance.
+  const [atBottom, setAtBottom] = useState(true);
 
   // Resolve the local backend URL once so we can stream chat directly from the
   // renderer (bypassing the fragile Electron IPC+SSE bridge). Falls back to the
@@ -1205,10 +1230,12 @@ const ChatPage: React.FC = () => {
             if (!el) return;
             const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
             stickToBottomRef.current = distance <= 80;
+            setAtBottom(distance <= 80);
           }}
           style={{
             flex: 1, overflowY: 'auto', padding: '24px 24px',
             display: 'flex', flexDirection: 'column', gap: 4,
+            position: 'relative',
           }}
         >
           {/* Welcome — Apple-style large title with plum blossom logo */}
@@ -1311,6 +1338,14 @@ const ChatPage: React.FC = () => {
             onZoom={setLightbox}
           />
           <div ref={messagesEndRef} />
+          {!atBottom && (
+            <button
+              className="scroll-down-btn"
+              onClick={() => { stickToBottomRef.current = true; setAtBottom(true); messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }}
+            >
+              <ChevronDown size={13} /> {t('chat.scrollToLatest')}
+            </button>
+          )}
         </div>
 
         {/* Lightbox — zoomed image attachment */}
@@ -1736,10 +1771,11 @@ const ChatPage: React.FC = () => {
           position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)',
           display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
         }}>
-          <div style={{
-            width: 440, maxWidth: '90vw', background: 'var(--bg-secondary)',
-            border: '1px solid var(--border-color)', borderRadius: 12,
+          <div className="elevated" style={{
+            width: 440, maxWidth: '90vw',
+            borderRadius: 12,
             padding: 20, boxShadow: '0 20px 60px rgba(0,0,0,0.45)',
+            animation: 'scaleIn 0.18s ease-out',
           }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
               <ShieldAlert size={20} style={{ color: 'var(--warning)' }} />
