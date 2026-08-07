@@ -55,6 +55,11 @@ func TestClaudeStyleRender(t *testing.T) {
 	if !strings.Contains(out, "*") {
 		t.Fatalf("expected model status marker '*' in output:\n%s", out)
 	}
+	// Claude Code parity: the header's right-hand strip shows the active model
+	// and context usage (120000/1048576 ≈ 11%).
+	if !strings.Contains(out, "deepseek-v4-flash · 11% ctx") {
+		t.Fatalf("expected header right-hand model·ctx%% strip in output:\n%s", out)
+	}
 
 	// Case 2: streaming with no tokens yet — should show the sliding thinking bar.
 	buf.Reset()

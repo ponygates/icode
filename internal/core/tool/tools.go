@@ -66,6 +66,14 @@ func NewRegistry() *Registry {
 	// On-demand skill loader: returns a SKILL.md body into volatile scratch
 	// instead of bloating the immutable system prefix (token-saving keystone).
 	r.Register(NewUseSkillTool(nil))
+	// Computer-use tools (Claude Code parity): screenshot + desktop mouse /
+	// keyboard control. High-risk surface → gated behind permission approval.
+	r.Register(&ScreenshotTool{})
+	r.Register(&MouseMoveTool{})
+	r.Register(&MouseClickTool{})
+	r.Register(&MouseScrollTool{})
+	r.Register(&TypeTextTool{})
+	r.Register(&KeyPressTool{})
 
 	return r
 }

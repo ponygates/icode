@@ -18,6 +18,7 @@ import (
 	"github.com/ponygates/icode/internal/core/searchreplace"
 	"github.com/ponygates/icode/internal/core/sessionum"
 	"github.com/ponygates/icode/internal/core/todo"
+	"github.com/ponygates/icode/internal/core/voice"
 	"github.com/ponygates/icode/internal/llm/provider"
 	"github.com/ponygates/icode/internal/server"
 	"github.com/ponygates/icode/internal/tui"
@@ -911,6 +912,7 @@ type chatCallback struct {
 	tui       *tui.TUI
 	sessionID string
 	lastTool  string
+	voiceRec  *voice.Recorder // active /voice recorder (nil when idle)
 }
 
 func (c *chatCallback) OnSend(text string) {
@@ -1497,6 +1499,40 @@ func (c *chatCallback) OnSlashCommand(cmd string, args []string) {
 		}
 		b.WriteString(fmt.Sprintf("\n/resume <session_id> to load a session"))
 		c.tui.AddMessage(tui.RoleSystem, b.String())
+
+	case "/voice":
+		// Toggle mic capture: first call starts recording, second stops and
+		// transcribes via Zhipu GLM-ASR, then submits the text as a message.
+		if c.app == nil {
+			c.tui.AddMessage(tui.RoleSystem, "语音输入暂不可用。")
+			break
+		}
+		if c.voiceRec == nil {
+			rec := voice.NewRecorder()
+			if err := rec.Start(); err != nil {
+				c.tui.AddMessage(tui.RoleSystem, "录音启动失败: "+err.Error())
+				break
+			}
+			c.voiceRec = rec
+			c.tui.AddMessage(tui.RoleSystem, "🎙 正在录音（最多30秒）…再次输入 /voice 结束并识别")
+			break
+		}
+		wav, err := c.voiceRec.Stop()
+		c.voiceRec = nil
+		if err != nil {
+			c.tui.AddMessage(tui.RoleSystem, "录音结束失败: "+err.Error())
+			break
+		}
+		c.tui.AddMessage(tui.RoleSystem, "⏳ 正在识别语音…")
+		apiKey := c.app.Cfg.APIKey("zhipu")
+		text, terr := voice.TranscribeZhipu(context.Background(), apiKey, wav, "voice.wav")
+		if terr != nil {
+			c.tui.AddMessage(tui.RoleSystem, "识别失败: "+terr.Error())
+			break
+		}
+		c.tui.AddMessage(tui.RoleSystem, "✅ 已识别:「"+text+"」")
+		// Send immediately so the recognised text flows through the normal path.
+		c.OnSend(text)
 
 	case "/config":
 		if cfg, cerr := config.LoadOrCreate(); cerr == nil {

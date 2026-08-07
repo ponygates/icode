@@ -597,13 +597,22 @@ func AccessLevelOf(toolName string) AccessLevel {
 		return AccessConnect
 
 	// Execute — runs commands / changes system state.
-	case "bash", "run_command", "cmd", "git_commit":
+	case "bash", "run_command", "cmd", "git_commit",
+		// Computer-use control: mouse/keyboard drives the user's real desktop,
+		// so it is gated like command execution — never auto-approved in Auto
+		// mode (本书 ch.22 高敏感工具).
+		"mouse_move", "mouse_click", "mouse_scroll", "type_text", "key_press":
 		return AccessExecute
 
 	// Write — mutates local files or workspace.
 	case "write_file", "edit", "search_replace", "git_branch",
 		"disk_cleanup", "todo_write":
 		return AccessWrite
+
+	// Screenshot is observation-only but classified as Read (not auto-approved
+	// in Auto mode because a capture may contain private on-screen data).
+	case "screenshot":
+		return AccessRead
 
 	// Everything else is observation-only.
 	default:

@@ -258,7 +258,7 @@ func (t *TUI) render() {
 	convStart := 2 // header(index 0) + hrule(index 1) precede the conversation
 	convEnd := convStart + len(conv) - 1
 	var out []string
-	out = append(out, t.headerLine())
+	out = append(out, t.headerLine(W))
 	out = append(out, t.hrule(contentW))
 	out = append(out, conv...)
 	out = append(out, t.hrule(contentW))
@@ -365,7 +365,7 @@ func (t *TUI) render() {
 
 // headerLine renders the compact top bar: app name (orange "iCode" wordmark),
 // working directory, and mode — the signature Claude Code-style header.
-func (t *TUI) headerLine() string {
+func (t *TUI) headerLine(W int) string {
 	cwd, _ := os.Getwd()
 	short := shortDir(cwd)
 	modeLabel := t.mode
@@ -378,9 +378,33 @@ func (t *TUI) headerLine() string {
 	} else if modeLabel == "plan" {
 		modeColor = "cyan"
 	}
-	return t.paint("orange", "iCode") + " " + t.paint("dim", appVersionStr()) +
+	left := t.paint("orange", "iCode") + " " + t.paint("dim", appVersionStr()) +
 		t.paint("dim", "  ·  ") + t.paint("dim", short) +
 		t.paint("dim", "  ·  ") + t.paint(modeColor, modeLabel)
+
+	// Right-hand meta strip: model · context% — Claude Code parity, so the
+	// active engine + context usage stay visible at a glance on the top line.
+	// Only rendered when we have data and the terminal is wide enough.
+	var right []string
+	if t.model != "" {
+		right = append(right, t.model)
+	}
+	if t.contextWindow > 0 && t.contextTokens > 0 {
+		pct := t.contextTokens * 100 / t.contextWindow
+		if pct > 100 {
+			pct = 100
+		}
+		right = append(right, fmt.Sprintf("%d%% ctx", pct))
+	}
+	if len(right) == 0 || W < 60 {
+		return left
+	}
+	rightStr := t.paint("dim", strings.Join(right, " · "))
+	if visibleWidth(left)+2+visibleWidth(rightStr) < W {
+		pad := W - visibleWidth(left) - visibleWidth(rightStr) - 2
+		return left + strings.Repeat(" ", pad) + rightStr
+	}
+	return left
 }
 
 // welcomeLines renders the startup screen: an ASCII LOGO (plum blossom +
