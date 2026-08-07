@@ -261,6 +261,8 @@ func (t *TUI) handleKey(r rune) bool {
 				if planPending {
 					t.SetPlanPending(false)
 					t.render()
+				} else if t.diffBoxOpen {
+					t.closeDiffBox()
 				} else if t.modelPickerOpen {
 					t.closeModelPicker()
 				} else if t.vimMode && !t.vimInsert {
@@ -297,6 +299,10 @@ func (t *TUI) handleKey(r rune) bool {
 						t.movePicker(-1)
 						return true
 					}
+					if t.diffBoxOpen {
+						t.moveDiff(-1)
+						return true
+					}
 					if t.acOpen && len(t.acItems) > 0 {
 						if t.acIdx > 0 {
 							t.acIdx--
@@ -308,6 +314,10 @@ func (t *TUI) handleKey(r rune) bool {
 				case 'B': // ↓ history next OR move suggestion cursor down (Claude Code)
 					if t.modelPickerOpen {
 						t.movePicker(1)
+						return true
+					}
+					if t.diffBoxOpen {
+						t.moveDiff(1)
 						return true
 					}
 					if t.acOpen && len(t.acItems) > 0 {
@@ -405,6 +415,10 @@ func (t *TUI) handleKey(r rune) bool {
 			t.acItems = nil
 			return true
 		}
+		if t.diffBoxOpen {
+			t.closeDiffBox()
+			return true
+		}
 		if t.helpVisible {
 			t.helpVisible = false
 			return true
@@ -414,6 +428,11 @@ func (t *TUI) handleKey(r rune) bool {
 		}
 		return true
 	case '\r', '\n':
+		if t.diffBoxOpen {
+			t.applyStagedEdits()
+			t.closeDiffBox()
+			return true
+		}
 		if t.modelPickerOpen {
 			t.selectModelAt(t.modelPickerIdx)
 			return true
@@ -442,6 +461,13 @@ func (t *TUI) handleKey(r rune) bool {
 		t.pushHistory(text)
 		t.submit(text)
 		return true
+	case 0x1a: // Ctrl+Z — reject all staged edits in the review overlay
+		if t.diffBoxOpen {
+			t.rejectStagedEdits()
+			t.closeDiffBox()
+			return true
+		}
+		return true
 	case 0x7f, 0x08: // Backspace / DEL
 		t.deleteAtCursor()
 		t.updateSuggestions()
@@ -466,6 +492,13 @@ func (t *TUI) handleKey(r rune) bool {
 			return true
 		}
 		t.closeModelPicker()
+		return true
+	}
+
+	// Any printable key dismisses the staged-edits review overlay
+	// (mirrors Claude Code's model picker behaviour).
+	if t.diffBoxOpen {
+		t.closeDiffBox()
 		return true
 	}
 

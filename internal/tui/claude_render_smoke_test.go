@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ponygates/icode/internal/core/searchreplace"
 )
 
 // TestClaudeStyleRender verifies the Claude Code-style single-column layout:
@@ -122,5 +124,45 @@ func TestWelcomeScreen(t *testing.T) {
 	out2 := buf.String()
 	if strings.Contains(out2, "Welcome back!") {
 		t.Fatalf("expected welcome panel to be hidden after dismiss:\n%s", out2)
+	}
+}
+
+// TestDiffBoxOverlay verifies the staged-edits review overlay renders each
+// edit's file path plus its colour-coded unified diff, highlights the current
+// row with ▶, and never exceeds the available body height.
+func TestDiffBoxOverlay(t *testing.T) {
+	tui := New(Config{Model: "deepseek-v4-flash", Provider: "deepseek", Lang: "zh-CN", Theme: "dark"})
+	tui.diffBoxOpen = true
+	tui.diffIdx = 0
+	tui.diffEdits = []searchreplace.StagedEdit{
+		{
+			FilePath: "internal/core/tool/tools.go",
+			Valid:    true,
+			Diff:     "--- a/internal/core/tool/tools.go\n+++ b/internal/core/tool/tools.go\n@@ -1,5 +1,6 @@\n-func old() {}\n+func new() {}",
+		},
+		{
+			FilePath: "cmd/commands.go",
+			Valid:    false,
+			Reason:   "search text not found",
+			Diff:     "",
+		},
+	}
+
+	lines := tui.diffBoxOverlay(80, 20)
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "tools.go") {
+		t.Fatalf("expected first file path in diff overlay:\n%s", joined)
+	}
+	if !strings.Contains(joined, "▶") {
+		t.Fatalf("expected ▶ highlight marker on the selected row:\n%s", joined)
+	}
+	if !strings.Contains(joined, "-func old") || !strings.Contains(joined, "+func new") {
+		t.Fatalf("expected unified diff +/- lines in overlay:\n%s", joined)
+	}
+	if !strings.Contains(joined, "无效") {
+		t.Fatalf("expected invalid-edit note in overlay:\n%s", joined)
+	}
+	if len(lines) > 20 {
+		t.Fatalf("diff overlay exceeds body height: %d lines (max 20)", len(lines))
 	}
 }

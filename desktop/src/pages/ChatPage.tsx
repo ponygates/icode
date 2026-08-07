@@ -10,6 +10,7 @@ import TokenBar from '../components/TokenBar';
 import TabBar from '../components/TabBar';
 import CheckpointPanel from '../components/CheckpointPanel';
 import FilePicker from '../components/FilePicker';
+import FileTree from '../components/FileTree';
 import ModelPicker from '../components/ModelPicker';
 import PlumBlossom from '../components/PlumBlossom';
 import { executeSlash, filterSlash, type SlashCommand } from '../lib/slashCommands';
@@ -1426,6 +1427,18 @@ const ChatPage: React.FC = () => {
           background: 'var(--bg-secondary)', padding: '16px 14px', overflowY: 'auto',
           fontSize: 12, color: 'var(--text-secondary)', display: 'flex', flexDirection: 'column', gap: 14,
         }}>
+          {/* Workspace file tree — shown when the active workspace is bound
+              to a real local directory. Double-click inserts @path into the
+              input; right-click offers ask/explain/optimize actions. */}
+          {activeWs?.path && (
+            <div className="card" style={{ padding: 0, overflow: 'hidden', height: 300, display: 'flex', flexDirection: 'column' }}>
+              <FileTree
+                path={activeWs.path}
+                onInsertPath={(p) => setInput((prev) => prev ? `${prev} ${p}` : p)}
+              />
+            </div>
+          )}
+
           {/* Files touched by agent */}
           {fileActions.length > 0 && (
               <div className="card" style={{ padding: 12 }}>

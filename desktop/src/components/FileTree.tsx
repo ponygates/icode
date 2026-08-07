@@ -8,6 +8,8 @@ type FileItem = { path: string; type: FileType; isDir: boolean; depth: number };
 const DIRS = new Set(['node_modules', '.git', '.idea', '.vscode', 'dist', 'build', '.next', 'vendor', '__pycache__', '.cache', 'target', '.icode', '.mimocode']);
 
 interface Props {
+  /** Root directory to list (passed as ?path= to /api/files). Defaults to the backend cwd. */
+  path?: string;
   /** injected into the input box when a file is double-clicked or Enter is pressed */
   onInsertPath?: (relPath: string) => void;
   /** context-menu action fired by right-click on a file */
@@ -85,7 +87,7 @@ function flatten(files: FileItem[]): FlatNode[] {
 
 // ── Component ───────────────────────────────────────────────────────────────
 
-const FileTree: React.FC<Props> = ({ onInsertPath, onAction, style }) => {
+const FileTree: React.FC<Props> = ({ path, onInsertPath, onAction, style }) => {
   const { backendUrl } = useAppStore();
   const [items, setItems] = useState<FlatNode[]>([]);
   const [loading, setLoading] = useState(true);
@@ -96,13 +98,16 @@ const FileTree: React.FC<Props> = ({ onInsertPath, onAction, style }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // Fetch tree on mount / backendUrl change
+  // Fetch tree on mount / backendUrl / path change
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
+    setItems([]);
     (async () => {
       try {
-        const url = `${backendUrl}/api/files`;
+        const url = path
+          ? `${backendUrl}/api/files?path=${encodeURIComponent(path)}`
+          : `${backendUrl}/api/files`;
         const res = await fetch(url, { cache: 'no-cache' });
         if (!res.ok) return;
         const data = await res.json();
@@ -116,7 +121,7 @@ const FileTree: React.FC<Props> = ({ onInsertPath, onAction, style }) => {
       }
     })();
     return () => { cancelled = true; };
-  }, [backendUrl]);
+  }, [backendUrl, path]);
 
   // Keyboard shortcut: Ctrl+F to toggle search
   useEffect(() => {

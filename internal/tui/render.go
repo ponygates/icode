@@ -217,6 +217,10 @@ func (t *TUI) render() {
 		conv = t.modelPickerOverlay(W, bodyH)
 		t.scrollOffset = 0
 		sbActive = false
+	} else if t.diffBoxOpen {
+		conv = t.diffBoxOverlay(contentW, bodyH)
+		t.scrollOffset = 0
+		sbActive = false
 	} else if t.helpVisible {
 		conv = t.helpBox(contentW, bodyH)
 		t.scrollOffset = 0
