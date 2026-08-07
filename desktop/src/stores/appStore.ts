@@ -186,6 +186,7 @@ interface AppStore {
   activeWorkspaceId: string | null;
   loadWorkspaces: () => Promise<void>;
   createWorkspace: (name: string, path: string) => Promise<void>;
+  updateWorkspace: (id: string, patch: { name?: string; path?: string }) => Promise<void>;
   setActiveWorkspace: (id: string) => void;
 
   // Messages
@@ -833,6 +834,21 @@ export const useAppStore = create<AppStore>()(
     }
     // Empty workspace: keep the current session so the user can start one
     // (createSession will auto-bind it to this workspace).
+  },
+
+  updateWorkspace: async (id, patch) => {
+    const { backendUrl } = get();
+    if (!backendUrl) return;
+    try {
+      const res = await fetch(`${backendUrl}/api/workspaces/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+      if (res.ok) {
+        await get().loadWorkspaces();
+      }
+    } catch { /* ignore */ }
   },
 
   addMessage: (sessionId, msg) => {

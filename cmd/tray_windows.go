@@ -152,6 +152,12 @@ func runWebView(url string) {
 	procRegisterHotKey.Call(desktopHWND, hotkeyID, modControl|modShift, vkSpace)
 
 	desktopVisible.Store(true)
+	// Bind a native folder picker so the React UI can "add local directory"
+	// to a workspace without hand-typing the path (安全: only ever returns a
+	// path the user explicitly chose; no filesystem access is granted).
+	if err := w.Bind("pickDirectory", pickDirectory); err != nil {
+		log.Printf("[desktop] Bind(pickDirectory) failed: %v", err)
+	}
 	w.Navigate(url)
 	w.Run()
 

@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next';
 import i18n from '../i18n';
 import { useAppStore, Message, Attachment, type Model } from '../stores/appStore';
-import { Send, Plus, Trash2, MessageSquare, Cpu, Shield, Square, ShieldAlert, GitBranch, FileText, RefreshCw, Folder, Edit3, Download, FileJson, Upload, ChevronDown } from 'lucide-react';
+import { Send, Plus, Trash2, MessageSquare, Cpu, Shield, Square, ShieldAlert, GitBranch, FileText, RefreshCw, Folder, Edit3, Download, FileJson, Upload, ChevronDown, Mic } from 'lucide-react';
 import Markdown from '../components/Markdown';
 import CommandPalette, { useCommandPalette } from '../components/CommandPalette';
 import TodoPanel from '../components/TodoPanel';
@@ -310,6 +310,14 @@ const ChatPage: React.FC = () => {
   // Whether the user is scrolled near the bottom of the message list — used to
   // show/hide the floating "back to latest" affordance.
   const [atBottom, setAtBottom] = useState(true);
+  // Voice input: mediaRecorderRef holds the active recorder while recording;
+  // chunksRef accumulates audio. A stored toggle lets the handler stay stable
+  // across renders (the button click uses the latest via ref).
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const voiceChunksRef = useRef<Blob[]>([]);
+  const [voiceActive, setVoiceActive] = useState(false);
+  const [voiceBusy, setVoiceBusy] = useState(false);
 
   // Resolve the local backend URL once so we can stream chat directly from the
   // renderer (bypassing the fragile Electron IPC+SSE bridge). Falls back to the
@@ -538,6 +546,56 @@ const ChatPage: React.FC = () => {
     const interval = setInterval(fetchBranch, 10000);
     return () => clearInterval(interval);
   }, [backendUrl]);
+
+  // Voice input toggling. Collects microphone audio with the MediaRecorder
+  // API then POSTs the WAV to the backend /api/voice, which runs it through
+  // Zhipu GLM-ASR. The recognised text is appended to the input so it can be
+  // edited before sending.
+  const toggleVoice = useCallback(async () => {
+    const rec = mediaRecorderRef.current;
+    // Stop an in-progress recording → onstop fires → transcribe.
+    if (rec && rec.state !== 'inactive') {
+      rec.stop();
+      return;
+    }
+    if (voiceBusy) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStreamRef.current = stream;
+      voiceChunksRef.current = [];
+      const mr = new MediaRecorder(stream);
+      mr.ondataavailable = (e) => { if (e.data.size > 0) voiceChunksRef.current.push(e.data); };
+      mr.onstop = async () => {
+        setVoiceActive(false);
+        setVoiceBusy(true);
+        try {
+          stream.getTracks().forEach(t => t.stop());
+          mediaStreamRef.current = null;
+          const blob = new Blob(voiceChunksRef.current, { type: 'audio/webm' });
+          const form = new FormData();
+          form.append('file', blob, 'voice.webm');
+          const res = await fetch(`${backendUrl}/api/voice`, { method: 'POST', body: form });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            alert(data.error || t('chat.voiceError'));
+          } else if (data.text) {
+            setInput(prev => (prev ? prev + ' ' : '') + data.text);
+            inputRef.current?.focus();
+          }
+        } catch {
+          /* ignore — button state already reset */
+        } finally {
+          setVoiceBusy(false);
+          mediaRecorderRef.current = null;
+        }
+      };
+      mr.start();
+      mediaRecorderRef.current = mr;
+      setVoiceActive(true);
+    } catch {
+      alert(t('chat.voiceUnsupported'));
+    }
+  }, [backendUrl, voiceBusy, t]);
 
   const handleSend = useCallback(async (override?: string) => {
     const text = (override ?? input).trim();
@@ -1705,6 +1763,19 @@ const ChatPage: React.FC = () => {
             }}
           />
           </div>
+          <button
+            onClick={toggleVoice}
+            disabled={voiceBusy}
+            title={voiceActive ? t('chat.voiceStop') : t('chat.voice')}
+            style={{
+              background: voiceActive ? 'var(--error)' : 'transparent',
+              border: 'none', color: voiceActive ? '#fff' : 'var(--text-muted)',
+              padding: '6px 10px', borderRadius: 8, cursor: 'pointer',
+              display: 'flex', alignItems: 'center',
+            }}
+          >
+            <Mic size={16} />
+          </button>
           {isStreaming ? (
             <button
               onClick={handleStop}

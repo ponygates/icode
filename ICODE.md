@@ -178,6 +178,9 @@ configs/                 默认配置文件
 
 ## 约定
 
+> 本行下为长期记忆约定，永久生效。
+
+- **语言**：与用户的所有对话回复、思考过程一律使用简体中文。
 - Go 1.26+，module path: `github.com/ponygates/icode`
 - 包名匹配目录名（如 `conversation`, `tokenopt`）
 - 公开类型/函数 PascalCase，私有 camelCase
