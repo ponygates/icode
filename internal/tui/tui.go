@@ -11,6 +11,7 @@ import (
 
 	"github.com/ponygates/icode/internal/config"
 	"github.com/ponygates/icode/internal/core/permission"
+	"github.com/ponygates/icode/internal/core/searchreplace"
 	"golang.org/x/term"
 )
 
@@ -236,6 +237,14 @@ type TUI struct {
 	// statusNotice is a one-line flash message shown in the status bar (e.g.
 	// "✓ Model switched to deepseek-v4-flash"), cleared after the next render.
 	statusNotice string
+
+	// diffBoxOpen enables the staged-edits diff review overlay (opened
+	// automatically when staged edits exist, or via `/review`). While active,
+	// printable keys dismiss the overlay, Enter accepts all edits, Ctrl+Z
+	// rejects them.
+	diffBoxOpen bool
+	diffEdits   []searchreplace.StagedEdit // staged edits to review
+	diffIdx     int                        // highlighted row in the box
 
 	// lastRenderW, lastRenderH track the dimensions used in the last frame
 	// so render() can detect a size change and issue a full clear.

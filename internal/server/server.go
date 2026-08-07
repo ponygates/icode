@@ -188,6 +188,12 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 	mux.HandleFunc("/api/workspaces", s.handleWorkspaces)
 	mux.HandleFunc("/api/workspaces/", s.handleWorkspaceByID)
 
+	// File tree
+	mux.HandleFunc("/api/files", s.handleFiles)
+
+	// Voice transcription (desktop / simpleui voice buttons)
+	mux.HandleFunc("/api/voice", s.handleVoice)
+
 	// Static frontend — serve the desktop UI at /
 	mux.HandleFunc("/", s.handleFrontend)
 
