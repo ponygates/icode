@@ -251,6 +251,13 @@ var execCmd = &cobra.Command{
 				} else if !jsonMode {
 					fmt.Printf("\n[Tool: %s]\n", event.ToolCall.Name)
 				}
+			case types.EventToolProgress:
+				// Live bash output — forward in stream mode, surface in text mode.
+				if streamJSON {
+					emitNDJSON(map[string]interface{}{"type": "tool_progress", "content": event.Content})
+				} else if !jsonMode {
+					fmt.Print(event.Content)
+				}
 			case types.EventDone:
 				if event.Meta.Usage.PromptTokens > 0 || event.Meta.Usage.CompletionTokens > 0 {
 					usage = event.Meta.Usage
@@ -994,6 +1001,9 @@ func (c *chatCallback) OnSend(text string) {
 				args = ""
 			}
 			c.tui.AddToolMessage(event.ToolCall.Name, args, "")
+		case types.EventToolProgress:
+			// Live tool output (bash streaming): append to the active tool card.
+			c.tui.AppendToolProgress(event.Content)
 		case types.EventDone:
 			u := event.Meta.Usage
 			var cacheRate float64
@@ -1047,6 +1057,35 @@ func (c *chatCallback) OnListSessions() string {
 		sb.WriteString(fmt.Sprintf("  %s  %s  [%s]\n", s.ID, title, s.ModelID))
 	}
 	return sb.String()
+}
+
+// OnListSessionsStructured implements tui.Callback — returns lightweight
+// session descriptors for the interactive /resume picker.
+func (c *chatCallback) OnListSessionsStructured(limit int) []tui.SessionInfo {
+	if c.app == nil || c.app.SessStore == nil {
+		return nil
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	sessions, err := sessionum.ListNonDeleted(c.app.SessStore, limit)
+	if err != nil {
+		return nil
+	}
+	out := make([]tui.SessionInfo, 0, len(sessions))
+	for _, s := range sessions {
+		title := s.Title
+		if title == "" {
+			title = "(untitled)"
+		}
+		out = append(out, tui.SessionInfo{
+			ID:      s.ID,
+			Title:   title,
+			Model:   s.ModelID,
+			Updated: s.UpdatedAt.Format("01-02 15:04"),
+		})
+	}
+	return out
 }
 
 // OnResume loads a past session's messages into the TUI.
@@ -1356,7 +1395,7 @@ func (c *chatCallback) OnSlashCommand(cmd string, args []string) {
 			}
 		}
 	case "/review":
-		edits := searchreplace.StageList()
+		edits := searchreplace.StageForSession(c.sessionID).List()
 		if len(edits) == 0 {
 			c.tui.AddMessage(tui.RoleSystem, "No staged edits. Use the search_replace tool to propose changes first.")
 			break
@@ -1412,14 +1451,15 @@ func (c *chatCallback) OnSlashCommand(cmd string, args []string) {
 			c.tui.AddMessage(tui.RoleSystem, "撤销系统未初始化")
 		}
 	case "/apply":
-		n := searchreplace.StageCount()
+		stage := searchreplace.StageForSession(c.sessionID)
+		n := stage.Count()
 		if n == 0 {
 			c.tui.AddMessage(tui.RoleSystem, "No staged edits to apply.")
 			break
 		}
 
 		// Snapshot files before applying (for atomic rollback)
-		edits := searchreplace.StageList()
+		edits := stage.List()
 		snapshottedFiles := make(map[string]bool)
 		for _, ed := range edits {
 			if ed.Valid && ed.FilePath != "" && !snapshottedFiles[ed.FilePath] {
@@ -1430,7 +1470,7 @@ func (c *chatCallback) OnSlashCommand(cmd string, args []string) {
 			}
 		}
 
-		results := searchreplace.StageApplyValid()
+		results := stage.ApplyValid()
 
 		// Check for failures — auto-rollback on any failure
 		hasFailures := false
@@ -1452,15 +1492,16 @@ func (c *chatCallback) OnSlashCommand(cmd string, args []string) {
 		}
 
 		c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("Applied %d/%d staged edits. Remaining: %d",
-			applied, n, searchreplace.StageCount()))
+			applied, n, stage.Count()))
 
 	case "/reject":
-		n := searchreplace.StageCount()
+		stage := searchreplace.StageForSession(c.sessionID)
+		n := stage.Count()
 		if n == 0 {
 			c.tui.AddMessage(tui.RoleSystem, "No staged edits to reject.")
 			break
 		}
-		searchreplace.StageClear()
+		stage.Clear()
 		c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("Rejected %d staged edits.", n))
 
 	case "/search":
@@ -1559,6 +1600,16 @@ func (c *chatCallback) TodoCounts() (pending, active, done, total int) {
 }
 
 func (c *chatCallback) SessionID() string { return c.sessionID }
+
+// OnSetMode implements tui.Callback — switches the permission gate so the
+// TUI's displayed mode and the enforced mode can never drift apart.
+func (c *chatCallback) OnSetMode(mode string) string {
+	if c.app == nil || c.app.Gate == nil {
+		return ""
+	}
+	c.app.Gate.SetMode(permission.Mode(mode))
+	return ""
+}
 
 func (c *chatCallback) OnInterrupt() {
 	if c.app != nil && c.app.Engine != nil && c.sessionID != "" {

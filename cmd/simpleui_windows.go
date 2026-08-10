@@ -393,6 +393,15 @@ func (b *simpleUIBridge) runPrompt(prompt string) {
 					args = ""
 				}
 				b.push(fmt.Sprintf("uiTool(%s, %s)", jsStr(event.ToolCall.Name), jsStr(args)))
+			case types.EventToolProgress:
+				// Live bash output — surface as tool-result updates so the
+				// SimpleUI transcript grows while the command runs.
+				b.mu.Lock()
+				lt := b.lastTool
+				b.mu.Unlock()
+				if lt != "" {
+					b.push(fmt.Sprintf("uiToolResult(%s)", jsStr(strings.TrimSpace(event.Content))))
+				}
 			case types.EventDone:
 				b.mu.Lock()
 				th := b.thinkingBuf
@@ -1362,6 +1371,14 @@ func simpleUIHTML(model, provider string) string {
   stopBtn.addEventListener('click', function(){ if (window.stop) window.stop(); });
   inp.addEventListener('keydown', function(e){
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); return; }
+    // Esc — interrupt an in-flight generation (mirrors the TUI and the
+    // desktop app; the stop button is hidden while idle, so this is the
+    // keyboard path for the same action).
+    if (e.key === 'Escape') {
+      if (stopBtn.style.display !== 'none') { if (window.stop) window.stop(); }
+      e.preventDefault();
+      return;
+    }
     // Tab / Shift+Tab cycle the permission mode (Claude Code style): Tab
     // moves forward, Shift+Tab backwards. Backend vocabulary is plan/agent/
     // auto/yolo; "ask" from the desktop UI maps to agent on the gate.
