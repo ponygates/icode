@@ -51,7 +51,8 @@ func (t *TUI) deleteToLineStart() {
 }
 
 // cycleMode rotates the agent mode: auto → plan → agent → yolo → auto
-// (Shift+Tab), mirroring the mode switcher in Claude Code.
+// (Shift+Tab), mirroring the mode switcher in Claude Code. The backend gate
+// is switched through the callback so display and enforcement stay in sync.
 func (t *TUI) cycleMode() {
 	t.mu.Lock()
 	switch t.mode {
@@ -66,6 +67,11 @@ func (t *TUI) cycleMode() {
 	}
 	mode := t.mode
 	t.mu.Unlock()
+	if t.callback != nil {
+		if msg := t.callback.OnSetMode(mode); msg != "" {
+			t.notice(msg)
+		}
+	}
 	t.notice("Mode: " + mode)
 	t.scheduleRender()
 }

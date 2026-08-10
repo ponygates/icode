@@ -251,10 +251,32 @@ func (t *TUI) handleKey(r rune) bool {
 		// / "A" characters would leak into the input buffer — the classic
 		// "garbled text on up/down" bug.
 		if br, ok := t.reader.(*bufio.Reader); ok {
-			ur, _, err := br.ReadRune()
-			if err != nil {
-				// Lone Esc (no follow-up byte): cancel a pending plan, close
-				// the model picker, or switch back from vim normal mode.
+			// Lone Esc (no follow-up byte yet): the terminal delivers a plain
+			// ESC press as a single byte. Peek — if the buffer is empty, this
+			// is a standalone Esc; otherwise the follow-up byte is already
+			// buffered (arrow keys, Alt+key, CSI, bracketed paste) because
+			// terminals write an escape sequence as one burst. A blocking
+			// ReadRune here would hang forever on a lone Esc — the classic
+			// "ESC key does nothing" bug.
+			if br.Buffered() == 0 {
+				// Lone Esc — interrupt streaming first, then dismiss whatever
+				// overlay is open (plan bar, diff box, pickers, autocomplete,
+				// help panel, welcome, vim mode).
+				if t.streaming {
+					if t.callback != nil {
+						t.callback.OnInterrupt()
+					}
+					return true
+				}
+				if t.acOpen {
+					t.acOpen = false
+					t.acItems = nil
+					return true
+				}
+				if t.helpVisible {
+					t.helpVisible = false
+					return true
+				}
 				t.mu.Lock()
 				planPending := t.planPending
 				t.mu.Unlock()
@@ -265,10 +287,18 @@ func (t *TUI) handleKey(r rune) bool {
 					t.closeDiffBox()
 				} else if t.modelPickerOpen {
 					t.closeModelPicker()
+				} else if t.resumePickerOpen {
+					t.closeResumePicker()
 				} else if t.vimMode && !t.vimInsert {
 					t.vimInsert = true
 					t.render()
+				} else if t.dismissWelcome() {
+					// Welcome banner closed.
 				}
+				return true
+			}
+			ur, _, err := br.ReadRune()
+			if err != nil {
 				return true
 			}
 			// Alt+Enter (or Alt+Return): submit current input.
@@ -282,9 +312,13 @@ func (t *TUI) handleKey(r rune) bool {
 				}
 				return true
 			}
-			// Plain Esc (or any non-CSI key) cancels the model picker.
+			// Plain Esc (or any non-CSI key) cancels the model /resume pickers.
 			if t.modelPickerOpen && ur != '[' {
 				t.closeModelPicker()
+				return true
+			}
+			if t.resumePickerOpen && ur != '[' {
+				t.closeResumePicker()
 				return true
 			}
 			if ur == '[' {
@@ -297,6 +331,10 @@ func (t *TUI) handleKey(r rune) bool {
 				case 'A': // ↑ history prev OR move suggestion cursor up (Claude Code)
 					if t.modelPickerOpen {
 						t.movePicker(-1)
+						return true
+					}
+					if t.resumePickerOpen {
+						t.moveResumePicker(-1)
 						return true
 					}
 					if t.diffBoxOpen {
@@ -314,6 +352,10 @@ func (t *TUI) handleKey(r rune) bool {
 				case 'B': // ↓ history next OR move suggestion cursor down (Claude Code)
 					if t.modelPickerOpen {
 						t.movePicker(1)
+						return true
+					}
+					if t.resumePickerOpen {
+						t.moveResumePicker(1)
 						return true
 					}
 					if t.diffBoxOpen {
@@ -403,29 +445,6 @@ func (t *TUI) handleKey(r rune) bool {
 			}
 			return true
 		}
-		// Plain Esc — stop streaming, dismiss panels, or welcome screen.
-		if t.streaming {
-			if t.callback != nil {
-				t.callback.OnInterrupt()
-			}
-			return true
-		}
-		if t.acOpen {
-			t.acOpen = false
-			t.acItems = nil
-			return true
-		}
-		if t.diffBoxOpen {
-			t.closeDiffBox()
-			return true
-		}
-		if t.helpVisible {
-			t.helpVisible = false
-			return true
-		}
-		if t.dismissWelcome() {
-			return true
-		}
 		return true
 	case '\r', '\n':
 		if t.diffBoxOpen {
@@ -435,6 +454,10 @@ func (t *TUI) handleKey(r rune) bool {
 		}
 		if t.modelPickerOpen {
 			t.selectModelAt(t.modelPickerIdx)
+			return true
+		}
+		if t.resumePickerOpen {
+			t.resumeSessionAt(t.resumePickerIdx)
 			return true
 		}
 		if t.multiline {

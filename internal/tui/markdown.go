@@ -1,7 +1,12 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
+
+	"github.com/alecthomas/chroma/v2"
+	"github.com/alecthomas/chroma/v2/lexers"
+	"github.com/alecthomas/chroma/v2/styles"
 )
 
 // renderMarkdown converts a Markdown string into a slice of pre-prefixed,
@@ -18,6 +23,7 @@ func (t *TUI) renderMarkdown(content, prefix, cont string, width int) []string {
 
 	inCode := false
 	var codeBuf []string
+	codeLang := ""
 
 	flushCode := func() {
 		if len(codeBuf) == 0 {
@@ -28,13 +34,16 @@ func (t *TUI) renderMarkdown(content, prefix, cont string, width int) []string {
 			inner = 8
 		}
 		out = append(out, prefix+t.paint("dim", "┌"+repeat("─", inner)+"┐"))
-		for _, cl := range codeBuf {
-			for _, wl := range wrapText(cl, inner-1) {
-				out = append(out, cont+t.paint("dim", "│ ")+t.c("cyan")+wl+"\x1b[0m")
-			}
+		// Syntax-highlight the block by language when the theme supports it;
+		// fall back to the plain cyan treatment otherwise. The output is
+		// post-processed so CJK width math never sees ANSI bytes.
+		styled := t.highlightCode(codeLang, strings.Join(codeBuf, "\n"), inner-1)
+		for _, wl := range styled {
+			out = append(out, cont+t.paint("dim", "│ ")+wl)
 		}
 		out = append(out, prefix+t.paint("dim", "└"+repeat("─", inner)+"┘"))
 		codeBuf = nil
+		codeLang = ""
 	}
 
 	lineIdx := 0
@@ -42,10 +51,12 @@ func (t *TUI) renderMarkdown(content, prefix, cont string, width int) []string {
 		ln := lines[lineIdx]
 		trim := strings.TrimSpace(ln)
 
-		// Fenced code block toggle.
+		// Fenced code block toggle. The language tag after ``` selects the
+		// highlighter (go, python, diff, json, ...).
 		if strings.HasPrefix(trim, "```") {
 			if !inCode {
 				inCode = true
+				codeLang = strings.TrimSpace(strings.TrimPrefix(trim, "```"))
 				lineIdx++
 				continue
 			}
@@ -297,7 +308,9 @@ func (t *TUI) renderInline(text string) string {
 			}
 		}
 
-		// Link: [text](url)
+		// Link: [text](url) — OSC 8 hyperlink when the terminal supports it
+		// (Windows Terminal / WezTerm / kitty / iTerm2), plain underline +
+		// dim URL otherwise.
 		if r == '[' {
 			closeB := -1
 			for j := i + 1; j < n; j++ {
@@ -317,35 +330,39 @@ func (t *TUI) renderInline(text string) string {
 				if closeP > closeB+1 {
 					linkText := string(runes[i+1 : closeB])
 					url := string(runes[closeB+2 : closeP])
-					b.WriteString("\x1b[4m")
-					b.WriteString(linkText)
-					b.WriteString("\x1b[0m")
-					b.WriteString(t.paint("dim", " ("+url+")"))
+					if t.osc8 {
+						// OSC 8 hyperlink: \x1b]8;;URL\x1b\\text\x1b]8;;\x1b\\
+						b.WriteString(fmt.Sprintf("\x1b]8;;%s\x1b\\", url))
+						b.WriteString("\x1b[4m")
+						b.WriteString(linkText)
+						b.WriteString("\x1b[0m")
+						b.WriteString("\x1b]8;;\x1b\\")
+					} else {
+						b.WriteString("\x1b[4m")
+						b.WriteString(linkText)
+						b.WriteString("\x1b[0m")
+						b.WriteString(t.paint("dim", " ("+url+")"))
+					}
 					i = closeP + 1
 					continue
 				}
 			}
 		}
 
-		// Bare URL auto-link: https://...
-		if r == 'h' && i+7 < n && string(runes[i:i+7]) == "http://" {
+		// Bare URL auto-link: http(s)://… — OSC 8 when supported.
+		if r == 'h' && i+7 < n && (string(runes[i:i+7]) == "http://" || (i+8 < n && string(runes[i:i+8]) == "https://")) {
 			end := findURLEnd(runes, i)
 			if end > i+7 {
 				url := string(runes[i:end])
+				if t.osc8 {
+					b.WriteString(fmt.Sprintf("\x1b]8;;%s\x1b\\", url))
+				}
 				b.WriteString("\x1b[4m")
 				b.WriteString(url)
 				b.WriteString("\x1b[0m")
-				i = end
-				continue
-			}
-		}
-		if r == 'h' && i+8 < n && string(runes[i:i+8]) == "https://" {
-			end := findURLEnd(runes, i)
-			if end > i+8 {
-				url := string(runes[i:end])
-				b.WriteString("\x1b[4m")
-				b.WriteString(url)
-				b.WriteString("\x1b[0m")
+				if t.osc8 {
+					b.WriteString("\x1b]8;;\x1b\\")
+				}
 				i = end
 				continue
 			}
@@ -630,3 +647,83 @@ func (t *TUI) colorizeDiffStr(diff string) string {
 	colored := t.colorizeDiff(lines)
 	return strings.Join(colored, "\n")
 }
+
+// highlightCode tokenizes code with chroma and returns terminal lines with
+// 3-4 colour classes (keywords, strings, comments, numbers) mapped onto the
+// existing palette. Each output line carries its own ANSI state so the
+// CJK-aware wrapper never has to balance escapes across lines.
+func (t *TUI) highlightCode(lang, code string, innerWidth int) []string {
+	if !t.color {
+		return wrapText(code, innerWidth)
+	}
+	// diff blocks already have dedicated +/-/@ coloring — skip chroma there.
+	if lang == "diff" || strings.HasPrefix(lang, "diff") {
+		return t.colorizeDiff(linesOf(code))
+	}
+	lexer := lexers.Get(lang)
+	if lexer == nil {
+		lexer = lexers.Fallback
+	}
+	lexer = chroma.Coalesce(lexer)
+
+	style := styles.Get("vs")
+	if style == nil {
+		style = styles.Fallback
+	}
+
+	// Map chroma token types onto the palette's named colours. Strings and
+	// keywords carry weight; comments dim; numbers yellow; everything else
+	// keeps the default cyan so unknown tokens still look "code".
+	tokenColor := func(tt chroma.TokenType) string {
+		switch {
+		case tt == chroma.Comment || tt == chroma.CommentSingle || tt == chroma.CommentSpecial:
+			return "dim"
+		case tt == chroma.Keyword || tt == chroma.KeywordDeclaration || tt == chroma.KeywordType ||
+			tt == chroma.KeywordNamespace || tt == chroma.KeywordConstant:
+			return "magenta"
+		case tt == chroma.String || tt == chroma.StringDouble || tt == chroma.StringSingle ||
+			tt == chroma.StringHeredoc || tt == chroma.StringInterpol:
+			return "green"
+		case tt == chroma.LiteralNumber || tt == chroma.LiteralNumberInteger || tt == chroma.LiteralNumberFloat:
+			return "yellow"
+		default:
+			return "cyan"
+		}
+	}
+
+	it, err := lexer.Tokenise(nil, code)
+	if err != nil {
+		return wrapText(code, innerWidth)
+	}
+
+	var out []string
+	var line strings.Builder
+	flush := func() {
+		if line.Len() > 0 {
+			// wrapANSI tracks ANSI state across wrapped lines and measures
+			// display width correctly for CJK — exactly what token-coloured
+			// code needs. Empty prefix/cont = no indentation here (the render
+			// layer adds the "│ " frame).
+			for _, wl := range t.wrapANSI("", "", line.String(), innerWidth) {
+				out = append(out, wl)
+			}
+			line.Reset()
+		}
+	}
+	for _, tok := range it.Tokens() {
+		if tok.Value == "\n" {
+			flush()
+			continue
+		}
+		col := tokenColor(tok.Type)
+		if col == "cyan" {
+			line.WriteString(tok.Value)
+		} else {
+			line.WriteString(t.paint(col, tok.Value))
+		}
+	}
+	flush()
+	return out
+}
+
+func linesOf(s string) []string { return strings.Split(s, "\n") }

@@ -305,7 +305,7 @@ func TestModelPickerEscCancel(t *testing.T) {
 	if !tu.modelPickerOpen {
 		t.Fatalf("picker should be open before Esc")
 	}
-	feedEsc(t, tu, "\x1b") // plain Esc (no CSI) cancels
+	feedEscLone(t, tu) // plain Esc (empty follow-up buffer) cancels
 	if tu.modelPickerOpen {
 		t.Errorf("Esc did not cancel the picker")
 	}
@@ -314,16 +314,75 @@ func TestModelPickerEscCancel(t *testing.T) {
 	}
 }
 
-// feedEsc sets the reader to the remainder of an ESC sequence (after the
-// leading 0x1b) and dispatches the ESC key through handleKey, exactly as the
-// raw-mode main loop does.
+// TestEscInterruptStreaming verifies the ESC-interrupt fix: a lone Esc while
+// streaming must call the callback's OnInterrupt (previously it blocked
+// forever on ReadRune waiting for a second byte). The streaming flag itself
+// is cleared by drainStream when the engine closes the event channel, not by
+// the ESC handler.
+func TestEscInterruptStreaming(t *testing.T) {
+	tu := newTestTUI()
+	tu.rawMode = true
+	tu.streaming = true
+	interrupted := false
+	tu.callback = &testCallback{onInterrupt: func() { interrupted = true }}
+	feedEscLone(t, tu)
+	if !interrupted {
+		t.Error("lone Esc while streaming must call OnInterrupt")
+	}
+}
+
+// testCallback is a minimal Callback that records interrupt calls.
+type testCallback struct {
+	onInterrupt func()
+}
+
+func (c *testCallback) OnSend(text string)                                    {}
+func (c *testCallback) OnSlashCommand(cmd string, args []string)              {}
+func (c *testCallback) OnPermissionResponse(decision string)                  {}
+func (c *testCallback) OnPlanConfirm()                                        {}
+func (c *testCallback) OnInterrupt()                                          { if c.onInterrupt != nil { c.onInterrupt() } }
+func (c *testCallback) OnListSessions() string                                { return "" }
+func (c *testCallback) OnResume(id string) string                             { return "" }
+func (c *testCallback) TodoCounts() (int, int, int, int)                      { return 0, 0, 0, 0 }
+func (c *testCallback) SessionID() string                                     { return "" }
+func (c *testCallback) OnStatus() string                                      { return "" }
+func (c *testCallback) OnTokenStats() string                                  { return "" }
+func (c *testCallback) OnOutputStyle(style string) string                     { return "" }
+func (c *testCallback) OnAddDir(dir string) string                            { return "" }
+func (c *testCallback) OnUpdateModels() string                                { return "" }
+func (c *testCallback) OnSetMode(mode string) string                          { return "" }
+func (c *testCallback) OnListSessionsStructured(limit int) []SessionInfo      { return nil }
+
+// feedEsc sets the reader to an ESC sequence (leading 0x1b + follow-up bytes)
+// and dispatches it exactly as the raw-mode main loop does: read the first
+// rune through bufio (which fills the internal buffer with any already-arrived
+// follow-up bytes — that is what the Lone-Esc vs CSI distinction relies on),
+// then hand it to handleKey.
 func feedEsc(t *testing.T, tu *TUI, seq string) {
 	if len(seq) == 0 || seq[0] != 0x1b {
 		t.Fatalf("feedEsc expects a sequence starting with ESC, got %q", seq)
 	}
-	tu.reader = bufio.NewReader(strings.NewReader(seq[1:]))
-	if !tu.handleKey(0x1b) {
+	tu.reader = bufio.NewReader(strings.NewReader(seq))
+	rr, _, err := tu.reader.(*bufio.Reader).ReadRune()
+	if err != nil {
+		t.Fatalf("feedEsc ReadRune: %v", err)
+	}
+	if !tu.handleKey(rr) {
 		t.Fatalf("handleKey(ESC %q) signalled exit", seq)
+	}
+}
+
+// feedEscLone dispatches a plain Esc whose follow-up buffer is empty — the
+// real-terminal shape of a lone Esc keypress (the ESC-interrupt fix routes
+// through br.Buffered()==0).
+func feedEscLone(t *testing.T, tu *TUI) {
+	tu.reader = bufio.NewReader(strings.NewReader("\x1b"))
+	rr, _, err := tu.reader.(*bufio.Reader).ReadRune()
+	if err != nil {
+		t.Fatalf("feedEscLone ReadRune: %v", err)
+	}
+	if !tu.handleKey(rr) {
+		t.Fatalf("handleKey(ESC lone) signalled exit")
 	}
 }
 

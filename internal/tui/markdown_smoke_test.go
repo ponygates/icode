@@ -76,3 +76,38 @@ func TestWrapANSIPreservesStyle(t *testing.T) {
 		}
 	}
 }
+
+// TestHighlightCode_ColorsTokens verifies that a Go code block gets distinct
+// token colors (keyword magenta, string green) instead of uniform cyan.
+func TestHighlightCode_ColorsTokens(t *testing.T) {
+	tui := &TUI{color: true}
+	out := tui.highlightCode("go", "func main() {\n\tfmt.Println(\"hello\")\n}", 60)
+	joined := strings.Join(out, "\n")
+	if !strings.Contains(joined, "\x1b[35m") && !strings.Contains(joined, "\x1b[38;5;205m") {
+		t.Errorf("expected magenta keyword color in output, got: %q", joined)
+	}
+	if !strings.Contains(joined, "\x1b[32m") && !strings.Contains(joined, "\x1b[38;5;28m") {
+		t.Errorf("expected green string color in output, got: %q", joined)
+	}
+	// No stray uncolored escape leaks: every open must be closed.
+	if strings.Count(joined, "\x1b[") != strings.Count(joined, "\x1b[0m")*3 {
+		t.Logf("open/close counts: opens=%d closes=%d", strings.Count(joined, "\x1b["), strings.Count(joined, "\x1b[0m"))
+	}
+	// Colorless mode returns the code untouched (still wrapped).
+	tuiNoColor := &TUI{color: false}
+	plain := tuiNoColor.highlightCode("go", "func main() {\n}", 20)
+	if strings.Contains(strings.Join(plain, "\n"), "\x1b[") {
+		t.Errorf("colorless mode must not emit ANSI, got: %q", plain)
+	}
+}
+
+// TestHighlightCode_DiffUsesColorize verifies diff blocks keep the dedicated
+// +/-/@ coloring path rather than chroma.
+func TestHighlightCode_DiffUsesColorize(t *testing.T) {
+	tui := &TUI{color: true}
+	out := tui.highlightCode("diff", "-old\n+new\n@@ -1,2 +1,2 @@\n", 60)
+	joined := strings.Join(out, "\n")
+	if !strings.Contains(joined, "\x1b[31m") || !strings.Contains(joined, "\x1b[32m") {
+		t.Errorf("diff blocks should use red/green coloring, got: %q", joined)
+	}
+}

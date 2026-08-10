@@ -208,7 +208,11 @@ func (t *TUI) render() {
 		convTotal = len(conv)
 	}
 
-	if t.modelPickerOpen {
+	if t.resumePickerOpen {
+		conv = t.resumePickerOverlay(W, bodyH)
+		t.scrollOffset = 0
+		sbActive = false
+	} else if t.modelPickerOpen {
 		// Fixed overlay: always fully visible. The panel scrolls its own
 		// internal window (modelPickerTop) to keep the highlighted row on
 		// screen, independent of the conversation scroll position. It takes
@@ -538,7 +542,7 @@ func (t *TUI) helpBox(W, bodyH int) []string {
 		{"/ 命令", "slash 命令（输入 / 查看）"},
 		{"@ 文件", "文件引用补全"},
 		{"? ", "显示 / 隐藏本帮助"},
-		{"Esc", "取消 / 关闭面板"},
+		{"Esc", "中断生成 / 取消 / 关闭面板"},
 	}
 	title := "键盘快捷键 (Shortcuts)"
 	boxW := W - 6

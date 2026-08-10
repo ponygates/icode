@@ -43,6 +43,14 @@ type Message struct {
 	ToolArgs string
 }
 
+// SessionInfo is a lightweight session descriptor for the /resume picker.
+type SessionInfo struct {
+	ID      string
+	Title   string
+	Model   string
+	Updated string // human-readable relative/absolute time
+}
+
 // Callback bridges user input / slash commands back to the backend.
 type Callback interface {
 	OnSend(text string)
@@ -57,6 +65,9 @@ type Callback interface {
 	OnInterrupt()
 	// OnListSessions returns a formatted list of past sessions.
 	OnListSessions() string
+	// OnListSessionsStructured returns up to limit past sessions (id, title,
+	// model) for the interactive /resume picker. Empty when none exist.
+	OnListSessionsStructured(limit int) []SessionInfo
 	// OnResume loads a past session's messages; returns a status line.
 	OnResume(id string) string
 	// TodoCounts returns the current session's todo counts for the status
@@ -80,6 +91,10 @@ type Callback interface {
 	// OnUpdateModels refreshes provider model catalogs (/update) and returns a
 	// per-provider report. The TUI model list is refreshed as a side effect.
 	OnUpdateModels() string
+	// OnSetMode switches the backend permission gate's mode (plan/agent/auto/
+	// yolo) so the TUI's displayed mode and the actual gate stay in sync.
+	// Returns a human-readable confirmation.
+	OnSetMode(mode string) string
 }
 
 // StreamWriter is the surface the backend uses to push data into the UI.
@@ -88,6 +103,7 @@ type StreamWriter interface {
 	AddToolMessage(tool, toolArgs, content string)
 	AppendToolResult(content string)
 	AppendStream(text string)
+	AppendToolProgress(content string)
 	EndStream()
 	SetStatus(input, output int, cacheHit float64, cost string)
 }
@@ -161,6 +177,7 @@ type TUI struct {
 	// raw-mode state
 	rawMode  bool
 	color    bool
+	osc8     bool // OSC 8 hyperlink support (Windows Terminal / WezTerm / kitty…)
 	width    int
 	height   int
 	inputBuf string
@@ -227,6 +244,15 @@ type TUI struct {
 	modelPickerOpen bool
 	modelPickerIdx  int
 	modelPickerTop  int
+
+	// resumePickerOpen enables the interactive /resume session selector
+	// (opened by /resume with no arguments in raw mode). Same overlay
+	// interaction pattern as the model picker: ↑/↓ move, Enter resumes,
+	// Esc cancels.
+	resumePickerOpen bool
+	resumePickerIdx  int
+	resumePickerTop  int
+	resumeSessions   []SessionInfo
 
 	// scrollbar geometry cached from the last render so mouse handlers can map
 	// a click/drag to a scroll offset without recomputing the conversation.
@@ -311,6 +337,10 @@ func (t *TUI) Run() error {
 			defer term.Restore(fd, state)
 			t.rawMode = true
 			t.color = true
+			// OSC 8 hyperlinks need a modern terminal; Windows conhost's legacy
+			// VT path may garble the sequence, so gate on TERM_PROGRAM / WT_SESSION
+			// / KITTY_WINDOW_ID / WEZTERM_PANE / TMUX (which forwards OSC 8).
+			t.osc8 = osc8Supported()
 			// Initial terminal-size measurement uses termSize() (tries both
 			// stdin and stdout handles) so alt-screen switching and Windows
 			// console quirks don't leave the UI at default 80×24.
@@ -321,6 +351,26 @@ func (t *TUI) Run() error {
 		}
 	}
 	return t.runLine()
+}
+
+// osc8Supported reports whether the terminal advertises OSC 8 hyperlink
+// support. Conservative: unknown terminals get plain underline links.
+func osc8Supported() bool {
+	env := os.Getenv("TERM_PROGRAM")
+	if env == "iTerm.app" || env == "WezTerm" || env == "Hyper" || env == "vscode" {
+		return true
+	}
+	if os.Getenv("WT_SESSION") != "" || os.Getenv("KITTY_WINDOW_ID") != "" ||
+		os.Getenv("WEZTERM_PANE") != "" || os.Getenv("TERM_PROGRAM_VERSION") != "" {
+		return true
+	}
+	if t := os.Getenv("TERM"); strings.Contains(t, "xterm-kitty") ||
+		strings.Contains(t, "wezterm") || strings.Contains(t, "foot") ||
+		strings.Contains(t, "tmux") || strings.Contains(t, "screen") {
+		return true
+	}
+	// Windows Terminal exposes WT_SESSION; legacy conhost does not.
+	return false
 }
 
 // ── Line mode (fallback) ─────────────────────────────────────────

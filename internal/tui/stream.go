@@ -71,6 +71,33 @@ func (t *TUI) AppendToolResult(content string) {
 	}
 }
 
+// AppendToolProgress appends live tool output (bash stdout/stderr) to the
+// most recent tool message. Repaints are throttled so a chatty process can't
+// force a full-screen redraw per line.
+func (t *TUI) AppendToolProgress(content string) {
+	t.mu.Lock()
+	if len(t.messages) == 0 {
+		t.mu.Unlock()
+		return
+	}
+	last := t.messages[len(t.messages)-1]
+	if last.Role != RoleTool {
+		// Progress arrived before the tool card (race with the tool_use
+		// event) — surface it on a fresh tool message with the tool name.
+		t.messages = append(t.messages, Message{Role: RoleTool, Tool: "…", ToolArgs: "", Content: content})
+	} else if t.messages[len(t.messages)-1].Content != "" {
+		t.messages[len(t.messages)-1].Content += content
+	} else {
+		t.messages[len(t.messages)-1].Content = content
+	}
+	t.mu.Unlock()
+	if t.rawMode {
+		t.scheduleRender()
+	} else {
+		fmt.Fprint(t.writer, content)
+	}
+}
+
 // printMessage writes a single message to the line-mode writer.
 func (t *TUI) printMessage(m Message) {
 	switch m.Role {

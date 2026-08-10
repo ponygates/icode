@@ -25,6 +25,18 @@ import (
 
 // ── Slash commands ───────────────────────────────────────────────
 
+// setMode switches the TUI mode AND the backend gate's mode so the displayed
+// mode always matches what the permission layer enforces (/mode and
+// Shift+Tab both funnel through here).
+func (t *TUI) setMode(mode string) {
+	t.mode = mode
+	if t.callback != nil {
+		if msg := t.callback.OnSetMode(mode); msg != "" {
+			t.notice(msg)
+		}
+	}
+}
+
 func (t *TUI) handleSlash(text string) {
 	parts := strings.Fields(text)
 	if len(parts) == 0 {
@@ -104,7 +116,7 @@ func (t *TUI) handleSlash(text string) {
 			want := strings.ToLower(args[0])
 			valid := map[string]bool{"agent": true, "plan": true, "yolo": true, "auto": true, "ask": true}
 			if valid[want] {
-				t.mode = want
+				t.setMode(want)
 				t.add(RoleSystem, "Mode -> "+want)
 			} else {
 				t.add(RoleError, "无效模式: "+want+"（可选 agent/plan/yolo/auto/ask）")
@@ -134,8 +146,10 @@ func (t *TUI) handleSlash(text string) {
 	case "/resume":
 		if len(args) > 0 && t.callback != nil {
 			t.callback.OnSlashCommand("/resume", args)
-		} else {
-			t.add(RoleSystem, "Usage: /resume <session-id> [--lite[=<n>]]")
+		} else if t.callback != nil {
+			// No session ID → interactive picker (raw mode) or a static
+			// numbered list (line mode).
+			t.openResumePicker()
 		}
 
 	case "/fork":
@@ -945,7 +959,7 @@ func (t *TUI) reviewCommand(args []string) {
 		}
 	} else {
 		// With pending staged edits, show the interactive review panel.
-		if len(searchreplace.StageList()) > 0 {
+		if len(t.stage().List()) > 0 {
 			t.openDiffBox()
 			return
 		}
@@ -1510,6 +1524,137 @@ func (t *TUI) closeModelPicker() {
 	}
 }
 
+// ── /resume interactive session picker ───────────────────────────
+
+// openResumePicker shows the saved-session selector. Raw mode gets an
+// interactive overlay (↑/↓ + Enter); line mode falls back to a numbered list.
+func (t *TUI) openResumePicker() {
+	if t.callback == nil {
+		t.add(RoleSystem, "Usage: /resume <session-id> [--lite[=<n>]]")
+		return
+	}
+	t.resumeSessions = t.callback.OnListSessionsStructured(20)
+	if len(t.resumeSessions) == 0 {
+		t.add(RoleSystem, "没有可恢复的历史会话。开始对话后会自动创建。")
+		return
+	}
+	if !t.rawMode {
+		var b strings.Builder
+		b.WriteString("历史会话（/resume <session-id> 恢复）:\n")
+		for i, s := range t.resumeSessions {
+			b.WriteString(fmt.Sprintf("  %-3d %s  %s  [%s]\n", i+1, s.ID, s.Title, s.Model))
+		}
+		t.add(RoleSystem, b.String())
+		return
+	}
+	t.mu.Lock()
+	t.resumePickerOpen = true
+	t.resumePickerIdx = 0
+	t.resumePickerTop = 0
+	t.mu.Unlock()
+	t.render()
+}
+
+// resumePickerOverlay renders the /resume selector as a fixed overlay.
+func (t *TUI) resumePickerOverlay(W, bodyH int) []string {
+	title := "选择要恢复的会话（↑/↓ 移动，Enter 恢复，Esc 取消）："
+	const titleRows = 1
+	maxRows := bodyH - titleRows
+	if maxRows < 1 {
+		maxRows = 1
+	}
+	n := len(t.resumeSessions)
+	if n == 0 {
+		return []string{title, t.paint("dim", "  （暂无历史会话）")}
+	}
+	if n > maxRows {
+		maxRows = bodyH - titleRows - 1
+		if maxRows < 1 {
+			maxRows = 1
+		}
+	}
+	if t.resumePickerIdx < t.resumePickerTop {
+		t.resumePickerTop = t.resumePickerIdx
+	}
+	if t.resumePickerIdx >= t.resumePickerTop+maxRows {
+		t.resumePickerTop = t.resumePickerIdx - maxRows + 1
+	}
+	if t.resumePickerTop > n-maxRows {
+		t.resumePickerTop = n - maxRows
+	}
+	if t.resumePickerTop < 0 {
+		t.resumePickerTop = 0
+	}
+	var lines []string
+	lines = append(lines, t.paint("bold", title))
+	for i := t.resumePickerTop; i < t.resumePickerTop+maxRows && i < n; i++ {
+		s := t.resumeSessions[i]
+		num := fmt.Sprintf("%-3d", i+1)
+		title := truncate(s.Title, 40)
+		meta := s.ID
+		if len(meta) > 24 {
+			meta = meta[:24] + "…"
+		}
+		row := "  " + num + title + t.paint("dim", "  "+meta+"  "+s.Updated+"  ["+s.Model+"]")
+		if i == t.resumePickerIdx {
+			row = "  " + t.paint("green", "▶ ") + num + t.paint("green", title) + t.paint("dim", "  "+meta+"  "+s.Updated+"  ["+s.Model+"]")
+		}
+		lines = append(lines, row)
+	}
+	if n > maxRows {
+		above := t.resumePickerTop
+		below := n - (t.resumePickerTop + maxRows)
+		lines = append(lines, t.paint("dim",
+			fmt.Sprintf("  ↑ %d 更多  ·  ↓ %d 更多  (共 %d)", above, below, n)))
+	}
+	return lines
+}
+
+// moveResumePicker shifts the /resume highlight.
+func (t *TUI) moveResumePicker(delta int) {
+	n := len(t.resumeSessions)
+	if n == 0 {
+		return
+	}
+	t.resumePickerIdx += delta
+	if t.resumePickerIdx < 0 {
+		t.resumePickerIdx = 0
+	}
+	if t.resumePickerIdx >= n {
+		t.resumePickerIdx = n - 1
+	}
+	t.render()
+}
+
+// resumeSessionAt resumes the session at index i and closes the picker.
+func (t *TUI) resumeSessionAt(i int) {
+	if i < 0 || i >= len(t.resumeSessions) {
+		t.closeResumePicker()
+		return
+	}
+	id := t.resumeSessions[i].ID
+	t.closeResumePicker()
+	if t.callback != nil {
+		msg := t.callback.OnResume(id)
+		if msg != "" {
+			t.add(RoleSystem, msg)
+		}
+	}
+}
+
+// closeResumePicker exits the /resume selector.
+func (t *TUI) closeResumePicker() {
+	if !t.resumePickerOpen {
+		return
+	}
+	t.resumePickerOpen = false
+	t.resumeSessions = nil
+	t.resumePickerTop = 0
+	if t.rawMode {
+		t.render()
+	}
+}
+
 func indexOfString(s []string, v string) int {
 	for i, x := range s {
 		if x == v {
@@ -1519,8 +1664,16 @@ func indexOfString(s []string, v string) int {
 	return -1
 }
 
+func (t *TUI) stage() *searchreplace.StagingArea {
+	var sid string
+	if t.callback != nil {
+		sid = t.callback.SessionID()
+	}
+	return searchreplace.StageForSession(sid)
+}
+
 func (t *TUI) applyStagedEdits() {
-	edits := searchreplace.StageList()
+	edits := t.stage().List()
 	if len(edits) == 0 {
 		t.add(RoleSystem, "No staged edits to apply.")
 		return
@@ -1534,19 +1687,20 @@ func (t *TUI) applyStagedEdits() {
 			snapshottedFiles[ed.FilePath] = true
 		}
 	}
-	results := searchreplace.StageApplyValid()
+	results := t.stage().ApplyValid()
 	for _, r := range results {
 		t.add(RoleSystem, r)
 	}
 }
 
 func (t *TUI) rejectStagedEdits() {
-	n := searchreplace.StageCount()
+	stage := t.stage()
+	n := stage.Count()
 	if n == 0 {
 		t.add(RoleSystem, "No staged edits to reject.")
 		return
 	}
-	searchreplace.StageClear()
+	stage.Clear()
 	t.add(RoleSystem, fmt.Sprintf("Rejected %d staged edits.", n))
 }
 
@@ -1559,7 +1713,7 @@ func (t *TUI) openDiffBox() {
 		t.add(RoleSystem, "staged edits: /review to inspect, /apply or /reject to act")
 		return
 	}
-	edits := searchreplace.StageList()
+	edits := t.stage().List()
 	if len(edits) == 0 {
 		t.add(RoleSystem, "No staged edits to review.")
 		return
