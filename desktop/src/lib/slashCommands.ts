@@ -118,6 +118,44 @@ export const slashCommands: SlashCommand[] = [
     },
   },
   {
+    name: 'plan',
+    descKey: 'slash.descPlan',
+    run: () => {
+      const st = useAppStore.getState();
+      st.setMode('plan');
+      sysMsg(`🧭 Mode → plan`);
+      return handled;
+    },
+  },
+  {
+    name: 'ask',
+    descKey: 'slash.descAsk',
+    run: () => {
+      const st = useAppStore.getState();
+      st.setMode('ask');
+      sysMsg(`❓ Mode → ask`);
+      return handled;
+    },
+  },
+  {
+    name: 'debug',
+    descKey: 'slash.descDebug',
+    run: () => {
+      const st = useAppStore.getState();
+      st.setMode('agent');
+      sysMsg(`🐞 Mode → agent`);
+      return handled;
+    },
+  },
+  // Backend-implemented commands — pass through so the server's /api/slash
+  // layer (internal/core/slashui, same vocabulary as the TUI) runs them. These
+  // entries only exist so they show up in the autocomplete dropdown.
+  { name: 'cd', usage: '<dir>', descKey: 'slash.descCd', run: () => ({ type: 'passthrough' as const }) },
+  { name: 'rename', usage: '<title>', descKey: 'slash.descRename', run: () => ({ type: 'passthrough' as const }) },
+  { name: 'copy', usage: '[file]', descKey: 'slash.descCopy', run: () => ({ type: 'passthrough' as const }) },
+  { name: 'branch', descKey: 'slash.descBranch', run: () => ({ type: 'passthrough' as const }) },
+  { name: 'checkpoint', descKey: 'slash.descCheckpoint', run: () => ({ type: 'passthrough' as const }) },
+  {
     name: 'compact',
     usage: '[instructions]',
     descKey: 'slash.descCompact',
@@ -151,7 +189,7 @@ export const slashCommands: SlashCommand[] = [
   },
   {
     name: 'cost',
-    aliases: ['token'],
+    aliases: ['token', 'usage', 'stats'],
     descKey: 'slash.descCost',
     run: async () => {
       const { activeSessionId } = useAppStore.getState();

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -67,6 +68,11 @@ type Result struct {
 	ClearSession bool   `json:"clear_session,omitempty"`
 	NewSession   bool   `json:"new_session,omitempty"`
 
+	// CWD is the resolved working directory after /cd. The caller should
+	// os.Chdir(res.CWD) so every later tool (bash, file read/write) runs
+	// relative to the new directory, then persist the change for new turns.
+	CWD string `json:"cwd,omitempty"`
+
 	// SessionID tells the caller which session became active (e.g. after
 	// /resume or /fork) so it can reload and display that session's messages.
 	SessionID string `json:"session_id,omitempty"`
@@ -105,12 +111,20 @@ func Execute(ctx context.Context, b *Backend, st *State, text string) Result {
 		return cmdProvider(st, args)
 	case "/mode":
 		return cmdMode(b, st, args)
+	case "/copy":
+		return cmdCopy(b, st, args)
 	case "/session", "/sessions":
 		return cmdSessions(b, st, args)
 	case "/resume":
 		return cmdResume(b, st, args)
 	case "/fork":
 		return cmdFork(b, st, args)
+	case "/branch":
+		return cmdFork(b, st, args)
+	case "/rename":
+		return cmdRename(b, st, args)
+	case "/cd", "/cds":
+		return cmdCD(st, args)
 	case "/goal":
 		return cmdGoal(b, st, args)
 	case "/budget":
@@ -124,7 +138,7 @@ func Execute(ctx context.Context, b *Backend, st *State, text string) Result {
 		return cmdClear(b, st)
 	case "/restore":
 		return cmdRestore(b, args)
-	case "/undo", "/rewind":
+	case "/undo", "/rewind", "/checkpoint":
 		return cmdUndo(st, args)
 	case "/diff":
 		return cmdDiff(args)
@@ -156,8 +170,10 @@ func Execute(ctx context.Context, b *Backend, st *State, text string) Result {
 		return cmdTeams()
 	case "/todo":
 		return cmdTodo(st)
-	case "/token", "/cost":
+	case "/token", "/cost", "/usage", "/stats":
 		return cmdToken(b, st)
+	case "/plan", "/ask", "/debug":
+		return cmdModeShortcut(b, st, cmd)
 	case "/context":
 		return cmdContext(b, st)
 	case "/summarize":
@@ -270,17 +286,17 @@ type helpItem struct{ Name, Hint string }
 
 func helpDefs() []helpItem {
 	return []helpItem{
-		{"/model [id]", "切换模型"}, {"/provider [名]", "切换提供商"},
-		{"/mode [agent|plan|yolo|auto|ask]", "切换模式"}, {"/models", "列出自定义模型"},
+		{"/cd <path>", "移动会话工作目录"}, {"/model [id]", "切换模型"}, {"/provider [名]", "切换提供商"},
+		{"/mode [agent|plan|yolo|auto|ask]", "切换模式"}, {"/plan|/ask|/debug", "/mode 快捷方式"}, {"/models", "列出自定义模型"},
 		{"/session", "显示当前会话"}, {"/sessions", "列出已保存会话"},
-		{"/resume <id>", "载入历史会话"}, {"/fork <id>[@n]", "从历史会话分支出独立会话"}, {"/goal [set|show|clear]", "长目标模式"}, {"/budget [set|show|clear]", "Token 预算护栏"}, {"/new", "开启新会话"},
+		{"/resume <id>", "载入历史会话"}, {"/fork <id>[@n]", "从历史会话分支出独立会话"}, {"/rename <标题>", "重命名当前会话"}, {"/goal [set|show|clear]", "长目标模式"}, {"/budget [set|show|clear]", "Token 预算护栏"}, {"/new", "开启新会话"},
 		{"/clear", "清空当前会话"}, {"/wipe", "清空会话上下文"},
 		{"/undo [N]", "回滚 N 步文件更改"}, {"/rewind [N]", "同上（检查点回滚）"},
 		{"/diff", "显示 git 工作区差异"}, {"/review [file]", "审查 diff 或指定文件"},
 		{"/apply", "应用已暂存编辑"}, {"/reject", "丢弃已暂存编辑"},
 		{"/search <query>", "搜索历史会话"}, {"/export [file]", "导出会话为 Markdown"},
-		{"/share", "导出会话为带时间戳 Markdown"}, {"/token", "Token 节省报告"},
-		{"/cost", "本次会话费用"}, {"/context", "上下文用量"},
+		{"/share", "导出会话为带时间戳 Markdown"}, {"/copy [file]", "复制最后输出到剪贴板"},
+		{"/token", "Token 节省报告"}, {"/usage", "同上（费用别名）"}, {"/cost", "本次会话费用"}, {"/context", "上下文用量"},
 		{"/summarize", "会话摘要"}, {"/compact", "压缩会话（自动五层压缩）"},
 		{"/status", "系统状态"}, {"/whoami", "显示当前配置"},
 		{"/doctor", "运行诊断"}, {"/keys", "API Key 状态"},
@@ -494,6 +510,123 @@ func cmdMode(b *Backend, st *State, args []string) Result {
 	}
 	persistSetting(func(c *config.Config) { c.Defaults.Mode = want })
 	return Result{Output: "Mode -> " + want, Mode: want}
+}
+
+// cmdModeShortcut maps the mode-shortcut commands to /mode values:
+// /plan → plan, /ask → ask, /debug → agent (the closest "hands-on debugging"
+// mode in iCode's agent/plan/yolo/auto/ask vocabulary).
+func cmdModeShortcut(b *Backend, st *State, cmd string) Result {
+	want := strings.TrimPrefix(cmd, "/")
+	if want == "debug" {
+		want = "agent"
+	}
+	return cmdMode(b, st, []string{want})
+}
+
+// cmdCD moves the session's working directory (Claude Code / Qwen Code
+// parity). Unlike /add-dir (which only grants extra access), /cd relocates
+// the whole session: every later tool resolves relative paths from here.
+// No args prints the current directory.
+func cmdCD(_ *State, args []string) Result {
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = "."
+	}
+	if len(args) == 0 {
+		return ok("当前工作目录: " + cwd + "\n用法: /cd <path> — 移动会话工作目录（相对路径基于当前目录解析）")
+	}
+	target := args[0]
+	if target == "~" || target == "~/" {
+		if home, err := os.UserHomeDir(); err == nil {
+			target = home
+		}
+	} else if strings.HasPrefix(target, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			target = filepath.Join(home, strings.TrimPrefix(target, "~/"))
+		}
+	}
+	abs, err := filepath.Abs(target)
+	if err != nil {
+		return errf("解析路径失败: %v", err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil || !info.IsDir() {
+		return errf("目录不存在或不是文件夹: %s", abs)
+	}
+	if err := os.Chdir(abs); err != nil {
+		return errf("切换工作目录失败: %v", err)
+	}
+	// Refresh engine context so tools see the new directory immediately.
+	if ncwd, err := os.Getwd(); err == nil {
+		abs = ncwd
+	}
+	return Result{Output: "工作目录已切换到: " + abs, CWD: abs}
+}
+
+// cmdRename retitles the active session (Cursor / Codex / Claude parity).
+// With no title it shows the current one.
+func cmdRename(b *Backend, st *State, args []string) Result {
+	if b == nil || b.SessStore == nil {
+		return ok("无会话存储可用。")
+	}
+	if st.SessionID == "" {
+		return ok("没有活跃会话。先开始对话再重命名。")
+	}
+	sess, err := b.SessStore.Get(st.SessionID)
+	if err != nil {
+		return errf("会话不存在: %s", st.SessionID)
+	}
+	if len(args) == 0 {
+		title := sess.Title
+		if title == "" {
+			title = "(untitled)"
+		}
+		return ok(fmt.Sprintf("当前会话标题: %s\n用法: /rename <新标题>", title))
+	}
+	title := strings.Join(args, " ")
+	sess.Title = title
+	if err := b.SessStore.Update(sess); err != nil {
+		return errf("保存标题失败: %v", err)
+	}
+	return ok(fmt.Sprintf("会话已重命名为: %s", title))
+}
+
+// cmdCopy copies the last assistant output (or an explicit target file) to
+// the Windows/Unix clipboard — Cursor / Codex / Gemini parity. It reads the
+// session's most recent assistant message when no arg is given.
+func cmdCopy(b *Backend, st *State, args []string) Result {
+	if len(args) > 0 {
+		path := args[0]
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return errf("读取文件失败: %v", err)
+		}
+		if err := copyToClipboard(string(data)); err != nil {
+			return errf("复制失败: %v", err)
+		}
+		return ok("已复制文件内容到剪贴板: " + path)
+	}
+	if b == nil || b.SessStore == nil || st.SessionID == "" {
+		return ok("没有可复制的输出（需要活跃会话）.\n用法: /copy [文件路径]")
+	}
+	sess, err := b.SessStore.Get(st.SessionID)
+	if err != nil {
+		return errf("会话不存在: %s", st.SessionID)
+	}
+	text := ""
+	for i := len(sess.Messages) - 1; i >= 0; i-- {
+		if sess.Messages[i].Role == types.RoleAssistant {
+			text = sess.Messages[i].Content
+			break
+		}
+	}
+	if text == "" {
+		return ok("没有可复制的助手输出。")
+	}
+	if err := copyToClipboard(text); err != nil {
+		return errf("复制失败: %v", err)
+	}
+	return ok(fmt.Sprintf("已复制最后一段助手输出（%d 字符）到剪贴板。", len(text)))
 }
 
 func cmdSessions(b *Backend, st *State, _ []string) Result {
@@ -1697,6 +1830,22 @@ func projectMemoryPath() string {
 		return "ICODE.md"
 	}
 	return filepath.Join(cwd, "ICODE.md")
+}
+
+// copyToClipboard writes text to the system clipboard using the platform's
+// native pipe helper (clip / pbcopy / xclip). Mirrors the TUI's writeClipboard.
+func copyToClipboard(text string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("clip")
+	case "darwin":
+		cmd = exec.Command("pbcopy")
+	default:
+		cmd = exec.Command("xclip", "-selection", "clipboard")
+	}
+	cmd.Stdin = strings.NewReader(text)
+	return cmd.Run()
 }
 
 func shortStr(s, def string) string {

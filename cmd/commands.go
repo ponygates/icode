@@ -1601,6 +1601,23 @@ func (c *chatCallback) TodoCounts() (pending, active, done, total int) {
 
 func (c *chatCallback) SessionID() string { return c.sessionID }
 
+// OnRenameSession implements tui.Callback — retitles the active session in the
+// backend store so the sidebar / resume list reflect it immediately.
+func (c *chatCallback) OnRenameSession(title string) string {
+	if c.app == nil || c.app.SessStore == nil || c.sessionID == "" {
+		return "无会话存储可用。"
+	}
+	sess, err := c.app.SessStore.Get(c.sessionID)
+	if err != nil {
+		return "会话不存在: " + c.sessionID
+	}
+	sess.Title = title
+	if err := c.app.SessStore.Update(sess); err != nil {
+		return "保存标题失败: " + err.Error()
+	}
+	return ""
+}
+
 // OnSetMode implements tui.Callback — switches the permission gate so the
 // TUI's displayed mode and the enforced mode can never drift apart.
 func (c *chatCallback) OnSetMode(mode string) string {

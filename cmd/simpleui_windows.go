@@ -666,6 +666,11 @@ func (b *simpleUIBridge) runSlash(text string) {
 			_ = cfg.Save(config.DefaultPath())
 		}
 	}
+	if res.CWD != "" {
+		if err := os.Chdir(res.CWD); err == nil {
+			b.sys("✓ 工作目录已切换到: " + res.CWD)
+		}
+	}
 
 	if res.Chat {
 		b.chatTurn(res.Content)

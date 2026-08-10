@@ -64,5 +64,44 @@ func (s *Server) handleSlash(w http.ResponseWriter, r *http.Request) {
 	}
 
 	res := slashui.Execute(r.Context(), backend, state, req.Text)
+
+	// /cd relocated the session's working directory: chdir the process so
+	// every later tool (bash, file read/write) resolves from the new path,
+	// and update the owning workspace's bound Path so the desktop file tree
+	// and the workspace list stay in sync.
+	if res.CWD != "" {
+		if err := os.Chdir(res.CWD); err == nil {
+			cwd = res.CWD
+			s.syncWorkspacePath(req.SessionID, res.CWD)
+		}
+	}
+
 	writeJSON(w, http.StatusOK, res)
+}
+
+// syncWorkspacePath finds the workspace that owns sessionID and updates its
+// bound Path to the new working directory so the desktop file tree and the
+// workspace list stay in sync. Best-effort — failures are logged, not fatal.
+// Sessions not yet bound to any workspace are left untouched (they'll be
+// bound when a new session is created under a workspace).
+func (s *Server) syncWorkspacePath(sessionID, newPath string) {
+	if s.db == nil || sessionID == "" {
+		return
+	}
+	list, err := s.db.ListWorkspaces()
+	if err != nil {
+		return
+	}
+	for _, ws := range list {
+		for _, sid := range ws.SessionIDs {
+			if sid == sessionID {
+				if ws.Path == newPath {
+					return
+				}
+				ws.Path = newPath
+				_ = s.db.UpdateWorkspace(ws)
+				return
+			}
+		}
+	}
 }

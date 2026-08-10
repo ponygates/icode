@@ -125,6 +125,20 @@ func (t *TUI) handleSlash(text string) {
 			t.add(RoleSystem, "当前模式: "+t.mode+"\n用法: /mode <agent|plan|yolo|auto|ask>")
 		}
 
+	case "/plan", "/ask", "/debug":
+		want := strings.TrimPrefix(cmd, "/")
+		if want == "debug" {
+			want = "agent"
+		}
+		t.setMode(want)
+		t.add(RoleSystem, "Mode -> "+want)
+
+	case "/cd":
+		t.changeDir(args)
+
+	case "/rename":
+		t.renameSession(args)
+
 	case "/session", "/sessions":
 		if t.callback != nil {
 			t.add(RoleSystem, t.callback.OnListSessions())
@@ -152,7 +166,7 @@ func (t *TUI) handleSlash(text string) {
 			t.openResumePicker()
 		}
 
-	case "/fork":
+	case "/fork", "/branch":
 		if len(args) > 0 && t.callback != nil {
 			t.callback.OnSlashCommand("/fork", args)
 		} else {
@@ -263,7 +277,7 @@ func (t *TUI) handleSlash(text string) {
 			t.add(RoleSystem, "引擎未初始化。")
 		}
 
-	case "/rewind":
+	case "/rewind", "/checkpoint":
 		n := 1
 		if len(args) > 0 {
 			fmt.Sscanf(args[0], "%d", &n)
@@ -395,7 +409,7 @@ func (t *TUI) handleSlash(text string) {
 			t.add(RoleSystem, "引擎未初始化。")
 		}
 
-	case "/cost":
+	case "/cost", "/usage", "/stats":
 		t.costPanel()
 
 	case "/provider":
@@ -1886,4 +1900,69 @@ func (t *TUI) copyLastReply() {
 		return
 	}
 	t.add(RoleSystem, "✓ 已复制最近一条助手回复到剪贴板 (Ctrl+Y)。")
+}
+
+// changeDir implements /cd: moves the TUI's working directory and refreshes
+// the explorer pane. Mirrors slashui.cmdCD so both ends behave identically.
+func (t *TUI) changeDir(args []string) {
+	cwd, _ := os.Getwd()
+	if len(args) == 0 {
+		t.add(RoleSystem, "当前工作目录: "+cwd+"\n用法: /cd <path> — 移动会话工作目录（相对路径基于当前目录解析）")
+		return
+	}
+	target := args[0]
+	if target == "~" || target == "~/" {
+		if home, err := os.UserHomeDir(); err == nil {
+			target = home
+		}
+	} else if strings.HasPrefix(target, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			target = filepath.Join(home, strings.TrimPrefix(target, "~/"))
+		}
+	}
+	abs, err := filepath.Abs(target)
+	if err != nil {
+		t.add(RoleError, "解析路径失败: "+err.Error())
+		return
+	}
+	info, err := os.Stat(abs)
+	if err != nil || !info.IsDir() {
+		t.add(RoleError, "目录不存在或不是文件夹: "+abs)
+		return
+	}
+	if err := os.Chdir(abs); err != nil {
+		t.add(RoleError, "切换工作目录失败: "+err.Error())
+		return
+	}
+	if ncwd, err := os.Getwd(); err == nil {
+		abs = ncwd
+	}
+	// Refresh the explorer pane listing and the prompt-line dir badge.
+	t.mu.Lock()
+	t.dirEntries = listCwd()
+	t.mu.Unlock()
+	// Re-notify the engine so tools (bash, file read/write) resolve relative
+	// paths from the new directory on the next turn.
+	t.notice("工作目录已切换到: " + abs)
+	t.add(RoleSystem, "✓ 工作目录已切换到: "+abs)
+}
+
+// renameSession implements /rename: retitles the active session via the
+// callback (backend store) so the sidebar / resume list reflect it.
+func (t *TUI) renameSession(args []string) {
+	if len(args) == 0 {
+		t.add(RoleSystem, "用法: /rename <新标题> — 重命名当前会话")
+		return
+	}
+	title := strings.Join(args, " ")
+	if t.callback != nil {
+		msg := t.callback.OnRenameSession(title)
+		if msg != "" {
+			t.add(RoleError, msg)
+			return
+		}
+		t.add(RoleSystem, "✓ 会话已重命名为: "+title)
+		return
+	}
+	t.add(RoleSystem, "引擎未初始化，无法重命名。")
 }

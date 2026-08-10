@@ -95,6 +95,9 @@ type Callback interface {
 	// yolo) so the TUI's displayed mode and the actual gate stay in sync.
 	// Returns a human-readable confirmation.
 	OnSetMode(mode string) string
+	// OnRenameSession retitles the active session (/rename) in the backend
+	// store. Returns an error message, or "" on success.
+	OnRenameSession(title string) string
 }
 
 // StreamWriter is the surface the backend uses to push data into the UI.

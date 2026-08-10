@@ -357,6 +357,7 @@ const ChatPage: React.FC = () => {
   const setSelectedModel = useAppStore(s => s.setSelectedModel);
   const setMode = useAppStore(s => s.setMode);
   const refreshModels = useAppStore(s => s.refreshModels);
+  const loadWorkspaces = useAppStore(s => s.loadWorkspaces);
 
   const abortRef = useRef<AbortController | null>(null);
   // True when the user pressed Esc / the stop button — lets streamChat
@@ -905,6 +906,11 @@ const ChatPage: React.FC = () => {
             setSelectedModel(`${data.provider}/${currentModel?.id?.split('/')[1] || model.split('/')[1] || 'free'}`);
           }
           if (data?.mode && data.mode !== mode) setMode(data.mode);
+          if (data?.cwd) {
+            // /cd moved the session working directory server-side — reload
+            // workspaces so the FileTree and workspace list pick up the new path.
+            loadWorkspaces().catch(() => {});
+          }
 
           if (data?.chat) {
             // Command expands into a model turn (e.g. /review) — stream it.

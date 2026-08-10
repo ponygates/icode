@@ -336,22 +336,27 @@ type testCallback struct {
 	onInterrupt func()
 }
 
-func (c *testCallback) OnSend(text string)                                    {}
-func (c *testCallback) OnSlashCommand(cmd string, args []string)              {}
-func (c *testCallback) OnPermissionResponse(decision string)                  {}
-func (c *testCallback) OnPlanConfirm()                                        {}
-func (c *testCallback) OnInterrupt()                                          { if c.onInterrupt != nil { c.onInterrupt() } }
-func (c *testCallback) OnListSessions() string                                { return "" }
-func (c *testCallback) OnResume(id string) string                             { return "" }
-func (c *testCallback) TodoCounts() (int, int, int, int)                      { return 0, 0, 0, 0 }
-func (c *testCallback) SessionID() string                                     { return "" }
-func (c *testCallback) OnStatus() string                                      { return "" }
-func (c *testCallback) OnTokenStats() string                                  { return "" }
-func (c *testCallback) OnOutputStyle(style string) string                     { return "" }
-func (c *testCallback) OnAddDir(dir string) string                            { return "" }
-func (c *testCallback) OnUpdateModels() string                                { return "" }
-func (c *testCallback) OnSetMode(mode string) string                          { return "" }
-func (c *testCallback) OnListSessionsStructured(limit int) []SessionInfo      { return nil }
+func (c *testCallback) OnSend(text string)                       {}
+func (c *testCallback) OnSlashCommand(cmd string, args []string) {}
+func (c *testCallback) OnPermissionResponse(decision string)     {}
+func (c *testCallback) OnPlanConfirm()                           {}
+func (c *testCallback) OnInterrupt() {
+	if c.onInterrupt != nil {
+		c.onInterrupt()
+	}
+}
+func (c *testCallback) OnListSessions() string                           { return "" }
+func (c *testCallback) OnResume(id string) string                        { return "" }
+func (c *testCallback) TodoCounts() (int, int, int, int)                 { return 0, 0, 0, 0 }
+func (c *testCallback) SessionID() string                                { return "" }
+func (c *testCallback) OnStatus() string                                 { return "" }
+func (c *testCallback) OnTokenStats() string                             { return "" }
+func (c *testCallback) OnOutputStyle(style string) string                { return "" }
+func (c *testCallback) OnAddDir(dir string) string                       { return "" }
+func (c *testCallback) OnUpdateModels() string                           { return "" }
+func (c *testCallback) OnSetMode(mode string) string                     { return "" }
+func (c *testCallback) OnRenameSession(title string) string              { return "" }
+func (c *testCallback) OnListSessionsStructured(limit int) []SessionInfo { return nil }
 
 // feedEsc sets the reader to an ESC sequence (leading 0x1b + follow-up bytes)
 // and dispatches it exactly as the raw-mode main loop does: read the first
