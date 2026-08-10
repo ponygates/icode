@@ -21,6 +21,7 @@ func TestSaveCreatesFileWithPersistedContent(t *testing.T) {
 	c := Default()
 	c.Language = "en"
 	c.Defaults.Mode = "plan"
+	c.Defaults.WorkingDir = filepath.Join(dir, "work")
 	c.Providers["deepseek"] = ProviderCfg{APIKey: "sk-test", APIBase: "https://example.com", Timeout: 99}
 
 	if err := c.Save(path); err != nil {
@@ -38,6 +39,9 @@ func TestSaveCreatesFileWithPersistedContent(t *testing.T) {
 	}
 	if reloaded.Language != "en" || reloaded.Defaults.Mode != "plan" {
 		t.Fatalf("reloaded mismatch: lang=%q mode=%q", reloaded.Language, reloaded.Defaults.Mode)
+	}
+	if reloaded.Defaults.WorkingDir != filepath.Join(dir, "work") {
+		t.Fatalf("reloaded working dir mismatch: %q", reloaded.Defaults.WorkingDir)
 	}
 	if p, ok := reloaded.Provider("deepseek"); !ok {
 		t.Fatalf("deepseek provider missing")

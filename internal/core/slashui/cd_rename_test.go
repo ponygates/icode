@@ -31,7 +31,7 @@ func TestCmdCD_ChangesDirectory(t *testing.T) {
 	defer os.Chdir(orig)
 
 	dir := t.TempDir()
-	res := cmdCD(nil, []string{dir})
+	res := cmdCD(&State{NoPersistCWD: true}, []string{dir})
 	if res.IsError {
 		t.Fatalf("unexpected error: %s", res.Output)
 	}
@@ -51,7 +51,7 @@ func TestCmdCD_RejectsMissingDir(t *testing.T) {
 	}
 	defer os.Chdir(orig)
 
-	res := cmdCD(nil, []string{filepath.Join(orig, "definitely-missing-dir-xyz")})
+	res := cmdCD(&State{NoPersistCWD: true}, []string{filepath.Join(orig, "definitely-missing-dir-xyz")})
 	if !res.IsError {
 		t.Fatalf("expected error for missing dir, got: %s", res.Output)
 	}

@@ -1937,6 +1937,8 @@ func (t *TUI) changeDir(args []string) {
 	if ncwd, err := os.Getwd(); err == nil {
 		abs = ncwd
 	}
+	// Persist the directory so the CLI/TUI/server start there next launch.
+	persistSetting(func(c *config.Config) { c.Defaults.WorkingDir = abs })
 	// Refresh the explorer pane listing and the prompt-line dir badge.
 	t.mu.Lock()
 	t.dirEntries = listCwd()
@@ -1965,4 +1967,15 @@ func (t *TUI) renameSession(args []string) {
 		return
 	}
 	t.add(RoleSystem, "引擎未初始化，无法重命名。")
+}
+
+// persistSetting loads the user config, applies fn, and saves it back to disk.
+// Best-effort: failures are ignored (logged by config.Save on error).
+func persistSetting(fn func(*config.Config)) {
+	cfg, err := config.Load()
+	if err != nil {
+		return
+	}
+	fn(cfg)
+	_ = cfg.Save(config.DefaultPath())
 }

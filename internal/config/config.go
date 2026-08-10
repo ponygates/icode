@@ -133,6 +133,9 @@ type DefaultCfg struct {
 	// ExtraDirs are additional working directories (beyond cwd) the agent may
 	// reference, surfaced in the system prompt (Claude Code /add-dir parity).
 	ExtraDirs []string `yaml:"extra_dirs,omitempty" json:"extra_dirs,omitempty"`
+	// WorkingDir is the directory /cd persists so subsequent launches of the
+	// CLI/TUI/server start there instead of the process launch directory.
+	WorkingDir string `yaml:"working_dir,omitempty" json:"working_dir,omitempty"`
 	// Smart model routing: cheap model for simple queries, powerful for complex
 	CheapModel    string `yaml:"cheap_model,omitempty" json:"cheap_model,omitempty"`
 	CheapProv     string `yaml:"cheap_provider,omitempty" json:"cheap_provider,omitempty"`
@@ -290,9 +293,9 @@ func Default() *Config {
 		Language:      "zh-CN",
 		SecurityLevel: SecForeignLLM,
 		Defaults: DefaultCfg{
-			Model:       "openrouter/free",
-			Provider:    "openrouter",
-			Mode:        "agent",
+			Model:    "openrouter/free",
+			Provider: "openrouter",
+			Mode:     "agent",
 			// 默认温度 0（本书 ch.23）：代码与工具判定任务需要确定性
 			// （相同输入 → 相同输出）。用户可在配置或 /config 中调高。
 			Temperature: 0,

@@ -636,3 +636,42 @@ func TestSubmitSlashReleaseNotes(t *testing.T) {
 		t.Fatalf("/release-notes produced no system message")
 	}
 }
+
+// TestSubmitSlashModeShortcuts verifies /plan, /ask, /debug map to the right
+// modes (Claude Code / Codex parity shortcuts for the mode switch).
+func TestSubmitSlashModeShortcuts(t *testing.T) {
+	cases := []struct {
+		cmd  string
+		want string
+	}{
+		{"/plan", "plan"},
+		{"/ask", "ask"},
+		{"/debug", "agent"},
+	}
+	for _, c := range cases {
+		tu := newTestTUI()
+		tu.submit(c.cmd)
+		if tu.mode != c.want {
+			t.Errorf("%s -> mode %q, want %q", c.cmd, tu.mode, c.want)
+		}
+	}
+}
+
+// TestSubmitSlashRename verifies /rename drives the callback (backend store
+// retitle) and reports the new title. It should not panic when the callback
+// is nil (engine not ready).
+func TestSubmitSlashRename(t *testing.T) {
+	tu := newTestTUI()
+	tu.callback = &testCallback{} // OnRenameSession returns ""
+	tu.submit("/rename 我的新会话")
+	joined := strings.Join(messagesText(tu), "\n")
+	if !strings.Contains(joined, "我的新会话") {
+		t.Errorf("/rename output missing new title:\n%s", joined)
+	}
+	// No callback → friendly message, no panic.
+	tu2 := newTestTUI()
+	tu2.submit("/rename 会话")
+	if countSystem(tu2) == 0 {
+		t.Fatalf("/rename with no callback produced no system message")
+	}
+}

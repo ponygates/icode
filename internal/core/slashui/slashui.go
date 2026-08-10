@@ -48,6 +48,10 @@ type State struct {
 	Security  string
 	CWD       string
 	Version   string
+
+	// NoPersistCWD, when true, makes /cd skip writing the new working
+	// directory to the user config (used by tests and headless runners).
+	NoPersistCWD bool
 }
 
 // Result describes the outcome of a slash command. When Chat is true the
@@ -527,7 +531,7 @@ func cmdModeShortcut(b *Backend, st *State, cmd string) Result {
 // parity). Unlike /add-dir (which only grants extra access), /cd relocates
 // the whole session: every later tool resolves relative paths from here.
 // No args prints the current directory.
-func cmdCD(_ *State, args []string) Result {
+func cmdCD(st *State, args []string) Result {
 	cwd, err := os.Getwd()
 	if err != nil {
 		cwd = "."
@@ -559,6 +563,11 @@ func cmdCD(_ *State, args []string) Result {
 	// Refresh engine context so tools see the new directory immediately.
 	if ncwd, err := os.Getwd(); err == nil {
 		abs = ncwd
+	}
+	// Persist the directory so the CLI/TUI/server start there next launch
+	// (the launch directory is otherwise lost when the process exits).
+	if st == nil || !st.NoPersistCWD {
+		persistSetting(func(c *config.Config) { c.Defaults.WorkingDir = abs })
 	}
 	return Result{Output: "工作目录已切换到: " + abs, CWD: abs}
 }

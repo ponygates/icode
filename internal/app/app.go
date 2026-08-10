@@ -65,6 +65,17 @@ func Bootstrap() (*App, error) {
 	app.Cfg = cfg
 	log.Printf("[iCode] bootstrap: config loaded (t=%dms)", time.Since(t0).Milliseconds())
 
+	// 1b. Adopt the persisted working directory (/cd), so the CLI/TUI/server
+	// start in the directory the user last moved to instead of the process
+	// launch directory. Best-effort: ignore missing / unreadable dirs.
+	if cfg.Defaults.WorkingDir != "" {
+		if info, err := os.Stat(cfg.Defaults.WorkingDir); err == nil && info.IsDir() {
+			if err := os.Chdir(cfg.Defaults.WorkingDir); err == nil {
+				log.Printf("[iCode] bootstrap: cwd -> %s", cfg.Defaults.WorkingDir)
+			}
+		}
+	}
+
 	// 2. Try SQLite persistence first, fall back to in-memory
 	dbStore, err := db.New(db.Config{})
 	if err != nil {

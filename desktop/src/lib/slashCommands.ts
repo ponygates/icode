@@ -151,7 +151,22 @@ export const slashCommands: SlashCommand[] = [
   // layer (internal/core/slashui, same vocabulary as the TUI) runs them. These
   // entries only exist so they show up in the autocomplete dropdown.
   { name: 'cd', usage: '<dir>', descKey: 'slash.descCd', run: () => ({ type: 'passthrough' as const }) },
-  { name: 'rename', usage: '<title>', descKey: 'slash.descRename', run: () => ({ type: 'passthrough' as const }) },
+  {
+    name: 'rename',
+    usage: '<title>',
+    descKey: 'slash.descRename',
+    run: (args) => {
+      const title = args.trim();
+      if (!title) {
+        sysMsg(i18n.t('slash.renameHint'));
+        return handled;
+      }
+      const st = useAppStore.getState();
+      if (st.activeSessionId) st.renameSession(st.activeSessionId, title);
+      sysMsg(`✏️ ${title}`);
+      return handled;
+    },
+  },
   { name: 'copy', usage: '[file]', descKey: 'slash.descCopy', run: () => ({ type: 'passthrough' as const }) },
   { name: 'branch', descKey: 'slash.descBranch', run: () => ({ type: 'passthrough' as const }) },
   { name: 'checkpoint', descKey: 'slash.descCheckpoint', run: () => ({ type: 'passthrough' as const }) },
