@@ -372,6 +372,13 @@
       $('stop').onclick = () => { post({ type: 'stop', sessionId: state.active }); };
       inputEl.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+        // Esc — interrupt an in-flight generation (mirrors the desktop app).
+        if (e.key === 'Escape') {
+          if ($('stop').style.display !== 'none') {
+            post({ type: 'stop', sessionId: state.active });
+          }
+          e.preventDefault();
+        }
       });
 
       // boot

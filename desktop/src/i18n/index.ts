@@ -6,7 +6,7 @@ i18n.use(initReactI18next).init({
     'zh-CN': {
       translation: {
         app: { name: 'iCode', tagline: '多模型 AI 编程 Agent', subtitle: '多模型 AI 编程助手' },
-        sidebar: { chat: '对话', models: '模型', analytics: '分析', compare: '对比', settings: '设置', sessions: '会话', noSessions: '暂无会话', rename: '重命名', delete: '删除', connecting: '连接中…', trash: '最近删除', restore: '恢复', deleteForever: '彻底删除', purgeTrash: '清空回收站', purgeTrashConfirm: '确定清空回收站？已删除的会话将被永久销毁，无法恢复。' },
+        sidebar: { chat: '对话', models: '模型', analytics: '分析', compare: '对比', settings: '设置', sessions: '会话', noSessions: '暂无会话', rename: '重命名', delete: '删除', connecting: '连接中…', trash: '最近删除', restore: '恢复', deleteForever: '彻底删除', purgeTrash: '清空回收站', purgeTrashConfirm: '确定清空回收站？已删除的会话将被永久销毁，无法恢复。', searchSessions: '搜索会话内容…', noSearchResults: '未找到匹配内容' },
         workspace: { title: '工作区', new: '新建工作区', empty: '暂无工作区，点击 + 创建', newPrompt: '工作区名称', pathPrompt: '关联目录路径（可选）', autoName: '工作区 · {{dir}}', bindDir: '绑定本地目录', changeDir: '更换本地目录' },
         chat: {
           placeholder: '输入编程问题... (# 追加记忆, ! 执行命令)',
@@ -47,6 +47,8 @@ i18n.use(initReactI18next).init({
           unknownError: '未知错误',
           backendError: '无法连接到后端服务。请确保 iCode 后端已启动，或检查网络连接。如果后端在运行，请尝试刷新页面。',
           timeoutError: '请求超时（120s）— 模型响应时间过长',
+          stopped: '⏹ 已停止生成',
+          copyBranch: '复制分支名',
           noResponse: '后端无响应 — 请在设置中配置 API Key（Ctrl+,）',
           openSettings: '点击打开设置',
           copied: '已复制',
@@ -57,6 +59,7 @@ i18n.use(initReactI18next).init({
           contextWindow: '上下文窗口',
           used: '已用',
           nearLimit200K: '距上限 200K',
+          ctxOf: '占',
           sessionMetrics: '会话指标',
           runTime: '运行时间',
           totalTokens: '累计 Tokens',
@@ -389,6 +392,17 @@ i18n.use(initReactI18next).init({
           rewound: '已回退 {{steps}} 步。',
           restoredFiles: '恢复文件: ',
           more: '更多...',
+          viewDiff: '查看差异',
+        },
+        diff: {
+          title: '检查点差异',
+          range: '最近 {{count}} 步',
+          since: '自',
+          loading: '加载中…',
+          error: '加载失败',
+          empty: '该检查点没有文件变更',
+          files: '个文件',
+          hint: '绿色=新增 · 红色=删除 · 蓝色=文件头',
         },
         tab: {
           newTab: '新会话',
@@ -457,7 +471,7 @@ i18n.use(initReactI18next).init({
     'zh-TW': {
       translation: {
         app: { name: 'iCode', tagline: '多模型 AI 程式開發 Agent', subtitle: '多模型 AI 編程助手' },
-        sidebar: { chat: '對話', models: '模型', analytics: '分析', compare: '對比', settings: '設定', sessions: '對話', noSessions: '暫無對話', rename: '重新命名', delete: '刪除', connecting: '連線中…', trash: '最近刪除', restore: '恢復', deleteForever: '徹底刪除', purgeTrash: '清空回收站', purgeTrashConfirm: '確定清空回收站？已刪除的對話將被永久銷毀，無法復原。' },
+        sidebar: { chat: '對話', models: '模型', analytics: '分析', compare: '對比', settings: '設定', sessions: '對話', noSessions: '暫無對話', rename: '重新命名', delete: '刪除', connecting: '連線中…', trash: '最近刪除', restore: '恢復', deleteForever: '徹底刪除', purgeTrash: '清空回收站', purgeTrashConfirm: '確定清空回收站？已刪除的對話將被永久銷毀，無法復原。', searchSessions: '搜尋對話內容…', noSearchResults: '未找到相符內容' },
         workspace: { title: '工作區', new: '新建工作區', empty: '暫無工作區，點擊 + 建立', newPrompt: '工作區名稱', pathPrompt: '關聯目錄路徑（選填）', autoName: '工作區 · {{dir}}', bindDir: '綁定本機目錄', changeDir: '更換本機目錄' },
         chat: {
           placeholder: '輸入編程問題... (# 追加記憶, ! 執行命令)',
@@ -499,6 +513,8 @@ i18n.use(initReactI18next).init({
           unknownError: '未知錯誤',
           backendError: '無法連線到後端服務。請確保 iCode 後端已啟動，或檢查網路連線。如果後端在運行，請嘗試重新整理頁面。',
           timeoutError: '請求逾時（120s）— 模型回應時間過長',
+          stopped: '⏹ 已停止生成',
+          copyBranch: '複製分支名稱',
           noResponse: '後端無回應 — 請在設定中配置 API Key（Ctrl+,）',
           openSettings: '點擊開啟設定',
           copied: '已複製',
@@ -509,6 +525,7 @@ i18n.use(initReactI18next).init({
           contextWindow: '上下文視窗',
           used: '已用',
           nearLimit200K: '距上限 200K',
+          ctxOf: '佔',
           sessionMetrics: '對話指標',
           runTime: '運行時間',
           totalTokens: '累計 Tokens',
@@ -841,6 +858,17 @@ i18n.use(initReactI18next).init({
           rewound: '已回退 {{steps}} 步。',
           restoredFiles: '恢復檔案: ',
           more: '更多...',
+          viewDiff: '查看差異',
+        },
+        diff: {
+          title: '檢查點差異',
+          range: '最近 {{count}} 步',
+          since: '自',
+          loading: '載入中…',
+          error: '載入失敗',
+          empty: '該檢查點沒有檔案變更',
+          files: '個檔案',
+          hint: '綠色=新增 · 紅色=刪除 · 藍色=檔案頭',
         },
         tab: {
           newTab: '新對話',
@@ -909,7 +937,7 @@ i18n.use(initReactI18next).init({
     en: {
       translation: {
         app: { name: 'iCode', tagline: 'Multi-Model AI Coding Agent', subtitle: 'Multi-Model AI Coding Assistant' },
-        sidebar: { chat: 'Chat', models: 'Models', analytics: 'Analytics', compare: 'Compare', settings: 'Settings', sessions: 'Sessions', noSessions: 'No sessions', rename: 'Rename', delete: 'Delete', connecting: 'Connecting…', trash: 'Recently removed', restore: 'Restore', deleteForever: 'Delete forever', purgeTrash: 'Empty trash', purgeTrashConfirm: 'Empty the trash? Deleted sessions will be permanently destroyed and cannot be recovered.' },
+        sidebar: { chat: 'Chat', models: 'Models', analytics: 'Analytics', compare: 'Compare', settings: 'Settings', sessions: 'Sessions', noSessions: 'No sessions', rename: 'Rename', delete: 'Delete', connecting: 'Connecting…', trash: 'Recently removed', restore: 'Restore', deleteForever: 'Delete forever', purgeTrash: 'Empty trash', purgeTrashConfirm: 'Empty the trash? Deleted sessions will be permanently destroyed and cannot be recovered.', searchSessions: 'Search sessions…', noSearchResults: 'No matching content' },
         workspace: { title: 'Workspaces', new: 'New Workspace', empty: 'No workspaces yet — click + to create', newPrompt: 'Workspace name', pathPrompt: 'Associated directory path (optional)', autoName: 'Workspace · {{dir}}', bindDir: 'Bind local directory', changeDir: 'Change local directory' },
         chat: {
           placeholder: 'Enter coding question... (# memory, ! shell)',
@@ -951,6 +979,8 @@ i18n.use(initReactI18next).init({
           unknownError: 'Unknown error',
           backendError: 'Cannot connect to backend. Make sure iCode backend is running, or check your network connection. If the backend is running, try refreshing the page.',
           timeoutError: 'Request timed out (120s) — model response took too long',
+          stopped: '⏹ Generation stopped',
+          copyBranch: 'Copy branch name',
           noResponse: 'No response from backend — configure API Key in Settings (Ctrl+,)',
           openSettings: 'Click to open settings',
           copied: 'Copied',
@@ -961,6 +991,7 @@ i18n.use(initReactI18next).init({
           contextWindow: 'Context Window',
           used: 'Used',
           nearLimit200K: 'Near limit 200K',
+          ctxOf: 'of',
           sessionMetrics: 'Session Metrics',
           runTime: 'Run Time',
           totalTokens: 'Total Tokens',
@@ -1293,6 +1324,17 @@ i18n.use(initReactI18next).init({
           rewound: 'Rewound {{steps}} steps.',
           restoredFiles: 'Restored files: ',
           more: 'More...',
+          viewDiff: 'View diff',
+        },
+        diff: {
+          title: 'Checkpoint diff',
+          range: 'last {{count}} step(s)',
+          since: 'since',
+          loading: 'Loading…',
+          error: 'Failed to load',
+          empty: 'No file changes in this checkpoint',
+          files: 'files',
+          hint: 'Green=added · Red=removed · Blue=header',
         },
         tab: {
           newTab: 'New Session',

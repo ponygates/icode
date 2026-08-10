@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../stores/appStore';
-import { RotateCcw, History } from 'lucide-react';
+import { RotateCcw, History, Eye } from 'lucide-react';
+import DiffViewer from './DiffViewer';
 
 interface CheckpointEntry {
   Hash: string;
@@ -15,6 +16,7 @@ const CheckpointPanel: React.FC = () => {
   const backendUrl = useAppStore(s => s.backendUrl);
   const [entries, setEntries] = useState<CheckpointEntry[]>([]);
   const [rewinding, setRewinding] = useState(false);
+  const [viewing, setViewing] = useState<{ steps: number; message: string } | null>(null);
 
   useEffect(() => {
     if (!backendUrl || !activeSessionId) return;
@@ -58,6 +60,15 @@ const CheckpointPanel: React.FC = () => {
 
   return (
     <div style={{ marginTop: 8 }}>
+      {viewing && backendUrl && activeSessionId && (
+        <DiffViewer
+          backendUrl={backendUrl}
+          sessionId={activeSessionId}
+          steps={viewing.steps}
+          message={viewing.message}
+          onClose={() => setViewing(null)}
+        />
+      )}
       <div style={{
         fontSize: 11, color: 'var(--text-muted)', marginBottom: 6,
         letterSpacing: 0.5, fontWeight: 500, display: 'flex',
@@ -98,20 +109,35 @@ const CheckpointPanel: React.FC = () => {
             {e.Message || e.Hash.slice(0, 7)}
           </span>
           {i > 0 && (
-            <button
-              onClick={() => handleRewind(i)}
-              disabled={rewinding}
-              title={t('checkpoint.confirmRewind', { steps: i })}
-              style={{
-                background: 'transparent', border: 'none', cursor: 'pointer',
-                color: 'var(--text-muted)', fontSize: 9, padding: '0 2px',
-                flexShrink: 0, opacity: 0.6,
-              }}
-              onMouseEnter={e => (e.currentTarget.style.opacity = '1')}
-              onMouseLeave={e => (e.currentTarget.style.opacity = '0.6')}
-            >
-              <RotateCcw size={9} />
-            </button>
+            <>
+              <button
+                onClick={() => setViewing({ steps: i, message: e.Message || e.Hash.slice(0, 7) })}
+                title={t('checkpoint.viewDiff')}
+                style={{
+                  background: 'transparent', border: 'none', cursor: 'pointer',
+                  color: 'var(--text-muted)', fontSize: 9, padding: '0 2px',
+                  flexShrink: 0, opacity: 0.6, display: 'flex',
+                }}
+                onMouseEnter={e => (e.currentTarget.style.opacity = '1')}
+                onMouseLeave={e => (e.currentTarget.style.opacity = '0.6')}
+              >
+                <Eye size={9} />
+              </button>
+              <button
+                onClick={() => handleRewind(i)}
+                disabled={rewinding}
+                title={t('checkpoint.confirmRewind', { steps: i })}
+                style={{
+                  background: 'transparent', border: 'none', cursor: 'pointer',
+                  color: 'var(--text-muted)', fontSize: 9, padding: '0 2px',
+                  flexShrink: 0, opacity: 0.6,
+                }}
+                onMouseEnter={e => (e.currentTarget.style.opacity = '1')}
+                onMouseLeave={e => (e.currentTarget.style.opacity = '0.6')}
+              >
+                <RotateCcw size={9} />
+              </button>
+            </>
           )}
         </div>
       ))}

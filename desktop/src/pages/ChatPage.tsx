@@ -58,6 +58,7 @@ type ChatEvent =
   | { type: 'thinking'; content: string }
   | { type: 'system'; content: string }
   | { type: 'tool_use'; tool_call?: { name: string; arguments?: string }; ToolCall?: { Name: string; Arguments?: string } }
+  | { type: 'tool_progress'; content: string }
   | { type: 'permission'; permission?: PermissionRequest; Permission?: PermissionRequest }
   | { type: 'plan_proposal' }
   | { type: 'done'; meta?: { usage?: UsageInfo } }
@@ -292,6 +293,7 @@ const ChatPage: React.FC = () => {
   const [lightbox, setLightbox] = useState<string | null>(null);
   const [attachedImages, setAttachedImages] = useState<{ mime: string; data: string }[]>([]);
   const [gitBranch, setGitBranch] = useState('');
+  const [cwdPath, setCwdPath] = useState('');
   // Session runtime is measured from the session's createdAt; tick once a second
   // so the "runtime" card stays live without re-rendering the message list.
   const [now, setNow] = useState(() => Date.now());
@@ -357,6 +359,10 @@ const ChatPage: React.FC = () => {
   const refreshModels = useAppStore(s => s.refreshModels);
 
   const abortRef = useRef<AbortController | null>(null);
+  // True when the user pressed Esc / the stop button — lets streamChat
+  // distinguish "user stopped" from "request timed out" in the AbortError
+  // catch. Reset after each stream ends.
+  const userStoppedRef = useRef(false);
   const activeSession = sessions.find((s) => s.id === activeSessionId);
 
   // Latest handleSend, kept in a ref so handleRegenerate can trigger a resend
@@ -493,6 +499,12 @@ const ChatPage: React.FC = () => {
     }
   };
   const currentModel = models.find((m) => m.id === selectedModel);
+  // Context-window gauge: use the model's real context window when known;
+  // fall back to 200K so the card never renders a divide-by-zero.
+  const ctxWindow = currentModel?.contextWindow || 200000;
+  const ctxWindowLabel = ctxWindow >= 1000000
+    ? (ctxWindow / 1000000).toFixed(1) + 'M'
+    : (ctxWindow / 1000).toFixed(0) + 'K';
   // Mode is synced from Zustand store (bidirectional with backend)
   const mode = useAppStore((s) => s.mode);
 
@@ -533,18 +545,21 @@ const ChatPage: React.FC = () => {
 
   // Fetch git branch for the status bar
   useEffect(() => {
-    const fetchBranch = async () => {
+    const fetchStatus = async () => {
       if (!backendUrl) return;
       try {
         const res = await fetch(`${backendUrl}/api/status`);
         if (res.ok) {
           const data = await res.json();
+          // /api/status carries cwd; git branch is derived client-side from
+          // the workspace (the backend field is absent).
+          if (data.cwd) setCwdPath(data.cwd);
           setGitBranch(data.git_branch || '');
         }
       } catch {}
     };
-    fetchBranch();
-    const interval = setInterval(fetchBranch, 10000);
+    fetchStatus();
+    const interval = setInterval(fetchStatus, 10000);
     return () => clearInterval(interval);
   }, [backendUrl]);
 
@@ -695,6 +710,10 @@ const ChatPage: React.FC = () => {
     let accumulated = '';
     let settled = false;
     let rafId: number | null = null;
+    // Tracks whether the most recent tool emitted live output via
+    // tool_progress, so the engine's `[Tool: name]` summary wrapper doesn't
+    // duplicate the full transcript.
+    let toolHadProgress = false;
     // Thinking deltas arrive first and are folded into a collapsible box; they
     // are shown but never persisted at full length or sent back to the model
     // (iCode keeps them out of the paid context — a token saver, not a leak).
@@ -741,12 +760,33 @@ const ChatPage: React.FC = () => {
           accumulated += '\n[Thinking]\n' + thinkingBuf + '\n';
           thinkingBuf = '';
         }
-        accumulated += event.content || '';
+        // The engine emits a `[Tool: <name>] <summary>` text wrapper after a
+        // tool finishes. Its body is only the first 200 chars — if we already
+        // streamed the full live output via tool_progress, appending the
+        // summary too duplicates it in the transcript. Strip the wrapper and
+        // keep just the (already-seen or compact) summary.
+        const toolWrap = accumulated.endsWith('\n') ? '' : '\n';
+        const contentStr = event.content || '';
+        const tm = contentStr.match(/^\[Tool: ([^\]]+)\](?:\n|$)/);
+        if (tm) {
+          if (!toolHadProgress) {
+            accumulated += toolWrap + contentStr.slice(tm[0].length);
+          }
+        } else {
+          accumulated += contentStr;
+        }
         scheduleFlush();
       } else if (ty === 'tool_use') {
         const name = event.tool_call?.name || event.ToolCall?.Name || 'tool';
         const argsRaw = event.tool_call?.arguments || event.ToolCall?.Arguments;
+        toolHadProgress = false;
         accumulated += `\n[Tool: ${name}]${summarizeToolArgs(argsRaw)}\n`;
+        scheduleFlush();
+      } else if (ty === 'tool_progress') {
+        // Live bash output — append to the accumulated assistant text. The
+        // rAF-coalesced flush keeps chatty processes from re-rendering per line.
+        toolHadProgress = true;
+        accumulated += event.content || '';
         scheduleFlush();
       } else if (ty === 'permission') {
         const req = event.permission || event.Permission;
@@ -827,7 +867,7 @@ const ChatPage: React.FC = () => {
           payload.attachments = attachedImages.map(img => ({ type: 'image', mime: img.mime, data: img.data }));
           setAttachedImages([]);
         }
-        await streamChat(url, payload, onEvent, abortRef);
+        await streamChat(url, payload, onEvent, abortRef, userStoppedRef);
         setInput('');
         return;
       }
@@ -873,7 +913,7 @@ const ChatPage: React.FC = () => {
               payload.attachments = attachedImages.map(img => ({ type: 'image', mime: img.mime, data: img.data }));
               setAttachedImages([]);
             }
-            await streamChat(url, payload, onEvent, abortRef);
+            await streamChat(url, payload, onEvent, abortRef, userStoppedRef);
           } else {
             const out = data?.output || '';
             updateMessage(sid, { ...assistantMsg, content: out || '(no output)' });
@@ -893,7 +933,7 @@ const ChatPage: React.FC = () => {
         setAttachedImages([]);
       }
       console.log('[iCode] sending to', url, 'model:', model, 'provider:', provider);
-      await streamChat(url, payload, onEvent, abortRef);
+      await streamChat(url, payload, onEvent, abortRef, userStoppedRef);
     } else {
       onEvent({ type: 'error', content: t('chat.backendError') });
     }
@@ -927,6 +967,9 @@ const ChatPage: React.FC = () => {
 
   const handleStop = useCallback(() => {
     if (!activeSessionId) return;
+    // Mark the abort as user-initiated so streamChat's AbortError catch shows
+    // a "stopped" notice instead of the misleading "request timed out" text.
+    userStoppedRef.current = true;
     abortRef.current?.abort();
     setPendingPermission(null);
     setIsStreaming(false);
@@ -1435,6 +1478,25 @@ const ChatPage: React.FC = () => {
               <FileTree
                 path={activeWs.path}
                 onInsertPath={(p) => setInput((prev) => prev ? `${prev} ${p}` : p)}
+                onAction={(action, path) => {
+                  const prompts: Record<string, string> = {
+                    ask: '请回答关于该文件的问题',
+                    explain: `请解释该文件的内容与作用：${path}`,
+                    optimize: `请审查并优化该文件，指出问题并给出改进建议：${path}`,
+                  };
+                  const msg = prompts[action] || prompts.ask;
+                  if (action === 'ask') {
+                    // Ask mode just inserts the path so the user can type their
+                    // question — matches the VS Code extension UX.
+                    setInput((prev) => prev ? `${prev} ${path}` : path);
+                  } else {
+                    setInput(msg);
+                    // Send immediately for explain/optimize (deterministic actions).
+                    if (handleSendRef.current) {
+                      setTimeout(() => handleSendRef.current!(), 0);
+                    }
+                  }
+                }}
               />
             </div>
           )}
@@ -1471,7 +1533,7 @@ const ChatPage: React.FC = () => {
           <div className="card" style={{ padding: 14 }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
               <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>{t('chat.contextWindow')}</span>
-              <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>200K</span>
+              <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>{ctxWindowLabel}</span>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
               {/* Circular progress */}
@@ -1480,12 +1542,12 @@ const ChatPage: React.FC = () => {
                 <circle
                   cx="28" cy="28" r="24" fill="none"
                   stroke="var(--success)" strokeWidth="3"
-                  strokeDasharray={`${Math.min(tokenUsage.input / 200000, 1) * 150.8} 150.8`}
+                  strokeDasharray={`${Math.min(tokenUsage.input / ctxWindow, 1) * 150.8} 150.8`}
                   strokeLinecap="round"
                   transform="rotate(-90 28 28)"
                 />
                 <text x="28" y="32" textAnchor="middle" fontSize="11" fontWeight="600" fill="var(--text-primary)">
-                  {Math.min((tokenUsage.input / 200000) * 100, 100).toFixed(0)}%
+                  {Math.min((tokenUsage.input / ctxWindow) * 100, 100).toFixed(0)}%
                 </text>
               </svg>
               <div style={{ flex: 1 }}>
@@ -1493,7 +1555,9 @@ const ChatPage: React.FC = () => {
                 <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>
                   {(tokenUsage.input / 1000).toFixed(1)}K
                 </div>
-                <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4 }}>{t('chat.nearLimit200K')}</div>
+                <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4 }}>
+                  {t('chat.ctxOf')} {ctxWindowLabel}
+                </div>
               </div>
             </div>
           </div>
@@ -1578,9 +1642,25 @@ const ChatPage: React.FC = () => {
         <Pill icon={<Cpu size={12} />} label={currentModel?.name || selectedModel} onClick={openSettings} />
         <Pill icon={<span>◈</span>} label={currentModel?.provider || 'openrouter'} onClick={openSettings} />
         <Pill icon={<Shield size={12} />} label={mode} onClick={openSettings} />
-        {/* CWD + Git branch */}
-        <Pill icon={<Folder size={12} />} label={shortDir('~')} onClick={() => {}} />
-        <Pill icon={<GitBranch size={12} />} label={gitBranch || '—'} onClick={() => {}} />
+        {/* CWD + Git branch — click opens the folder in the OS file manager */}
+        <Pill
+          icon={<Folder size={12} />}
+          label={cwdPath ? shortDir(cwdPath) : '~'}
+          onClick={() => {
+            if (cwdPath) {
+              if (window.icode?.openFolder) window.icode.openFolder(cwdPath);
+              else window.open('file:///' + cwdPath.replace(/\\/g, '/'));
+            }
+          }}
+        />
+        <Pill
+          icon={<GitBranch size={12} />}
+          label={gitBranch || '—'}
+          title={gitBranch ? t('chat.copyBranch') : ''}
+          onClick={() => {
+            if (gitBranch && navigator.clipboard) navigator.clipboard.writeText(gitBranch).catch(() => {});
+          }}
+        />
         <span style={{ marginLeft: 'auto', display: 'flex', gap: 14 }}>
           <span>↑{tokenUsage.input.toLocaleString()}</span>
           <span>↓{tokenUsage.output.toLocaleString()}</span>
@@ -1950,6 +2030,7 @@ async function streamChat(
   payload: ChatPayload,
   onEvent: (e: ChatEvent) => void,
   abortRef?: React.MutableRefObject<AbortController | null>,
+  userStoppedRef?: React.MutableRefObject<boolean>,
 ) {
   const ctrl = new AbortController();
   if (abortRef) abortRef.current = ctrl;
@@ -1994,12 +2075,15 @@ async function streamChat(
     }
   } catch (e) {
     if (e instanceof DOMException && e.name === 'AbortError') {
-      onEvent({ type: 'error', content: i18n.t('chat.timeoutError') });
+      // User-initiated stop (Esc / stop button) aborts the fetch — show a
+      // neutral "stopped" line instead of the misleading timeout message.
+      onEvent({ type: 'error', content: userStoppedRef?.current ? i18n.t('chat.stopped') : i18n.t('chat.timeoutError') });
     } else {
       onEvent({ type: 'error', content: e instanceof Error ? e.message : String(e) });
     }
   } finally {
     clearTimeout(t);
+    if (userStoppedRef) userStoppedRef.current = false;
     if (abortRef) abortRef.current = null;
   }
 }
@@ -2023,11 +2107,11 @@ function estimateCost(usage: UsageInfo | null | undefined, model: Model | null |
 }
 
 // Small presentational helpers for the status bar / stats sidebar.
-function Pill({ icon, label, onClick }: { icon: React.ReactNode; label: string; onClick: () => void }) {
+function Pill({ icon, label, onClick, title }: { icon: React.ReactNode; label: string; onClick: () => void; title?: string }) {
   return (
     <button
       onClick={onClick}
-      title={i18n.t('chat.openSettings')}
+      title={title || i18n.t('chat.openSettings')}
       style={{
         display: 'inline-flex', alignItems: 'center', gap: 5,
         background: 'var(--bg-tertiary)', border: '1px solid var(--border-color)',

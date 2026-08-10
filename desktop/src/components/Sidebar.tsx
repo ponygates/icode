@@ -2,11 +2,18 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../stores/appStore';
-import { MessageSquare, Cpu, Settings, BarChart, ArrowLeftRight, PanelLeftClose, Github, Plus, Server, Pencil, RotateCcw, Trash2 } from 'lucide-react';
+import { MessageSquare, Cpu, Settings, BarChart, ArrowLeftRight, PanelLeftClose, Github, Plus, Server, Pencil, RotateCcw, Trash2, Search } from 'lucide-react';
 import PlumBlossom from './PlumBlossom';
 import WorkspaceSidebar from './WorkspaceSidebar';
 
 interface Props { onToggle: () => void; }
+
+interface SearchHit {
+  session_id?: string;
+  session_title?: string;
+  content?: string;
+  timestamp?: string | number;
+}
 
 const Sidebar: React.FC<Props> = ({ onToggle }) => {
   const { t } = useTranslation();
@@ -15,6 +22,9 @@ const Sidebar: React.FC<Props> = ({ onToggle }) => {
   const [collapsed, setCollapsed] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchHits, setSearchHits] = useState<SearchHit[] | null>(null);
+  const [searching, setSearching] = useState(false);
 
   // Precise selectors: the sidebar renders the session list + model name.
   // It must re-render when sessions/activeSession/selectedModel change, but
@@ -35,6 +45,40 @@ const Sidebar: React.FC<Props> = ({ onToggle }) => {
   const backendConnected = useAppStore((s) => s.backendConnected);
   const backendChecking = useAppStore((s) => s.backendChecking);
   const backendVersion = useAppStore((s) => s.backendVersion);
+  const backendUrl = useAppStore((s) => s.backendUrl);
+
+  // Debounced session-content search against /api/search (the backend has
+  // full-text search over all sessions; the sidebar surfaces it).
+  useEffect(() => {
+    if (!searchQuery.trim() || !backendConnected) {
+      setSearchHits(null);
+      setSearching(false);
+      return;
+    }
+    setSearching(true);
+    const timer = setTimeout(async () => {
+      try {
+        const url = backendUrl || '';
+        const res = await fetch(`${url}/api/search?q=${encodeURIComponent(searchQuery.trim())}&limit=8`);
+        if (res.ok) {
+          const data = await res.json();
+          setSearchHits(data.results || []);
+        } else {
+          setSearchHits([]);
+        }
+      } catch { setSearchHits([]); }
+      setSearching(false);
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [searchQuery, backendConnected, backendUrl]);
+
+  const openHit = (hit: SearchHit) => {
+    if (!hit?.session_id) return;
+    setActiveSession(hit.session_id);
+    setSearchQuery('');
+    setSearchHits(null);
+    navigate('/');
+  };
 
   // Load the soft-deleted ("recently removed") sessions whenever the backend
   // connects, so the trash section stays in sync with /clear on other surfaces.
@@ -123,6 +167,67 @@ const Sidebar: React.FC<Props> = ({ onToggle }) => {
 
       {/* Session history */}
       <div style={{ flex: 1, overflowY: 'auto', padding: collapsed ? '4px 4px' : '6px 6px' }}>
+        {!collapsed && (
+          <div style={{ padding: '0 6px 6px', position: 'relative' }}>
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 6,
+              background: 'var(--bg-tertiary)', border: '0.5px solid var(--border-color)',
+              borderRadius: 6, padding: '4px 8px',
+            }}>
+              <Search size={11} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
+              <input
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                onFocus={(e) => { if (e.target.value) { setSearchHits(null); } }}
+                placeholder={t('sidebar.searchSessions')}
+                style={{
+                  flex: 1, background: 'transparent', border: 'none', outline: 'none',
+                  color: 'var(--text-primary)', fontSize: 11, minWidth: 0,
+                }}
+              />
+              {searching && <span style={{ color: 'var(--text-muted)', fontSize: 9 }}>…</span>}
+            </div>
+            {searchQuery.trim() && searchHits !== null && (
+              <div style={{
+                position: 'absolute', left: 6, right: 6, top: '100%', zIndex: 60,
+                background: 'var(--bg-secondary)', border: '0.5px solid var(--border-color)',
+                borderRadius: 8, boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
+                maxHeight: 240, overflowY: 'auto', padding: 4,
+              }}>
+                {searchHits.length === 0 ? (
+                  <div style={{ padding: '8px', color: 'var(--text-muted)', fontSize: 11 }}>
+                    {t('sidebar.noSearchResults')}
+                  </div>
+                ) : searchHits.map((hit, i) => (
+                  <div
+                    key={i}
+                    onClick={() => openHit(hit)}
+                    style={{
+                      padding: '5px 8px', borderRadius: 6, cursor: 'pointer',
+                      fontSize: 11,
+                    }}
+                    onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-tertiary)'; }}
+                    onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
+                  >
+                    <div style={{
+                      color: 'var(--text-primary)', fontWeight: 500,
+                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                    }}>
+                      {hit.session_title || hit.session_id || '?'}
+                    </div>
+                    <div style={{
+                      color: 'var(--text-muted)', fontSize: 10,
+                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      marginTop: 1,
+                    }}>
+                      {(hit.content || '').slice(0, 80)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
         {!collapsed && (
           <div style={{
             display: 'flex', alignItems: 'center', justifyContent: 'space-between',
