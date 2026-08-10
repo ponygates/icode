@@ -359,6 +359,16 @@ func extractBaiduRealURL(html, fakeURL string) string {
 
 type TavilySearch struct{}
 
+// SetTavilyAPIKey injects the Tavily API key from the iCode config system.
+// Called during bootstrap so web_search/tavily works without a shell env var.
+func SetTavilyAPIKey(key string) {
+	tavilyKeyOverride = strings.TrimSpace(key)
+}
+
+// package-level override so NewWebSearchTool() can construct engines without
+// threading config through the whole registry. Safe to set before any Search.
+var tavilyKeyOverride string
+
 func (s *TavilySearch) Name() string { return "tavily" }
 
 func (s *TavilySearch) Search(ctx context.Context, query string, count int) ([]SearchResult, error) {
@@ -366,10 +376,10 @@ func (s *TavilySearch) Search(ctx context.Context, query string, count int) ([]S
 		count = 5
 	}
 
-	// Check for API key in environment
+	// Check for API key in the config system, then the environment.
 	apiKey := getTavilyAPIKey()
 	if apiKey == "" {
-		return nil, fmt.Errorf("Tavily API key not configured. Set TAVILY_API_KEY or configure via 'icode auth set'")
+		return nil, fmt.Errorf("Tavily API key not configured. Set TAVILY_API_KEY, configure 'icode auth set --provider tavily --key <KEY>', or set the tavily provider in config")
 	}
 
 	payload := map[string]any{
@@ -455,11 +465,14 @@ func stripTags(s string) string {
 }
 
 func getTavilyAPIKey() string {
+	// Prefer the config-system override injected during bootstrap.
+	if k := strings.TrimSpace(tavilyKeyOverride); k != "" {
+		return k
+	}
 	// Try from environment first
 	if key := getEnv("TAVILY_API_KEY", ""); key != "" {
 		return key
 	}
-	// TODO: add integration with iCode config system
 	return ""
 }
 

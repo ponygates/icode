@@ -309,11 +309,17 @@ func (p *BaseProvider) ChatStream(ctx context.Context, req types.ChatRequest) (<
 	}
 
 	ch := make(chan types.StreamEvent, 64)
-	go p.readStream(resp.Body, ch)
+	go p.readStream(ctx, resp.Body, ch)
 	return ch, nil
 }
 
-func (p *BaseProvider) readStream(body io.ReadCloser, ch chan types.StreamEvent) {
+// readStream pumps SSE lines from the response body into ch until EOF, an
+// error, or ctx cancellation. The context matters: when the user interrupts
+// (Esc / stop button) the engine cancels it, and the HTTP transport closes
+// the body — but the bufio.Scanner may still be parked on a read, so we
+// also select on ctx.Done() and abort the scan early instead of blocking
+// until the provider notices.
+func (p *BaseProvider) readStream(ctx context.Context, body io.ReadCloser, ch chan types.StreamEvent) {
 	defer close(ch)
 	defer body.Close()
 
@@ -323,128 +329,150 @@ func (p *BaseProvider) readStream(body io.ReadCloser, ch chan types.StreamEvent)
 	toolCalls := make(map[int]*types.LiveToolCall)
 	eventsProduced := false
 
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-
-		data := strings.TrimPrefix(line, "data: ")
-		if data == "[DONE]" {
-			eventsProduced = true
-			ch <- types.StreamEvent{
-				Type: types.EventDone,
-				Meta: types.StreamMeta{FinishReason: "stop"},
+	// Drain the scanner on a dedicated goroutine; the main loop selects on
+	// ctx.Done() so an interrupt never waits for the provider's SSE to end.
+	lines := make(chan string, 64)
+	go func() {
+		defer close(lines)
+		for scanner.Scan() {
+			select {
+			case lines <- scanner.Text():
+			case <-ctx.Done():
+				return
 			}
+		}
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
 			return
-		}
-
-		var chunk streamChunk
-		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			continue
-		}
-
-		// Handle usage-only chunk with no choices (e.g. some providers
-		// send usage in a final chunk separately from the last choice).
-		if len(chunk.Choices) == 0 && chunk.Usage != nil {
-			eventsProduced = true
-			ch <- types.StreamEvent{
-				Type: types.EventDone,
-				Meta: types.StreamMeta{
-					Usage: types.TokenUsage{
-						PromptTokens:     chunk.Usage.PromptTokens,
-						CompletionTokens: chunk.Usage.CompletionTokens,
-						TotalTokens:      chunk.Usage.TotalTokens,
-					},
-					FinishReason: "",
-					Model:        "",
-				},
-			}
-			continue
-		}
-
-		// Handle usage in final chunk
-		if chunk.Usage != nil {
-			eventsProduced = true
-			ch <- types.StreamEvent{
-				Type: types.EventDone,
-				Meta: types.StreamMeta{
-					Usage: types.TokenUsage{
-						PromptTokens:     chunk.Usage.PromptTokens,
-						CompletionTokens: chunk.Usage.CompletionTokens,
-						TotalTokens:      chunk.Usage.TotalTokens,
-					},
-					FinishReason: chunk.Choices[0].FinishReason,
-					Model:        chunk.Model,
-				},
-			}
-			return
-		}
-
-		if len(chunk.Choices) == 0 {
-			continue
-		}
-		choice := chunk.Choices[0]
-
-		// Text delta
-		if choice.Delta.Content != "" {
-			ch <- types.StreamEvent{
-				Type:    types.EventText,
-				Content: choice.Delta.Content,
-			}
-		}
-
-		// Reasoning / thinking delta (DeepSeek R1, Qwen, etc.)
-		if choice.Delta.ReasoningContent != "" {
-			ch <- types.StreamEvent{
-				Type:    types.EventThinking,
-				Content: choice.Delta.ReasoningContent,
-			}
-		}
-
-		// Tool call delta
-		for _, tc := range choice.Delta.ToolCalls {
-			idx := tc.Index
-			if existing, ok := toolCalls[idx]; ok {
-				if tc.Function.Name != "" {
-					existing.Name = tc.Function.Name
+		case line, ok := <-lines:
+			if !ok {
+				// Scanner finished (EOF or error). Surface a scan error if the
+				// context is still alive; otherwise emit the no-response error
+				// for a stream that produced nothing.
+				if err := scanner.Err(); err != nil && !eventsProduced {
+					ch <- types.StreamEvent{Type: types.EventError, Content: err.Error()}
+				} else if !eventsProduced {
+					ch <- types.StreamEvent{
+						Type:    types.EventError,
+						Content: "No response from provider — please check your API key in Settings → Models",
+					}
 				}
-				existing.Arguments += tc.Function.Arguments
-			} else {
-				ltc := &types.LiveToolCall{
-					Index:     idx,
-					ID:        tc.ID,
-					Name:      tc.Function.Name,
-					Arguments: tc.Function.Arguments,
-				}
-				toolCalls[idx] = ltc
+				return
+			}
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+
+			data := strings.TrimPrefix(line, "data: ")
+			if data == "[DONE]" {
+				eventsProduced = true
 				ch <- types.StreamEvent{
-					Type:     types.EventToolUse,
-					ToolCall: ltc,
+					Type: types.EventDone,
+					Meta: types.StreamMeta{FinishReason: "stop"},
+				}
+				return
+			}
+
+			var chunk streamChunk
+			if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+				continue
+			}
+
+			// Handle usage-only chunk with no choices (e.g. some providers
+			// send usage in a final chunk separately from the last choice).
+			if len(chunk.Choices) == 0 && chunk.Usage != nil {
+				eventsProduced = true
+				ch <- types.StreamEvent{
+					Type: types.EventDone,
+					Meta: types.StreamMeta{
+						Usage: types.TokenUsage{
+							PromptTokens:     chunk.Usage.PromptTokens,
+							CompletionTokens: chunk.Usage.CompletionTokens,
+							TotalTokens:      chunk.Usage.TotalTokens,
+						},
+						FinishReason: "",
+						Model:        "",
+					},
+				}
+				continue
+			}
+
+			// Handle usage in final chunk
+			if chunk.Usage != nil {
+				eventsProduced = true
+				ch <- types.StreamEvent{
+					Type: types.EventDone,
+					Meta: types.StreamMeta{
+						Usage: types.TokenUsage{
+							PromptTokens:     chunk.Usage.PromptTokens,
+							CompletionTokens: chunk.Usage.CompletionTokens,
+							TotalTokens:      chunk.Usage.TotalTokens,
+						},
+						FinishReason: chunk.Choices[0].FinishReason,
+						Model:        chunk.Model,
+					},
+				}
+				return
+			}
+
+			if len(chunk.Choices) == 0 {
+				continue
+			}
+			choice := chunk.Choices[0]
+
+			// Text delta
+			if choice.Delta.Content != "" {
+				ch <- types.StreamEvent{
+					Type:    types.EventText,
+					Content: choice.Delta.Content,
 				}
 			}
-		}
 
-		if choice.FinishReason != "" {
-			eventsProduced = true
-			ch <- types.StreamEvent{
-				Type: types.EventDone,
-				Meta: types.StreamMeta{
-					FinishReason: choice.FinishReason,
-					Model:        chunk.Model,
-				},
+			// Reasoning / thinking delta (DeepSeek R1, Qwen, etc.)
+			if choice.Delta.ReasoningContent != "" {
+				ch <- types.StreamEvent{
+					Type:    types.EventThinking,
+					Content: choice.Delta.ReasoningContent,
+				}
 			}
-			return
-		}
-	}
 
-	// No events were produced — the provider returned a successful HTTP
-	// response but NO valid SSE data. This typically means the API key is
-	// missing or invalid, and the provider returned a non-streaming body.
-	if !eventsProduced {
-		ch <- types.StreamEvent{
-			Type:    types.EventError,
-			Content: "No response from provider — please check your API key in Settings → Models",
+			// Tool call delta
+			for _, tc := range choice.Delta.ToolCalls {
+				idx := tc.Index
+				if existing, ok := toolCalls[idx]; ok {
+					if tc.Function.Name != "" {
+						existing.Name = tc.Function.Name
+					}
+					existing.Arguments += tc.Function.Arguments
+				} else {
+					ltc := &types.LiveToolCall{
+						Index:     idx,
+						ID:        tc.ID,
+						Name:      tc.Function.Name,
+						Arguments: tc.Function.Arguments,
+					}
+					toolCalls[idx] = ltc
+					ch <- types.StreamEvent{
+						Type:     types.EventToolUse,
+						ToolCall: ltc,
+					}
+				}
+			}
+
+			if choice.FinishReason != "" {
+				eventsProduced = true
+				ch <- types.StreamEvent{
+					Type: types.EventDone,
+					Meta: types.StreamMeta{
+						FinishReason: choice.FinishReason,
+						Model:        chunk.Model,
+					},
+				}
+				return
+			}
 		}
 	}
 }

@@ -119,6 +119,42 @@ func TestSnapshotAndUndo_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestUndoMultiStep verifies the fix for "multi-step /undo restores the
+// latest snapshot instead of the target one": with three snapshots, /undo 2
+// must restore the content captured by HEAD~1, not the most recent snapshot.
+func TestUndoMultiStep(t *testing.T) {
+	fs := newSnapshot(t)
+	path := filepath.Join(fs.projectRoot, "a.txt")
+
+	writeFile(t, path, "v0")
+	if _, err := fs.SnapshotFile(context.Background(), path); err != nil {
+		t.Fatalf("snapshot v0: %v", err)
+	}
+	writeFile(t, path, "one")
+	if _, err := fs.SnapshotFile(context.Background(), path); err != nil {
+		t.Fatalf("snapshot one: %v", err)
+	}
+	writeFile(t, path, "two")
+	if _, err := fs.SnapshotFile(context.Background(), path); err != nil {
+		t.Fatalf("snapshot two: %v", err)
+	}
+	// Simulate a tool leaving the file at a post-edit state.
+	writeFile(t, path, "three")
+
+	restored, err := fs.Undo(context.Background(), 2)
+	if err != nil {
+		t.Fatalf("Undo: %v", err)
+	}
+	if len(restored) == 0 {
+		t.Fatal("Undo should list restored files")
+	}
+	got, _ := os.ReadFile(path)
+	// /undo 2 skips the latest snapshot (two) and restores "one" (HEAD~1).
+	if string(got) != "one" {
+		t.Errorf("after undo 2 content = %q, want %q (captured by HEAD~1)", string(got), "one")
+	}
+}
+
 func TestListSnapshots_AfterSnapshot(t *testing.T) {
 	fs := newSnapshot(t)
 	path := filepath.Join(fs.projectRoot, "b.txt")

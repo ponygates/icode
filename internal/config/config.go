@@ -74,8 +74,9 @@ type Config struct {
 	// Multimodal configures the image/video generation backend used by the
 	// image_gen and video_gen tools.
 	Multimodal MultimodalCfg `yaml:"multimodal" json:"multimodal"`
-	// Hooks maps lifecycle event names (PreToolUse/PostToolUse/Stop) to
-	// hook rules — external commands fired during the agent loop.
+	// Hooks maps lifecycle event names (PreToolUse/PostToolUse/
+	// UserPromptSubmit/Stop) to hook rules — external commands fired during
+	// the agent loop.
 	Hooks map[string][]HookRule `yaml:"hooks" json:"hooks"`
 	// Autostart, when true, registers iCode to launch in desktop mode on OS
 	// login (Windows: HKCU Run key; macOS: LaunchAgent; Linux: autostart

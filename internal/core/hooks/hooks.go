@@ -3,11 +3,14 @@
 //
 // Supported events:
 //
-//	PreToolUse  — before a tool executes. Exit code 2 blocks the tool call
-//	              and feeds stderr back to the model as the error message.
-//	PostToolUse — after a tool executes. Stderr (exit code 2) is appended to
-//	              the tool result so the model sees the feedback.
-//	Stop        — when the agent finishes responding.
+//	PreToolUse      — before a tool executes. Exit code 2 blocks the tool call
+//	                  and feeds stderr back to the model as the error message.
+//	PostToolUse     — after a tool executes. Stderr (exit code 2) is appended to
+//	                  the tool result so the model sees the feedback.
+//	UserPromptSubmit — before a user message is sent to the model. Exit code 2
+//	                  blocks the message; stdout JSON {"prompt": "..."} rewrites
+//	                  the message the model sees.
+//	Stop            — when the agent finishes responding.
 //
 // Hooks receive a JSON payload on stdin describing the event:
 //
@@ -40,9 +43,10 @@ import (
 type Event string
 
 const (
-	PreToolUse  Event = "PreToolUse"
-	PostToolUse Event = "PostToolUse"
-	Stop        Event = "Stop"
+	PreToolUse       Event = "PreToolUse"
+	PostToolUse      Event = "PostToolUse"
+	UserPromptSubmit Event = "UserPromptSubmit"
+	Stop             Event = "Stop"
 )
 
 // Rule is a single hook definition: a tool-name matcher plus a shell command.
@@ -58,6 +62,7 @@ type Input struct {
 	ToolName   string          `json:"tool_name,omitempty"`
 	ToolInput  json.RawMessage `json:"tool_input,omitempty"`
 	ToolOutput string          `json:"tool_output,omitempty"`
+	Prompt     string          `json:"prompt,omitempty"` // UserPromptSubmit: the user's message
 	SessionID  string          `json:"session_id,omitempty"`
 	Cwd        string          `json:"cwd"`
 }
@@ -66,6 +71,9 @@ type Input struct {
 type Result struct {
 	Block   bool   // true when a PreToolUse hook exited with code 2
 	Message string // stderr of the deciding hook (feedback for the model)
+	// Prompt is the rewritten user message for UserPromptSubmit hooks. Empty
+	// means "keep the original" (or, with Block=true, "drop the message").
+	Prompt string
 }
 
 // Runner executes configured hooks. Safe for concurrent use (immutable config).
@@ -114,9 +122,15 @@ func (r *Runner) Fire(ctx context.Context, ev Event, in Input) *Result {
 		if !matches(rule.Matcher, in.ToolName) {
 			continue
 		}
-		block, msg := runOne(ctx, rule, payload, r.cwd)
+		block, msg, stdout := runOne(ctx, rule, payload, r.cwd)
 		if block {
 			return &Result{Block: true, Message: msg}
+		}
+		// UserPromptSubmit hooks can rewrite the prompt via stdout JSON.
+		if ev == UserPromptSubmit {
+			if p := parsePromptRewrite(stdout); p != "" {
+				agg.Prompt = p
+			}
 		}
 		if msg != "" {
 			if agg.Message != "" {
@@ -126,6 +140,22 @@ func (r *Runner) Fire(ctx context.Context, ev Event, in Input) *Result {
 		}
 	}
 	return agg
+}
+
+// parsePromptRewrite decodes the optional stdout JSON {"prompt": "..."}
+// contract of UserPromptSubmit hooks. Anything else (or unparsable) yields "".
+func parsePromptRewrite(stdout string) string {
+	s := strings.TrimSpace(stdout)
+	if s == "" {
+		return ""
+	}
+	var v struct {
+		Prompt string `json:"prompt"`
+	}
+	if err := json.Unmarshal([]byte(s), &v); err != nil {
+		return ""
+	}
+	return v.Prompt
 }
 
 func matches(pattern, toolName string) bool {
@@ -143,10 +173,11 @@ func matches(pattern, toolName string) bool {
 	return re.MatchString(toolName)
 }
 
-// runOne executes a single hook command. Returns (block, message).
+// runOne executes a single hook command. Returns (block, message, stdout).
 // Exit code 2 → block=true with stderr as message. Other non-zero exit
 // codes are non-blocking (stderr surfaced as informational message).
-func runOne(ctx context.Context, rule Rule, payload []byte, cwd string) (bool, string) {
+// stdout is captured for UserPromptSubmit's JSON rewrite contract.
+func runOne(ctx context.Context, rule Rule, payload []byte, cwd string) (bool, string, string) {
 	timeout := time.Duration(rule.Timeout) * time.Second
 	if timeout <= 0 {
 		timeout = 30 * time.Second
@@ -163,19 +194,22 @@ func runOne(ctx context.Context, rule Rule, payload []byte, cwd string) (bool, s
 	cmd.Dir = cwd
 	cmd.Stdin = bytes.NewReader(payload)
 	var stderr bytes.Buffer
+	var stdout bytes.Buffer
 	cmd.Stderr = &stderr
+	cmd.Stdout = &stdout
 
 	err := cmd.Run()
 	msg := strings.TrimSpace(stderr.String())
+	out := strings.TrimSpace(stdout.String())
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 2 {
 			if msg == "" {
 				msg = "blocked by hook: " + rule.Command
 			}
-			return true, msg
+			return true, msg, out
 		}
 		// Non-2 failures (including timeout) never block the agent.
-		return false, msg
+		return false, msg, out
 	}
-	return false, msg
+	return false, msg, out
 }

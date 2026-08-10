@@ -624,6 +624,19 @@ func (e *Engine) executeTool(
 ) *types.ToolResult {
 	ctx = tool.WithSessionID(ctx, sessionID)
 
+	// Live-output forwarding: tools that support incremental streaming (bash)
+	// emit EventToolProgress so the UI can render output in real time. The
+	// UI layer throttles repaints; here we just relay chunks as-is. Progress
+	// events are volatile — never persisted into the conversation.
+	relay := func(chunk string) {
+		select {
+		case out <- types.StreamEvent{Type: types.EventToolProgress, Content: chunk}:
+		case <-ctx.Done():
+		default:
+		}
+	}
+	ctx = tool.WithProgress(ctx, relay)
+
 	// Doom loop detection: if the same tool+args appears 3+ consecutive
 	// times, emit a warning and return a failure to break the loop.
 	if e.doomLoop.RecordCall(tc.Name, tc.Arguments) {
@@ -737,6 +750,11 @@ func (e *Engine) runTool(ctx context.Context, tc types.ToolCall) *types.ToolResu
 	}
 
 	e.snapshotBeforeTool(ctx, tc)
+	// bash can modify any file — snapshot the whole project so /undo can
+	// restore changes it makes (per-file snapshots can't cover that).
+	if tc.Name == "bash" {
+		checkpoint.BeforeBash(ctx)
+	}
 	res, err := e.toolReg.Execute(ctx, tc.Name, tc.Arguments)
 	if err != nil {
 		return &types.ToolResult{Success: false, Error: err.Error()}
@@ -1287,6 +1305,27 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 		// Also redact any past attachments in the session
 	}
 
+	// UserPromptSubmit lifecycle hook (Claude Code parity): an external
+	// command can rewrite the prompt (stdout {"prompt": "..."}) before the
+	// model sees it, or block the message entirely (exit code 2).
+	if hr := e.getHooksRunner(); hr.HasHooks(hooks.UserPromptSubmit) {
+		hres := hr.Fire(ctx, hooks.UserPromptSubmit, hooks.Input{
+			Prompt:    sendContent,
+			SessionID: sessionID,
+		})
+		if hres.Block {
+			// The message is dropped — emit a system notice so the UI tells
+			// the user why nothing happened.
+			out := make(chan types.StreamEvent, 1)
+			out <- types.StreamEvent{Type: types.EventSystem, Content: "ⓘ 用户消息已被 UserPromptSubmit 钩子拦截: " + firstN(hres.Message, 200)}
+			close(out)
+			return out, nil
+		}
+		if hres.Prompt != "" && hres.Prompt != sendContent {
+			sendContent = hres.Prompt
+		}
+	}
+
 	userMsg := types.Message{
 		Role:      types.RoleUser,
 		Content:   sendContent,
@@ -1398,43 +1437,55 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 		assistantMsg.Timestamp = time.Now()
 		var toolCalls []types.ToolCall
 
-		for event := range eventCh {
-			switch event.Type {
-			case types.EventText:
-				assistantMsg.Content += event.Content
-				out <- event
-			case types.EventThinking:
-				// Pass through thinking events to the UI for display
-				out <- event
-			case types.EventToolUse:
-				tc := types.ToolCall{
-					ID:        event.ToolCall.ID,
-					Name:      event.ToolCall.Name,
-					Arguments: event.ToolCall.Arguments,
-				}
-				toolCalls = append(toolCalls, tc)
-				out <- event
-				// NOTE: execution deferred to EventDone so the whole turn's
-				// tool calls can run through executeToolBatch (read-only tools
-				// in parallel — Claude Code parallel tool use parity).
-			case types.EventDone:
-				if len(toolCalls) > 0 {
-					e.runToolTurn(ctx, sessionID, provider, opt, modelInfo, assistantMsg, toolCalls, out, 0)
-				} else {
-					e.finishTextTurn(ctx, sessionID, provider, opt, modelInfo, assistantMsg, event, startTime, out, 0)
-				}
-				// Stop lifecycle hook — the agent has finished responding.
-				if hr := e.getHooksRunner(); hr.HasHooks(hooks.Stop) {
-					hr.Fire(context.Background(), hooks.Stop, hooks.Input{SessionID: sessionID})
-				}
-				out <- types.StreamEvent{
-					Type: types.EventDone,
-					Meta: types.StreamMeta{Model: modelInfo.ID},
-				}
+		for {
+			select {
+			case <-ctx.Done():
+				// User interrupted (Esc / stop button): drop the provider
+				// stream immediately even if the provider's readStream hasn't
+				// noticed the cancellation yet. The tool call loop below must
+				// not start a new turn on a dead context.
 				return
-			case types.EventError:
-				out <- event
-				return
+			case event, ok := <-eventCh:
+				if !ok {
+					return
+				}
+				switch event.Type {
+				case types.EventText:
+					assistantMsg.Content += event.Content
+					out <- event
+				case types.EventThinking:
+					// Pass through thinking events to the UI for display
+					out <- event
+				case types.EventToolUse:
+					tc := types.ToolCall{
+						ID:        event.ToolCall.ID,
+						Name:      event.ToolCall.Name,
+						Arguments: event.ToolCall.Arguments,
+					}
+					toolCalls = append(toolCalls, tc)
+					out <- event
+					// NOTE: execution deferred to EventDone so the whole turn's
+					// tool calls can run through executeToolBatch (read-only tools
+					// in parallel — Claude Code parallel tool use parity).
+				case types.EventDone:
+					if len(toolCalls) > 0 {
+						e.runToolTurn(ctx, sessionID, provider, opt, modelInfo, assistantMsg, toolCalls, out, 0)
+					} else {
+						e.finishTextTurn(ctx, sessionID, provider, opt, modelInfo, assistantMsg, event, startTime, out, 0)
+					}
+					// Stop lifecycle hook — the agent has finished responding.
+					if hr := e.getHooksRunner(); hr.HasHooks(hooks.Stop) {
+						hr.Fire(context.Background(), hooks.Stop, hooks.Input{SessionID: sessionID})
+					}
+					out <- types.StreamEvent{
+						Type: types.EventDone,
+						Meta: types.StreamMeta{Model: modelInfo.ID},
+					}
+					return
+				case types.EventError:
+					out <- event
+					return
+				}
 			}
 		}
 	}()
@@ -1488,36 +1539,47 @@ func (e *Engine) continueAgentLoop(
 	var toolCalls []types.ToolCall
 	acc := &textAccumulator{}
 
-	for event := range eventCh {
-		switch event.Type {
-		case types.EventText:
-			full, delta := acc.feed(event.Content)
-			assistantMsg.Content = full
-			if delta != "" {
-				out <- types.StreamEvent{Type: types.EventText, Content: delta}
-			}
-		case types.EventThinking:
-			// Pass through thinking events to the UI for display
-			out <- event
-		case types.EventToolUse:
-			tc := types.ToolCall{
-				ID:        event.ToolCall.ID,
-				Name:      event.ToolCall.Name,
-				Arguments: event.ToolCall.Arguments,
-			}
-			toolCalls = append(toolCalls, tc)
-			out <- event
-			// NOTE: tool execution deferred — see parallel execution below
-		case types.EventDone:
-			if len(toolCalls) > 0 {
-				e.runToolTurn(ctx, sessionID, provider, opt, modelInfo, assistantMsg, toolCalls, out, depth)
-			} else {
-				e.finishTextTurn(ctx, sessionID, provider, opt, modelInfo, assistantMsg, event, startTime, out, depth)
-			}
+	for {
+		select {
+		case <-ctx.Done():
+			// User interrupted (Esc / stop) during a continuation round —
+			// stop consuming the provider stream; runToolTurn above already
+			// checks ctx.Done() before dispatching tools.
 			return
-		case types.EventError:
-			out <- event
-			return
+		case event, ok := <-eventCh:
+			if !ok {
+				return
+			}
+			switch event.Type {
+			case types.EventText:
+				full, delta := acc.feed(event.Content)
+				assistantMsg.Content = full
+				if delta != "" {
+					out <- types.StreamEvent{Type: types.EventText, Content: delta}
+				}
+			case types.EventThinking:
+				// Pass through thinking events to the UI for display
+				out <- event
+			case types.EventToolUse:
+				tc := types.ToolCall{
+					ID:        event.ToolCall.ID,
+					Name:      event.ToolCall.Name,
+					Arguments: event.ToolCall.Arguments,
+				}
+				toolCalls = append(toolCalls, tc)
+				out <- event
+				// NOTE: tool execution deferred — see parallel execution below
+			case types.EventDone:
+				if len(toolCalls) > 0 {
+					e.runToolTurn(ctx, sessionID, provider, opt, modelInfo, assistantMsg, toolCalls, out, depth)
+				} else {
+					e.finishTextTurn(ctx, sessionID, provider, opt, modelInfo, assistantMsg, event, startTime, out, depth)
+				}
+				return
+			case types.EventError:
+				out <- event
+				return
+			}
 		}
 	}
 }

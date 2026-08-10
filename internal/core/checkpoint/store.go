@@ -133,6 +133,23 @@ func (s *Store) Status(ctx context.Context) string {
 	return fmt.Sprintf("%d 个检查点 (%d 个最近五分钟) — /rewind N 回滚", len(entries), recent)
 }
 
+// Diff returns the unified diff introduced by the last `steps` checkpoints
+// (i.e. what the latest snapshot commit changed relative to its parent).
+// Returns an empty string when there is no diff to show (no checkpoints yet,
+// or an empty --allow-empty snapshot).
+func (s *Store) Diff(ctx context.Context, steps int) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if steps <= 0 {
+		steps = 1
+	}
+	out, err := s.gitCmd(ctx, "diff", fmt.Sprintf("HEAD~%d", steps), "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("checkpoint diff: %w", err)
+	}
+	return out, nil
+}
+
 func (s *Store) gitCmd(ctx context.Context, args ...string) (string, error) {
 	cmdArgs := append([]string{"--git-dir", s.gitDir, "--work-tree", s.workDir}, args...)
 	cmd := executil.CommandContext(ctx, "git", cmdArgs...)

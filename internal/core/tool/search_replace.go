@@ -60,7 +60,7 @@ func (t *SearchReplaceTool) Execute(ctx context.Context, args string) (*types.To
 		return &types.ToolResult{Success: false, Error: "search is required"}, nil
 	}
 
-	idx, valid, reason := searchreplace.StageAdd(in.FilePath, in.Search, in.Replace)
+	idx, valid, reason := searchreplace.StageForSession(SessionIDFromContext(ctx)).Add(in.FilePath, in.Search, in.Replace)
 
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("Staged edit #%d to %s\n", idx, in.FilePath))

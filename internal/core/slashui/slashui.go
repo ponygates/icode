@@ -135,9 +135,9 @@ func Execute(ctx context.Context, b *Backend, st *State, text string) Result {
 	case "/review":
 		return cmdReview(args)
 	case "/apply":
-		return cmdApply()
+		return cmdApply(st)
 	case "/reject":
-		return cmdReject()
+		return cmdReject(st)
 	case "/keys":
 		return cmdKeys()
 	case "/mcp":
@@ -1003,12 +1003,13 @@ func cmdReview(args []string) Result {
 	return chat(target)
 }
 
-func cmdApply() Result {
-	n := searchreplace.StageCount()
+func cmdApply(st *State) Result {
+	stage := searchreplace.StageForSession(st.SessionID)
+	n := stage.Count()
 	if n == 0 {
 		return ok("没有可应用的暂存编辑。")
 	}
-	results := searchreplace.StageApplyValid()
+	results := stage.ApplyValid()
 	var b strings.Builder
 	applied := 0
 	for _, r := range results {
@@ -1017,16 +1018,17 @@ func cmdApply() Result {
 			applied++
 		}
 	}
-	b.WriteString(fmt.Sprintf("Applied %d/%d staged edits. Remaining: %d", applied, n, searchreplace.StageCount()))
+	b.WriteString(fmt.Sprintf("Applied %d/%d staged edits. Remaining: %d", applied, n, stage.Count()))
 	return ok(b.String())
 }
 
-func cmdReject() Result {
-	n := searchreplace.StageCount()
+func cmdReject(st *State) Result {
+	stage := searchreplace.StageForSession(st.SessionID)
+	n := stage.Count()
 	if n == 0 {
 		return ok("没有可丢弃的暂存编辑。")
 	}
-	searchreplace.StageClear()
+	stage.Clear()
 	return ok(fmt.Sprintf("已丢弃 %d 条暂存编辑。", n))
 }
 

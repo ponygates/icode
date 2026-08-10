@@ -201,11 +201,19 @@ func (fs *FileSnapshot) Undo(ctx context.Context, steps int) ([]string, error) {
 		steps = 1
 	}
 
-	// Get the file list that changed in the last N commits
-	out, err := fs.gitCmd(ctx, "diff", "--name-only",
-		fmt.Sprintf("HEAD~%d", steps), "HEAD~0")
+	// The snapshot to restore to. Each staged snapshot records the "before"
+	// state of a tool call, so restoring N steps back means reading the
+	// content captured HEAD~(steps-1) (steps=1 → HEAD, the most recent
+	// snapshot).
+	target := fmt.Sprintf("HEAD~%d", steps-1)
+
+	// Get the file list that changed between the step before the target and
+	// HEAD — i.e. the files touched by the last `steps` snapshots.
+	diffFrom := fmt.Sprintf("HEAD~%d", steps)
+	out, err := fs.gitCmd(ctx, "diff", "--name-only", diffFrom, "HEAD")
 	if err != nil {
 		// Try with fewer steps
+		target = "HEAD"
 		out2, e2 := fs.gitCmd(ctx, "diff", "--name-only", "HEAD~1", "HEAD")
 		if e2 != nil {
 			return nil, fmt.Errorf("undo: no snapshots available")
@@ -218,37 +226,43 @@ func (fs *FileSnapshot) Undo(ctx context.Context, steps int) ([]string, error) {
 		return nil, fmt.Errorf("undo: no files changed in recent snapshots")
 	}
 
-	// Restore each file from the shadow git worktree to the actual project
+	// Restore each file from the TARGET commit straight out of git. Reading
+	// the shadow worktree would be wrong: mirrorTree always holds the LATEST
+	// mirror, so /undo N (N≥2) must consult git objects, not the worktree.
 	var restored []string
 	for _, relPath := range changedFiles {
 		if relPath == "" {
 			continue
 		}
-		srcPath := filepath.Join(fs.undoDir, relPath)
 		dstPath := filepath.Join(fs.projectRoot, relPath)
 
-		// Check if the source (snapshot) exists
-		if _, err := os.Stat(srcPath); os.IsNotExist(err) {
+		content, cerr := fs.gitCmd(ctx, "cat-file", "blob", target+":"+relPath)
+		if cerr != nil {
+			// File did not exist at the target snapshot — it was created in
+			// the meantime. Remove it so /undo fully reverts the tree.
+			_ = os.Remove(dstPath)
+			restored = append(restored, relPath)
 			continue
 		}
 
-		// Copy from shadow to actual project
-		input, err := os.ReadFile(srcPath)
-		if err != nil {
-			continue
+		// Preserve the executable bit recorded by git for this path.
+		mode := os.FileMode(0644)
+		if modeOut, me := fs.gitCmd(ctx, "ls-tree", target, "--", relPath); me == nil && strings.HasPrefix(modeOut, "100755") {
+			mode = 0755
 		}
+
 		dstDir := filepath.Dir(dstPath)
 		if err := os.MkdirAll(dstDir, 0755); err != nil {
 			return nil, fmt.Errorf("undo: mkdir %s: %w", dstDir, err)
 		}
-		if err := os.WriteFile(dstPath, input, 0644); err != nil {
+		if err := os.WriteFile(dstPath, []byte(content), mode); err != nil {
 			continue
 		}
 		restored = append(restored, relPath)
 	}
 
 	// Soft-reset the shadow git to forget the undone commits
-	_, _ = fs.gitCmd(ctx, "reset", "--soft", fmt.Sprintf("HEAD~%d", steps))
+	_, _ = fs.gitCmd(ctx, "reset", "--soft", target)
 
 	return restored, nil
 }
@@ -283,6 +297,122 @@ func InitUndo(projectRoot string) error {
 	return nil
 }
 
+// SnapshotProject captures the entire project tree BEFORE a bash command runs
+// (bash can modify any file, so per-file snapshots are insufficient). It
+// mirrors the working tree into the shadow repo and commits. Returns the
+// commit hash. Files that are already identical to the last snapshot still
+// get a commit (with --allow-empty) so Undo steps stay aligned 1:1 with
+// tool executions.
+func (fs *FileSnapshot) SnapshotProject(ctx context.Context) (string, error) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	// Mirror the project tree into the shadow worktree, skipping the undo
+	// repo itself and VCS internals (cheap copy — only changed files land in
+	// the git object store via the single add below).
+	if err := fs.mirrorTree(ctx); err != nil {
+		return "", err
+	}
+
+	if _, err := fs.gitCmd(ctx, "add", "-A"); err != nil {
+		return "", fmt.Errorf("undo: add: %w", err)
+	}
+	if _, err := fs.gitCmd(ctx, "commit", "--allow-empty", "-m",
+		fmt.Sprintf("snapshot project before bash @ %s", time.Now().Format("2006-01-02 15:04:05"))); err != nil {
+		return "", fmt.Errorf("undo: commit: %w", err)
+	}
+	hash, _ := fs.gitCmd(ctx, "rev-parse", "HEAD")
+	return strings.TrimSpace(hash), nil
+}
+
+// mirrorTree copies the project's regular files into the shadow worktree,
+// preserving relative paths, and prunes shadow paths that no longer exist in
+// the project. Large/binary blobs are still copied by reference into git's
+// object store on add; the working-tree copy keeps Undo's restore simple.
+func (fs *FileSnapshot) mirrorTree(ctx context.Context) error {
+	// Prune stale shadow entries (deleted project files).
+	shadowRel := func(abs string) (string, bool) {
+		rel, err := filepath.Rel(fs.undoDir, abs)
+		if err != nil || strings.HasPrefix(rel, "..") {
+			return "", false
+		}
+		return rel, true
+	}
+	_ = filepath.Walk(fs.undoDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		rel, ok := shadowRel(path)
+		if !ok {
+			return nil
+		}
+		// Never prune inside the shadow repo's own .git.
+		if info.IsDir() && (rel == ".git" || strings.HasPrefix(rel, ".git"+string(filepath.Separator))) {
+			return filepath.SkipDir
+		}
+		if info.IsDir() {
+			return nil
+		}
+		if rel == ".git" || strings.HasPrefix(rel, ".git"+string(filepath.Separator)) {
+			return nil
+		}
+		src := filepath.Join(fs.projectRoot, rel)
+		if _, err := os.Stat(src); os.IsNotExist(err) {
+			_ = os.Remove(path)
+		}
+		return nil
+	})
+
+	// Copy the project tree over (skip the undo repo itself).
+	skipPrefix := fs.undoDir + string(filepath.Separator)
+	return filepath.Walk(fs.projectRoot, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			if path == fs.undoDir || strings.HasPrefix(path, skipPrefix) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, err := filepath.Rel(fs.projectRoot, path)
+		if err != nil {
+			return nil
+		}
+		// Skip the shadow repo itself and the user's git internals.
+		if rel == ".git" || strings.HasPrefix(rel, ".git"+string(filepath.Separator)) {
+			return nil
+		}
+		if rel == ".icode" || strings.HasPrefix(rel, ".icode"+string(filepath.Separator)) {
+			return nil
+		}
+		dest := filepath.Join(fs.undoDir, rel)
+		// Skip the copy when the shadow file already matches (same size and
+		// mtime) — consecutive/bash snapshots rarely touch every file, so this
+		// turns the per-bash full-tree mirror into mostly a no-op.
+		if di, derr := os.Stat(dest); derr == nil && di.Size() == info.Size() && di.ModTime().Equal(info.ModTime()) {
+			return nil
+		}
+		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+			return err
+		}
+		return copyFile(path, dest)
+	})
+}
+
+// copyFile copies a file (preserving mode) — plain copy, no overwrite checks.
+func copyFile(src, dst string) error {
+	input, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	fi, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, input, fi.Mode().Perm())
+}
+
 // BeforeTool snapshots all files that a tool is about to modify.
 // Call this before executing write_file, edit, or similar tools.
 func BeforeTool(ctx context.Context, toolName, filePath string) {
@@ -297,4 +427,14 @@ func BeforeTool(ctx context.Context, toolName, filePath string) {
 		return
 	}
 	_, _ = DefaultUndo.SnapshotFile(ctx, filePath)
+}
+
+// BeforeBash snapshots the whole project before a shell command runs, so
+// /undo can restore files modified by bash. Call right before executing the
+// bash tool (best-effort; a failure leaves the undo chain unbroken).
+func BeforeBash(ctx context.Context) {
+	if DefaultUndo == nil {
+		return
+	}
+	_, _ = DefaultUndo.SnapshotProject(ctx)
 }

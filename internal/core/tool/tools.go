@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +27,12 @@ type Registry struct {
 	mu    sync.RWMutex
 	tools map[string]types.Tool
 }
+
+// writerFunc adapts a Write function into an io.Writer (used for the live
+// bash output path so exec.Cmd copies child output into it directly).
+type writerFunc func(p []byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
 
 // NewRegistry creates a tool registry with all built-in tools.
 func NewRegistry() *Registry {
@@ -234,6 +241,55 @@ func (t *BashTool) Execute(ctx context.Context, args string) (*types.ToolResult,
 		}
 	}
 
+	// Live streaming: when the engine attached a progress callback (TUI /
+	// desktop), forward stdout/stderr incrementally so the user sees output
+	// as the command runs instead of one dump at the end. The full output is
+	// still accumulated and returned for the model. cmd.Wait drains the
+	// exec-managed pipes into these writers before returning, so the
+	// accumulated content is complete when Wait returns.
+	progress := ProgressFromContext(ctx)
+	if progress != nil {
+		type progressWriter struct {
+			mu  sync.Mutex
+			buf strings.Builder
+		}
+		newPW := func() *progressWriter {
+			w := &progressWriter{}
+			return w
+		}
+		attach := func(w *progressWriter) io.Writer {
+			return writerFunc(func(p []byte) (int, error) {
+				w.mu.Lock()
+				w.buf.Write(p)
+				w.mu.Unlock()
+				progress(string(p))
+				return len(p), nil
+			})
+		}
+		stdoutPW := newPW()
+		stderrPW := newPW()
+		cmd.Stdout = attach(stdoutPW)
+		cmd.Stderr = attach(stderrPW)
+		if err := cmd.Start(); err != nil {
+			return &types.ToolResult{Success: false, Error: err.Error()}, nil
+		}
+		waitErr := cmd.Wait()
+		var content strings.Builder
+		stdoutPW.mu.Lock()
+		content.WriteString(stdoutPW.buf.String())
+		stdoutPW.mu.Unlock()
+		stderrPW.mu.Lock()
+		content.WriteString(stderrPW.buf.String())
+		stderrPW.mu.Unlock()
+		if waitErr != nil {
+			if ctx.Err() == context.DeadlineExceeded {
+				return &types.ToolResult{Success: false, Content: content.String(), Error: "command timed out after 120 seconds"}, nil
+			}
+			return &types.ToolResult{Success: false, Content: content.String(), Error: waitErr.Error()}, nil
+		}
+		return &types.ToolResult{Success: true, Content: content.String()}, nil
+	}
+
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
@@ -345,7 +401,7 @@ func (t *WriteFileTool) Execute(ctx context.Context, args string) (*types.ToolRe
 }
 
 // ============================================================================
-// GrepTool — search text in files
+// GrepTool — search text in files (regex-aware)
 // ============================================================================
 
 type GrepTool struct{}
@@ -353,17 +409,21 @@ type GrepTool struct{}
 func (t *GrepTool) Def() types.ToolDef {
 	return types.ToolDef{
 		Name:        "grep",
-		Description: "Search for a pattern in files. Returns matching lines with file paths and line numbers.",
+		Description: "Search for a pattern in files. The pattern is a regular expression; plain text also works (special characters are escaped automatically when the pattern is not a valid regex). Returns matching lines with file paths and line numbers.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"pattern": map[string]any{
 					"type":        "string",
-					"description": "The regex pattern to search for",
+					"description": "The regex pattern (or plain text) to search for",
 				},
 				"path": map[string]any{
 					"type":        "string",
 					"description": "Directory or file to search in",
+				},
+				"ignore_case": map[string]any{
+					"type":        "boolean",
+					"description": "Case-insensitive search (default false)",
 				},
 			},
 			"required": []string{"pattern", "path"},
@@ -380,6 +440,21 @@ func (t *GrepTool) Execute(ctx context.Context, args string) (*types.ToolResult,
 	if err != nil {
 		// Default to current directory
 		searchPath = "."
+	}
+	ignoreCase := parseBoolArgWithDefault(args, "ignore_case", false)
+
+	// Compile the pattern as a regex. If it fails to compile, fall back to
+	// plain substring search (the old behavior) so a model that passes
+	// literal text like "fmt.Println(" keeps working.
+	re, reErr := regexp.Compile(pattern)
+	if reErr != nil {
+		re = nil
+	} else if ignoreCase {
+		// Recompile with the case-insensitive flag — lowering only the text
+		// would break uppercase classes in the pattern itself.
+		if reIC, err := regexp.Compile("(?i)" + pattern); err == nil {
+			re = reIC
+		}
 	}
 
 	// Use Go-native grep (cross-platform, no external dependency)
@@ -409,7 +484,15 @@ func (t *GrepTool) Execute(ctx context.Context, args string) (*types.ToolResult,
 
 		lines := strings.Split(string(content), "\n")
 		for i, line := range lines {
-			if strings.Contains(line, pattern) {
+			var matched bool
+			if re != nil {
+				matched = re.MatchString(line)
+			} else if ignoreCase {
+				matched = strings.Contains(strings.ToLower(line), strings.ToLower(pattern))
+			} else {
+				matched = strings.Contains(line, pattern)
+			}
+			if matched {
 				results = append(results, fmt.Sprintf("%s:%d: %s", path, i+1, strings.TrimSpace(line)))
 			}
 		}
@@ -471,9 +554,18 @@ func (t *GlobTool) Execute(ctx context.Context, args string) (*types.ToolResult,
 		return nil, err
 	}
 
-	matches, err := filepath.Glob(pattern)
-	if err != nil {
-		return &types.ToolResult{Success: false, Error: err.Error()}, nil
+	// filepath.Glob does not support "**" recursion, but the schema advertises
+	// '**/*.go' examples. Convert a leading "**/" into a recursive walk and
+	// fall back to plain filepath.Glob for simple patterns.
+	var matches []string
+	if strings.Contains(pattern, "**") {
+		matches = globDoubleStar(pattern)
+	} else {
+		m, err := filepath.Glob(pattern)
+		if err != nil {
+			return &types.ToolResult{Success: false, Error: err.Error()}, nil
+		}
+		matches = m
 	}
 
 	var sb strings.Builder
@@ -482,6 +574,55 @@ func (t *GlobTool) Execute(ctx context.Context, args string) (*types.ToolResult,
 		sb.WriteString("\n")
 	}
 	return &types.ToolResult{Success: true, Content: sb.String()}, nil
+}
+
+// globDoubleStar implements the "**" recursion that filepath.Glob lacks.
+// It walks from the fixed prefix of the pattern and matches each remaining
+// segment against the relative paths at every depth, so '**/*.go' matches
+// *.go at any depth and 'src/**/x.go' matches x.go under src recursively.
+func globDoubleStar(pattern string) []string {
+	// Split into the literal root and the recursive tail.
+	idx := strings.Index(pattern, "**")
+	root := strings.TrimSuffix(pattern[:idx], string(filepath.Separator))
+	if root == "" {
+		root = "."
+	}
+	tail := strings.TrimPrefix(pattern[idx+2:], string(filepath.Separator))
+	tail = strings.TrimPrefix(tail, "/")
+
+	var out []string
+	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return nil
+		}
+		if rel == "." {
+			return nil
+		}
+		if tail == "" {
+			out = append(out, path)
+			return nil
+		}
+		// Match the tail against every suffix of rel so '**/x.go' also
+		// matches x.go at depth 0 below root.
+		ok := false
+		parts := strings.Split(rel, string(filepath.Separator))
+		for i := range parts {
+			cand := strings.Join(parts[i:], string(filepath.Separator))
+			if m, err := filepath.Match(tail, cand); err == nil && m {
+				ok = true
+				break
+			}
+		}
+		if ok {
+			out = append(out, path)
+		}
+		return nil
+	})
+	return out
 }
 
 // ============================================================================
@@ -578,60 +719,57 @@ func (t *EditTool) Execute(ctx context.Context, args string) (*types.ToolResult,
 
 	totalReplacements := 0
 
+	// applyEdit performs one replacement on text. When the exact old_string is
+	// absent it retries with whitespace-normalized fuzzy matching (Aider-style
+	// anchor matching) so a model that mismatches indentation still succeeds.
+	applyEdit := func(oldStr, newStr string, replaceAll bool) (newText string, replaced int, errMsg string) {
+		c := strings.Count(text, oldStr)
+		if c > 0 {
+			if c > 1 && !replaceAll {
+				return "", 0, fmt.Sprintf("old_string %q appears %d times. Use replace_all or add context.", truncateStr(oldStr, 60), c)
+			}
+			if replaceAll {
+				return strings.ReplaceAll(text, oldStr, newStr), c, ""
+			}
+			return strings.Replace(text, oldStr, newStr, 1), 1, ""
+		}
+		// Fuzzy fallback: whitespace-normalized match.
+		idx, end, fuzzyNew := fuzzyFind(text, oldStr, newStr)
+		if idx < 0 {
+			return "", 0, fmt.Sprintf("old_string %q not found.", truncateStr(oldStr, 60))
+		}
+		return text[:idx] + fuzzyNew + text[end:], 1, ""
+	}
+
 	if len(in.Edits) > 0 {
 		// MultiEdit mode: apply edits sequentially
 		for _, ed := range in.Edits {
 			if ed.OldString == "" {
 				continue
 			}
-			c := strings.Count(text, ed.OldString)
-			if c == 0 {
+			nt, n, errMsg := applyEdit(ed.OldString, ed.NewString, ed.ReplaceAll)
+			if errMsg != "" {
 				// Let the model know which edit failed but keep partial progress
 				return &types.ToolResult{
 					Success: false,
-					Content: fmt.Sprintf("after %d replacements, failed on: old_string %q not found.",
-						totalReplacements, truncateStr(ed.OldString, 60)),
+					Content: fmt.Sprintf("after %d replacements, failed on: %s",
+						totalReplacements, errMsg),
 				}, nil
 			}
-			if c > 1 && !ed.ReplaceAll {
-				return &types.ToolResult{
-					Success: false,
-					Content: fmt.Sprintf("after %d replacements: old_string %q appears %d times. Use replace_all.",
-						totalReplacements, truncateStr(ed.OldString, 60), c),
-				}, nil
-			}
-			if ed.ReplaceAll {
-				text = strings.ReplaceAll(text, ed.OldString, ed.NewString)
-			} else {
-				text = strings.Replace(text, ed.OldString, ed.NewString, 1)
-			}
-			totalReplacements++
+			text = nt
+			totalReplacements += n
 		}
 	} else {
 		// Single edit mode (backward compatible)
 		if in.OldStr == "" {
 			return &types.ToolResult{Success: false, Error: "old_string is required"}, nil
 		}
-		c := strings.Count(text, in.OldStr)
-		if c == 0 {
-			return &types.ToolResult{
-				Success: false,
-				Error:   fmt.Sprintf("old_string not found in %s.", in.FilePath),
-			}, nil
+		nt, n, errMsg := applyEdit(in.OldStr, in.NewStr, in.Replace)
+		if errMsg != "" {
+			return &types.ToolResult{Success: false, Error: errMsg}, nil
 		}
-		if c > 1 && !in.Replace {
-			return &types.ToolResult{
-				Success: false,
-				Error:   fmt.Sprintf("old_string appears %d times. Use replace_all or add context.", c),
-			}, nil
-		}
-		if in.Replace {
-			text = strings.ReplaceAll(text, in.OldStr, in.NewStr)
-			totalReplacements = c
-		} else {
-			text = strings.Replace(text, in.OldStr, in.NewStr, 1)
-			totalReplacements = 1
-		}
+		text = nt
+		totalReplacements = n
 	}
 
 	if err := os.WriteFile(in.FilePath, []byte(text), 0644); err != nil {
@@ -643,6 +781,103 @@ func (t *EditTool) Execute(ctx context.Context, args string) (*types.ToolResult,
 		Success: true,
 		Content: fmt.Sprintf("Edited %s (%d replacements)\n%s", in.FilePath, totalReplacements, diffOut),
 	}, nil
+}
+
+// fuzzyFind locates oldStr in text after collapsing runs of whitespace in
+// both sides (so indentation or line-ending differences don't break the
+// match). It returns the byte span of the matched region plus the
+// replacement with the file's own indentation style applied — the caller
+// splices matchedNew at idx..end, preserving the file's whitespace while
+// applying the model's content change.
+func fuzzyFind(text, oldStr, newStr string) (idx, end int, matchedNew string) {
+	needleWords := wordSpans(oldStr)
+	if len(needleWords) == 0 {
+		return -1, 0, ""
+	}
+	textWords := wordSpans(text)
+
+	// Find the first run of textWords whose word texts equal the needle's.
+	needleTexts := make([]string, len(needleWords))
+	for i, w := range needleWords {
+		needleTexts[i] = oldStr[w.start:w.end]
+	}
+	matched := -1
+	for i := 0; i+len(needleTexts) <= len(textWords); i++ {
+		ok := true
+		for k, nt := range needleTexts {
+			if text[textWords[i+k].start:textWords[i+k].end] != nt {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			matched = i
+			break
+		}
+	}
+	if matched < 0 {
+		return -1, 0, ""
+	}
+
+	first := textWords[matched]
+	last := textWords[matched+len(needleTexts)-1]
+	idx = first.start
+	end = last.end
+	// Include any trailing whitespace of the matched region so the splice
+	// lands cleanly on the line break.
+	for end < len(text) && (text[end] == ' ' || text[end] == '\t' || text[end] == '\n' || text[end] == '\r') {
+		end++
+	}
+
+	// Re-indent the replacement with the matched region's base indentation:
+	// the whitespace between the start of the matched line and the match
+	// itself (e.g. the "\t" before "if x {"), so multiline replacements stay
+	// aligned inside their block.
+	leadWS := leadingWhitespace(text[:idx])
+	lines := strings.Split(newStr, "\n")
+	for i := 1; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) != "" {
+			lines[i] = leadWS + lines[i]
+		}
+	}
+	matchedNew = strings.Join(lines, "\n")
+	return idx, end, matchedNew
+}
+
+// wordSpan is a byte range of one whitespace-delimited word.
+type wordSpan struct{ start, end int }
+
+// wordSpans returns the byte spans of all whitespace-delimited words.
+func wordSpans(s string) []wordSpan {
+	var spans []wordSpan
+	i := 0
+	isWS := func(b byte) bool { return b == ' ' || b == '\t' || b == '\n' || b == '\r' }
+	for i < len(s) {
+		for i < len(s) && isWS(s[i]) {
+			i++
+		}
+		if i >= len(s) {
+			break
+		}
+		start := i
+		for i < len(s) && !isWS(s[i]) {
+			i++
+		}
+		spans = append(spans, wordSpan{start, i})
+	}
+	return spans
+}
+
+// leadingWhitespace returns the whitespace prefix of the LAST line of s
+// (the indentation immediately before the match). Handles Windows line
+// endings so the base indent is whatever is between the last \n and the
+// matched token.
+func leadingWhitespace(s string) string {
+	i := len(s)
+	for i > 0 && (s[i-1] == ' ' || s[i-1] == '\t') {
+		i--
+	}
+	return s[i:]
 }
 
 // unifiedDiff produces a compact unified-diff-format string showing what
@@ -808,13 +1043,18 @@ type GitCommitTool struct{}
 func (t *GitCommitTool) Def() types.ToolDef {
 	return types.ToolDef{
 		Name:        "git_commit",
-		Description: "Stage all changes and commit with a message.",
+		Description: "Stage changes and commit with a message. By default stages ALL changes; pass 'files' to stage specific paths only.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"message": map[string]any{
 					"type":        "string",
 					"description": "Commit message",
+				},
+				"files": map[string]any{
+					"type":        "array",
+					"items":       map[string]any{"type": "string"},
+					"description": "Optional: paths to stage and commit (relative to repo root). When omitted, all changes are staged.",
 				},
 			},
 			"required": []string{"message"},
@@ -831,8 +1071,15 @@ func (t *GitCommitTool) Execute(ctx context.Context, args string) (*types.ToolRe
 	ctx2, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	// git add -A
-	addCmd := executil.CommandContext(ctx2, "git", "add", "-A")
+	// Stage specific files when given; otherwise stage everything. Selective
+	// staging keeps unrelated work out of the commit (Claude Code parity).
+	var addArgs []string
+	if files := parseStringArrayArg(args, "files"); len(files) > 0 {
+		addArgs = append(addArgs, files...)
+	} else {
+		addArgs = append(addArgs, "-A")
+	}
+	addCmd := executil.CommandContext(ctx2, "git", append([]string{"add"}, addArgs...)...)
 	if err := addCmd.Run(); err != nil {
 		return &types.ToolResult{Success: false, Error: fmt.Sprintf("git add: %v", err)}, nil
 	}
@@ -1201,4 +1448,28 @@ func parseArg(rawJSON, key string) (string, error) {
 		return rest[1:], nil
 	}
 	return rest[1 : end+1], nil
+}
+
+// parseStringArrayArg extracts a []string argument (e.g. the git_commit
+// "files" list). Returns nil when the key is absent or not a JSON array.
+func parseStringArrayArg(rawJSON, key string) []string {
+	m, err := parseJSONArgs(rawJSON)
+	if err != nil {
+		return nil
+	}
+	v, ok := m[key]
+	if !ok {
+		return nil
+	}
+	arr, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(arr))
+	for _, item := range arr {
+		if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }

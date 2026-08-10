@@ -5,6 +5,68 @@ import (
 	"testing"
 )
 
+// Claude Code settings.json rules must apply in Agent mode: allow patterns
+// auto-approve, deny patterns always reject, and deny wins over allow.
+func TestClaudeSettingsInAgentMode(t *testing.T) {
+	g := NewGate(ModeAgent)
+	g.SetClaudeSettings(&ClaudeSettings{Permissions: ClaudePermissions{
+		Allow: []string{"Bash(git status:*)", "Edit(**.md)"},
+		Deny:  []string{"Bash(rm *)", "*(*:*)", "Read"},
+	}})
+
+	// Bash "git status" allowed by pattern.
+	if res := g.Check("s1", Action{Tool: "bash", Command: "git status --short"}); res.Decision != DecisionAllow {
+		t.Errorf("Bash(git status:*) should allow, got %s (%s)", res.Decision, res.Reason)
+	}
+	// Bash "rm -rf x" denied by pattern (even though allow would match "git status" — it doesn't).
+	if res := g.Check("s1", Action{Tool: "bash", Command: "rm -rf x"}); res.Decision != DecisionDeny {
+		t.Errorf("Bash(rm *) should deny, got %s", res.Decision)
+	}
+	// Edit on .md path allowed.
+	if res := g.Check("s1", Action{Tool: "edit", Path: "docs/readme.md"}); res.Decision != DecisionAllow {
+		t.Errorf("Edit(**.md) should allow, got %s", res.Decision)
+	}
+	// Edit on a .go path: allow pattern doesn't match → normal Agent flow asks.
+	if res := g.Check("s1", Action{Tool: "edit", Path: "src/main.go"}); res.Decision != DecisionAsk {
+		t.Errorf("unmatched edit should fall through to ask, got %s", res.Decision)
+	}
+}
+
+// Claude settings must NOT affect other modes (YOLO stays YOLO).
+func TestClaudeSettingsIgnoredInYOLO(t *testing.T) {
+	g := NewGate(ModeYOLO)
+	g.SetClaudeSettings(&ClaudeSettings{Permissions: ClaudePermissions{
+		Deny: []string{"Bash(*)"},
+	}})
+	if res := g.Check("s1", Action{Tool: "bash", Command: "ls"}); res.Decision != DecisionAllow {
+		t.Errorf("YOLO mode must ignore Claude settings, got %s", res.Decision)
+	}
+}
+
+func TestClaudeAllowMatch(t *testing.T) {
+	cases := []struct {
+		action  Action
+		pattern string
+		want    bool
+	}{
+		{Action{Tool: "bash", Command: "git status"}, "Bash(git status:*)", true},
+		{Action{Tool: "bash", Command: "git diff"}, "Bash(git status:*)", false},
+		{Action{Tool: "edit", Path: "a.md"}, "Edit(**.md)", true},
+		{Action{Tool: "edit", Path: "a.go"}, "Edit(**.md)", false},
+		{Action{Tool: "read_file", Path: "x.go"}, "*", true},
+		{Action{Tool: "bash", Command: "anything"}, "*", true},
+		{Action{Tool: "fetch", URL: "https://example.com"}, "Fetch(example.com*)", true},
+		{Action{Tool: "bash", Command: "ls"}, "Bash(ls*)", true},
+		{Action{Tool: "bash", Command: "pwd"}, "Bash(ls*)", false},
+		{Action{Tool: "grep", Path: "/proj", Pattern: "foo"}, "Grep(/proj*foo)", true},
+	}
+	for _, c := range cases {
+		if got := claudeAllowMatch(c.action, c.pattern); got != c.want {
+			t.Errorf("claudeAllowMatch(%+v, %q) = %v, want %v", c.action, c.pattern, got, c.want)
+		}
+	}
+}
+
 // The AllowedPaths sandbox must contain EVERY file tool, not just bash, so an
 // agent cannot escape the workspace with write_file/edit/read_file in YOLO mode.
 func TestAllowedPathsContainmentForFileTools(t *testing.T) {

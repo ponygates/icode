@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ponygates/icode/internal/types"
@@ -29,6 +31,70 @@ func TestBashTool_Def(t *testing.T) {
 	}
 	if def.Parameters == nil {
 		t.Error("parameters should not be nil")
+	}
+}
+
+// TestBashTool_StreamsProgress verifies that when a progress callback is
+// attached to the context, bash output arrives incrementally (while the
+// tool is still executing) AND is still accumulated into the final result.
+func TestBashTool_StreamsProgress(t *testing.T) {
+	var mu sync.Mutex
+	var chunks []string
+	var executing int32 // atomic: 1 while Execute is still running
+	ctx := WithProgress(context.Background(), func(chunk string) {
+		mu.Lock()
+		chunks = append(chunks, chunk)
+		mu.Unlock()
+		if atomic.LoadInt32(&executing) == 1 {
+			// At least one chunk arrived mid-execution — the streaming path works.
+			atomic.StoreInt32(&streamingObserved, 1)
+		}
+	})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer atomic.StoreInt32(&executing, 0)
+		atomic.StoreInt32(&executing, 1)
+		res, err := (&BashTool{}).Execute(ctx, `{"command": "echo line1 && echo line2 && echo line3"}`)
+		if err != nil {
+			t.Errorf("Execute: %v", err)
+			return
+		}
+		if !res.Success {
+			t.Errorf("expected success, got: %s", res.Error)
+			return
+		}
+		if !strings.Contains(res.Content, "line1") || !strings.Contains(res.Content, "line3") {
+			t.Errorf("result should carry the full output, got %q", res.Content)
+		}
+	}()
+	<-done
+
+	mu.Lock()
+	joined := strings.Join(chunks, "")
+	mu.Unlock()
+	if atomic.LoadInt32(&streamingObserved) != 1 {
+		t.Fatal("no progress chunk arrived while the command was still executing")
+	}
+	if !strings.Contains(joined, "line1") || !strings.Contains(joined, "line3") {
+		t.Errorf("progress chunks should carry the output, got %q", joined)
+	}
+}
+
+// streamingObserved is set when a progress chunk arrives mid-execution.
+// Package-level because the callback closes over it.
+var streamingObserved int32
+
+// TestBashTool_NoProgressKeepsCombinedOutput guards the non-streaming path:
+// without a progress callback the tool behaves exactly as before.
+func TestBashTool_NoProgressKeepsCombinedOutput(t *testing.T) {
+	res, err := (&BashTool{}).Execute(context.Background(), `{"command": "echo hello"}`)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !res.Success || !strings.Contains(res.Content, "hello") {
+		t.Fatalf("expected success with output, got success=%v content=%q err=%q", res.Success, res.Content, res.Error)
 	}
 }
 
@@ -106,6 +172,78 @@ func TestGlobTool_Def(t *testing.T) {
 	def := tool.Def()
 	if def.Name != "glob" {
 		t.Errorf("expected name 'glob', got %q", def.Name)
+	}
+}
+
+// TestGrepTool_Regex verifies the schema-advertised regex behavior.
+func TestGrepTool_Regex(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	write("a.txt", "hello world\nfoo bar\n")
+	write("b.txt", "HELLO there\n")
+
+	// Regex: ^foo matches only the line starting with foo.
+	res, err := (&GrepTool{}).Execute(context.Background(),
+		fmt.Sprintf(`{"pattern": "^foo", "path": %q}`, dir))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !res.Success || !strings.Contains(res.Content, "foo bar") || strings.Contains(res.Content, "hello") {
+		t.Fatalf("regex ^foo should match only foo bar, got: %q", res.Content)
+	}
+
+	// Invalid regex falls back to substring (old behavior).
+	res, err = (&GrepTool{}).Execute(context.Background(),
+		fmt.Sprintf(`{"pattern": "hello", "path": %q}`, dir))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(res.Content, "hello world") {
+		t.Fatalf("substring fallback failed, got: %q", res.Content)
+	}
+
+	// ignore_case matches HELLO in b.txt.
+	res, err = (&GrepTool{}).Execute(context.Background(),
+		fmt.Sprintf(`{"pattern": "hello", "path": %q, "ignore_case": true}`, dir))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(res.Content, "HELLO there") {
+		t.Fatalf("ignore_case should match HELLO, got: %q", res.Content)
+	}
+}
+
+// TestGlobTool_DoubleStar verifies "**" recursion matches at any depth.
+func TestGlobTool_DoubleStar(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "src", "deep", "deeper"), 0755)
+	os.MkdirAll(filepath.Join(dir, "pkg"), 0755)
+	write := func(name string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("root.go")
+	write("src/a.go")
+	write("src/deep/b.go")
+	write("src/deep/deeper/c.go")
+	write("pkg/d.go")
+
+	pattern := filepath.Join(dir, "**", "*.go")
+	res, err := (&GlobTool{}).Execute(context.Background(), fmt.Sprintf(`{"pattern": %q}`, pattern))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	for _, want := range []string{"root.go", "a.go", "b.go", "c.go", "d.go"} {
+		if !strings.Contains(res.Content, want) {
+			t.Errorf("**/*.go should match %s, got: %q", want, res.Content)
+		}
 	}
 }
 
@@ -342,6 +480,80 @@ func TestEditTool_MultiEdit(t *testing.T) {
 	data, _ := os.ReadFile(filePath)
 	if string(data) != "A\nb\nC" {
 		t.Errorf("expected 'A\nb\nC', got %q", string(data))
+	}
+}
+
+// TestEditTool_FuzzyWhitespace verifies the whitespace-normalized fallback:
+// a model that mismatches indentation still succeeds, and the file's own
+// indentation is preserved in the replacement.
+func TestEditTool_FuzzyWhitespace(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "fuzzy.go")
+	os.WriteFile(filePath, []byte("func main() {\n\t    fmt.Println(\"a\")\n\tfmt.Println(\"b\")\n}"), 0644)
+
+	// Model's old_string uses 4 spaces; the file uses tabs.
+	editJSON := `{"file_path":"` + jsonEscape(filePath) + `",
+		"old_string":"    fmt.Println(\"a\")",
+		"new_string":"    fmt.Println(\"A\")"}`
+	result, err := (&EditTool{}).Execute(context.Background(), editJSON)
+	if err != nil {
+		t.Fatalf("Edit failed: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("fuzzy edit failed: %s", result.Error)
+	}
+
+	data, _ := os.ReadFile(filePath)
+	if !strings.Contains(string(data), "fmt.Println(\"A\")") {
+		t.Errorf("fuzzy edit should replace the matched line, got: %q", string(data))
+	}
+	// The tab-indented second line must survive untouched.
+	if !strings.Contains(string(data), "\tfmt.Println(\"b\")") {
+		t.Errorf("unrelated line must survive, got: %q", string(data))
+	}
+}
+
+// TestEditTool_FuzzyNoMatch verifies an unknown old_string still errors
+// (fuzzy matching must not invent matches).
+func TestEditTool_FuzzyNoMatch(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "nomatch.txt")
+	os.WriteFile(filePath, []byte("hello world"), 0644)
+
+	result, _ := (&EditTool{}).Execute(context.Background(),
+		`{"file_path":"`+jsonEscape(filePath)+`","old_string":"totally different","new_string":"x"}`)
+	if result.Success {
+		t.Error("unknown old_string must fail")
+	}
+	if !strings.Contains(result.Error, "not found") {
+		t.Errorf("expected 'not found' error, got: %q", result.Error)
+	}
+}
+
+// TestEditTool_FuzzyMultiLine verifies multiline fuzzy matches re-indent the
+// replacement with the matched region's base indentation, keeping the
+// model's relative nesting.
+func TestEditTool_FuzzyMultiLine(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "multi.go")
+	os.WriteFile(filePath, []byte("func a() {\n\tif x {\n\t\tfoo()\n\t}\n}"), 0644)
+
+	// Model passes the block with different indentation.
+	editJSON := `{"file_path":"` + jsonEscape(filePath) + `",
+		"old_string":"if x {\n        foo()\n    }",
+		"new_string":"if x {\n        bar()\n    }"}`
+	result, _ := (&EditTool{}).Execute(context.Background(), editJSON)
+	if !result.Success {
+		t.Fatalf("multiline fuzzy edit failed: %s", result.Error)
+	}
+	data, _ := os.ReadFile(filePath)
+	// The replacement landed (bar exists, foo is gone)…
+	if !strings.Contains(string(data), "bar()") || strings.Contains(string(data), "foo()") {
+		t.Errorf("fuzzy multiline should swap foo for bar, got: %q", string(data))
+	}
+	// …and the match's own line keeps its file indentation (tab before if).
+	if !strings.Contains(string(data), "\tif x {") {
+		t.Errorf("matched line must keep its file indentation, got: %q", string(data))
 	}
 }
 

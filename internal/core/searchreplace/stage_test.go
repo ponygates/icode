@@ -39,6 +39,39 @@ func main() {
 	}
 }
 
+// TestStageForSession_Isolation verifies that two sessions stage into
+// separate areas — the multi-tab desktop regression this fix targets.
+func TestStageForSession_Isolation(t *testing.T) {
+	a := StageForSession("sess-A")
+	b := StageForSession("sess-B")
+	if a == b {
+		t.Fatal("different sessions must get different staging areas")
+	}
+	// Empty session ID falls back to the shared default area, so the
+	// UI slash commands (/apply /reject) keep working without a session.
+	if StageForSession("") != defaultStage {
+		t.Fatal("empty session ID must resolve to the default stage")
+	}
+	if StageForSession("sess-A") != a {
+		t.Fatal("same session must resolve to the same area")
+	}
+
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(fp, []byte("hello world"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, valid, reason := a.Add(fp, "hello", "hola"); !valid {
+		t.Fatalf("expected valid edit, got: %s", reason)
+	}
+	if b.Count() != 0 {
+		t.Fatalf("session B must not see session A's staged edits, got %d", b.Count())
+	}
+	if a.Count() != 1 {
+		t.Fatalf("session A should have 1 staged edit, got %d", a.Count())
+	}
+}
+
 func TestStageAdd_Invalid_FileNotFound(t *testing.T) {
 	s := &StagingArea{}
 	_, valid, reason := s.Add("/nonexistent/file.go", "search", "replace")

@@ -30,7 +30,36 @@ type StagingArea struct {
 	edits []StagedEdit
 }
 
+// defaultStage is the fallback staging area used by UI slash commands
+// (/apply /reject /review) that have no session context. The search_replace
+// tool itself stages into the per-session area (see StageForSession).
 var defaultStage = &StagingArea{}
+
+// stageRegistry keeps one staging area per session so concurrent sessions
+// (desktop multi-tab, parallel sub-agents) can never pollute each other's
+// staged edits. Areas are created lazily and never pruned — a session
+// finishes a handful of staged-edit rounds, so the footprint is trivial.
+var (
+	stageMu     sync.Mutex
+	stageBySess = map[string]*StagingArea{}
+)
+
+// StageForSession returns the staging area owned by the given session ID.
+// The UI slash commands (no session context) fall back to the shared
+// default area via the bare Stage* functions.
+func StageForSession(sessionID string) *StagingArea {
+	if sessionID == "" {
+		return defaultStage
+	}
+	stageMu.Lock()
+	defer stageMu.Unlock()
+	if s, ok := stageBySess[sessionID]; ok {
+		return s
+	}
+	s := &StagingArea{}
+	stageBySess[sessionID] = s
+	return s
+}
 
 // StageAdd adds a proposed edit, validates it, and returns the index.
 func StageAdd(filePath, search, replace string) (int, bool, string) {

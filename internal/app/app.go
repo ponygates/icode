@@ -96,6 +96,11 @@ func Bootstrap() (*App, error) {
 	if cfg.Defaults.Mode != "" {
 		app.Gate.SetMode(permission.Mode(cfg.Defaults.Mode))
 	}
+	// Claude Code settings.json permission compatibility: rules from
+	// ~/.claude/settings.json + .claude/settings.json take effect in Agent
+	// mode just like iCode's own hooks.yaml rules.
+	wd, _ := os.Getwd()
+	app.Gate.SetClaudeSettings(permission.LoadClaudeSettings(wd))
 
 	// 5. Initialize conversation engine (with permission gate wired in)
 	app.Engine = conversation.NewEngine(app.Reg, app.SessStore, app.Gate)
@@ -221,7 +226,8 @@ func Bootstrap() (*App, error) {
 		}
 	}
 
-	// 5f. Lifecycle hooks (PreToolUse/PostToolUse/Stop) — Claude Code parity.
+	// 5f. Lifecycle hooks (PreToolUse/PostToolUse/UserPromptSubmit/Stop) —
+	// Claude Code parity.
 	if len(cfg.Hooks) > 0 {
 		rules := make(map[string][]hooks.Rule, len(cfg.Hooks))
 		for ev, list := range cfg.Hooks {
@@ -243,6 +249,10 @@ func Bootstrap() (*App, error) {
 		APIKey:       cfg.Multimodal.APIKey,
 		OutputDir:    cfg.Multimodal.OutputDir,
 	})
+
+	// 5h. Tavily web-search API key, read from the config system so it works
+	// without a shell env var (web_search/tavily engine).
+	tool.SetTavilyAPIKey(cfg.APIKey("tavily"))
 	log.Printf("[iCode] bootstrap: skills/teams/hooks/LSP/multimodal done (t=%dms)", time.Since(t0).Milliseconds())
 
 	// 6. Initialize undo system (file-level snapshot /undo)

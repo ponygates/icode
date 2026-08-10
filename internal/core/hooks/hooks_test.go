@@ -2,6 +2,8 @@ package hooks
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"runtime"
 	"testing"
 )
@@ -65,5 +67,62 @@ func TestFireBlockAndPass(t *testing.T) {
 	// unmatched tool fires nothing
 	if res := r.Fire(context.Background(), PreToolUse, Input{ToolName: "grep"}); res.Block {
 		t.Error("grep matches no rule; must not block")
+	}
+}
+
+func TestFireUserPromptSubmitRewrite(t *testing.T) {
+	// A hook that echoes back a rewritten prompt as stdout JSON. Use a
+	// temp script so the test is immune to shell quoting differences.
+	dir := t.TempDir()
+	cmd := "python -c \"import sys; sys.stdout.write('{\\\"prompt\\\":\\\"REWRITTEN\\\"}')\""
+	if runtime.GOOS == "windows" {
+		script := filepath.Join(dir, "rewrite.cmd")
+		// cmd echo mangles quotes; a here-file written by Go is exact.
+		if err := os.WriteFile(script, []byte("@echo {\"prompt\":\"REWRITTEN\"}"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		cmd = script
+	}
+	r := NewRunner(map[string][]Rule{
+		"UserPromptSubmit": {{Command: cmd}},
+	}, ".")
+
+	if !r.HasHooks(UserPromptSubmit) {
+		t.Fatal("expected UserPromptSubmit hooks registered")
+	}
+	res := r.Fire(context.Background(), UserPromptSubmit, Input{Prompt: "original"})
+	if res.Block {
+		t.Fatal("rewrite hook must not block")
+	}
+	if res.Prompt != "REWRITTEN" {
+		t.Errorf("expected rewritten prompt, got %q", res.Prompt)
+	}
+}
+
+func TestFireUserPromptSubmitBlock(t *testing.T) {
+	blockCmd := "exit 2"
+	if runtime.GOOS == "windows" {
+		blockCmd = "exit /b 2"
+	}
+	r := NewRunner(map[string][]Rule{
+		"UserPromptSubmit": {{Command: blockCmd}},
+	}, ".")
+
+	res := r.Fire(context.Background(), UserPromptSubmit, Input{Prompt: "original"})
+	if !res.Block {
+		t.Fatal("exit-2 UserPromptSubmit hook must block the message")
+	}
+}
+
+func TestFireUserPromptSubmitPlainStdoutIgnored(t *testing.T) {
+	// Plain stdout (not JSON) must NOT be treated as a rewrite.
+	cmd := "echo hello"
+	r := NewRunner(map[string][]Rule{
+		"UserPromptSubmit": {{Command: cmd}},
+	}, ".")
+
+	res := r.Fire(context.Background(), UserPromptSubmit, Input{Prompt: "original"})
+	if res.Block || res.Prompt != "" {
+		t.Fatalf("plain stdout must be ignored, got block=%v prompt=%q", res.Block, res.Prompt)
 	}
 }

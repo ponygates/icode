@@ -100,6 +100,13 @@ type Tool interface {
 	Execute(ctx context.Context, args string) (*ToolResult, error)
 }
 
+// ToolProgressFunc receives incremental output chunks while a long-running
+// tool (bash) executes. The chunk is raw stdout/stderr text. Tools that
+// stream progress MUST NOT call fn after Execute returns (the engine's
+// callback is turn-scoped and unregistered once the tool completes). The
+// callback may be called from the tool's own goroutine.
+type ToolProgressFunc func(chunk string)
+
 // ============================================================================
 // ChatCompletion — request + streaming response
 // ============================================================================
@@ -141,6 +148,10 @@ const (
 	EventDone       StreamEventType = "done"
 	EventError      StreamEventType = "error"
 	EventPermission StreamEventType = "permission"
+	// EventToolProgress is emitted while a long-running tool (bash) streams
+	// its stdout/stderr incrementally, so the UI can show live output instead
+	// of a single result dump at the end. Never persisted into the session.
+	EventToolProgress StreamEventType = "tool_progress"
 	// EventSystem is an engine-originated notice (e.g. budget guard kicking
 	// in) shown to the user as a system message — never folded into the
 	// assistant reply or persisted into the conversation.

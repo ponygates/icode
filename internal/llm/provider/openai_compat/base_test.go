@@ -137,7 +137,7 @@ data: [DONE]
 `
 
 	ch := make(chan types.StreamEvent, 64)
-	go p.readStream(sseBody(sseData), ch)
+	go p.readStream(context.Background(), sseBody(sseData), ch)
 
 	var events []types.StreamEvent
 	for e := range ch {
@@ -181,7 +181,7 @@ data: [DONE]
 `
 
 	ch := make(chan types.StreamEvent, 64)
-	go p.readStream(sseBody(sseData), ch)
+	go p.readStream(context.Background(), sseBody(sseData), ch)
 
 	var events []types.StreamEvent
 	for e := range ch {
@@ -230,7 +230,7 @@ data: [DONE]
 `
 
 	ch := make(chan types.StreamEvent, 64)
-	go p.readStream(sseBody(sseData), ch)
+	go p.readStream(context.Background(), sseBody(sseData), ch)
 
 	var events []types.StreamEvent
 	for e := range ch {
@@ -261,7 +261,7 @@ func TestReadStream_EmptyResponse(t *testing.T) {
 	sseData := "just some random text\nno data prefix\n"
 
 	ch := make(chan types.StreamEvent, 64)
-	go p.readStream(sseBody(sseData), ch)
+	go p.readStream(context.Background(), sseBody(sseData), ch)
 
 	var events []types.StreamEvent
 	for e := range ch {
@@ -297,7 +297,7 @@ data: [DONE]
 `
 
 	ch := make(chan types.StreamEvent, 64)
-	go p.readStream(sseBody(sseData), ch)
+	go p.readStream(context.Background(), sseBody(sseData), ch)
 
 	events := make(map[int]*types.LiveToolCall)
 	for e := range ch {

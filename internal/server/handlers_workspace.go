@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/ponygates/icode/internal/core/checkpoint"
@@ -265,6 +266,13 @@ func (s *Server) handleCheckpoints(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing session id", http.StatusBadRequest)
 		return
 	}
+	// /api/checkpoints/{sessionID}/diff → the diff handler (the trailing
+	// /diff suffix is handled inline here rather than as a registered route,
+	// so there is no bare /api/checkpoints/diff endpoint).
+	if strings.HasSuffix(sessionID, "/diff") {
+		s.handleCheckpointDiff(w, r)
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		store, err := checkpoint.GetOrOpen(sessionID)
@@ -282,6 +290,44 @@ func (s *Server) handleCheckpoints(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// handleCheckpointDiff returns the unified diff of the last N checkpoints
+// (GET /api/checkpoints/{sessionID}/diff?steps=N) — the data behind the
+// desktop diff viewer.
+func (s *Server) handleCheckpointDiff(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/api/checkpoints/")
+	rest = strings.TrimSuffix(rest, "/diff")
+	sessionID := strings.TrimSuffix(rest, "/")
+	if sessionID == "" {
+		http.Error(w, "missing session id", http.StatusBadRequest)
+		return
+	}
+	steps := 1
+	if v := r.URL.Query().Get("steps"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			steps = n
+		}
+	}
+	store, err := checkpoint.GetOrOpen(sessionID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	diff, err := store.Diff(r.Context(), steps)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"diff":  diff,
+		"steps": steps,
+	})
 }
 
 func (s *Server) handleRewind(w http.ResponseWriter, r *http.Request) {
