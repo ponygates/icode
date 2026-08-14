@@ -9,9 +9,9 @@ import (
 	"github.com/ponygates/icode/internal/core/searchreplace"
 )
 
-// TestClaudeStyleRender verifies the Claude Code-style single-column layout:
-// the compact header (iCode), the bottom status bar (model · ctx · cost),
-// the bordered input box, and the sliding thinking bar all render without
+// TestClaudeStyleRender verifies the minimal opencode-style layout: the compact
+// header (iCode + model), the bottom status bar (model · ctx · cost), the
+// single-line prompt, and the sliding thinking bar all render without
 // panicking and contain the expected structural markers.
 func TestClaudeStyleRender(t *testing.T) {
 	tui := New(Config{Model: "deepseek-v4-flash", Provider: "deepseek", Lang: "zh-CN", Theme: "dark"})
@@ -42,8 +42,10 @@ func TestClaudeStyleRender(t *testing.T) {
 	// Case 1: idle (not streaming) — should render conversation + status + box.
 	tui.render()
 	out := buf.String()
-	if !strings.Contains(out, "iCode") {
-		t.Fatalf("expected Claude Code-style header 'iCode' in output:\n%s", out)
+	// opencode-style header dot (●) leads the model name in the header AND the
+	// model marker on the task bar below the prompt.
+	if !strings.Contains(out, "●") {
+		t.Fatalf("expected opencode-style model dot '●' in output:\n%s", out)
 	}
 	if !strings.Contains(out, "ctx") {
 		t.Fatalf("expected context %%-meter ('ctx') in status bar:\n%s", out)
@@ -52,15 +54,19 @@ func TestClaudeStyleRender(t *testing.T) {
 		t.Fatalf("expected cost in status bar:\n%s", out)
 	}
 	if !strings.Contains(out, "┌") || !strings.Contains(out, "└") {
-		t.Fatalf("expected bordered input box (┌/└) in output:\n%s", out)
+		t.Fatalf("expected code-block fence (┌/└) in output:\n%s", out)
 	}
-	if !strings.Contains(out, "*") {
-		t.Fatalf("expected model status marker '*' in output:\n%s", out)
+	if !strings.Contains(out, "·") {
+		t.Fatalf("expected task-bar dot separators '·' in output:\n%s", out)
 	}
-	// Claude Code parity: the header's right-hand strip shows the active model
-	// and context usage (120000/1048576 ≈ 11%).
-	if !strings.Contains(out, "deepseek-v4-flash · 11% ctx") {
-		t.Fatalf("expected header right-hand model·ctx%% strip in output:\n%s", out)
+	// Minimal design: the model sits next to the wordmark in the header, and
+	// context usage (120000/1048576 ≈ 11%) lives on the status bar below the
+	// prompt — no duplicated header strip.
+	if !strings.Contains(out, "deepseek-v4-flash") {
+		t.Fatalf("expected model in header/status output:\n%s", out)
+	}
+	if !strings.Contains(out, "11% ctx") {
+		t.Fatalf("expected context %%-meter ('11%% ctx') in status bar:\n%s", out)
 	}
 
 	// Case 2: streaming with no tokens yet — should show the sliding thinking bar.

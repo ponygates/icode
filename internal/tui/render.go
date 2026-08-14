@@ -134,24 +134,16 @@ func (t *TUI) render() {
 	}
 
 	// ── Layout ───────────────────────────────────────────────────
-	// The input owns the bottom 3 rows: 1 prompt line + 1 hint line + 1 status
-	// line. Everything else (header, conversation, status bar) lives above.
-	const inputRows = 3
+	// Bottom chrome is one prompt row (`❯ input`) plus a single compact status
+	// bar underneath it (hidden entirely when /statusline is toggled off).
+	// Everything else (header, conversation, overlays) lives above those rows.
+	inputRows := 1
+	if t.statusVisible {
+		inputRows = 2
+	}
 	contentRows := H - inputRows
 	if contentRows < 4 {
 		contentRows = 4
-	}
-
-	// Bottom status bar: a single compact line (model · tokens · context% ·
-	// cost · cache), truncated to the terminal width so it stays a thin strip.
-	// Hidden entirely when /statusline is toggled off (Claude Code parity).
-	statusW := []string{}
-	if t.statusVisible {
-		statusLine := status
-		if visibleWidth(statusLine) > W {
-			statusLine = truncVisible(statusLine, W)
-		}
-		statusW = []string{statusLine}
 	}
 
 	// Overlays drawn above the input box.
@@ -180,10 +172,11 @@ func (t *TUI) render() {
 		)
 	}
 
-	// Body height = rows between the top header/hrule and the bottom (status
-	// separator + status). Claude Code is a single column, so the conversation
-	// takes the full terminal width.
-	bodyH := contentRows - 1 /*header*/ - 2 /*hrule×2*/ - len(statusW) - len(permLines) - len(acLines)
+	// Body height = rows between the header rule and the bottom prompt block.
+	// opencode chrome above the conversation: header (1) + rule (1). The status
+	// bar is part of the prompt block (drawn by drawInputBox), not a separate
+	// strip.
+	bodyH := contentRows - 1 /*header*/ - 1 /*header rule*/ - len(permLines) - len(acLines)
 	if bodyH < 3 {
 		bodyH = 3
 	}
@@ -263,16 +256,14 @@ func (t *TUI) render() {
 	}
 
 	// Assemble the full screen (everything except the final input box).
-	convStart := 2 // header(index 0) + hrule(index 1) precede the conversation
+	// opencode layout: the header is followed by a thin dim rule, then the
+	// conversation flows beneath it all the way down to the prompt block.
+	convStart := 2 // header(index 0) + rule(index 1) precede the conversation
 	convEnd := convStart + len(conv) - 1
 	var out []string
 	out = append(out, t.headerLine(W))
 	out = append(out, t.hrule(contentW))
 	out = append(out, conv...)
-	out = append(out, t.hrule(contentW))
-	for _, sl := range statusW {
-		out = append(out, sl)
-	}
 	for _, pl := range permLines {
 		out = append(out, pl)
 	}
@@ -367,57 +358,34 @@ func (t *TUI) render() {
 	if searchMode {
 		t.drawSearchBox(contentW, H, searchBuf, searchCur, streaming)
 	} else {
-		t.drawInputBox(contentW, H, inputBuf, cursor, streaming)
+		t.drawInputBox(contentW, H, inputBuf, cursor, streaming, status)
 	}
 }
 
-// headerLine renders the compact top bar: app name (orange "iCode" wordmark),
-// working directory, and mode — the signature Claude Code-style header.
+// headerLine renders the opencode-style top bar: an orange model dot (●) with
+// the bold model name on the left, and the working-directory basename in dim on
+// the right. No version, no mode label, no wordmark — the least chromed line
+// that still tells you what's driving the session, exactly like opencode.
 func (t *TUI) headerLine(W int) string {
 	cwd, _ := os.Getwd()
-	short := shortDir(cwd)
-	modeLabel := t.mode
-	if modeLabel == "" {
-		modeLabel = ModeAuto
+	model := t.model
+	left := t.paint("orange", "●") + " " + t.paint("bold", model)
+	if model == "" {
+		left = t.paint("orange", "●") + " " + t.paint("bold", "iCode")
 	}
-	modeColor := "dim"
-	if modeLabel == "yolo" {
-		modeColor = "yellow"
-	} else if modeLabel == "plan" {
-		modeColor = "cyan"
-	}
-	left := t.paint("orange", "iCode") + " " + t.paint("dim", appVersionStr()) +
-		t.paint("dim", "  ·  ") + t.paint("dim", short) +
-		t.paint("dim", "  ·  ") + t.paint(modeColor, modeLabel)
+	right := t.paint("dim", filepath.Base(cwd))
 
-	// Right-hand meta strip: model · context% — Claude Code parity, so the
-	// active engine + context usage stay visible at a glance on the top line.
-	// Only rendered when we have data and the terminal is wide enough.
-	var right []string
-	if t.model != "" {
-		right = append(right, t.model)
+	if visibleWidth(left)+2+visibleWidth(right) < W {
+		pad := W - visibleWidth(left) - visibleWidth(right) - 2
+		return left + strings.Repeat(" ", pad) + right
 	}
-	if t.contextWindow > 0 && t.contextTokens > 0 {
-		pct := t.contextTokens * 100 / t.contextWindow
-		if pct > 100 {
-			pct = 100
-		}
-		right = append(right, fmt.Sprintf("%d%% ctx", pct))
-	}
-	if len(right) == 0 || W < 60 {
-		return left
-	}
-	rightStr := t.paint("dim", strings.Join(right, " · "))
-	if visibleWidth(left)+2+visibleWidth(rightStr) < W {
-		pad := W - visibleWidth(left) - visibleWidth(rightStr) - 2
-		return left + strings.Repeat(" ", pad) + rightStr
-	}
-	return left
+	return truncVisible(left, W)
 }
 
-// welcomeLines renders the startup screen: an ASCII LOGO (plum blossom +
-// block-letter ICODE wordmark, deliberately WITHOUT a surrounding box so it can
-// never be mis-aligned) on top, followed by the two startup panels — the LEFT
+// welcomeLines renders the startup screen: an ASCII LOGO (the enlarged "iCode"
+// wordmark — yellow-dot i + dim Code, in opencode's minimal style and
+// deliberately WITHOUT a surrounding box so it can never be mis-aligned) on
+// top, followed by the two startup panels — the LEFT
 // panel merges the live session info (model / provider / mode / cwd / context /
 // cache / quick commands) with the "Welcome back!" greeting, and the RIGHT panel
 // shows tips & what's new. The two panels sit side by side when they fit, and
@@ -795,29 +763,26 @@ func (t *TUI) messageLinesW(m Message, width int) []string {
 }
 
 // conversationLines builds the full-width conversation: every message (+ the
-// in-flight stream). Claude Code-style thin dim separators divide turns.
-// While the model is "thinking" (stream started but no tokens yet) a prominent
-// animated thinking box is shown with the rotating spinner and sliding gradient bar.
+// in-flight stream). Turns are separated by a thin dim rule — the opencode
+// message divider — so each new turn is visible at a glance while the chrome
+// stays quiet. Tool messages belong to the assistant turn that invoked them,
+// so they get no rule above. While the model is "thinking" (stream started but
+// no tokens yet) a single animated spinner + gradient bar is shown.
 func (t *TUI) conversationLines(msgs []Message, streaming bool, streamContent string, width int) []string {
-	sep := t.paint("dim", "  "+strings.Repeat("─", min(width-2, 80)))
 	var lines []string
 	all := append([]Message{}, msgs...)
 	if streaming {
 		all = append(all, Message{Role: RoleAssistant, Content: streamContent})
 	}
 	for i, m := range all {
-		// Replace the empty in-flight assistant message with the thinking box.
+		// Replace the empty in-flight assistant message with the thinking line.
 		if streaming && i == len(all)-1 && strings.TrimSpace(m.Content) == "" {
 			continue
 		}
-		// Insert thin separator between turns, except before the first message
-		// or before a tool message (which is part of the same assistant turn).
-		if i > 0 && m.Role != RoleTool && all[i-1].Role != RoleAssistant {
-			lines = append(lines, "")
-			lines = append(lines, sep)
-			lines = append(lines, "")
-		} else if i > 0 {
-			lines = append(lines, "")
+		// A thin dim rule separates turns; tool messages belong to the
+		// assistant turn that invoked them, so they get no rule above.
+		if i > 0 && m.Role != RoleTool {
+			lines = append(lines, t.paint("dim", repeat("─", width)))
 		}
 		lines = append(lines, t.messageLinesW(m, width)...)
 	}
@@ -828,22 +793,10 @@ func (t *TUI) conversationLines(msgs []Message, streaming bool, streamContent st
 	return lines
 }
 
-// thinkingBox renders the framed "thinking" indicator — a bordered box
-// containing the spinning glyph and sliding gradient bar, styled to match
-// Claude Code's streaming thinking state. Returns individual lines.
+// thinkingBox renders the streaming "thinking" indicator — a single bare line
+// (spinner + gradient bar + elapsed), deliberately box-less and minimal.
 func (t *TUI) thinkingBox(width int) []string {
-	// Build a headline line with the spinner and slider
-	headline := "  " + t.tstr("status.gen") + "  " + t.thinkingBar()
-
-	boxW := width - 2
-	if boxW < 24 {
-		boxW = 24
-	}
-	inner := t.paint("dim", "│") + " " + padVisible(headline, boxW-4) + " " + t.paint("dim", "│")
-	top := t.paint("dim", "┌"+strings.Repeat("─", boxW-2)+"┐")
-	bot := t.paint("dim", "└"+strings.Repeat("─", boxW-2)+"┘")
-
-	return []string{top, inner, bot}
+	return []string{"  " + t.paint("dim", t.tstr("status.gen")) + " " + t.thinkingBar()}
 }
 
 // padVisible pads s with spaces to reach the given display width, accounting
@@ -854,47 +807,6 @@ func padVisible(s string, w int) string {
 		return s
 	}
 	return s + strings.Repeat(" ", w-vw)
-}
-
-// contextBar renders a "NN% ▓▓░░" usage meter of width w (display columns).
-// Colour-coded: green (<50%), yellow (50–80%), red (>80%) — Claude Code style.
-func (t *TUI) contextBar(w int) string {
-	if w < 6 {
-		return strings.Repeat("░", w)
-	}
-	pct := 0
-	if t.contextWindow > 0 && t.contextTokens > 0 {
-		pct = t.contextTokens * 100 / t.contextWindow
-	}
-	if pct > 100 {
-		pct = 100
-	}
-	if pct < 0 {
-		pct = 0
-	}
-	barW := w - 4
-	if barW < 1 {
-		barW = 1
-	}
-	filled := barW * pct / 100
-
-	// Colour-coded threshold
-	colour := t.c("green") // < 50%
-	if pct > 80 {
-		colour = t.c("red")
-	} else if pct > 50 {
-		colour = t.c("yellow")
-	}
-	pctStr := fmt.Sprintf("%2d%%", pct)
-	if pct > 80 {
-		pctStr = t.paint("bold", pctStr)
-	}
-	reset := "\x1b[0m"
-	if !t.color {
-		colour, reset = "", ""
-		pctStr = fmt.Sprintf("%2d%%", pct)
-	}
-	return colour + pctStr + " " + strings.Repeat("▓", filled) + strings.Repeat("░", barW-filled) + reset
 }
 
 // thinkingBar is an animated "thinking" indicator inspired by Claude Code's
@@ -1142,18 +1054,14 @@ func listCwd() []string {
 	return names
 }
 
-// statusLine renders the Claude Code-style bottom status bar: a colored model
-// dot, provider, token usage, context %, cache hit rate, and running cost.
-// All coloring is applied here (the renderer appends the line verbatim, so no
-// nested ANSI wrapping occurs). During generation it shows the elapsed time
-// and the sliding thinking bar.
+// statusLine renders the opencode-style bottom task bar: a green model dot (●)
+// with the model name, then token usage as `▸`-prefixed in/out counts, context
+// %, cache, cost and todo counts — all joined by dim `·` and dim except the
+// model dot. While streaming the elapsed time trails the line.
 func (t *TUI) statusLine() string {
 	d := func(s string) string { return t.paint("dim", s) }
 	var parts []string
-	parts = append(parts, t.paint("green", "*")+" "+t.model)
-	if t.provider != "" {
-		parts = append(parts, d(t.provider))
-	}
+	parts = append(parts, t.paint("green", "●")+" "+t.model)
 	// Security level badge — always visible so the user knows their privacy
 	// boundary. Unlike Claude Code, no hidden telemetry or phone-home.
 	if t.securityLevel != "" && t.securityLevel != "local" {
@@ -1162,7 +1070,7 @@ func (t *TUI) statusLine() string {
 	}
 	if t.promptTokens > 0 || t.completionTokens > 0 {
 		parts = append(parts,
-			d("↑"+formatTokens(t.promptTokens)+" ↓"+formatTokens(t.completionTokens)))
+			d("▸"+formatTokens(t.promptTokens)+" ▸"+formatTokens(t.completionTokens)))
 	}
 	if t.contextWindow > 0 && t.contextTokens > 0 {
 		pct := t.contextTokens * 100 / t.contextWindow
@@ -1170,22 +1078,6 @@ func (t *TUI) statusLine() string {
 			pct = 100
 		}
 		parts = append(parts, d(fmt.Sprintf("%d%% ctx", pct)))
-		// Visual context progress bar
-		barW := 10
-		filled := pct * barW / 100
-		if filled > barW {
-			filled = barW
-		}
-		bar := "["
-		for i := 0; i < barW; i++ {
-			if i < filled {
-				bar += "▓"
-			} else {
-				bar += "░"
-			}
-		}
-		bar += "]"
-		parts = append(parts, d(bar))
 	}
 	if t.cacheHitRate > 0 {
 		parts = append(parts, d(fmt.Sprintf("%.0f%% cache", t.cacheHitRate*100)))
@@ -1193,12 +1085,14 @@ func (t *TUI) statusLine() string {
 	if t.cost != "" {
 		parts = append(parts, d(t.cost))
 	}
-	// Todo counters — shown when the current session has an active todo
-	// list. Pending items appear in dim, in-progress in yellow, completed
-	// dim. Zero-list sessions render nothing.
+	// Todo counter — shown when the current session has an active todo list.
+	// Zero-list sessions render nothing.
 	if t.callback != nil {
 		if pending, active, done, total := t.callback.TodoCounts(); total > 0 {
-			seg := fmt.Sprintf("[ ]%d >%d [x]%d", pending, active, done)
+			seg := fmt.Sprintf("✓%d", done)
+			if pending > 0 || active > 0 {
+				seg = fmt.Sprintf("%d…%d→%d", pending, active, done)
+			}
 			if active > 0 {
 				seg = t.paint("yellow", seg)
 			} else {
@@ -1207,18 +1101,15 @@ func (t *TUI) statusLine() string {
 			parts = append(parts, seg)
 		}
 	}
-	if t.streaming {
-		if !t.turnStart.IsZero() {
-			parts = append(parts, d("T "+formatDuration(time.Since(t.turnStart))))
-		}
-		// Thinking bar is already shown in the conversation area (thinkingBox),
-		// so don't duplicate it here — Claude Code shows the spinner only once.
+	if t.streaming && !t.turnStart.IsZero() {
+		parts = append(parts, d("⏱ "+formatDuration(time.Since(t.turnStart))))
 	}
+	line := strings.Join(parts, d(" · "))
 	// Flash notice (slash command feedback)
 	if t.statusNotice != "" {
-		parts = append(parts, t.statusNotice)
+		line += "  " + t.statusNotice
 	}
-	return strings.Join(parts, d(" · "))
+	return line
 }
 
 // formatDuration renders a duration compactly: "3.2s" or "1m04s".
@@ -1248,24 +1139,24 @@ func modeColor(m Mode) string {
 	}
 }
 
-// drawInputBox renders the Claude Code-style single-line prompt — NO box, just
-// `> <input>` on a single row. The hint bar (manual mode · shortcuts · agents)
-// and the status bar (max · /effort) sit on the rows below. This is the exact
-// layout from the Claude Code v2.x screenshots.
+// drawInputBox renders the minimal opencode-style prompt: a single `❯ <input>`
+// row followed by one compact status bar row underneath it (the /statusline
+// toggle hides that second row). The old hint row and duplicated effort/context
+// rows are gone — all live info now lives on the single status line passed in.
 //
-//	> <input>                                   row topRow
-//	  manual mode on · ? for shortcuts · ↵ for agents   row topRow+1
-//	                                          ⊙max · /effort   row topRow+2
-func (t *TUI) drawInputBox(W, H int, inputBuf string, cursor int, streaming bool) {
-	const inputRows = 3
-	topRow := H - inputRows + 1
+//	❯ <input>                              row topRow
+//	● model · ▸1.2k ▸3.4k · 42% ctx        row topRow+1 (when /statusline on)
+func (t *TUI) drawInputBox(W, H int, inputBuf string, cursor int, streaming bool, status string) {
+	bottomRows := 1
+	if t.statusVisible {
+		bottomRows = 2
+	}
+	topRow := H - bottomRows + 1
 	if topRow < 1 {
 		topRow = 1
 	}
-	hintRow := topRow + 1
-	statusRow := topRow + 2
 
-	// Prompt line: "❯ <input>" (Claude Code style)
+	// Prompt line: "❯ <input>" (mode-colored prompt).
 	prompt := t.paint(modeColor(t.mode), "❯")
 	// Content must fit after the prompt + space, with a 1-char margin.
 	innerW := W - visibleWidth(prompt) - 2
@@ -1281,40 +1172,24 @@ func (t *TUI) drawInputBox(W, H int, inputBuf string, cursor int, streaming bool
 		line = truncVisible(line, W)
 	}
 
-	// Hint row (left side)
-	hint := t.paint("dim", "  "+t.tstr("input.hint"))
-	if streaming {
-		hint = t.paint("dim", "  "+t.tstr("input.hint.streaming"))
-	}
-
-	// Status row: left = model / cache rate, right = effort level.
-	// Combines what Claude Code splits across its status + effort rows into one
-	// compact line so we stay at the same 3-row input footprint.
-	mLine := t.model
-	if len(mLine) > 24 {
-		mLine = mLine[:24] + "…"
-	}
-	if t.cacheHitRate > 0 {
-		mLine += t.paint("dim", " · Csh ") + fmt.Sprintf("%.0f%%", t.cacheHitRate*100)
-	}
-	effort := t.paint("dim", "⚙") + "max"
-	if t.mode == ModeYOLO {
-		effort = t.paint("yellow", "⚡") + "yolo"
-	}
-	rightPart := effort + t.paint("dim", " · /effort")
-	pad := W - visibleWidth(mLine) - visibleWidth(rightPart) - 2
-	if pad < 1 {
-		pad = 1
-	}
-	statusLine := mLine + strings.Repeat(" ", pad) + rightPart
-
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", topRow))
 	b.WriteString(line)
-	b.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", hintRow))
-	b.WriteString(hint)
-	b.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", statusRow))
-	b.WriteString(statusLine)
+
+	if t.statusVisible {
+		// Status bar row: the pre-rendered compact strip, truncated so it stays
+		// a single line even in a narrow terminal.
+		st := status
+		if visibleWidth(st) > W {
+			st = truncVisible(st, W)
+		}
+		b.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", topRow+1))
+		b.WriteString(st)
+	} else if H >= 1 {
+		// Status bar hidden — clear the row it used to occupy so stale text
+		// from a previous frame never lingers after /statusline.
+		b.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", H))
+	}
 
 	// Position the cursor on the input line, just after the typed prefix.
 	// The prefix is "❯ " = prompt + space. Use visibleWidth instead of a
@@ -1352,8 +1227,11 @@ func (t *TUI) drawInputBox(W, H int, inputBuf string, cursor int, streaming bool
 // drawSearchBox renders the Claude Code-style reverse-history-search overlay
 // shown while Ctrl+R is active. It replaces the normal input prompt.
 func (t *TUI) drawSearchBox(W, H int, searchBuf, current string, streaming bool) {
-	const inputRows = 3
-	topRow := H - inputRows + 1
+	bottomRows := 1
+	if t.statusVisible {
+		bottomRows = 2
+	}
+	topRow := H - bottomRows + 1
 	if topRow < 1 {
 		topRow = 1
 	}
@@ -1373,17 +1251,14 @@ func (t *TUI) drawSearchBox(W, H int, searchBuf, current string, streaming bool)
 	}
 
 	query := t.paint("dim", "  i-search: "+searchBuf)
-	pad := W - visibleWidth(query) - 2
-	if pad < 0 {
-		pad = 0
-	}
-	statusPadded := strings.Repeat(" ", pad) + query
 
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", topRow))
 	b.WriteString(line)
-	b.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", topRow+2))
-	b.WriteString(statusPadded)
+	if t.statusVisible {
+		b.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", topRow+1))
+		b.WriteString(query)
+	}
 	b.WriteString(fmt.Sprintf("\x1b[%d;%dH", topRow, 2))
 	b.WriteString("\x1b[?25h")
 	fmt.Fprint(t.writer, b.String())
@@ -1393,7 +1268,7 @@ func (t *TUI) drawSearchBox(W, H int, searchBuf, current string, streaming bool)
 
 // convHeight returns the number of rows available for conversation content.
 func (t *TUI) convHeight() int {
-	return t.height - 7 // header(1) + hrule(1) + hrule(1) + status(1) + perm(2) + input(4) — rough min
+	return t.height - 4 // header(1) + footer hrule(1) + prompt(1) + status(1)
 }
 
 // totalConvLines counts all display lines for the current conversation.
@@ -1477,7 +1352,7 @@ func (t *TUI) canScroll() bool {
 	W := t.width
 	H := t.height
 	t.mu.Unlock()
-	bodyH := H - 7
+	bodyH := H - 4
 	if bodyH < 3 {
 		bodyH = 3
 	}
