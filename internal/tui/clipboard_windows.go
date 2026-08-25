@@ -12,14 +12,15 @@ import (
 // NOT be freed by us (it belongs to the clipboard) — only the global lock is
 // released.
 var (
-	clipUser32          = syscall.NewLazyDLL("user32.dll")
-	clipKernel32        = syscall.NewLazyDLL("kernel32.dll")
+	clipUser32           = syscall.NewLazyDLL("user32.dll")
+	clipKernel32         = syscall.NewLazyDLL("kernel32.dll")
 	procOpenClipboard    = clipUser32.NewProc("OpenClipboard")
 	procCloseClipboard   = clipUser32.NewProc("CloseClipboard")
 	procGetClipboardData = clipUser32.NewProc("GetClipboardData")
 	procGlobalLock       = clipKernel32.NewProc("GlobalLock")
 	procGlobalUnlock     = clipKernel32.NewProc("GlobalUnlock")
 	procGlobalSize       = clipKernel32.NewProc("GlobalSize")
+	procRtlMoveMemory    = clipKernel32.NewProc("RtlMoveMemory")
 )
 
 const cfUnicodeText = 13 // CF_UNICODETEXT
@@ -50,8 +51,19 @@ func readClipboard() (string, error) {
 	}
 	defer procGlobalUnlock.Call(handle)
 
-	// CF_UNICODETEXT data is NUL-terminated UTF-16; slice the locked memory and
-	// decode it. The global handle remains locked until GlobalUnlock.
-	u16 := (*[1 << 30]uint16)(unsafe.Pointer(ptr))[:int(size)/2]
-	return syscall.UTF16ToString(u16), nil
+	// CF_UNICODETEXT data is NUL-terminated UTF-16. Copy the locked memory
+	// into a Go-owned buffer via RtlMoveMemory so we never convert the
+	// syscall's uintptr handle to unsafe.Pointer (keeps `go vet` clean and
+	// avoids holding the clipboard lock during decoding).
+	n := int(size) / 2
+	if n <= 0 {
+		return "", nil
+	}
+	buf := make([]uint16, n)
+	const maxClip = 8 << 20 // 8 MiB of UTF-16 chars — far beyond any real paste
+	if n > maxClip {
+		return "", nil
+	}
+	procRtlMoveMemory.Call(uintptr(unsafe.Pointer(&buf[0])), ptr, uintptr(n*2))
+	return syscall.UTF16ToString(buf), nil
 }

@@ -67,7 +67,7 @@ func (t *TUI) handleMouse(br *bufio.Reader) {
 	// Bottom 3 rows → input box: move the editable cursor to the clicked column.
 	inputTop := t.height - 3 + 1 // first input row (1-based): H-2
 	if row >= inputTop {
-		targetCol := col - 2 // "❯ " occupies 2 columns; content starts at col 2
+		targetCol := col - visibleWidth("❯ ") // prompt occupies 3 columns ("❯ " + space)
 		if targetCol < 0 {
 			targetCol = 0
 		}

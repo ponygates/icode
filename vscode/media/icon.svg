@@ -1,6 +1,17 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
-  <rect x="2" y="3" width="20" height="18" rx="3" fill="#2563eb"/>
-  <rect x="2" y="3" width="20" height="18" rx="3" fill="none" stroke="#1e40af" stroke-width="1"/>
-  <path d="M6 9l3 3-3 3" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-  <line x1="12" y1="15" x2="17" y2="15" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/>
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#667eea"/>
+      <stop offset="100%" stop-color="#764ba2"/>
+    </linearGradient>
+    <linearGradient id="spark" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#a78bfa"/>
+      <stop offset="100%" stop-color="#c084fc"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="20" height="20" rx="4" fill="url(#bg)"/>
+  <path d="M8 7L5 12L8 17" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M16 7L19 12L16 17" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="12" cy="6" r="1.5" fill="url(#spark)"/>
+  <line x1="12" y1="8" x2="12" y2="18" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/>
 </svg>

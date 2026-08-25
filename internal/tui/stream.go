@@ -132,15 +132,18 @@ func (t *TUI) printMessage(m Message) {
 	}
 }
 
-// printAssistant renders assistant text in line mode (* prefix).
+// printAssistant renders assistant text in line mode. Non-streamed messages
+// (history replay, slash-command output, /resume) get full Markdown rendering
+// (headings, bold/italic, inline code, fenced blocks, lists, tables) exactly
+// like raw mode — line mode previously dumped raw Markdown syntax.
 func (t *TUI) printAssistant(text string) {
-	lines := strings.Split(text, "\n")
-	for i, line := range lines {
-		if i == 0 {
-			fmt.Fprintf(t.writer, "  * %s\n", line)
-		} else {
-			fmt.Fprintf(t.writer, "    %s\n", line)
-		}
+	width := 100
+	if w, _, ok := t.termSize(); ok && w > 24 {
+		width = w - 4
+	}
+	lines := t.renderMarkdown(text, "  ", "  ", width)
+	for _, l := range lines {
+		fmt.Fprintln(t.writer, l)
 	}
 	fmt.Fprintln(t.writer)
 }

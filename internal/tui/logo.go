@@ -6,11 +6,11 @@ import "strings"
 // layout can be emitted coloured (TUI) or plain (Logo()).
 type logoPainter func(color, s string) string
 
-// asciiLogo returns the iCode startup LOGO: a large text wordmark "iCode" in
-// opencode's half-block lettering style (█ ▀ ▄, rounded corners) — a yellow
-// dot above the "i", a light-white "i" stem, and "Code" in a lighter black
-// (dim grey) — plus a centred tagline. No box, no blossom, nothing to
-// mis-align.
+// asciiLogo returns the iCode startup LOGO: a large text wordmark "iCODE" in
+// opencode's block-lettering style (chunky rectangular letters, █ body with a
+// ░ inner-shadow bevel at the bottom of each counter) — a yellow dot above the
+// "I", a bright white letter body, and dim inner shadows — plus a centred
+// tagline. No box, no blossom, nothing to mis-align.
 func (t *TUI) asciiLogo(width int, paint logoPainter) []string {
 	wordRows := textWordRows(paint)
 	wordW := 0
@@ -22,7 +22,7 @@ func (t *TUI) asciiLogo(width int, paint logoPainter) []string {
 
 	if width < wordW {
 		// Too narrow for the big wordmark — fall back to a single line.
-		return []string{paint("yellow", "●") + paint("white", "i") + paint("dim", "Code") + "  " + paint("dim", "多模型 AI 编程助手")}
+		return []string{paint("yellow", "●") + paint("white", "I") + paint("dim", "CODE") + "  " + paint("dim", "多模型 AI 编程助手")}
 	}
 
 	out := make([]string, 0, len(wordRows)+1)
@@ -45,85 +45,64 @@ func Logo() []string {
 	t := &TUI{}
 	lines := t.asciiLogo(80, func(_, s string) string { return s })
 	lines = append(lines, "")
-	lines = append(lines, "iCode "+appVersionStr()+"  ·  多模型 AI 编程助手")
+	lines = append(lines, "iCODE "+appVersionStr()+"  ·  多模型 AI 编程助手")
 	return lines
 }
 
-// textWordRows renders the enlarged wordmark "iCode" in opencode's half-block
-// lettering style: each letter is a 4-cell box where a cell is either a block
-// glyph (█ ▀ ▄, which iCode's width model counts as 2 columns) or two spaces.
-// Using this uniform "cell = 2 columns" convention keeps every letter exactly
-// 8 columns wide, so the five letters line up into one clean wordmark.
+// textWordRows returns the 5-row "iCODE" wordmark, colourised per glyph:
+// █ = bright white body, ░ = dim inner shadow, ● = yellow dot.
 //
-// Colouring follows the design request: the "i" dot is yellow (▀), the "i"
-// stem is light white (█), and the letters "Code" are a lighter black (dim).
+// The letterforms follow opencode's wordmark geometry (packages/ui logo.tsx):
+// every letter is a thick rectangular block whose counter carries a shadow
+// band across its lower half — the "bevel" that makes the mark read at a
+// glance. "I" keeps its dot so the word stays unambiguous.
+//
+//	●   ████ ████ ███  ████
+//	█   █    █  █ █  █ █
+//	█   █░░░ █░░█ █░░█ ████
+//	█   █░░░ █░░█ █░░█ █░░░
+//	█   ████ ████ ████ ████
 func textWordRows(paint logoPainter) []string {
-	dot := paint("yellow", "▀")
-	tint := func(s string, fg string) string { return paint(fg, s) }
+	rows := []string{
+		" ●   ████ ████ ███  ████",
+		" █   █    █  █ █  █ █   ",
+		" █   █░░░ █░░█ █░░█ ████",
+		" █   █░░░ █░░█ █░░█ █░░░",
+		" █   ████ ████ ████ ████",
+	}
+	out := make([]string, len(rows))
+	for i, row := range rows {
+		out[i] = colorizeWordRow(row, paint)
+	}
+	return out
+}
 
-	const cell = "  " // one empty 2-column cell
-
-	iRows := []string{
-		"█" + cell + cell + cell,
-		"█" + cell + cell + cell,
-		"█" + cell + cell + cell,
-	}
-	cRows := []string{
-		"█▀▀▀",
-		"█" + cell + cell + cell,
-		"▀▀▀▀",
-	}
-	oRows := []string{
-		"█▀▀█",
-		"█" + cell + cell + "█",
-		"▀▀▀▀",
-	}
-	dRows := []string{
-		"█▀▀█",
-		"█" + cell + cell + "█",
-		"▀▀▀█",
-	}
-	eRows := []string{
-		"█▀▀█",
-		"█▀▀▀",
-		"▀▀▀▀",
-	}
-
-	// Colour one letter's glyphs (any non-space rune) with the given colour,
-	// leaving spaces untouched so ANSI codes never break alignment.
-	colorize := func(rows []string, fg string) []string {
-		out := make([]string, 3)
-		for r, row := range rows {
-			var b strings.Builder
-			for _, ch := range row {
-				if ch == ' ' {
-					b.WriteRune(ch)
-				} else {
-					b.WriteString(tint(string(ch), fg))
-				}
-			}
-			out[r] = b.String()
+// colorizeWordRow maps each glyph of one wordmark row to its colour: █ body →
+// white, ░ shadow → dim, ● dot → yellow; everything else stays a space. Runs
+// of the same glyph are painted as one span so the ANSI output stays small.
+func colorizeWordRow(row string, paint logoPainter) string {
+	runes := []rune(row)
+	var b strings.Builder
+	for i := 0; i < len(runes); {
+		ch := runes[i]
+		j := i
+		for j < len(runes) && runes[j] == ch {
+			j++
 		}
-		return out
+		seg := string(runes[i:j])
+		switch ch {
+		case '█':
+			b.WriteString(paint("white", seg))
+		case '░':
+			b.WriteString(paint("dim", seg))
+		case '●':
+			b.WriteString(paint("yellow", seg))
+		default:
+			b.WriteString(seg)
+		}
+		i = j
 	}
-
-	i := colorize(iRows, "white")
-	c := colorize(cRows, "dim")
-	o := colorize(oRows, "dim")
-	d := colorize(dRows, "dim")
-	e := colorize(eRows, "dim")
-
-	blank := cell + cell + cell + cell // empty 8-column letter box
-	rows := make([]string, 4)
-
-	// Row 0: the yellow dot over the "i"; the other four letter boxes are blank.
-	rows[0] = dot + cell + cell + cell + " " + blank + " " + blank + " " + blank + " " + blank
-
-	// Rows 1–3: the letters, one space apart.
-	for r := 0; r < 3; r++ {
-		rows[r+1] = i[r] + " " + c[r] + " " + o[r] + " " + d[r] + " " + e[r]
-	}
-	return rows
+	return b.String()
 }
 
 // padEndVisible pads s with trailing spaces to exactly w visible cells (ANSI

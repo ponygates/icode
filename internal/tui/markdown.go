@@ -202,7 +202,10 @@ func listItemParts(trim string) (marker, rest string, ok bool) {
 // Returns the plain text unchanged when color is disabled.
 func (t *TUI) renderInline(text string) string {
 	if !t.color {
-		return text
+		// Even without colour, strip inline-code backticks (and paired
+		// bold/italic markers) so raw Markdown syntax never leaks into the
+		// conversation when the terminal lacks ANSI support.
+		return stripInlineMarkup(text)
 	}
 
 	runes := []rune(text)
@@ -225,7 +228,7 @@ func (t *TUI) renderInline(text string) string {
 			if end > i+1 {
 				code := string(runes[i+1 : end])
 				b.WriteString(t.c("cyan"))
-				b.WriteString("`" + code + "`")
+				b.WriteString(code) // drop the backticks — they are markup, not content
 				b.WriteString("\x1b[0m")
 				i = end + 1
 				continue
@@ -305,6 +308,38 @@ func (t *TUI) renderInline(text string) string {
 				b.WriteString("\x1b[0m")
 				i = end + 1
 				continue
+			}
+		}
+
+		// Image: ![alt](url) — cannot render pixels in a terminal, but render the
+		// alt text and URL so the user sees what image was referenced. The
+		// '!' before the '[' disambiguates from a plain link.
+		if r == '[' && i > 0 && runes[i-1] == '!' {
+			closeB := -1
+			for j := i + 1; j < n; j++ {
+				if runes[j] == ']' {
+					closeB = j
+					break
+				}
+			}
+			if closeB > i && closeB+1 < n && runes[closeB+1] == '(' {
+				closeP := -1
+				for j := closeB + 2; j < n; j++ {
+					if runes[j] == ')' {
+						closeP = j
+						break
+					}
+				}
+				if closeP > closeB+1 {
+					alt := string(runes[i+1 : closeB])
+					url := string(runes[closeB+2 : closeP])
+					// Emit "📷 alt — url" in dim. The '!' before '[' has
+					// already been emitted literally; we overwrite that
+					// visual spot with the image indicator.
+					b.WriteString(t.paint("dim", " 📷 "+alt+" — "+url))
+					i = closeP + 1
+					continue
+				}
 			}
 		}
 
@@ -727,3 +762,78 @@ func (t *TUI) highlightCode(lang, code string, innerWidth int) []string {
 }
 
 func linesOf(s string) []string { return strings.Split(s, "\n") }
+
+// stripInlineMarkup removes inline Markdown markers from a line when ANSI
+// styling is unavailable: backticks around code, **bold**, *italic* and
+// _italic_ markers, and ~~strikethrough~~. Content is preserved verbatim.
+func stripInlineMarkup(s string) string {
+	var b strings.Builder
+	runes := []rune(s)
+	i, n := 0, len(runes)
+	for i < n {
+		r := runes[i]
+		// `code`
+		if r == '`' {
+			end := -1
+			for j := i + 1; j < n; j++ {
+				if runes[j] == '`' {
+					end = j
+					break
+				}
+			}
+			if end > i+1 {
+				b.WriteString(string(runes[i+1 : end]))
+				i = end + 1
+				continue
+			}
+		}
+		// **bold**
+		if r == '*' && i+1 < n && runes[i+1] == '*' {
+			end := -1
+			for j := i + 2; j < n-1; j++ {
+				if runes[j] == '*' && runes[j+1] == '*' {
+					end = j
+					break
+				}
+			}
+			if end > i+1 {
+				b.WriteString(string(runes[i+2 : end]))
+				i = end + 2
+				continue
+			}
+		}
+		// *italic* or _italic_
+		if r == '*' || r == '_' {
+			end := -1
+			for j := i + 1; j < n; j++ {
+				if runes[j] == r {
+					end = j
+					break
+				}
+			}
+			if end > i+1 {
+				b.WriteString(string(runes[i+1 : end]))
+				i = end + 1
+				continue
+			}
+		}
+		// ~~strike~~
+		if r == '~' && i+1 < n && runes[i+1] == '~' {
+			end := -1
+			for j := i + 2; j < n-1; j++ {
+				if runes[j] == '~' && runes[j+1] == '~' {
+					end = j
+					break
+				}
+			}
+			if end > i+1 {
+				b.WriteString(string(runes[i+2 : end]))
+				i = end + 2
+				continue
+			}
+		}
+		b.WriteRune(r)
+		i++
+	}
+	return b.String()
+}

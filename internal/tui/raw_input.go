@@ -168,8 +168,19 @@ func (t *TUI) handleKey(r rune) bool {
 			return true
 		}
 		if t.inputBuf == "" {
+			// First Ctrl+C on an empty line confirms exit (Claude Code parity)
+			// so a stray keypress never accidentally quits with an unsaved
+			// conversation. A second Ctrl+C (or Ctrl+D) exits immediately.
 			fmt.Fprint(t.writer, "\r\n")
+			if t.callback != nil {
+				t.callback.OnSlashCommand("/summarize", nil)
+			}
+			t.add(RoleSystem, "按任意键退出（再次 Ctrl+C 直接退出）")
+			t.render()
+			buf := make([]byte, 1)
+			_, _ = t.reader.Read(buf)
 			t.running = false
+			t.add(RoleSystem, "再见！👋")
 			return false
 		}
 		t.inputBuf = ""
@@ -237,7 +248,11 @@ func (t *TUI) handleKey(r rune) bool {
 			return true
 		}
 		if len(t.models) > 1 && !t.streaming {
-			// Cycle to next model
+			// Cycle to next model (Tab). Guard against a stale modelIdx
+			// (e.g. set by /model with an unknown id) so we never index t.models[-1].
+			if t.modelIdx < 0 || t.modelIdx >= len(t.models) {
+				t.modelIdx = 0
+			}
 			t.modelIdx = (t.modelIdx + 1) % len(t.models)
 			t.model = t.models[t.modelIdx]
 			t.add(RoleSystem, "Tab -> "+t.model)

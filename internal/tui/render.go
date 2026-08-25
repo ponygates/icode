@@ -569,21 +569,27 @@ func (t *TUI) welcomeInfoLines() []string {
 		meter = "Context:  " + fmt.Sprintf("%dK / %dK", t.contextTokens/1000, t.contextWindow/1000) +
 			" [" + bar + "] " + fmt.Sprintf("%d%%", pct)
 	} else {
-		meter = "Context:  —"
+		meter = "Context:  -"
 	}
 	cache := "Cache:    "
 	if t.cacheHitRate > 0 {
 		cache += fmt.Sprintf("%.0f%%", t.cacheHitRate*100)
 	} else {
-		cache += "—"
+		cache += "-"
+	}
+	// Label→value column: pad every label to a fixed visible width so the
+	// values start at the same column no matter how long the label is.
+	// Hand-padded literals were the source of the drifting value column.
+	kv := func(label, val string) string {
+		return label + strings.Repeat(" ", 10-visibleWidth(label)) + val
 	}
 	return []string{
 		t.paint("bold", "Welcome back!"),
 		"",
-		"Model:    " + t.model,
-		"Provider: " + t.provider,
-		"Mode:     " + t.mode,
-		"CWD:      " + short,
+		kv("Model:", t.model),
+		kv("Provider:", t.provider),
+		kv("Mode:", t.mode),
+		kv("CWD:", short),
 		"",
 		meter,
 		cache,
@@ -594,14 +600,19 @@ func (t *TUI) welcomeInfoLines() []string {
 
 // welcomeTipsLines builds the RIGHT panel content: tips & what's new.
 func (t *TUI) welcomeTipsLines() []string {
+	// Underline = title visible width, so the orange rule always matches the
+	// heading above it (a fixed dash count drifted when titles changed).
+	rule := func(title string) string {
+		return repeat("─", visibleWidth(title))
+	}
 	return []string{
 		t.paint("orange", "Tips for getting started"),
-		t.paint("orange", "─────────────────────"),
+		t.paint("orange", rule("Tips for getting started")),
 		"  Run /init to create a ICODE.md file with",
 		"  instructions for iCode",
 		"",
 		t.paint("orange", "What's new"),
-		t.paint("orange", "──────────"),
+		t.paint("orange", rule("What's new")),
 		"  Check the iCode changelog for updates",
 	}
 }
@@ -809,26 +820,27 @@ func padVisible(s string, w int) string {
 	return s + strings.Repeat(" ", w-vw)
 }
 
-// thinkingBar is an animated "thinking" indicator inspired by Claude Code's
-// glimmer bar. It combines a rotating spinner on the left with a growing
-// gradient bar on the right that sweeps back and forth. The combined effect
-// gives smooth, continuous motion feedback while the model works.
+// thinkingBar is an animated "thinking" indicator in opencode's minimal
+// style: a braille spinner, a thin context slider, and an elapsed clock. The
+// heavy ▓▒░ gradient of the earlier glimmer bar is dropped — opencode's
+// chrome stays quiet, so the fill is uniform and the chrome is one dim line.
 //
-// Visual:  ◌ [▓▓▓▓▓░░░░░░░░░]  32%  ⏱ 12s
+// Visual:  ⠋ [▓▓▓▓▓▓░░░░░░░░] 32% 12s
 func (t *TUI) thinkingBar() string {
-	const trackLen = 16
+	const trackLen = 14
 	elapsed := time.Since(t.turnStart)
 	frame := int(elapsed.Milliseconds() / 100)
 	if frame < 0 {
 		frame = 0
 	}
 
-	// ── Spinner ──
+	// ── Spinner ── braille cycle (the opencode / CLI-native activity glyph).
 	spinners := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 	spinner := spinners[frame%len(spinners)]
 
-	// ── Context progress bar ──
-	// Use actual context usage when available, otherwise animate.
+	// ── Context slider ──
+	// Use actual context usage when available, otherwise animate a growing
+	// sweep so the indicator always moves while the model works.
 	var filled int
 	if t.contextWindow > 0 && t.contextTokens > 0 {
 		filled = t.contextTokens * trackLen / t.contextWindow
@@ -836,26 +848,21 @@ func (t *TUI) thinkingBar() string {
 			filled = trackLen
 		}
 	} else {
-		// Animated growing bar during stream
-		filled = (frame % (trackLen + 1))
+		filled = frame % (trackLen + 1)
 	}
 
 	var b strings.Builder
 	b.WriteString("[")
 	for i := 0; i < trackLen; i++ {
 		if i < filled {
-			if i < filled-1 {
-				b.WriteString("▓")
-			} else {
-				b.WriteString("▒")
-			}
+			b.WriteString("▓")
 		} else {
 			b.WriteString("░")
 		}
 	}
 	b.WriteString("]")
 
-	// Context percentage
+	// Context percentage + elapsed clock.
 	var pctStr string
 	if t.contextWindow > 0 && t.contextTokens > 0 {
 		pct := t.contextTokens * 100 / t.contextWindow
@@ -864,8 +871,12 @@ func (t *TUI) thinkingBar() string {
 		}
 		pctStr = fmt.Sprintf(" %d%%", pct)
 	}
+	secs := int(elapsed.Seconds())
+	if secs < 0 {
+		secs = 0
+	}
 
-	return t.paint("cyan", spinner) + " " + b.String() + t.paint("dim", pctStr)
+	return t.paint("cyan", spinner) + " " + b.String() + t.paint("dim", pctStr) + t.paint("dim", fmt.Sprintf(" %ds", secs))
 }
 
 // fit returns s padded (or truncated with an ellipsis) to exactly w *visible*

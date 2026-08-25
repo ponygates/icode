@@ -83,7 +83,7 @@ func (t *TUI) handleSlash(text string) {
 		if t.callback != nil {
 			t.callback.OnSlashCommand("/summarize", nil)
 		}
-		t.add(RoleSystem, "Goodbye!")
+		t.add(RoleSystem, "再见！👋")
 		t.running = false
 
 	case "/expand":
@@ -105,9 +105,19 @@ func (t *TUI) handleSlash(text string) {
 		if n, err := strconv.Atoi(args[0]); err == nil && n >= 1 && n <= len(t.models) {
 			t.model = t.models[n-1]
 		} else {
-			t.model = args[0]
+			id := args[0]
+			idx := indexOfString(t.models, id)
+			if idx >= 0 {
+				t.model = id
+				t.modelIdx = idx
+			} else {
+				// Accept the ID as-is but warn if it isn't in the known list.
+				t.model = id
+				t.modelIdx = -1
+				t.add(RoleSystem, "⚠️ 模型 “"+id+"” 不在可用列表中（仍需手动确认）")
+				return
+			}
 		}
-		t.modelIdx = indexOfString(t.models, t.model)
 		t.notice("Model -> " + t.model)
 		t.add(RoleSystem, t.tstr("mode.set")+" -> "+t.model)
 
@@ -167,27 +177,44 @@ func (t *TUI) handleSlash(text string) {
 		}
 
 	case "/fork", "/branch":
+		cmdName := cmd
 		if len(args) > 0 && t.callback != nil {
 			t.callback.OnSlashCommand("/fork", args)
 		} else {
-			t.add(RoleSystem, "Usage: /fork <session-id>[@<n>] — 从历史会话分支出一个独立会话")
+			t.add(RoleSystem, "用法: "+cmdName+" <session-id>[@<n>] — 从历史会话分支出一个独立会话")
+		}
+
+	case "/restore":
+		// Restore a soft-deleted session (/clear marks sessions as deleted;
+		// /restore undoes that). Forwarded to the backend store so both the
+		// soft-delete flag and the message list are repaired atomically.
+		if t.callback != nil {
+			t.callback.OnSlashCommand("/restore", args)
+		} else {
+			t.add(RoleSystem, "用法: /restore <session-id> — 恢复被 /clear 软删除的会话")
 		}
 
 	case "/goal":
 		if t.callback != nil {
 			t.callback.OnSlashCommand("/goal", args)
 		} else {
-			t.add(RoleSystem, "Usage: /goal set <目标> | /goal show | /goal clear")
+			t.add(RoleSystem, "用法: /goal set <目标> | /goal show | /goal clear")
 		}
 
 	case "/budget":
 		if t.callback != nil {
 			t.callback.OnSlashCommand("/budget", args)
 		} else {
-			t.add(RoleSystem, "Usage: /budget set <上限token数> | /budget show | /budget clear")
+			t.add(RoleSystem, "用法: /budget set <上限token数> | /budget show | /budget clear")
 		}
 
 	case "/clear":
+		// Archive the current session (soft-delete) via the callback first so
+		// the CLI/slashui behaviour matches: the session can later be recovered
+		// with /restore. Then wipe the local message list.
+		if t.callback != nil {
+			t.callback.OnSlashCommand("/clear", nil)
+		}
 		t.mu.Lock()
 		t.messages = nil
 		t.promptTokens = 0
@@ -195,12 +222,12 @@ func (t *TUI) handleSlash(text string) {
 		t.cost = ""
 		t.cacheHitRate = 0
 		t.mu.Unlock()
-		t.add(RoleSystem, "Conversation cleared.")
+		t.add(RoleSystem, "对话已清空（可从 /sessions 恢复）")
 
 	case "/search":
 		query := strings.Join(args, " ")
 		if query == "" {
-			t.add(RoleSystem, "Usage: /search <query> — 搜索历史对话")
+			t.add(RoleSystem, "用法: /search <关键词> — 搜索历史对话")
 			break
 		}
 		if t.callback != nil {
@@ -229,6 +256,24 @@ func (t *TUI) handleSlash(text string) {
 
 	case "/diff":
 		t.showGitDiff(args)
+
+	case "/lsp":
+		sub := "status"
+		if len(args) > 0 {
+			sub = args[0]
+			args = args[1:]
+		}
+		t.add(RoleSystem, t.callback.LSPQuery(sub, args))
+
+	case "/kb", "/knowledge":
+		t.add(RoleSystem, t.callback.KnowledgeQuery(strings.Join(args, " ")))
+
+	case "/idle":
+		if len(args) < 2 {
+			t.add(RoleSystem, "用法: /idle <名称> <任务描述>（闲时窗口内自动执行）")
+			break
+		}
+		t.add(RoleSystem, t.callback.CreateIdleTask(args[0], strings.Join(args[1:], " ")))
 
 	case "/output-style":
 		if len(args) == 0 {
@@ -410,7 +455,15 @@ func (t *TUI) handleSlash(text string) {
 		}
 
 	case "/cost", "/usage", "/stats":
-		t.costPanel()
+		// Prefer the full Token-savings report (with per-round detail and
+		// Cache-First Loop stats) when the engine is available; fall back to
+		// the simple cost panel. This mirrors slashui where /cost and /token
+		// are identical aliases.
+		if t.callback != nil {
+			t.add(RoleSystem, t.callback.OnTokenStats())
+		} else {
+			t.costPanel()
+		}
 
 	case "/provider":
 		if len(args) > 0 {
@@ -453,21 +506,7 @@ func (t *TUI) handleSlash(text string) {
 		t.add(RoleSystem, b.String())
 
 	case "/models":
-		cfg, err := config.Load()
-		if err != nil || len(cfg.Models) == 0 {
-			t.add(RoleSystem, "暂无自定义模型。\n用 `icode config model add <provider> <model_id> [name]` 新增。")
-			return
-		}
-		var b strings.Builder
-		b.WriteString("自定义模型：\n")
-		for _, m := range cfg.Models {
-			name := m.Name
-			if name == "" {
-				name = m.ModelID
-			}
-			b.WriteString(fmt.Sprintf("  %-26s %s / %s\n", m.ID, m.Provider, name))
-		}
-		t.add(RoleSystem, b.String())
+		t.modelsCommand(args)
 
 	case "/config":
 		t.configCommand(args)
@@ -1012,6 +1051,54 @@ func (t *TUI) reviewCommand(args []string) {
 // configCommand shows the current configuration, or sets a key when given
 // `set <key> <value>` (Claude Code's /config opens an interactive menu; here
 // we expose the most useful keys directly).
+// modelsCommand implements /models with optional add/rm subcommands so the TUI
+// can manage user-defined models without dropping to the CLI:
+//
+//	/models                     → list custom models
+//	/models add <p> <id> [name] → persist + live-register a custom model
+//	/models rm <id>             → remove a custom model (id = provider/model_id)
+func (t *TUI) modelsCommand(args []string) {
+	if len(args) > 0 {
+		switch strings.ToLower(args[0]) {
+		case "add":
+			if len(args) < 3 {
+				t.add(RoleSystem, "用法: /models add <provider> <model_id> [name]")
+				return
+			}
+			name := args[2]
+			if len(args) >= 4 {
+				name = strings.Join(args[3:], " ")
+			}
+			msg := t.callback.OnAddCustomModel(args[1], args[2], name)
+			t.add(RoleSystem, msg)
+			return
+		case "rm", "remove", "del", "delete":
+			if len(args) < 2 {
+				t.add(RoleSystem, "用法: /models rm <id>（id 形如 provider/model_id）")
+				return
+			}
+			t.add(RoleSystem, t.callback.OnRemoveCustomModel(args[1]))
+			return
+		}
+	}
+
+	cfg, err := config.Load()
+	if err != nil || len(cfg.Models) == 0 {
+		t.add(RoleSystem, "暂无自定义模型。\n用 `/models add <provider> <model_id> [name]` 或 `icode config model add <provider> <model_id> [name]` 新增。")
+		return
+	}
+	var b strings.Builder
+	b.WriteString("自定义模型：\n")
+	for _, m := range cfg.Models {
+		name := m.Name
+		if name == "" {
+			name = m.ModelID
+		}
+		b.WriteString(fmt.Sprintf("  %-26s %s / %s\n", m.ID, m.Provider, name))
+	}
+	t.add(RoleSystem, b.String())
+}
+
 func (t *TUI) configCommand(args []string) {
 	if len(args) > 0 && strings.ToLower(args[0]) == "set" {
 		if len(args) < 3 {
@@ -1221,42 +1308,86 @@ func (t *TUI) execShell(cmdStr string) {
 // the older turns of the conversation into a single system note so the model
 // keeps the context while freeing up the token budget. An optional instruction
 // string is folded into the summary so the user can steer what is preserved.
+//
+// Since v0.37.5 the summary is model-generated (semantic): the backend asks
+// the configured model to compress the older turns into a structured summary
+// (目标/已完成/关键决策/文件改动/待办/下一步), cached into the session metadata
+// so a later /resume --compact reuses it without a second model call. When the
+// model is unavailable or fails, it falls back to the free local line dump.
 func (t *TUI) compactCommand(args []string) {
 	instruction := strings.Join(args, " ")
 	t.mu.Lock()
 	if len(t.messages) < 4 {
-		t.messages = append(t.messages, Message{Role: RoleSystem, Content: "Not enough messages to compact."})
 		t.mu.Unlock()
-		t.render()
+		t.add(RoleSystem, "Not enough messages to compact.")
 		return
 	}
-	var keep []Message
-	var summary strings.Builder
-	summary.WriteString("[Compacted] Summary of earlier turns")
-	if instruction != "" {
-		summary.WriteString(" (focus: " + instruction + ")")
-	}
-	summary.WriteString(":\n")
-	count := 0
-	for _, m := range t.messages {
-		if m.Role == RoleSystem || count >= len(t.messages)-4 {
-			keep = append(keep, m)
-		} else {
-			summary.WriteString(fmt.Sprintf("  %s: %s\n", m.Role, truncate(m.Content, 80)))
-			count++
-		}
-	}
-	t.messages = keep
-	t.messages = append(t.messages, Message{Role: RoleSystem, Content: summary.String()})
 	t.mu.Unlock()
-	t.render()
-	t.add(RoleSystem, "✓ 已压缩较早的对话上下文。")
+
+	// Async so the TUI keeps rendering while the model works.
+	t.add(RoleSystem, "⏳ 正在生成语义摘要…（模型压缩，约 10–60 秒）")
+	go func() {
+		sum := ""
+		if t.callback != nil {
+			sum = t.callback.OnCompactSummarize(instruction)
+		}
+		if sum != "" {
+			// Semantic path: keep system notes + the last 4 turns, replace the
+			// rest with a [Compacted] summary note (Claude Code style).
+			t.mu.Lock()
+			var keep []Message
+			for _, m := range t.messages {
+				if m.Role == RoleSystem {
+					keep = append(keep, m)
+				}
+			}
+			var recent []Message
+			for i := len(t.messages) - 1; i >= 0 && len(recent) < 4; i-- {
+				m := t.messages[i]
+				if m.Role == RoleUser || m.Role == RoleAssistant {
+					recent = append([]Message{m}, recent...)
+				}
+			}
+			keep = append(keep, Message{Role: RoleSystem, Content: "[Compacted] 已由模型压缩的早期对话摘要:\n\n" + sum})
+			keep = append(keep, recent...)
+			t.messages = keep
+			t.mu.Unlock()
+			t.render()
+			t.add(RoleSystem, "✓ 已用模型语义摘要压缩较早对话（已缓存，/resume --compact 可复用）。")
+			return
+		}
+
+		// Fallback: free local line dump (existing behavior).
+		t.mu.Lock()
+		var keep []Message
+		var summary strings.Builder
+		summary.WriteString("[Compacted] Summary of earlier turns")
+		if instruction != "" {
+			summary.WriteString(" (focus: " + instruction + ")")
+		}
+		summary.WriteString(":\n")
+		count := 0
+		for _, m := range t.messages {
+			if m.Role == RoleSystem || count >= len(t.messages)-4 {
+				keep = append(keep, m)
+			} else {
+				summary.WriteString(fmt.Sprintf("  %s: %s\n", m.Role, truncate(m.Content, 80)))
+				count++
+			}
+		}
+		t.messages = keep
+		t.messages = append(t.messages, Message{Role: RoleSystem, Content: summary.String()})
+		t.mu.Unlock()
+		t.render()
+		t.add(RoleSystem, "✓ 已压缩较早的对话上下文。（模型摘要不可用，已用本地摘要）")
+	}()
 }
 
 // ── Rewind / Cost panel ──────────────────────────────────────────
 
 // rewindSteps rolls back the last n tool-call steps via the checkpoint store.
-// Shared by /rewind and /undo.
+// Shared by /rewind and /undo. Before rolling back it surfaces a diff preview
+// of the changes about to be reverted (Claude Code parity).
 func (t *TUI) rewindSteps(n int) {
 	sessionID := ""
 	if t.callback != nil {
@@ -1271,12 +1402,16 @@ func (t *TUI) rewindSteps(n int) {
 		t.add(RoleError, "打开检查点失败: "+err.Error())
 		return
 	}
+	// Preview the diff that the rewind will revert.
+	if preview, perr := store.Diff(context.Background(), n); perr == nil && strings.TrimSpace(preview) != "" {
+		t.add(RoleSystem, fmt.Sprintf("⏪ 即将回滚 %d 步，以下改动将被撤销:\n```diff\n%s\n```", n, strings.TrimRight(preview, "\n")))
+	}
 	files, err := store.Rewind(context.Background(), n)
 	if err != nil {
 		t.add(RoleError, "回滚失败: "+err.Error())
 		return
 	}
-	msg := fmt.Sprintf("⏪ 已回滚 %d 步。影响文件:\n", n)
+	msg := fmt.Sprintf("✓ 已回滚 %d 步。影响文件:\n", n)
 	for _, f := range files {
 		msg += "  " + f + "\n"
 	}
@@ -1345,11 +1480,16 @@ func (t *TUI) exportMarkdown(args []string) {
 		sb.WriteString(m.Content)
 		sb.WriteString("\n\n")
 	}
-	if err := os.WriteFile(filename, []byte(sb.String()), 0644); err != nil {
+	// Windows: prepend UTF-8 BOM so Notepad recognizes the file as UTF-8.
+	content := sb.String()
+	if runtime.GOOS == "windows" {
+		content = "\xef\xbb\xbf" + content
+	}
+	if err := os.WriteFile(filename, []byte(content), 0644); err != nil {
 		t.add(RoleError, "Export failed: "+err.Error())
 		return
 	}
-	t.add(RoleSystem, fmt.Sprintf("Exported to %s (%d messages)", filename, len(msgs)))
+	t.add(RoleSystem, fmt.Sprintf("已导出到 %s（%d 条消息）", filename, len(msgs)))
 }
 
 // ── Git diff ─────────────────────────────────────────────────────
@@ -1364,7 +1504,7 @@ func (t *TUI) showGitDiff(args []string) {
 		return
 	}
 	if len(output) == 0 {
-		t.add(RoleSystem, "No unstaged changes.")
+		t.add(RoleSystem, "没有未暂存的改动。")
 		return
 	}
 	t.AddToolMessage("git_diff", "", t.colorizeDiffStr(strings.TrimRight(string(output), "\n")))
@@ -1544,7 +1684,7 @@ func (t *TUI) closeModelPicker() {
 // interactive overlay (↑/↓ + Enter); line mode falls back to a numbered list.
 func (t *TUI) openResumePicker() {
 	if t.callback == nil {
-		t.add(RoleSystem, "Usage: /resume <session-id> [--lite[=<n>]]")
+		t.add(RoleSystem, "Usage: /resume <session-id> [--lite[=<n>] | --compact[=<n>]]")
 		return
 	}
 	t.resumeSessions = t.callback.OnListSessionsStructured(20)
@@ -1554,7 +1694,7 @@ func (t *TUI) openResumePicker() {
 	}
 	if !t.rawMode {
 		var b strings.Builder
-		b.WriteString("历史会话（/resume <session-id> 恢复）:\n")
+		b.WriteString("历史会话（/resume <session-id> 恢复，--compact 语义摘要压缩）:\n")
 		for i, s := range t.resumeSessions {
 			b.WriteString(fmt.Sprintf("  %-3d %s  %s  [%s]\n", i+1, s.ID, s.Title, s.Model))
 		}
@@ -1689,7 +1829,7 @@ func (t *TUI) stage() *searchreplace.StagingArea {
 func (t *TUI) applyStagedEdits() {
 	edits := t.stage().List()
 	if len(edits) == 0 {
-		t.add(RoleSystem, "No staged edits to apply.")
+		t.add(RoleSystem, "没有可应用的暂存编辑。")
 		return
 	}
 	snapshottedFiles := make(map[string]bool)
@@ -1711,11 +1851,11 @@ func (t *TUI) rejectStagedEdits() {
 	stage := t.stage()
 	n := stage.Count()
 	if n == 0 {
-		t.add(RoleSystem, "No staged edits to reject.")
+		t.add(RoleSystem, "没有可丢弃的暂存编辑。")
 		return
 	}
 	stage.Clear()
-	t.add(RoleSystem, fmt.Sprintf("Rejected %d staged edits.", n))
+	t.add(RoleSystem, fmt.Sprintf("已丢弃 %d 条暂存编辑。", n))
 }
 
 // openDiffBox enters the staged-edits review overlay (Claude Code parity):
@@ -1729,7 +1869,7 @@ func (t *TUI) openDiffBox() {
 	}
 	edits := t.stage().List()
 	if len(edits) == 0 {
-		t.add(RoleSystem, "No staged edits to review.")
+		t.add(RoleSystem, "没有可审阅的暂存编辑。")
 		return
 	}
 	t.mu.Lock()

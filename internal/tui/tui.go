@@ -70,6 +70,11 @@ type Callback interface {
 	OnListSessionsStructured(limit int) []SessionInfo
 	// OnResume loads a past session's messages; returns a status line.
 	OnResume(id string) string
+	// OnCompactSummarize asks the backend to semantically summarize the active
+	// session's older turns using the model (Claude Code /compact parity).
+	// Returns "" when not applicable or on failure, so the caller falls back
+	// to the free local trim. The instruction optionally steers what to keep.
+	OnCompactSummarize(instruction string) string
 	// TodoCounts returns the current session's todo counts for the status
 	// bar. Returns all zeros when there is no active session or no list.
 	TodoCounts() (pending, active, done, total int)
@@ -98,6 +103,23 @@ type Callback interface {
 	// OnRenameSession retitles the active session (/rename) in the backend
 	// store. Returns an error message, or "" on success.
 	OnRenameSession(title string) string
+	// OnAddCustomModel persists and live-registers a user-defined model
+	// (/models add <provider> <model_id> [name]). Returns a status line, or an
+	// error message prefixed with "ERROR" on failure.
+	OnAddCustomModel(provider, modelID, name string) string
+	// OnRemoveCustomModel removes a user-defined model (/models rm <id>).
+	// Returns a status line, or an error message on failure.
+	OnRemoveCustomModel(id string) string
+	// LSPQuery runs an on-demand LSP code-intelligence query for /lsp
+	// (subcommand: status/diag/syms/hover/def/refs). Returns a formatted
+	// report, or an error message when LSP is unavailable.
+	LSPQuery(sub string, args []string) string
+	// KnowledgeQuery searches the local document knowledge base (/kb).
+	// Returns formatted passages, or a status/error message.
+	KnowledgeQuery(query string) string
+	// CreateIdleTask creates an off-peak task (/idle <name> <prompt>) that runs
+	// in the idle window. Returns a status/error message.
+	CreateIdleTask(name, prompt string) string
 }
 
 // StreamWriter is the surface the backend uses to push data into the UI.
