@@ -1,5 +1,40 @@
 # 更新日志
 
+## v0.40.0 — 后台子代理 + Fork 缓存继承 + Worktree 隔离 + 跨会话消息（对标 Claude Code 2.1.x）（2026-08-25）
+
+> 对标最新 Claude Code（v2.1.24x）功能代差：多代理后台化与缓存化委派。六项后端能力 + 桌面 MCP 测试 UI。
+
+### 🚀 后台子代理（CC "background agents" parity）
+- `task` 工具新增 `background: true`：子代理派生后立即返回 `agt-N` 句柄，主对话继续工作；完成时系统通知 + TUI 内提示。
+- `task_output` 兼容 `agt-N` 查询（状态/输出/token），无 id 时列出全部后台任务（子代理 + shell 命令）。
+- 新增 `/tasks` 面板命令：一屏查看所有后台任务（运行中/完成/失败 + 耗时）。
+
+### ⚡ Fork 缓存继承（强化 Cache-First 卖点）
+- `task` 工具新增 `fork: true` + `AgentDef.fork` 定义：将父对话尾部消息（≤40 条，原样字节）重放进子代理上下文——同前缀命中 Provider prompt cache，委派近乎零边际 token 成本。
+- 引擎新增 `RunForkedSubAgent`，自动截断孤儿 tool-result 尾部保证消息配对完整。
+
+### 🌿 Worktree 隔离执行
+- `AgentDef.isolation: worktree`：子代理在临时 git worktree（独立分支）中读写，绝不触碰用户检出目录。
+- 无改动自动清理；有改动回传 patch 或提交至隔离分支供 cherry-pick。启动时 `CleanupWorktrees` 修剪崩溃残留。
+
+### 🧠 子代理持久记忆（CC per-agent memory parity）
+- `AgentDef.memory: user|project|local`：每个子代理拥有跨会话 `MEMORY.md`（~/.icode/agent-memory、项目共享、项目私有三档）。
+- 运行时注入记忆头部（200 行 / 25KB 上限）+ 维护指令，代理可积累项目知识。
+
+### 💬 跨会话消息（CC SendMessage/ListAgents parity）
+- 新表 `agent_messages` + 三工具：`send_message`（会话互发）、`inbox`（读收件箱/未读标记已读）、`list_agents`（发现可寻址会话）。
+- SQLite 持久化，对端离线也能投递。
+
+### 🔐 参数级权限规则（CC Tool(param:value) parity）
+- 配置 `[permission.rules]`：`pattern = "Bash(git push:*)"` + `decision = "ask|allow|deny"`，首条命中即生效，优先于一切模式/白名单——YOLO 下也可硬拦破坏性命令。
+
+### 🖥 桌面端
+- 新增 **McpPanel**：MCP 服务器连接测试可视化（列表 + 实时状态灯 + 一键 `/api/mcp/test` 连接验证 + 发现工具清单）。
+- 核实权限审批弹窗（允许一次/总是允许/拒绝三键）与图片粘贴输入已在先前版本落地，差距文档相应项关闭。
+
+### 🧪 测试
+- 新增：参数规则硬拦/首条命中/per-tool 匹配、agent 记忆三档+截断、后台代理生命周期/失败捕获/取消、fork 前缀纯函数、worktree 真仓库生命周期、消息往返/校验/限额；全绿。
+
 ## v0.39.0 — 分级授权兜底 + 闲时任务 + Goal 模式（对齐 Claude Code & 智谱 ZCode）（2026-08-14）
 
 > 用户"按你建议全部完成"——落地 Claude Code 分级授权兜底 + 智谱 ZCode 闲时任务 / Goal 模式。

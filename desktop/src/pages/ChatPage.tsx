@@ -12,6 +12,7 @@ import CheckpointPanel from '../components/CheckpointPanel';
 import LspPanel from '../components/LspPanel';
 import KnowledgePanel from '../components/KnowledgePanel';
 import GoalPanel from '../components/GoalPanel';
+import McpPanel from '../components/McpPanel';
 import FilePicker from '../components/FilePicker';
 import FileTree from '../components/FileTree';
 import ModelPicker from '../components/ModelPicker';
@@ -1818,6 +1819,7 @@ const ChatPage: React.FC = () => {
           <LspPanel />
           <KnowledgePanel />
           <GoalPanel />
+          <McpPanel />
         </div>
       </div>
 

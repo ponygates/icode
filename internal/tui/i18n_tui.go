@@ -402,6 +402,7 @@ var palettes = map[string]map[string]string{
 		"red":     "\x1b[31m",
 		"green":   "\x1b[32m",
 		"yellow":  "\x1b[33m",
+		"brightyellow": "\x1b[38;5;220m", // 大黄 (golden yellow ~#FFD75F, iCODE dot)
 		"orange":  "\x1b[38;5;209m", // brand orange (~#ff7a45)
 		"blue":    "\x1b[34m",
 		"magenta": "\x1b[38;5;205m",
@@ -415,6 +416,7 @@ var palettes = map[string]map[string]string{
 		"red":     "\x1b[31m",
 		"green":   "\x1b[38;5;28m",
 		"yellow":  "\x1b[38;5;136m",
+		"brightyellow": "\x1b[38;5;178m", // deep golden yellow on light bg (~#D7AF00)
 		"orange":  "\x1b[38;5;166m",
 		"blue":    "\x1b[34m",
 		"magenta": "\x1b[35m",

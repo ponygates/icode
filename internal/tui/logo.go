@@ -22,7 +22,7 @@ func (t *TUI) asciiLogo(width int, paint logoPainter) []string {
 
 	if width < wordW {
 		// Too narrow for the big wordmark — fall back to a single line.
-		return []string{paint("yellow", "●") + paint("white", "I") + paint("dim", "CODE") + "  " + paint("dim", "多模型 AI 编程助手")}
+		return []string{paint("brightyellow", "●") + paint("white", "I") + paint("dim", "CODE") + "  " + paint("dim", "多模型 AI 编程助手")}
 	}
 
 	out := make([]string, 0, len(wordRows)+1)
@@ -101,8 +101,8 @@ func colorizeWordRow(row string, paint logoPainter) string {
 		case '░':
 			b.WriteString(paint("dim", seg))
 		case '\uFFED':
-			// Big dot: two yellow block cells (width matches the stem below).
-			b.WriteString(paint("yellow", "██"))
+			// Big dot: two bright-yellow block cells (width matches the stem).
+			b.WriteString(paint("brightyellow", "██"))
 		case '●':
 			b.WriteString(paint("yellow", seg))
 		default:
