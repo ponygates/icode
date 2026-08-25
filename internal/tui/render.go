@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime/debug"
 	"sort"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/ponygates/icode/internal/config"
 	"github.com/ponygates/icode/internal/core/permission"
+	"github.com/ponygates/icode/internal/core/tool"
 	"github.com/ponygates/icode/internal/xgo"
 )
 
@@ -1065,14 +1067,23 @@ func listCwd() []string {
 	return names
 }
 
-// statusLine renders the opencode-style bottom task bar: a green model dot (●)
-// with the model name, then token usage as `▸`-prefixed in/out counts, context
-// %, cache, cost and todo counts — all joined by dim `·` and dim except the
-// model dot. While streaming the elapsed time trails the line.
+// statusLine renders the Claude Code / opencode-style bottom task bar:
+// mode badge, model dot, git branch, token counts, a visual context bar,
+// cache, cost, todo counts, current-tool activity, and background-task
+// count — joined by dim `·`. While streaming the elapsed time trails.
 func (t *TUI) statusLine() string {
 	d := func(s string) string { return t.paint("dim", s) }
 	var parts []string
+	// Mode badge — always visible so the user knows what approvals to
+	// expect (Claude Code parity: plan/agent/auto/yolo are first-class).
+	if t.mode != "" {
+		parts = append(parts, t.paint(modeColor(t.mode), "["+string(t.mode)+"]"))
+	}
 	parts = append(parts, t.paint("green", "●")+" "+t.model)
+	// Git branch — lazily refreshed, never on the render hot path.
+	if b := t.cachedBranch(); b != "" {
+		parts = append(parts, d("⎇ ")+b)
+	}
 	// Security level badge — always visible so the user knows their privacy
 	// boundary. Unlike Claude Code, no hidden telemetry or phone-home.
 	if t.securityLevel != "" && t.securityLevel != "local" {
@@ -1084,11 +1095,7 @@ func (t *TUI) statusLine() string {
 			d("▸"+formatTokens(t.promptTokens)+" ▸"+formatTokens(t.completionTokens)))
 	}
 	if t.contextWindow > 0 && t.contextTokens > 0 {
-		pct := t.contextTokens * 100 / t.contextWindow
-		if pct > 100 {
-			pct = 100
-		}
-		parts = append(parts, d(fmt.Sprintf("%d%% ctx", pct)))
+		parts = append(parts, t.contextBar())
 	}
 	if t.cacheHitRate > 0 {
 		parts = append(parts, d(fmt.Sprintf("%.0f%% cache", t.cacheHitRate*100)))
@@ -1112,6 +1119,17 @@ func (t *TUI) statusLine() string {
 			parts = append(parts, seg)
 		}
 	}
+	// Current work indicator: the tool executing right now ("正在做的工作").
+	t.mu.Lock()
+	cur := t.curTool
+	t.mu.Unlock()
+	if t.streaming && cur != "" && cur != "…" {
+		parts = append(parts, t.paint("yellow", "⚙ "+cur))
+	}
+	// Background tasks (sub-agents + shell) running detached.
+	if n := t.runningBgCount(); n > 0 {
+		parts = append(parts, t.paint("cyan", fmt.Sprintf("⚡%d bg", n)))
+	}
 	if t.streaming && !t.turnStart.IsZero() {
 		parts = append(parts, d("⏱ "+formatDuration(time.Since(t.turnStart))))
 	}
@@ -1121,6 +1139,74 @@ func (t *TUI) statusLine() string {
 		line += "  " + t.statusNotice
 	}
 	return line
+}
+
+// contextBar renders a mini progress bar for context usage with threshold
+// colouring: green <60%, yellow <85%, red at/above. Example: ctx ▓▓▓░░░░░ 42%
+func (t *TUI) contextBar() string {
+	pct := t.contextTokens * 100 / t.contextWindow
+	if pct > 100 {
+		pct = 100
+	}
+	const cells = 8
+	filled := pct * cells / 100
+	bar := strings.Repeat("▓", filled) + strings.Repeat("░", cells-filled)
+	color := "green"
+	switch {
+	case pct >= 85:
+		color = "red"
+	case pct >= 60:
+		color = "yellow"
+	}
+	return t.paint(color, bar) + t.paint("dim", fmt.Sprintf(" %d%%", pct))
+}
+
+// cachedBranch returns the workspace git branch, refreshing at most every
+// 30s via a background goroutine so rendering never blocks on git exec.
+func (t *TUI) cachedBranch() string {
+	t.mu.Lock()
+	fresh := time.Since(t.branchCheck) < 30*time.Second
+	if !fresh {
+		t.branchCheck = time.Now()
+	}
+	branch := t.gitBranch
+	t.mu.Unlock()
+	if fresh {
+		return branch
+	}
+	xgo.GoSafe("tui.branch", func() {
+		out, err := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD").Output()
+		name := ""
+		if err == nil {
+			name = strings.TrimSpace(string(out))
+			if name == "HEAD" { // detached — show short sha instead
+				if sha, e := exec.Command("git", "rev-parse", "--short", "HEAD").Output(); e == nil {
+					name = "@" + strings.TrimSpace(string(sha))
+				}
+			}
+		}
+		t.mu.Lock()
+		t.gitBranch = name
+		t.mu.Unlock()
+	})
+	return branch
+}
+
+// runningBgCount reports how many background jobs (detached sub-agents plus
+// background shell commands) exist, for the ⚡N status segment.
+func (t *TUI) runningBgCount() int {
+	n := 0
+	for _, l := range tool.ListAgentTaskLines() {
+		if strings.Contains(l, "[running") {
+			n++
+		}
+	}
+	for _, l := range tool.ListShellTaskLines() {
+		if strings.Contains(l, "[running") {
+			n++
+		}
+	}
+	return n
 }
 
 // formatDuration renders a duration compactly: "3.2s" or "1m04s".

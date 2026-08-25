@@ -394,14 +394,7 @@ func (t *TUI) handleSlash(text string) {
 		t.add(RoleSystem, "[x] ICODE.md 已生成")
 
 	case "/agents":
-		v := agent.Load(agent.AgentDefaultDirs()...)
-		v.RegisterDefaults()
-		var a strings.Builder
-		a.WriteString("子 agent:\n")
-		for _, d := range v.List() {
-			a.WriteString(fmt.Sprintf("  %s — %s\n", d.Name, d.Description))
-		}
-		t.add(RoleSystem, a.String())
+		t.agentsCommand()
 
 	case "/skills":
 		reg := skills.Load(skills.DefaultDirs()...)
@@ -2155,4 +2148,53 @@ func persistSetting(fn func(*config.Config)) {
 	}
 	fn(cfg)
 	_ = cfg.Save(config.DefaultPath())
+}
+
+// agentsCommand renders the live agent panel: registered sub-agents with
+// their capability flags, teams, and background sub-agent runs (elapsed at
+// render time). Claude Code "claude agents" parity.
+func (t *TUI) agentsCommand() {
+	var b strings.Builder
+	b.WriteString("子 agent 注册表:\n")
+	reg := agent.Load(agent.AgentDefaultDirs()...)
+	reg.RegisterDefaults()
+	list := reg.List()
+	if len(list) == 0 {
+		b.WriteString("  （无）\n")
+	}
+	for _, d := range list {
+		flags := ""
+		if d.Fork {
+			flags += " fork"
+		}
+		if d.Memory != "" {
+			flags += " memory:" + d.Memory
+		}
+		if d.Isolation != "" {
+			flags += " isolation:" + d.Isolation
+		}
+		if flags != "" {
+			flags = "  [" + strings.TrimSpace(flags) + "]"
+		}
+		fmt.Fprintf(&b, "  %s — %s%s\n", d.Name, d.Description, t.paint("dim", flags))
+	}
+
+	if teams := agent.LoadTeams(agent.TeamDefaultDirs()...); len(teams) > 0 {
+		b.WriteString("\n团队:\n")
+		for _, tm := range teams {
+			names := make([]string, 0, len(tm.Members))
+			for _, m := range tm.Members {
+				names = append(names, m.Name)
+			}
+			fmt.Fprintf(&b, "  %s (%d 成员: %s)\n", tm.Name, len(tm.Members), strings.Join(names, ", "))
+		}
+	}
+
+	if lines := tool.ListAgentTaskLines(); len(lines) > 0 {
+		b.WriteString("\n后台运行中:\n")
+		for _, l := range lines {
+			b.WriteString("  " + l + "\n")
+		}
+	}
+	t.add(RoleSystem, b.String())
 }

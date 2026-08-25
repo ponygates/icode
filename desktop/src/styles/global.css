@@ -362,3 +362,36 @@ hr { border: none; border-top: 0.5px solid var(--border-color); margin: var(--s3
   }
   html { scroll-behavior: auto; }
 }
+
+/* ── opencode-style yellow thinking slider (SettingsPage) ── */
+input[type='range'] {
+  -webkit-appearance: none;
+  appearance: none;
+}
+input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #eab308;
+  border: 2px solid #fefce8;
+  box-shadow: 0 0 0 1px rgba(234, 179, 8, 0.5), 0 1px 3px rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+  transition: transform 0.12s ease;
+}
+input[type='range']::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+}
+input[type='range']::-webkit-slider-thumb:active {
+  transform: scale(1.25);
+}
+input[type='range']::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #eab308;
+  border: 2px solid #fefce8;
+  box-shadow: 0 0 0 1px rgba(234, 179, 8, 0.5), 0 1px 3px rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+}

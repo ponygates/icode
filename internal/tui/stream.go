@@ -38,6 +38,11 @@ func (t *TUI) AddToolMessage(tool, toolArgs, content string) {
 	t.mu.Lock()
 	t.messages = append(t.messages, Message{Role: RoleTool, Tool: tool, ToolArgs: toolArgs, Content: content})
 	idx := len(t.messages) - 1
+	// While streaming this invocation is the "current work" shown in the
+	// status bar; the result append clears it.
+	if t.streaming {
+		t.curTool = tool
+	}
 	t.mu.Unlock()
 	if t.rawMode {
 		t.render()
@@ -56,6 +61,7 @@ func (t *TUI) AppendToolResult(content string) {
 			}
 			t.messages[i].Content += content
 			idx := i
+			t.curTool = "" // this invocation finished
 			t.mu.Unlock()
 			if t.rawMode {
 				t.render()

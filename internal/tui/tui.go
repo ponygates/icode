@@ -192,6 +192,13 @@ type TUI struct {
 	onConfigChanged func(*config.Config)
 	// recentCmds tracks slash-command usage for recency-ranked autocomplete.
 	recentCmds []string
+	// curTool is the tool currently executing while streaming ("⚙ bash" in
+	// the status bar). Set by AddToolMessage, cleared by AppendToolResult.
+	curTool string
+	// gitBranch caches the workspace branch for the status bar; refreshed
+	// lazily (branchChecked) so no git exec happens per frame.
+	gitBranch   string
+	branchCheck time.Time
 
 	// input autocomplete state (raw mode)
 	acOpen  bool

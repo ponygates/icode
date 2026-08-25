@@ -480,6 +480,41 @@ func TestEffectiveLanguageProjectOverride(t *testing.T) {
 	if got := EffectiveLanguage(c); got != "zh-CN" {
 		t.Errorf("invalid override = %q, want fallback zh-CN", got)
 	}
+
+	// Precedence: .icode/language beats ICODE.md declaration.
+	if err := os.WriteFile("ICODE.md", []byte("# Project\n\nlanguage: zh-TW\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove("ICODE.md")
+	if err := os.WriteFile(filepath.Join(".icode", "language"), []byte("en"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := EffectiveLanguage(c); got != "en" {
+		t.Errorf("precedence = %q, want en (.icode/language first)", got)
+	}
+
+	// ICODE.md declaration works when .icode/language is absent.
+	os.Remove(filepath.Join(".icode", "language"))
+	if got := EffectiveLanguage(c); got != "zh-TW" {
+		t.Errorf("ICODE.md = %q, want zh-TW", got)
+	}
+}
+
+func TestICodemdLanguage(t *testing.T) {
+	cases := map[string]string{
+		"# Project\n\nlanguage: en\n":                     "en",
+		"语言: zh-TW\n":                                     "zh-TW",
+		"some text\nLanguage: `zh-CN`\n":                  "zh-CN",
+		"*language: en*":                                  "en",
+		"language: fr\n":                                  "", // unsupported locale
+		"# no directive here\njust prose\n":               "",
+		strings.Repeat("filler\n", 50) + "language: en\n": "", // beyond line 40
+	}
+	for in, want := range cases {
+		if got := icodemdLanguage(in); got != want {
+			t.Errorf("icodemdLanguage(%q) = %q, want %q", in, got, want)
+		}
+	}
 }
 
 // TestSaveEncryptsMCPHeaders verifies MCP request headers (e.g. Authorization

@@ -1326,24 +1326,57 @@ function PageDesktop({ store }: { store: ReturnType<typeof useAppStore.getState>
         )}
       </Section>
 
-      {/* Deep thinking (Anthropic extended thinking) */}
+      {/* Deep thinking (Anthropic extended thinking) — opencode-style
+          yellow slider: thin track, round thumb, preset stops */}
       <Section title={t('settings.thinkingTitle')} desc={t('settings.thinkingDesc')}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{t('settings.thinkingLabel')}</span>
           <Toggle on={store.thinkingTokens > 0} onChange={(v) => store.setThinkingTokens(v ? 4096 : 0)} />
         </div>
         {store.thinkingTokens > 0 && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>
-            <input
-              type="number" min={1024} step={1024}
-              value={String(store.thinkingTokens)}
-              onChange={(e) => {
-                const n = parseInt(e.target.value, 10);
-                if (!isNaN(n) && n >= 1024) store.setThinkingTokens(n);
-              }}
-              style={{ ...selectStyle, width: 140 }}
-            />
-            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{t('settings.thinkingBudgetHint')}</span>
+          <div style={{ marginTop: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <input
+                type="range" min={1024} max={32768} step={1024}
+                value={store.thinkingTokens}
+                onChange={(e) => {
+                  const n = parseInt(e.target.value, 10);
+                  if (!isNaN(n)) store.setThinkingTokens(n);
+                }}
+                style={{
+                  flex: 1, height: 4, appearance: 'none', WebkitAppearance: 'none',
+                  borderRadius: 2, cursor: 'pointer', outline: 'none',
+                  background: `linear-gradient(to right, #eab308 0%, #eab308 ${((store.thinkingTokens - 1024) / (32768 - 1024)) * 100}%, var(--bg-tertiary) ${((store.thinkingTokens - 1024) / (32768 - 1024)) * 100}%, var(--bg-tertiary) 100%)`,
+                }}
+                onMouseDown={(e) => { (e.target as HTMLInputElement).style.setProperty('--thumb-scale', '1.15'); }}
+                onMouseUp={(e) => { (e.target as HTMLInputElement).style.removeProperty('--thumb-scale'); }}
+              />
+              <span style={{
+                fontSize: 11, fontWeight: 600, minWidth: 44, textAlign: 'right',
+                color: '#eab308', fontFamily: 'var(--font-mono)',
+              }}>
+                {(store.thinkingTokens / 1024).toFixed(0)}k
+              </span>
+            </div>
+            {/* Preset stops — click to snap, mirrors opencode's segmented feel */}
+            <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+              {[4096, 8192, 16384, 32768].map((v) => (
+                <button
+                  key={v}
+                  onClick={() => store.setThinkingTokens(v)}
+                  style={{
+                    flex: 1, padding: '3px 0', fontSize: 10, borderRadius: 5,
+                    cursor: 'pointer', fontFamily: 'var(--font-mono)',
+                    background: store.thinkingTokens === v ? 'rgba(234,179,8,0.16)' : 'var(--bg-tertiary)',
+                    border: `0.5px solid ${store.thinkingTokens === v ? '#eab308' : 'var(--border-color)'}`,
+                    color: store.thinkingTokens === v ? '#eab308' : 'var(--text-muted)',
+                  }}
+                >
+                  {v / 1024}k
+                </button>
+              ))}
+            </div>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>{t('settings.thinkingBudgetHint')}</div>
           </div>
         )}
       </Section>

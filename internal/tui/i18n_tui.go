@@ -17,6 +17,7 @@ var tuiStrings = map[string]map[string]string{
 		"ac.title":             "命令提示",
 		"ac.hint":              "↑↓ 选择 · Tab 补全 · Esc 关闭",
 		"ac.custom":            "自定义命令",
+		"ac.arg":               "参数值",
 		"banner.hint":          "输入你的需求，或 /help 查看命令。按 Ctrl+C 退出。",
 		"welcome.hint":         "输入你的需求开始对话，或 /help 查看全部命令 · Tab 补全 · ↑↓ 历史",
 		"welcome.tagline":      "你的 AI 编程伙伴",
@@ -118,6 +119,7 @@ var tuiStrings = map[string]map[string]string{
 		"ac.title":             "指令提示",
 		"ac.hint":              "↑↓ 選擇 · Tab 補全 · Esc 關閉",
 		"ac.custom":            "自訂指令",
+		"ac.arg":               "參數值",
 		"banner.hint":          "輸入你的需求，或 /help 檢視指令。按 Ctrl+C 退出。",
 		"welcome.hint":         "輸入你的需求開始對話，或 /help 檢視全部指令 · Tab 補全 · ↑↓ 歷史",
 		"welcome.tagline":      "你的 AI 程式設計夥伴",
@@ -217,6 +219,7 @@ var tuiStrings = map[string]map[string]string{
 		"ac.title":             "Commands",
 		"ac.hint":              "↑↓ to move · Tab to complete · Esc to close",
 		"ac.custom":            "custom command",
+		"ac.arg":               "value",
 		"banner.hint":          "Type your request, or /help for commands. Ctrl+C to exit.",
 		"welcome.hint":         "Type your request to start, or /help for all commands · Tab to complete · ↑↓ history",
 		"welcome.tagline":      "your AI coding partner",
@@ -402,6 +405,10 @@ var slashDefs = []struct {
 type acItem struct {
 	Name string
 	Desc string
+	// ArgPrefix, when set, marks this as an argument-completion entry for the
+	// slash command in the prefix (e.g. "/model"); accepting it replaces only
+	// the argument part of the input buffer.
+	ArgPrefix string
 }
 
 var palettes = map[string]map[string]string{

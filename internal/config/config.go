@@ -333,11 +333,11 @@ func OutputStyleDirective(style string) string {
 	}
 }
 
-// EffectiveLanguage resolves the locale that governs model output language:
-// a project-level override file (.icode/language, plain text, e.g. "en")
-// wins over the global cfg.Language. This lets one repo demand English
-// comments while the rest of the machine runs in Chinese. Empty when
-// nothing is set.
+// EffectiveLanguage resolves the locale that governs model output language.
+// Precedence: project .icode/language file → language declaration inside
+// ICODE.md ("language: en" within the first 40 lines) → global cfg.Language.
+// This lets one repo demand English comments while the rest of the machine
+// runs in Chinese. Empty when nothing is set.
 func EffectiveLanguage(c *Config) string {
 	if data, err := os.ReadFile(filepath.Join(".icode", "language")); err == nil {
 		lang := strings.TrimSpace(string(data))
@@ -346,8 +346,40 @@ func EffectiveLanguage(c *Config) string {
 			return lang
 		}
 	}
+	if data, err := os.ReadFile("ICODE.md"); err == nil {
+		lang := icodemdLanguage(string(data))
+		if lang != "" {
+			return lang
+		}
+	}
 	if c != nil {
 		return strings.TrimSpace(c.Language)
+	}
+	return ""
+}
+
+// icodemdLanguage extracts a "language: <locale>" directive from ICODE.md
+// content (case-insensitive key, first 40 lines only). Returns "" when absent
+// or not one of the supported locales.
+func icodemdLanguage(content string) string {
+	lines := strings.Split(content, "\n")
+	if len(lines) > 40 {
+		lines = lines[:40]
+	}
+	for _, l := range lines {
+		l = strings.TrimSpace(l)
+		l = strings.Trim(l, "*`_") // markdown emphasis around the directive
+		lower := strings.ToLower(l)
+		for _, prefix := range []string{"language:", "語言:", "语言:"} {
+			if strings.HasPrefix(lower, strings.ToLower(prefix)) {
+				v := strings.TrimSpace(l[len(prefix):])
+				v = strings.Trim(v, "`*")
+				switch v {
+				case "zh-CN", "zh-TW", "en":
+					return v
+				}
+			}
+		}
 	}
 	return ""
 }

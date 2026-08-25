@@ -49,6 +49,24 @@ func (t *TUI) updateSuggestions() {
 		return
 	}
 	if strings.HasPrefix(buf, "/") {
+		// Argument-level completion: "/model " (space typed) offers values
+		// for commands that take enumerable arguments — Claude Code parity.
+		if i := strings.IndexByte(buf, ' '); i >= 0 && !strings.Contains(buf[i+1:], " ") {
+			if items := t.argSuggestions(buf[:i], buf[i+1:]); len(items) > 0 {
+				t.acOpen = true
+				t.acItems = items
+				t.clampAcIdx()
+				return
+			}
+			t.acOpen = false
+			t.acItems = nil
+			return
+		}
+		if strings.Contains(buf, " ") {
+			t.acOpen = false
+			t.acItems = nil
+			return
+		}
 		prefix := strings.TrimSpace(buf)
 		var items []acItem
 		for _, d := range slashDefs {
@@ -113,6 +131,47 @@ func (t *TUI) updateSuggestions() {
 	}
 	t.acOpen = false
 	t.acItems = nil
+}
+
+// argSuggestions returns completion entries for the argument of a slash
+// command (e.g. /model → model list; /lang → locales). partial is the text
+// typed after the command's space.
+func (t *TUI) argSuggestions(cmd, partial string) []acItem {
+	var values []string
+	switch strings.ToLower(cmd) {
+	case "/model":
+		t.mu.Lock()
+		values = append(values, t.models...)
+		t.mu.Unlock()
+	case "/lang":
+		values = []string{"zh-CN", "zh-TW", "en"}
+	case "/theme":
+		values = []string{"auto", "dark", "light"}
+	case "/security":
+		values = []string{"local", "desensitize", "local-llm", "foreign-llm", "unrestricted"}
+	case "/mode":
+		values = []string{"plan", "agent", "auto", "yolo"}
+	default:
+		return nil
+	}
+	var items []acItem
+	for _, v := range values {
+		if partial != "" && fuzzyScore(partial, v) < 0 {
+			continue
+		}
+		items = append(items, acItem{Name: v, Desc: t.tstr("ac.arg"), ArgPrefix: cmd + " "})
+	}
+	return items
+}
+
+// clampAcIdx keeps the autocomplete cursor inside the item bounds.
+func (t *TUI) clampAcIdx() {
+	if t.acIdx >= len(t.acItems) {
+		t.acIdx = len(t.acItems) - 1
+	}
+	if t.acIdx < 0 {
+		t.acIdx = 0
+	}
 }
 
 // filesAutocomplete returns files and directories that match the given
@@ -433,6 +492,15 @@ func (t *TUI) acceptSuggestion() {
 		return
 	}
 	it := t.acItems[t.acIdx]
+
+	// Argument completion for enumerable slash-command values: replace only
+	// the argument part after the command token ("/model " + value).
+	if it.ArgPrefix != "" {
+		t.inputBuf = it.ArgPrefix + it.Name + " "
+		t.cursor = len([]rune(t.inputBuf))
+		t.acOpen = false
+		return
+	}
 
 	// If this is an @file autocomplete item (name starts with a path
 	// separator or "./"), replace the "@prefix" with the file path.
