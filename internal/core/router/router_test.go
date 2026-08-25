@@ -69,7 +69,7 @@ func TestRouteQuery_Simple(t *testing.T) {
 		DefaultProv:   "deepseek",
 		CheapModel:    "deepseek-chat",
 		CheapProv:     "deepseek",
-		PowerfulModel: "claude-sonnet-4",
+		PowerfulModel: "claude-sonnet-5",
 		PowerfulProv:  "anthropic",
 	})
 	route := r.RouteQuery("hello", 0)
@@ -87,7 +87,7 @@ func TestRouteQuery_Normal(t *testing.T) {
 		DefaultProv:   "deepseek",
 		CheapModel:    "deepseek-chat",
 		CheapProv:     "deepseek",
-		PowerfulModel: "claude-sonnet-4",
+		PowerfulModel: "claude-sonnet-5",
 		PowerfulProv:  "anthropic",
 	})
 	route := r.RouteQuery("implement a sorting function", 0)
@@ -105,13 +105,13 @@ func TestRouteQuery_Complex(t *testing.T) {
 		DefaultProv:   "deepseek",
 		CheapModel:    "deepseek-chat",
 		CheapProv:     "deepseek",
-		PowerfulModel: "claude-sonnet-4",
+		PowerfulModel: "claude-sonnet-5",
 		PowerfulProv:  "anthropic",
 	})
 	// Use a long query (>500 chars) to trigger complex classification
 	longQuery := "refactor the entire authentication module to use JWT tokens and add role-based access control for the enterprise platform with multi-tenant support and granular permissions across the entire system while maintaining backward compatibility with existing APIs and ensuring data consistency throughout the migration process"
 	route := r.RouteQuery(longQuery, 0)
-	if route.ModelID != "claude-sonnet-4" {
+	if route.ModelID != "claude-sonnet-5" {
 		t.Errorf("expected powerful model, got %s", route.ModelID)
 	}
 	if route.Complexity != ComplexityComplex {
@@ -125,7 +125,7 @@ func TestRouteQuery_LongHistory(t *testing.T) {
 		DefaultProv:   "deepseek",
 		CheapModel:    "deepseek-chat",
 		CheapProv:     "deepseek",
-		PowerfulModel: "claude-sonnet-4",
+		PowerfulModel: "claude-sonnet-5",
 		PowerfulProv:  "anthropic",
 	})
 	// With history > 50, even simple queries should be treated as complex
