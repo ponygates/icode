@@ -137,15 +137,63 @@ icode server --port 0          # 启动 HTTP API 服务（桌面版使用）
 ```
 
 ### 交互模式斜杠命令
-```
-/help      显示帮助面板
-/model <id>  切换模型
-/mode <plan|agent|yolo>  切换权限模式
-/session   管理会话
-/clear     清空对话历史
-/exit      退出 iCode
-/token     查看本会话 Token 节省报告（已省/缓存命中率/压缩次数/费用）
-```
+
+| 命令 | 说明 |
+|------|------|
+| `/help` | 显示帮助面板（含快捷键和所有命令） |
+| `/model [id]` | 切换模型（无参 → 交互选择器，支持数字编号和模型 ID） |
+| `/mode [agent\|plan\|yolo\|auto\|ask]` | 切换权限模式 |
+| `/plan` / `/ask` / `/debug` | 模式快捷方式 |
+| `/session` | 显示当前会话 |
+| `/sessions` | 列出已保存会话 |
+| `/resume <id> [--lite[=n]]` | 载入历史会话（`--lite` 只送摘要+最近 N 条） |
+| `/fork <id>[@n]` / `/branch` | 从历史会话分支出独立会话 |
+| `/rename <标题>` | 重命名当前会话 |
+| `/cd <path>` | 移动会话工作目录 |
+| `/goal set\|show\|clear` | 长目标模式（每轮自动携带） |
+| `/budget set\|show\|warn\|clear` | Token 预算护栏 |
+| `/new` | 开启新会话 |
+| `/clear` | 清空当前会话（归档，可用 `/restore` 恢复） |
+| `/wipe` | 不可逆清空 |
+| `/restore <id>` | 恢复被 /clear 软删除的会话 |
+| `/undo [N]` / `/rewind` / `/checkpoint` | 回滚前 N 步文件更改 |
+| `/diff` | 显示 git 工作区差异 |
+| `/review [file]` | 审查 diff 或指定文件 |
+| `/apply` / `/reject` | 应用/丢弃暂存编辑 |
+| `/search <关键词>` | 搜索历史会话 |
+| `/export [file]` | 导出会话为 Markdown |
+| `/share` | 导出带时间戳 Markdown 副本 |
+| `/copy [file/N]` | 复制最后输出到剪贴板 |
+| `/token` / `/cost` / `/usage` / `/stats` | Token 节省报告（Cache-First 五层压缩明细） |
+| `/context` | 上下文用量 |
+| `/summarize` | 会话摘要 |
+| `/compact` | 压缩会话（手动） |
+| `/status` / `/whoami` | 系统状态 |
+| `/doctor` | 运行诊断 |
+| `/keys` | API Key 配置状态 |
+| `/config [set <k> <v>]` | 查看/设置配置 |
+| `/output-style [concise\|normal\|verbose]` | 设置输出风格 |
+| `/security [level]` | 设置安全等级 |
+| `/permissions` | 查看权限/安全配置 |
+| `/mcp [list\|add\|remove\|get\|restart]` | 管理 MCP 服务器 |
+| `/memory [edit\|prefs\|forget\|clear]` | 查看/管理记忆文件 |
+| `/hooks` | 查看/生成 hooks.yaml |
+| `/init` | 创建 ICODE.md |
+| `/agents` / `/skills` / `/teams` | 列出 agent / 技能 / 团队 |
+| `/todo` | 查看当前会话待办任务 |
+| `/add-dir <dir>` | 添加额外工作目录 |
+| `/update` | 刷新模型目录 |
+| `/lang [zh-CN\|zh-TW\|en]` | 切换语言 |
+| `/login` / `/logout` | 配置/清除 API Key |
+| `/feedback` | 反馈渠道 |
+| `/release-notes` / `/changelog` | 查看更新日志 |
+| `/bug` | 打开预填 Bug 报告 |
+| `/exit` / `/quit` | 退出 iCode |
+| `/admin [off]` | 切换管理员（yolo）模式 |
+| `/pr` / `/pr_comments` | PR 评论（需 gh CLI） |
+| `/changelog` | 查看更新日志 |
+
+> 桌面端（Electron）和 TUI 共享同一套命令；未知命令自动转发到后端 `/api/slash`。
 
 ## 权限模式
 
@@ -263,6 +311,9 @@ go run . server --port 9090
 - [x] **v0.16–v0.20**: 多模态结果回灌上下文（vision 闭环）、桌面设置页（开机自启 / 后端端口）、路由默认升级 embedding
 - [x] **v0.25–v0.35**: 桌面卡死/启动加固（MCP boot 阻塞、localStorage 序列化、主线程重渲染隔离、`/model` 选择器、简易 WebView2 UI）
 - [x] **v0.36**: 一键自动更新模型（新增检测 + 下架标记 + 文档富化）
+- [x] **v0.37**: 语音转写（三端麦克风按钮）、屏幕/输入自动化、启动自动恢复最近会话、文件树面板 + 暂存编辑 diff 审查覆盖层
+- [x] **v0.38**: LSP 诊断（结构化条目 + 一键复制定位）、知识库 RAG 检索升级 IDF/BM25 加权排序、桌面系统通知（含免打扰时段）、检查点预览与撤销加固
+- [x] **v0.39**: 分级授权兜底（连续拦截自动退回手动模式，`permission.strike_threshold` 可配）、闲时任务调度（`/idle`，低峰窗口跨午夜）、Goal 可验收目标模式（`/goal set <目标> --verify <验收命令>`）
 - [ ] **当前**: 后端安全与并发加固（CSRF/同源防护、fetch SSRF 拦截、文件工具目录沙箱、配置/工具注册表加锁、API Key 脱敏）+ 前端类型与测试加固（vitest、i18n 三语键一致性）
 
 ## 许可证

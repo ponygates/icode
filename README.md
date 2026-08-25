@@ -258,6 +258,9 @@ go run . server --port 9090
 - [x] **v0.16–v0.20**: Multimodal result feed-back into context (vision round-trips), desktop settings page (autostart / backend port), routing default → embedding
 - [x] **v0.25–v0.35**: Desktop freeze/startup hardening (MCP boot blocking, localStorage serialization, main-thread re-render isolation, `/model` picker, simple WebView2 UI)
 - [x] **v0.36**: One-click model auto-update (detection + deprecation marking + doc enrichment)
+- [x] **v0.37**: Voice transcription (mic button on all ends), screen/input automation, auto-resume most recent session on startup, file-tree panel + staged-edit diff review overlay
+- [x] **v0.38**: LSP diagnostics (structured entries + one-click locate copy), knowledge-base RAG upgraded with IDF/BM25-weighted ranking, desktop system notifications (with do-not-disturb window), checkpoint preview & undo hardening
+- [x] **v0.39**: Tiered-permission fallback (auto downgrade to manual mode after consecutive blocks, `permission.strike_threshold`), idle-time task scheduling (`/idle`, cross-midnight windows), verifiable Goal mode (`/goal set <goal> --verify <cmd>`)
 - [ ] **Current**: Backend security & concurrency hardening (CSRF/same-origin guard, fetch SSRF blocking, directory sandbox for file tools, config/tool-registry locking, API-key redaction) + frontend type/test hardening (vitest, i18n locale parity)
 
 ## License

@@ -1,5 +1,325 @@
 # 更新日志
 
+## v0.39.0 — 分级授权兜底 + 闲时任务 + Goal 模式（对齐 Claude Code & 智谱 ZCode）（2026-08-14）
+
+> 用户"按你建议全部完成"——落地 Claude Code 分级授权兜底 + 智谱 ZCode 闲时任务 / Goal 模式。
+
+### ✨ P0-1 连续拦截退回手动（分类器兜底）
+- `Gate` 加**会话级 strike 计数器**：`ask`/`deny` 累计 +1、`allow` 归零；连续 N 次（默认 3，`config.permission.strike_threshold` 可配）自动把会话降级为**手动模式**（后续所有操作强制 `ask`），并一次性提示「已连续 N 次拦截，自动退回手动模式」。补齐 Claude Code 分级授权的最后一块：`默认放行低危 → 命中危险软拦截 → 连续拦截退回手动` 全链路。
+
+### ✨ P0-2 闲时任务调度（对齐智谱 Idle Tasks）
+- scheduler 新增 `"idle"` 调度类型 + 闲时窗口（`config.scheduler.idle_start/idle_end`，默认 00:00–06:00，支持跨午夜）；闲时任务在低峰窗口内才执行，窗口外自动重排到下一窗口。`/idle <名称> <描述>` 命令创建闲时任务（三端），完成后结合既有通知提醒。
+
+### ✨ P1 Goal 模式深化（对齐 ZCode 可验收 Goal）
+- `/goal set <目标> --verify <验收命令>`：设置**可验收目标**，engine 每轮注入「ACCEPTANCE CHECK」指令，让模型自动「改动 → 运行验收命令 → 判断 → 未达标继续迭代 → 达标报告停止」。
+- 桌面新增 **GoalPanel**（查看/设置目标与验收命令/清除）；`/goal show` 展示目标 + 验收命令。
+
+### 🧪 测试与交付
+- 新增：`TestStrikeEscalation`（连续拦截降级 + 会话隔离）、`TestIdleSchedule`（闲时窗口/跨午夜）；全量 internal+cmd 测试绿；前端 tsc 0 错误 + 构建通过；四份二进制重编（PE 3/3/2/2），版本号 0.39.0。
+
+## v0.38.2 — 深化完善：LSP 诊断跳转 + 检索 IDF 加权 + 通知免打扰（2026-08-14）
+
+> 用户"继续完善"——落地上一轮的三项待办。
+
+### ✨ 深化 1：LSP 诊断结构化 + 点击复制定位
+- 桌面 **LspPanel** 诊断结果从纯文本升级为**结构化条目**（severity 彩色标签 + 行:列 + 消息），点击条目一键复制 `file:line:col` 定位信息（桌面端为聊天 Agent，无代码编辑器，故以"复制定位"落地跳转）。
+
+### ✨ 深化 2：知识库检索 IDF 加权（BM25 式排序）
+- `knowledge` 包升级为**两遍索引**：先统计词频算 IDF（`log((N+1)/(df+1))+1`），再构建 IDF 加权向量。稀有词（判别性强）自动加权、常见词自动降权，检索命中更精准——仍保持零 API 零 token 离线。
+
+### ✨ 深化 3：通知免打扰开关
+- 新增 `config.notify` 配置（`enabled` / `quiet_from` / `quiet_to`），`notify` 包加 `SetPolicy` + `shouldNotify`（支持跨午夜时段），后台任务通知前自动检查免打扰窗口。
+
+### 🧪 测试与交付
+- 新增：`knowledge.TestIDFWeighting`、`notify.TestShouldNotify`；全量 internal 测试绿；前端 tsc 0 错误 + 构建通过；四份二进制重编（PE 3/3/2/2），版本号 0.38.2。
+
+## v0.38.1 — 对标深化：子代理实时流 + 系统通知 + 桌面 LSP/知识库面板（2026-08-13）
+
+> 用户"继续深化你建议的项目"——落地上一轮的三项待办。
+
+### ✨ 深化 1：子代理实时执行流（对标 OpenCode 多 agent）
+- `agent.Runner.Run` 通过 context 的 `ToolProgressFunc`（engine 注入）实时上报子代理的**工具调用**（🔧 调用工具 X）、**工具结果**（✓/⚠）、`TeamRunner` 补充团队级进度（👥 分解任务 / 并行执行 N 名成员）。
+- 三端（TUI/桌面/简易 UI）均渲染 tool_progress，子代理执行过程从"静默等待"变成"可见的流水"。
+
+### ✨ 深化 2：系统级 toast 通知（Windows 托盘 balloon）
+- 新包 `internal/notify`：Windows 用 PowerShell + WinForms NotifyIcon balloon（零外部依赖、独立进程、不阻塞），macOS `osascript`、Linux `notify-send`。
+- `bgtask` 完成/失败时触发系统通知——用户切到别的窗口也能收到"后台任务完成"提醒。
+
+### ✨ 深化 3：桌面端 LSP / 知识库可视化面板
+- 右侧面板新增 **LspPanel**（状态查询 + 文件诊断 + 符号搜索）与 **KnowledgePanel**（知识库检索），均复用 `/api/slash`（与 /lsp、/kb 命令同实现），无需记命令即可点选使用。
+
+### 🧪 测试与交付
+- 新增 `notify.psQuote` 单测；全量 internal 测试绿；前端 tsc 0 错误 + 构建通过；四份二进制重编（PE 3/3/2/2），版本号 0.38.1。
+
+## v0.38.0 — 三端对标收尾：LSP 接线 + 知识库 RAG + 后台通知 + 回滚预览（2026-08-13）
+
+> 用户"帮我全部按计划完成"——落地三端对标差距清单全部 8 项（P0→P1→P2）。
+
+### ✨ P0 — 能力断层修复
+- **LSP 接线（/lsp）**：`internal/lsp` 客户端早已实现但从未暴露。本轮新增 `Manager.QueryReport`（status/diag/syms/hover/def/refs）+ `ParsePos`（兼容 Windows 盘符）+ 便捷方法（DiagnosticsForFile/HoverAt/DefinitionAt/ReferencesAt/Symbols/AvailableServers）；`/lsp` 命令接入 **TUI（Callback.LSPQuery）+ 桌面/simpleui（slashui.cmdLsp）**，两套共享一份实现零重复。
+- **简易 UI 补齐**：会话下拉加**时间分组前缀**（今天/昨天/近7天/更早，SessionEntry 补 updated_at）；错误友好化经 engine 层已覆盖（v0.37.8）；Token 统计条此前已有。
+
+### ✨ P1 — 对标能力缺口
+- **后台任务完成通知**：`bgTaskManager` 加 `SetCompleteHook`，TUI/simpleui 注入回调，后台任务完成/失败时自动推送「✓ 后台任务完成 / ⚠ 失败」提示（跨端、零平台依赖）。
+- **多 agent 执行可视化**：`TaskTool` 委托子代理时先发一条 `EventToolProgress`（「🔍 子代理 X 正在执行：…」），三端实时渲染（桌面/简易UI/ TUI 均处理 tool_progress），消除"静默卡顿"。
+- **文档知识库 RAG（/kb）**：新包 `internal/core/knowledge`——本地哈希特征向量 + 余弦相似度检索，**零 API 零 token 离线**（延续 iCode 省 token 使命）；`/kb` 命令 + `search_knowledge` 工具（模型可调用）；`config.knowledge.dirs` 配置目录，后台索引。
+
+### ✨ P2 — 体验打磨
+- **三端 cwd 打通**：桌面切换工作区时自动执行 `/cd <workspace.path>`，bash/文件工具随之作用在新目录。
+- **TUI 回滚 diff 预览**：`/rewind` `/undo` 回滚前先展示 `checkpoint.Diff` 的统一 diff（即将撤销的改动）。
+- **跨端续接**：验证通过——三端共享 SQLite 会话 + 摘要/预算/goal 随 `session.Metadata` 持久化，engine 统一读取，无需改动。
+
+### 🧪 测试与交付
+- 新增：`lsp.ParsePos`（含 Windows 盘符）、`knowledge` Index/Search/分段。全量 internal+cmd 测试绿；前端 tsc 0 错误 + 构建通过；四份二进制重编（PE 3/3/2/2），版本号 0.38.0。
+
+## v0.37.13 — 状态栏 CWD / Git 分支点击可操作（WebView2 修复）（2026-08-13）
+
+> 用户反馈：对话窗口状态栏的 `e:\icode`（工作目录）和 `-`（Git 分支）点击打不开。
+
+### 🐛 根因
+- **CWD pill**（显示 `e:\icode`）：点击调 `window.icode?.openFolder(cwdPath)`——**WebView2 桌面不注入 Electron 桥 `window.icode`**，点击完全无反应（fallback `window.open('file:///')` 也被 WebView2 安全策略拦截）。
+- **Git 分支 pill**（无仓库时显示 `-`）：点击复制分支名但**无任何反馈**，看起来"打不开"。
+
+### ✅ 修复
+- **CWD pill → 复用工作区切换器**：状态栏的目录显示替换为 `<WorkspaceSwitcher compact />`（组件新增 `compact` 低调样式变体），点击弹出同一套菜单：**切换工作区 / 更换本地目录（WebView2 原生目录对话框）/ 新建工作区**——点击必有所应。
+- **Git 分支 pill 加反馈**：复制成功显示「已复制 ✓」2 秒后恢复；无 Git 仓库时 title 提示「当前目录无 Git 仓库」。
+- 顺带清理：删除不再使用的 `shortDir`、未使用的 `Folder` import（tsc 全绿验证）。
+
+### 🧪 交付
+- tsc --noEmit 0 错误 + 前端构建通过 + 重嵌 dist + 四份二进制重编（PE 3/3/2/2），版本号 0.37.13。
+
+## v0.37.12 — 修复桌面版渲染崩溃：TDZ 变量初始化顺序（2026-08-13）
+
+> 用户反馈桌面版打开即报"界面渲染出错 / Cannot access 'R' before initialization"。产物 hash 定位为 v0.37.11。
+
+### 🐛 根因
+`runCompactNow`（新增的 /compact 快捷执行）的 useCallback **依赖数组引用了声明在它之后的 const**：
+- `const currentModel = models.find(...)`（第 593 行）与 `const mode = ...`（第 601 行）都声明在 runCompactNow（第 510 行）**之后**。
+- 渲染时 useCallback 先执行、依赖数组立即求值 → 访问未初始化的 const → **TDZ ReferenceError**（压缩后即 "Cannot access 'R' before initialization"），应用整体崩溃。
+
+### ✅ 修复
+- `currentModel / ctxWindow / ctxWindowLabel / mode` 声明块**上移**到 runCompactNow 之前（附注释说明顺序约束）。
+- **顺带修复 tsc 揪出的 2 个预存类型/运行时问题**（此前 `npm run build` 只跑 vite、不做类型检查，一直漏检）：
+  - ChatPage 引用了未声明的 `securityLevel / setSecurityLevel`（/api/slash 返回 security 时才会触发）→ 补 store selector。
+  - ModelsPage 用了 `Model.custom` 但接口无此字段 → `Model` 接口补 `custom?: boolean`。
+
+### 🧪 验证
+- `tsc --noEmit` 全绿（0 错误）；产物确认 currentModel 声明已排在依赖数组之前。
+- 重嵌 dist + 四份二进制重编（PE 3/3/2/2），版本号 0.37.12。
+- ⚠️ 教训：vite build 不做类型检查，TDZ/类型错误漏检——**前端改动后应加跑 `tsc --noEmit`**。
+
+## v0.37.11 — 桌面组件交互化第二轮：Tab 右键菜单 + Token 明细 + 上下文一键压缩（2026-08-13）
+
+> 用户"继续优化完成"——把工作文件夹切换之外的剩余关键组件也做成"点击可操作"。
+
+### ✨ 会话标签右键菜单（TabBar）
+- 多会话标签**右键**弹出菜单：✏ 重命名（prompt 输入新标题）、🔗 复制会话 ID、📄 导出 JSON（复用导出逻辑，抽成 `exportSessionJson(id)`）、× 关闭标签；点外部关闭。
+
+### ✨ TokenBar 可点击展开明细
+- 底部 Token 状态条整体可点击：弹出 popover 显示输入/输出/缓存命中/节省/费用明细（tabular 数字对齐）+ 两个快捷按钮：
+  - **运行 /compact**：直接调后端 `/api/slash`（不碰输入框，用户正在打的草稿不受影响）→ 完成追加一条 system 消息反馈 + 刷新会话
+  - **复制统计**：明细以文本复制到剪贴板
+- 点外部 / Esc 关闭。
+
+### ✨ 上下文窗口卡片点击压缩
+- 右侧「上下文窗口」圆环卡片加 hover 高亮 + 点击直接执行 /compact（title 提示"点击压缩上下文"）——上下文管理从"只能看"变成"一键操作"。
+- 执行逻辑统一走 `runCompactNow` + `icode:compact-session` 自定义事件（TokenBar 与圆环共用一处）。
+
+### 🧪 交付
+- i18n 三语补：tab.ctxHint/copyId/close、token.barClickHint/detailTitle/compactNow/copyStats、chat.ctxClickCompact。
+- 前端构建通过（TS 干净，36.6s）、重嵌 dist、四份二进制重编（PE 3/3/2/2），版本号 0.37.11。
+
+## v0.37.10 — 工作文件夹可点击切换（聊天工具栏交互组件）（2026-08-13）
+
+> 用户"桌面版的对话框上的组件，点击可以进行相应操作，如点开工作文件夹可以进行选择切换"——把聊天页顶部原本只能"在资源管理器中打开"的文件夹按钮，升级为可交互的**工作文件夹切换器**。
+
+### ✨ WorkspaceSwitcher 组件
+- 聊天工具栏新增「工作文件夹」pill：显示当前工作区名 / 绑定目录 basename，**点击弹出 popover**：
+  - **工作区列表**：所有工作区点选即切换（当前打勾），显示名称 + 路径
+  - **更换本地目录**：调原生文件夹对话框（`window.pickDirectory`，WebView2 桥）把选中目录绑定到当前工作区；无工作区时自动新建
+  - **新建工作区**：选择目录后自动命名创建
+  - **在资源管理器中打开**：沿用原 `openFolder` 能力
+- 无工作区时 pill 为"打开文件夹"样式；点外部 / Esc 关闭；纯浏览器环境（dev）降级为路径输入 prompt。
+- i18n 三语补 `workspace.openInExplorer`。
+
+### 🧪 交付
+- 前端构建通过（TS 干净，产物含新组件与键）、重嵌 dist、四份二进制重编（PE 3/3/2/2），版本号 0.37.10。
+
+## v0.37.9 — 桌面界面打磨：会话时间分组 + 消息模型标签 + 欢迎卡片（2026-08-13）
+
+> 用户"在界面上帮我优化达到对标对象的水平"。设计系统已是 Apple flat（无阴影/发丝边框），本轮聚焦三处高感知度视觉升级（对标 Claude Code / WorkBuddy 的会话管理与消息头部）。
+
+### ✨ 侧边栏会话按时间分组（Claude Code 式时间线）
+- 会话列表从平铺改为**今天 / 昨天 / 近 7 天 / 更早**四段分组，组头小字 uppercase 标签；折叠模式保持纯图标列表不受影响。
+- 前端 Session 补 `updatedAt`（后端 `updated_at` 透传），分组优先用更新时间、回退创建时间——最近动过的会话排最前。
+
+### ✨ 模型消息头部标签行（Claude Code "Claude" 式）
+- 每条模型消息气泡顶部新增**模型名 + 时间**小字标签行（如「DeepSeek V4 Pro · 14:05」），模型名跟随当前选中模型（selector 取 name 字符串，不破坏 MessageList 的 memo 优化）；thinking/工具消息不显示。
+
+### ✨ Welcome 快捷操作升级为卡片网格（Reasonix/WorkBuddy 式）
+- 4 个胶囊按钮改为 **2×2 卡片**（图标 + 标题 + 一行描述 + hover 提亮），桌面更精致、可点击区域更大；i18n 三语补描述键。
+
+### 🎨 微调
+- 发送按钮由直角小方块改为**渐变胶囊**（radius 999），与 composer 聚焦光环呼应。
+
+### 🧪 交付
+- 前端构建通过（TS 干净）、重嵌 dist、四份二进制重编（PE 3/3/2/2），版本号 0.37.9。
+
+## v0.37.8 — 对标收尾：错误友好化 + 长会话压缩提示 + 桌面深度思考开关（2026-08-12）
+
+> 用户"还有什么可以提升的，继续帮我做，比照对标项目"。差距扫描确认命令层（60+ 斜杠命令、自定义命令、/statusline、Analytics/TokenBar 等）已覆盖 Claude Code/OpenCode 主功能，真缺口收敛为三项体验项。
+
+### ✨ 模型错误友好化（friendlyModelError）
+- 新增 `internal/core/conversation/errors.go`：把裸错误（"HTTP 401"、"insufficient_quota"、超时、连接拒绝、模型不存在、上下文超窗等）映射为**清晰中文提示 + 修复建议**（如 401→`icode auth set <provider> <key>`、429→限流稍后重试、超时→检查网络/代理、模型不存在→`/model` 查看可用列表），并在末尾附截断的原始错误便于排查。
+- 挂到全部 4 个错误出口：Send 兜底模型链错误、continueAgentLoop/recoverTruncation/repairBrokenToolCalls 的 EventError。
+
+### ✨ 长会话自动压缩提示（token 护栏）
+- `Engine.longSessionHint`：会话 user+assistant 消息 ≥ 40 条、且未启用 /budget 或 --lite 时，向 UI 推送一条一次性 EventSystem 提示"运行 /compact 或 /resume --compact 省 token"——**每会话仅一次**，不打扰；有预算/轻量恢复的会话自动跳过。
+
+### ✨ 桌面「深度思考」开关（extended thinking UI 收尾）
+- 后端 `/api/config` PUT 补 `defaults.thinking_tokens` 透传 + 即时 `engine.SetThinking`（重启/斜杠命令之外的新入口）。
+- 桌面「桌面设置」页新增「深度思考」区块：Toggle 开关（开启默认预算 4096）+ 预算数字输入（≥1024，后端自动钳制到输出上限一半）；appStore 新增 `thinkingTokens/setThinkingTokens`，启动时从配置加载。
+- i18n zh-CN/zh-TW/en 补齐。
+
+### 🧪 测试与交付
+- 新增 `errors_test.go`：friendlyModelError 14 分类子用例 + longSessionHint（短会话不提示 / 长会话提示一次不重复 / 有预算不提示）。
+- 全量 internal+cmd 测试绿；前端构建 + 重嵌 dist + 四份二进制重编（PE 3/3/2/2），版本号 0.37.8。
+
+## v0.37.7 — 坏 JSON 全自动修复 + Anthropic extended thinking + 桌面自定义提供商（2026-08-12）
+
+> 用户"按你的建议执行"——落地 v0.37.6 结尾列出的三个可选项。
+
+### ✨ tool-JSON 自动修复放宽（带防循环）
+- `repairBrokenToolCalls` 触发条件从"仅 finish_reason=length"放宽为**任何坏参数 JSON 都自动修**（含模型 bug 产生的 finish_reason=stop 非法参数）：截断时仍升级 max_tokens（8K→64K），非截断保持当前预算、走"请重新输出完整参数"提示。
+- **防循环预算**：每会话每轮 `maxToolRepairsPerTurn=2`（Send 时清零），模型反复吐坏 JSON 时预算耗尽即放行给工具正常报错，杜绝无限重试。
+
+### ✨ Anthropic extended thinking 开关
+- `types.ChatRequest` 新增 `Thinking`；anthropic provider 请求体输出 `thinking: {type: enabled, budget_tokens}`；**开启时自动抑制 temperature**（Anthropic 要求默认 1，否则 400）；预算钳制到 max_tokens/2（≥1024）兜底。
+- 引擎 `SetThinking/ThinkingBudget` 并注入全部 4 个 ChatStream 调用点；config `defaults.thinking_tokens`；**`/thinking` 斜杠命令**（CLI + 桌面，`/thinking on|off|<tokens>`，持久化）。
+- EventThinking 流转早已存在（TUI/桌面都渲染思考块），复用即可。
+
+### ✨ 桌面端自定义提供商 UI
+- 后端 `PUT/DELETE /api/config/provider` 早已支持（新厂商自动注册 OpenAI 兼容），缺口全在前端：ModelsPage 新增「＋ 新增提供商」弹窗（名称/Base URL/API Key/超时）→ `appStore.saveProvider`；自定义厂商头部新增🗑删除（确认弹窗 + `deleteProvider`，连带删除其下自定义模型）。
+- i18n zh-CN/zh-TW/en 补齐。
+
+### 🧪 测试与交付
+- 新增：`TestRepairBrokenToolCalls_NonTruncated_RepairsToo`、`TestRepairBrokenToolCalls_BudgetExhausted`、`TestEngine_SetThinking`、`TestBuildMessagesBody_Thinking/ThinkingClampsBudget/NoThinkingPreservesTemperature`。全量 internal+cmd 测试绿。
+- 前端构建 + 重嵌 dist + 四份二进制重编（PE 3/3/2/2），版本号 0.37.7。
+
+## v0.37.6 — tool-JSON 自动重发 + 大文件分块读取 + few-shot 工作流示例（2026-08-12）
+
+> 用户"继续"——落地 v0.37.5 清单剩余的高价值候补。多级 CLAUDE.md 经核查已实现（ICODE.md/CLAUDE.md/AGENTS.md 自 CWD 向上 5 级 + @import 展开），本轮补上另外三刀。
+
+### ✨ tool-JSON 自动重发（Claude Code parity）
+- 新增 `Engine.repairBrokenToolCalls`（engine.go）：当模型回合被 `max_tokens` 截断（finish_reason=length）且某个 tool call 的参数 JSON 不完整时，不再执行坏调用（那只会得到 "invalid args" 并让模型从头重来），而是**自动升级输出预算并发起补齐请求**——以 user 消息回放已生成的部分参数开头，让模型只重发该调用的完整参数，随后正常执行并续跑 agent loop。
+- 兼容所有提供商：修复提示走 user 消息而非孤儿 assistant tool_use（避免 Anthropic 原生格式的 tool_result 缺失问题）。最多 3 次升级尝试（8K→16K→32K→64K），流错误立即降级；非截断的坏 JSON 不自动修复（那是模型 bug，交给工具报错反馈）。
+- 抽出可测的 `brokenToolCallIndex` 帮助函数。
+
+### ✨ 大文件分块读取（Claude Code parity）
+- `read_file` 新增 `offset`（1 起行号）与 `limit`（最大行数）参数：按行窗口返回，头部报告文件总行数与当前范围，并在还有后续时提示"继续读取请用 offset=N"；`offset` 越界自动钳制到末尾。不传参数时保持原全量读取（向后兼容）。
+- 工具描述同步更新，让模型知道大文件可以分段读。
+
+### ✨ few-shot 工作流示例
+- 系统提示 WORKFLOW 之后新增 `# WORKED EXAMPLE`：一行"修复 src/main.go 并发 bug"的 Good flow / Bad flow 对照（读→改→测→汇报 vs 重写整个文件/不验证），静态内容不破坏缓存前缀。
+- 多级 CLAUDE.md 核查：`context.LoadProjectContext` 已实现（用户级 ~/.icode/CLAUDE.md + 项目级自 CWD 向上 maxParentLevels=5 逐级读 ICODE.md/CLAUDE.md/AGENTS.md + @import 3 层展开/循环检测），无需新做。
+
+### 🧪 测试与交付
+- 新增 `tool_repair_test.go`（brokenToolCallIndex 4 子用例 + 修复执行集成测试 + 全合法不触发 + 流错误降级）、`TestReadFileTool_Chunked`（窗口/尾部/全量/越界 4 场景）。全量 internal+cmd 测试绿。
+- 四份二进制重编（icode.exe / bin/icode-cli.exe = CLI 控制台；icode-cli.exe = 简易 UI；icode-desktop.exe = 桌面），PE 子系统验证 3/3/2/2。版本号 0.37.6。
+
+## v0.37.5 — 借鉴 Claude Code 的智能提升：语义摘要压缩 + 测试命令自动发现（2026-08-11）
+
+> 用户两次询问"智能程度提升上还能借鉴 Claude Code 什么"。对标后确认 iCode 已具备并行工具调用/后台 bash/自动压缩/工具输出截断（BudgetEnforcer 头尾保留早已实现），本轮落地三刀中最有价值的：**模型生成语义摘要**（resume compaction）与**测试命令自动发现**。
+
+### ✨ 模型语义摘要（Claude Code /compact 与 /resume --compact parity）
+- 新增 `Engine.SummarizeConversation`（internal/core/conversation/summarize.go）：把会话旧轮次（保留最近 4 条）交给配置模型，产出结构化摘要（目标/已完成/关键决策/文件改动/待办/下一步建议），90s 超时、输出上限 6000 字；摘要输入走**头尾保留 + 中间省略**（与 BudgetEnforcer 同思路，60K runes 封顶）。
+- **`/compact [指令]` 升级**（TUI + 桌面 slashui）：不再是 80 字逐行 dump，而是异步调用模型生成语义摘要，保留系统消息 + 最近 4 轮；模型不可用时自动降级为原本地摘要。摘要写入会话元数据（`summary_semantic` 标记）。
+- **`/resume <id> --compact[=<n>]` 新增**（CLI + 桌面）：无缓存语义摘要时先用模型生成并缓存，随后以「语义摘要 + 最近 n 条」送入模型（引擎 Send 路径原有 LiteN 机制生效）——续聊省 token 且上下文不丢，正是 Claude Code 的 resume compaction。已有语义摘要则直接复用，零额外模型调用。
+- `sessionum` 新增 `SemanticKey/IsSemantic/MarkSemantic`，区分本地统计摘要与模型语义摘要。
+- 单测：`summarize_test.go`（4 个引擎用例 + 头尾保留）、`TestSemantic_MarkAndIs`。
+
+### ✨ 测试命令自动发现（Claude Code parity）
+- 新增 `context.DetectTestCommand()`（internal/core/context）：按 go.mod→`go test ./...`、package.json（yarn.lock→`yarn test` / pnpm-lock→`pnpm test` / 默认 `npm test`）、pyproject/pytest.ini/setup.py→`pytest`、Cargo.toml→`cargo test`、Makefile→`make test`、justfile→`just test` 自动探测。
+- 探测结果并入 `LoadProjectAnalysis` 的 `Test:` 行，随项目分析注入系统提示——模型一开局就知道"这个项目怎么跑测试"，验证环节不再瞎猜。
+- 单测：`TestDetectTestCommand`（10 子用例）+ `TestLoadProjectAnalysis_IncludesTestCommand`。
+
+### 📌 说明
+- 此前对标清单中的"长输出头尾保留"经核查**早已存在**（tokenopt/budget.go Enforce：70% head + tail + `[... N chars truncated ...]`，engine.go:800 已接入），无需新做。
+- 待办（未做）：tool-JSON 自动重发、多级 CLAUDE.md（已有 ICODE.md 多级）、大文件分块读取、few-shot 工作流示例。
+
+## v0.37.4 — CLI Markdown 渲染修复（对话界面支持 Markdown）（2026-08-11）
+
+> 用户反馈 CLI 对话界面 Markdown 不支持。排查发现两类根因：line mode（非 TTY，如 IDE 终端/管道）assistant 消息完全不走 Markdown 渲染；行内代码反引号泄漏。
+
+### 🐞 修复
+- **line mode 全面渲染 Markdown**（stream.go printAssistant）：非 TTY 环境（IDE 内置终端、重定向、脚本）下，assistant 消息由纯文本改为走 `renderMarkdown`——标题/粗斜体/行内代码/围栏代码块/列表/表格/引用全部生效。此前只有 raw mode（真终端）渲染。
+- **行内标记剥离**（markdown.go）：`color=false`（无 ANSI 终端）时新增 `stripInlineMarkup`——剥离 `` `code` ``、`**粗体**`、`*斜体*`、`_斜体_`、`~~删除~~` 标记但保留内容，反引号/星号不再泄漏进对话。
+- **简易 UI 历史消息 Markdown**（simpleui_windows.go）：`uiAppend` 的 useMd 判断补上 assistant——历史会话回放的 assistant 消息从纯文本改为 Markdown 渲染（与流式一致）。
+- **桌面版核查**：Markdown.tsx 为完整解析器且 ChatPage 始终使用，无同类问题。
+- 新增回归测试 `markdown_inline_test.go`（两颜色模式反引号不泄漏 + line mode assistant 渲染）；全量 35 包测试绿；四份二进制按正确标签重编（icode.exe=CLI 控制台 / icode-cli.exe=简易UI GUI / icode-desktop.exe=桌面 GUI / bin/icode-cli.exe=CLI）。
+
+## v0.37.3 — 系统提示词重写：对齐 Claude Code 级编码工作流（2026-08-11）
+
+> 用户反馈"没有 Claude Code 智能好用"。归因：模型层（默认 deepseek-v4-flash vs Sonnet 5，占 60%+）+ 系统提示词层（默认 prompt 仅 15 行且是早期磁盘清理场景写的）+ 工作流层。本轮完成提示词整改。
+
+### ✨ 默认 system prompt 重写（engine.go buildSystemPrompt）
+- 旧版：通篇 disk_usage/disk_cleanup（早期磁盘清理需求残留），"NEVER refuse" 式粗暴引导。
+- 新版（对齐 Claude Code 工作流，保持缓存稳定/中文友好）：
+  1. **WORKFLOW**：探索→todo_write 计划→最小改动执行→验证（跑测试/lint）→**迭代修复**（失败读全错误、改根因、重跑，最多 3 次，同命令不重复）→简洁汇报
+  2. **TOOL RULES**：坚持用工具、bash/cwd、task 子代理并行、换方案而非放弃
+  3. **CODE QUALITY**：匹配项目风格、改动聚焦、修 bug 保兼容
+  4. **SAFETY**：破坏性命令需用户批准、报真实结果
+- 自动修复循环/todo 的"工程部分"已存在（todo_write 工具 + TodoCounts 渲染 + doom-loop 防死循环），本轮补上**工作流引导**——让模型按"改→测→修"闭环干活。
+- 验证：conversation/tool/todo 测试全绿，四份二进制重编。
+
+### 📌 用户侧提醒
+- 最大杠杆在模型：`icode /model claude-sonnet-5` 或 `deepseek-v4-pro` 后对比体验。
+- 后续立项：P1 JSON mode（openai_compat response_format）、P2 桌面自定义 provider UI、P3 Anthropic extended thinking 开关、D5 知识库。
+
+## v0.37.2 — Agnes 独立厂商拆分 + SenseNova 模型修正（2026-08-11）
+
+> 用户纠正：**Agnes AI 与 SenseNova（商汤）是两家独立厂商**。iCode 之前把 `agnes-chat/agnes-fast` 误放在 SenseNova 厂商下。
+
+### 🐞 Agnes / SenseNova 厂商拆分
+- **根因**：`sensenova.go` 混入了 Agnes 模型（`agnes-chat`/`agnes-fast`），且包注释把两者写成一家。实际：Agnes AI（agnes-ai.com，全球 Top 10 AI 实验室，免费多模态 API）与商汤 SenseNova（sensenova.cn）是两家独立厂商。
+- **修复**：① 新建独立 provider `internal/llm/provider/agnes/agnes.go`（ProviderName="agnes"，DefaultBase=`https://api.agnes-ai.com/v1`，OpenAI 兼容），模型：`agnes-2.5-flash`（主力，代码/推理/agentic）、`agnes-2.0-flash`、`agnes-large`（8k）；② `sensenova.go` 移除 agnes 两模型，保留商汤真实模型并补 `sensenova-6.7-flash-lite`（公测入口常用）；③ `app.go registerProviders` 注册 agnes；④ 桌面 SettingsPage provider 颜色表补 sensenova/agnes。
+- 验证：`go build ./...`、provider 全量测试绿、前端 build 通过重嵌、四份二进制重编 0.37.1（版本号沿用）。
+
+## v0.37.1 — Anthropic 模型列表按官网全面修正（2026-08-11）
+
+> 用户反馈 Anthropic 模型名过时；已核对 Anthropic 官方 Models overview（2026-06 更新）与 OpenRouter 页面，替换为最新一代模型。
+
+### 🐞 Anthropic 模型列表修正
+- **根因**：`DefaultModels` 仍为 `claude-sonnet-4-20250514` / `claude-haiku-4-20250514`（Claude 4 代），而官网当前为 **Fable 5 / Opus 5 / Sonnet 5 / Haiku 4.5**（4.6 代起 ID 无日期后缀）。
+- **修复**（anthropic.go）：新增 4 个最新模型——`claude-fable-5`（1M ctx/128k out/$10-$50）、`claude-opus-5`（1M/$5-$25）、`claude-sonnet-5`（1M/$3-$15）、`claude-haiku-4-5-20251001`（200k/64k/$1-$5，官方 API ID 带日期）；全部 SupportsVision，缓存读取价 = 输入价×10%。
+- **联动更新**：`openrouter.go` `anthropic/claude-sonnet-4` → `anthropic/claude-sonnet-5`（1M ctx/128k out，slug 已核对 OpenRouter 页面）；`cmd/commands.go` 默认模型推荐表同步（含 opus-5/haiku-4-5）。
+- 测试断言同步（anthropic/openrouter/router test）；四份二进制重编 0.37.1。
+
+## v0.37.0 — 定时任务/自动化 + CLI 上下文条 + 简易 UI 消息重发（2026-08-11）
+
+> 第三十三批：对标 workbuddy 的定时任务（automations）落地——Go 调度核心 + SQLite 持久化 + REST API + 桌面设置页 UI；CLI 输入区上下文条上移（claude code 风格）；简易 UI 消息悬停重发；启动卡死防线加固（Bootstrap 看门狗/panic 兜底/entering 日志）。
+
+### ✨ 定时任务/自动化（对标 workbuddy，D1）
+- 新增 `internal/scheduler` 包：`every:30m`（间隔）与 `daily:09:00`（每天定点）两种调度格式（零依赖正则解析）；后台 20s tick 检查到期任务；每个任务在**独立新会话**中通过引擎执行（不污染用户对话），输出截断 4000 字符存入历史。
+- SQLite 持久化：`automations` / `automation_runs` 两表 + `db.Store` CRUD（LoadAutomations/SaveAutomation/DeleteAutomation/AppendAutomationRun/ListAutomationRuns）。
+- 挂载：`app.Bootstrap` 在有 SQLite 时创建并启动 `Scheduler`；server 新增 `/api/automations`（GET 列表 / POST 创建）、`/api/automations/{id}`（GET/PUT/DELETE）、`/api/automations/{id}/run`（立即执行）、`/api/automations/{id}/history`（执行历史）。
+- 桌面设置页新增「定时任务」页（PageAutomations）：任务列表（启用开关/立即运行/展开历史/删除）+ 新建表单；三语 i18n。
+- 单测 `TestNextRunAfter`（含 daily 越界校验）/`TestDescribeSchedule`/`TestSchedulerCRUD` 全绿。
+
+### 🐞 CLI 启动卡死防线再加固（simpleui 08-08 三次卡在 Bootstrap 前）
+- `app.Bootstrap()` 开头加 `bootstrap: entering (config.Load)` 日志——此前三次简易版启动卡在 `console hidden` 之后、连 `config loaded` 都没有，无法定位。
+- `runSimpleUI` 的 Bootstrap 包 panic recover（弹错误框而非静默死）+ 20s 看门狗（打 WARNING 日志）。
+
+### ✨ CLI 上下文条上移输入区（对标 claude code，C3）
+- `drawInputBox` 提示行右侧新增 `context: NN% ▓▓░░` 实时条（复用 contextBar），输入时即可看到上下文窗口占用。
+
+### ✨ 简易 UI 消息重发（对标 opencode，S3）
+- 用户消息悬停显示「↻ 重发」按钮，点击回填输入框；消息块统一悬停显示复制/重发按钮（opacity 过渡）。
+
+### ✅ 差距清单复核（2026-08-11 全量核对）
+- 已存在无需实现：C1 彩色 diff（colorizeDiff）、C5 代码块语法高亮（chroma）、C2 工具输出折叠（/expand）、D2 MCP 测试 UI（doTest + /api/mcp/test）、D4 权限审批 UI（ChatPage pendingPermission modal）、D6 图片粘贴（ChatPage 已支持）、D8 快捷键查看页、S2 会话搜索（datalist 原生搜索）。
+- 验证：`go test ./internal/scheduler/... ./internal/db/... ./internal/server/... ./internal/tui/` 全绿；`vite build` 通过并重嵌；四份二进制重编。
+
 ## v0.36.0 — 一键自动更新模型：新增检测 + 下架标记 + 文档富化（2026-08-02）
 
 > 第三十二批：实现一键自动更新模型功能——点击刷新按钮后，自动从各 provider API + 官网文档获取最新模型列表，对比内置列表，新增新模型、标记下架模型，并持久化到磁盘缓存。
