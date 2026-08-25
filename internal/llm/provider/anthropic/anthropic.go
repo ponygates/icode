@@ -417,6 +417,30 @@ func (p *Provider) buildMessagesBody(req types.ChatRequest, stream bool) (io.Rea
 		body["temperature"] = req.Temperature
 	}
 
+	// Extended thinking (Claude Messages API "thinking" block). When enabled,
+	// Anthropic requires temperature to stay at its default (1) — suppress any
+	// configured temperature so the API never rejects the call. budget_tokens
+	// must be < max_tokens; clamp it to max_tokens/2 (>= 1024) as a safety net
+	// so a misconfigured budget can never 400 the request.
+	if req.Thinking != nil && req.Thinking.BudgetTokens > 0 {
+		budget := req.Thinking.BudgetTokens
+		maxTok := req.MaxTokens
+		if maxTok <= 0 {
+			maxTok = 8192
+		}
+		if budget >= maxTok {
+			budget = maxTok / 2
+		}
+		if budget < 1024 {
+			budget = 1024
+		}
+		body["thinking"] = map[string]any{
+			"type":          "enabled",
+			"budget_tokens": budget,
+		}
+		delete(body, "temperature")
+	}
+
 	// Tool definitions in Anthropic format
 	if len(req.Tools) > 0 {
 		var tools []map[string]any
@@ -563,19 +587,19 @@ type anthropicUsage struct {
 func DefaultModels() []types.ModelInfo {
 	return []types.ModelInfo{
 		{
-			ID:              "claude-sonnet-4-20250514",
-			Name:            "Claude Sonnet 4",
-			Description:     "Anthropic latest coding model, excellent at code generation and reasoning",
+			ID:              "claude-fable-5",
+			Name:            "Claude Fable 5",
+			Description:     "Anthropic 最强模型，为长时运行 agent 提供下一代智能（2026-06 GA，1M 上下文）",
 			Provider:        ProviderName,
-			ContextWindow:   200000,
-			MaxOutputTokens: 16384,
+			ContextWindow:   1000000,
+			MaxOutputTokens: 128000,
 			Plans: []types.TokenPlan{
 				{
 					Name:        "coding-plan",
 					Description: "Standard coding plan with prompt caching",
-					InputPrice:  3.0,
-					OutputPrice: 15.0,
-					CachePrice:  0.30,
+					InputPrice:  10.0,
+					OutputPrice: 50.0,
+					CachePrice:  1.0,
 				},
 			},
 			Capabilities: types.ModelCap{
@@ -587,26 +611,75 @@ func DefaultModels() []types.ModelInfo {
 			UpdatedAt:      time.Now(),
 		},
 		{
-			ID:              "claude-haiku-4-20250514",
-			Name:            "Claude Haiku 4",
-			Description:     "Fast and cost-effective Claude model",
+			ID:              "claude-opus-5",
+			Name:            "Claude Opus 5",
+			Description:     "复杂 agentic 编码与企业级工作负载的首选（1M 上下文）",
+			Provider:        ProviderName,
+			ContextWindow:   1000000,
+			MaxOutputTokens: 128000,
+			Plans: []types.TokenPlan{
+				{
+					Name:        "coding-plan",
+					Description: "Standard coding plan with prompt caching",
+					InputPrice:  5.0,
+					OutputPrice: 25.0,
+					CachePrice:  0.5,
+				},
+			},
+			Capabilities: types.ModelCap{
+				Tools:     true,
+				Streaming: true,
+				JSONMode:  false,
+			},
+			SupportsVision: true,
+			UpdatedAt:      time.Now(),
+		},
+		{
+			ID:              "claude-sonnet-5",
+			Name:            "Claude Sonnet 5",
+			Description:     "速度与智能的最佳平衡，日常编码主力（1M 上下文，训练截止 2026-01）",
+			Provider:        ProviderName,
+			ContextWindow:   1000000,
+			MaxOutputTokens: 128000,
+			Plans: []types.TokenPlan{
+				{
+					Name:        "coding-plan",
+					Description: "Standard coding plan with prompt caching",
+					InputPrice:  3.0,
+					OutputPrice: 15.0,
+					CachePrice:  0.3,
+				},
+			},
+			Capabilities: types.ModelCap{
+				Tools:     true,
+				Streaming: true,
+				JSONMode:  false,
+			},
+			SupportsVision: true,
+			UpdatedAt:      time.Now(),
+		},
+		{
+			ID:              "claude-haiku-4-5-20251001",
+			Name:            "Claude Haiku 4.5",
+			Description:     "最快、近前沿智能，成本最优（200k 上下文，训练截止 2025-02）",
 			Provider:        ProviderName,
 			ContextWindow:   200000,
-			MaxOutputTokens: 8192,
+			MaxOutputTokens: 64000,
 			Plans: []types.TokenPlan{
 				{
 					Name:        "token-plan",
 					Description: "Cost-optimized plan",
-					InputPrice:  0.80,
-					OutputPrice: 4.0,
-					CachePrice:  0.08,
+					InputPrice:  1.0,
+					OutputPrice: 5.0,
+					CachePrice:  0.1,
 				},
 			},
 			Capabilities: types.ModelCap{
 				Tools:     true,
 				Streaming: true,
 			},
-			UpdatedAt: time.Now(),
+			SupportsVision: true,
+			UpdatedAt:      time.Now(),
 		},
 	}
 }

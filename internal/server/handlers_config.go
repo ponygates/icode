@@ -58,6 +58,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			s.cfg.Defaults.Cache = cfg.Defaults.Cache
 			s.cfg.Defaults.SystemPrompt = cfg.Defaults.SystemPrompt
 			s.cfg.Defaults.FallbackModels = cfg.Defaults.FallbackModels
+			s.cfg.Defaults.ThinkingTokens = cfg.Defaults.ThinkingTokens
 			s.cfg.TUI.Theme = cfg.TUI.Theme
 			s.cfg.TUI.DiffMode = cfg.TUI.DiffMode
 			s.cfg.TUI.SyntaxHL = cfg.TUI.SyntaxHL
@@ -88,6 +89,13 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		s.engine.SetGenerationParams(cfg.Defaults.Temperature, cfg.Defaults.MaxTokens)
 		s.engine.SetSystemPrompt(cfg.Defaults.SystemPrompt)
 		s.engine.SetFallbackModels(cfg.Defaults.FallbackModels)
+		// Push the extended-thinking toggle into the live engine so the
+		// desktop "深度思考" setting takes effect without a restart.
+		if cfg.Defaults.ThinkingTokens > 0 {
+			s.engine.SetThinking(cfg.Defaults.ThinkingTokens)
+		} else {
+			s.engine.SetThinking(0)
+		}
 		// Push tool sandbox settings into the live permission gate so the
 		// desktop "工具与权限" settings take effect without a restart.
 		if s.gate != nil {

@@ -346,6 +346,13 @@ var knownFetchers = map[string]*modelFetcher{
 			return fetchOpenAICompatModels(ctx, "https://api.scnet.cn/v1/models", "scnet")
 		},
 	},
+	"sensenova": {
+		name:   "sensenova",
+		docURL: "",
+		fetch: func(ctx context.Context, cacheDir string) ([]types.ModelInfo, error) {
+			return fetchOpenAICompatModels(ctx, "https://api.sensenova.cn/v1/models", "sensenova")
+		},
+	},
 }
 
 // fetchOpenRouterModels fetches the model list from OpenRouter's API.
@@ -474,10 +481,10 @@ func fetchAnthropicModels(ctx context.Context) ([]types.ModelInfo, error) {
 
 	var result struct {
 		Data []struct {
-			ID         string `json:"id"`
-			Type       string `json:"type"`
-			Display    string `json:"display_name"`
-			CreatedAt  string `json:"created_at"`
+			ID        string `json:"id"`
+			Type      string `json:"type"`
+			Display   string `json:"display_name"`
+			CreatedAt string `json:"created_at"`
 		} `json:"data"`
 	}
 

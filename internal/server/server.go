@@ -29,6 +29,7 @@ import (
 	"github.com/ponygates/icode/internal/core/sessionum"
 	"github.com/ponygates/icode/internal/db"
 	"github.com/ponygates/icode/internal/mcp"
+	"github.com/ponygates/icode/internal/scheduler"
 	"github.com/ponygates/icode/internal/types"
 	"github.com/ponygates/icode/internal/update"
 	"github.com/ponygates/icode/pkg/modelupdate"
@@ -43,6 +44,7 @@ type Server struct {
 	engine  *conversation.Engine
 	gate    *permission.Gate
 	updater *modelupdate.Service
+	sch     *scheduler.Scheduler
 	version string
 
 	mcpPool      *mcp.Pool
@@ -69,8 +71,10 @@ type ServerConfig struct {
 	Engine   *conversation.Engine
 	Gate     *permission.Gate
 	Updater  *modelupdate.Service
-	Version  string // app version
-	Port     int    // 0 = auto-assign
+	// Scheduler runs WorkBuddy-style scheduled automations (nil = disabled).
+	Scheduler *scheduler.Scheduler
+	Version   string // app version
+	Port      int    // 0 = auto-assign
 }
 
 // New creates a new API server.
@@ -90,6 +94,7 @@ func New(cfg ServerConfig) *Server {
 		engine:   cfg.Engine,
 		gate:     cfg.Gate,
 		updater:  cfg.Updater,
+		sch:      cfg.Scheduler,
 		version:  cfg.Version,
 		port:     cfg.Port,
 		apiToken: hex.EncodeToString(tokenBytes),
@@ -187,6 +192,10 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 	// Workspaces — desktop project containers that group sessions
 	mux.HandleFunc("/api/workspaces", s.handleWorkspaces)
 	mux.HandleFunc("/api/workspaces/", s.handleWorkspaceByID)
+
+	// Automations — WorkBuddy-style scheduled tasks
+	mux.HandleFunc("/api/automations", s.handleAutomations)
+	mux.HandleFunc("/api/automations/", s.handleAutomationByID)
 
 	// File tree
 	mux.HandleFunc("/api/files", s.handleFiles)
@@ -448,6 +457,20 @@ func (s *Server) refreshMCPTools() {
 func (s *Server) isProviderDisabled(name string) bool {
 	if pc, ok := s.cfg.Providers[name]; ok {
 		return pc.Disabled
+	}
+	return false
+}
+
+// isCustomModelID reports whether a model id is a registered user-defined
+// custom model (used to avoid double-listing them in /api/models).
+func (s *Server) isCustomModelID(id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, m := range s.cfg.Models {
+		if m.Custom && (m.ID == id || m.ModelID == id) {
+			return true
+		}
 	}
 	return false
 }

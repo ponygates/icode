@@ -49,10 +49,17 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		Custom     bool   `json:"custom"`
 	}
 	result := make([]modelDTO, 0, len(models)+len(s.cfg.Models))
+	seen := make(map[string]bool, len(models)+len(s.cfg.Models))
 	for _, m := range models {
 		if s.isProviderDisabled(m.Provider) {
 			continue
 		}
+		// Custom models are appended below (marked custom:true) so they are not
+		// listed twice — ListAllModels already includes registered custom models.
+		if m.Provider != "" && s.isCustomModelID(m.ID) {
+			continue
+		}
+		seen[m.ID] = true
 		plan := "Coding Plan"
 		free := false
 		if len(m.Plans) > 0 {
@@ -83,6 +90,9 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if s.isProviderDisabled(cm.Provider) {
+			continue
+		}
+		if seen[cm.ID] {
 			continue
 		}
 		result = append(result, modelDTO{

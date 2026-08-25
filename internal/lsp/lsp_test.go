@@ -357,3 +357,28 @@ func TestReadLSPMessage_WithCRLF(t *testing.T) {
 		t.Errorf("got %q, want %q", string(msg), "hello")
 	}
 }
+
+func TestParsePos(t *testing.T) {
+	cases := []struct {
+		in        string
+		file      string
+		line, col int
+	}{
+		{"main.go:12:5", "main.go", 12, 5},
+		{"main.go:12", "main.go", 12, 1},
+		{"C:\\code\\main.go:42:3", "C:\\code\\main.go", 42, 3},
+		{"/usr/src/main.go:7:9", "/usr/src/main.go", 7, 9},
+	}
+	for _, tc := range cases {
+		f, l, c, err := ParsePos(tc.in)
+		if err != nil {
+			t.Fatalf("ParsePos(%q) error: %v", tc.in, err)
+		}
+		if f != tc.file || l != tc.line || c != tc.col {
+			t.Fatalf("ParsePos(%q) = (%q,%d,%d), want (%q,%d,%d)", tc.in, f, l, c, tc.file, tc.line, tc.col)
+		}
+	}
+	if _, _, _, err := ParsePos("nocolon"); err == nil {
+		t.Fatal("expected error for missing colon")
+	}
+}

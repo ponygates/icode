@@ -2,6 +2,8 @@ package anthropic
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -61,11 +63,17 @@ func TestListModels(t *testing.T) {
 		}
 	}
 
-	if !modelIDs["claude-sonnet-4-20250514"] {
-		t.Error("expected claude-sonnet-4-20250514 in model list")
+	if !modelIDs["claude-fable-5"] {
+		t.Error("expected claude-fable-5 in model list")
 	}
-	if !modelIDs["claude-haiku-4-20250514"] {
-		t.Error("expected claude-haiku-4-20250514 in model list")
+	if !modelIDs["claude-opus-5"] {
+		t.Error("expected claude-opus-5 in model list")
+	}
+	if !modelIDs["claude-sonnet-5"] {
+		t.Error("expected claude-sonnet-5 in model list")
+	}
+	if !modelIDs["claude-haiku-4-5-20251001"] {
+		t.Error("expected claude-haiku-4-5-20251001 in model list")
 	}
 }
 
@@ -136,7 +144,7 @@ func TestChatStream_WithMockServer(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`event: message_start
-data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-20250514","stop_reason":null,"usage":{"input_tokens":10,"output_tokens":1}}}
+data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"claude-sonnet-5","stop_reason":null,"usage":{"input_tokens":10,"output_tokens":1}}}
 
 event: content_block_delta
 data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello from"}}
@@ -156,7 +164,7 @@ data: {"type":"message_stop"}
 
 	p := New("sk-ant-test", server.URL)
 	ch, err := p.ChatStream(context.Background(), types.ChatRequest{
-		Model: "claude-sonnet-4-20250514",
+		Model: "claude-sonnet-5",
 		Messages: []types.Message{
 			{Role: types.RoleUser, Content: "test"},
 		},
@@ -208,7 +216,7 @@ func TestChatStream_HTTPError(t *testing.T) {
 
 	p := New("bad-key", server.URL)
 	_, err := p.ChatStream(context.Background(), types.ChatRequest{
-		Model: "claude-sonnet-4-20250514",
+		Model: "claude-sonnet-5",
 		Messages: []types.Message{
 			{Role: types.RoleUser, Content: "hi"},
 		},
@@ -226,7 +234,7 @@ func TestChatStream_ToolCall(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`event: message_start
-data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-20250514","stop_reason":null,"usage":{"input_tokens":10,"output_tokens":1}}}
+data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"claude-sonnet-5","stop_reason":null,"usage":{"input_tokens":10,"output_tokens":1}}}
 
 event: content_block_start
 data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"read_file","input":{}}}
@@ -252,7 +260,7 @@ data: {"type":"message_stop"}
 
 	p := New("sk-test", server.URL)
 	ch, err := p.ChatStream(context.Background(), types.ChatRequest{
-		Model: "claude-sonnet-4-20250514",
+		Model: "claude-sonnet-5",
 		Messages: []types.Message{
 			{Role: types.RoleUser, Content: "read file"},
 		},
@@ -296,5 +304,87 @@ data: {"type":"message_stop"}
 
 	if !foundDone {
 		t.Error("expected done event")
+	}
+}
+
+// decodeBody unmarshals a buildMessagesBody reader for assertion.
+func decodeBody(t *testing.T, body io.Reader) map[string]any {
+	t.Helper()
+	data, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	return m
+}
+
+func TestBuildMessagesBody_Thinking(t *testing.T) {
+	p := New("sk-test", "")
+	body, err := p.buildMessagesBody(types.ChatRequest{
+		Model:       "claude-sonnet-5",
+		Messages:    []types.Message{{Role: types.RoleUser, Content: "hi"}},
+		MaxTokens:   8192,
+		Temperature: 0.7,
+		Thinking:    &types.ThinkingConfig{BudgetTokens: 4096},
+	}, false)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	m := decodeBody(t, body)
+	th, ok := m["thinking"].(map[string]any)
+	if !ok {
+		t.Fatalf("thinking block missing: %v", m["thinking"])
+	}
+	if th["type"] != "enabled" {
+		t.Fatalf("thinking type = %v, want enabled", th["type"])
+	}
+	if th["budget_tokens"] != float64(4096) {
+		t.Fatalf("budget_tokens = %v, want 4096", th["budget_tokens"])
+	}
+	// Extended thinking requires temperature=1 (default): any configured
+	// temperature must be suppressed or the API rejects the call.
+	if _, has := m["temperature"]; has {
+		t.Fatalf("temperature must be suppressed when thinking is enabled")
+	}
+}
+
+func TestBuildMessagesBody_ThinkingClampsBudget(t *testing.T) {
+	p := New("sk-test", "")
+	// budget == max_tokens would 400 the request → clamped to max_tokens/2.
+	body, err := p.buildMessagesBody(types.ChatRequest{
+		Model:     "claude-sonnet-5",
+		Messages:  []types.Message{{Role: types.RoleUser, Content: "hi"}},
+		MaxTokens: 4000,
+		Thinking:  &types.ThinkingConfig{BudgetTokens: 4000},
+	}, false)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	m := decodeBody(t, body)
+	th := m["thinking"].(map[string]any)
+	if th["budget_tokens"] != float64(2000) {
+		t.Fatalf("budget should clamp to max_tokens/2, got %v", th["budget_tokens"])
+	}
+}
+
+func TestBuildMessagesBody_NoThinkingPreservesTemperature(t *testing.T) {
+	p := New("sk-test", "")
+	body, err := p.buildMessagesBody(types.ChatRequest{
+		Model:       "claude-sonnet-5",
+		Messages:    []types.Message{{Role: types.RoleUser, Content: "hi"}},
+		Temperature: 0.5,
+	}, false)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	m := decodeBody(t, body)
+	if _, has := m["thinking"]; has {
+		t.Fatalf("thinking must be absent when not configured")
+	}
+	if m["temperature"] != float64(0.5) {
+		t.Fatalf("temperature should be preserved without thinking, got %v", m["temperature"])
 	}
 }

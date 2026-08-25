@@ -43,8 +43,8 @@ func TestDefaultModels(t *testing.T) {
 	if !ids["openrouter/free"] {
 		t.Error("expected openrouter/free in default models")
 	}
-	if !ids["anthropic/claude-sonnet-4"] {
-		t.Error("expected anthropic/claude-sonnet-4 in default models")
+	if !ids["anthropic/claude-sonnet-5"] {
+		t.Error("expected anthropic/claude-sonnet-5 in default models")
 	}
 }
 

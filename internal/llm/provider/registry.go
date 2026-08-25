@@ -163,7 +163,8 @@ func (r *Impl) List() []string {
 	return names
 }
 
-// ListAllModels returns every model across all providers.
+// ListAllModels returns every model across all providers, plus any registered
+// user-defined custom models (so they show up in the model picker / dropdown).
 func (r *Impl) ListAllModels() []types.ModelInfo {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -171,6 +172,9 @@ func (r *Impl) ListAllModels() []types.ModelInfo {
 	var all []types.ModelInfo
 	for _, p := range r.providers {
 		all = append(all, p.ListModels()...)
+	}
+	for _, m := range r.customModels {
+		all = append(all, m)
 	}
 	return all
 }

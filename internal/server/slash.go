@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 
+	"github.com/ponygates/icode/internal/config"
 	"github.com/ponygates/icode/internal/core/slashui"
 	"github.com/ponygates/icode/pkg/modelupdate"
 )
@@ -51,6 +53,34 @@ func (s *Server) handleSlash(w http.ResponseWriter, r *http.Request) {
 				return nil, errUpdaterUnavailable
 			}
 			return s.updater.UpdateAll(ctx)
+		},
+		RegisterCustomModel: func(provider, modelID, name string) string {
+			if name == "" {
+				name = modelID
+			}
+			m := config.ModelCfg{
+				Provider: provider,
+				ModelID:  modelID,
+				Name:     name,
+				Custom:   true,
+			}
+			m.ID = config.ModelKey(provider, modelID)
+			s.cfg.UpsertModel(m)
+			if err := s.cfg.Save(config.DefaultPath()); err != nil {
+				return err.Error()
+			}
+			s.registerCustomModel(m)
+			return ""
+		},
+		RemoveCustomModel: func(id string) string {
+			if !s.cfg.DeleteModel(id) {
+				return fmt.Sprintf("model %q not found", id)
+			}
+			s.reg.RemoveCustomModel(id)
+			if err := s.cfg.Save(config.DefaultPath()); err != nil {
+				return err.Error()
+			}
+			return ""
 		},
 	}
 	state := &slashui.State{

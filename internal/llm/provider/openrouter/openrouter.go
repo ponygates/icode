@@ -68,12 +68,12 @@ func DefaultModels() []types.ModelInfo {
 			UpdatedAt: time.Now(),
 		},
 		{
-			ID:              "anthropic/claude-sonnet-4",
-			Name:            "Claude Sonnet 4 (via OpenRouter)",
-			Description:     "Anthropic 最新编程模型，代码生成能力卓越",
+			ID:              "anthropic/claude-sonnet-5",
+			Name:            "Claude Sonnet 5 (via OpenRouter)",
+			Description:     "Anthropic 最新编程模型，速度与智能平衡，1M 上下文",
 			Provider:        ProviderName,
-			ContextWindow:   200000,
-			MaxOutputTokens: 16384,
+			ContextWindow:   1000000,
+			MaxOutputTokens: 128000,
 			Plans: []types.TokenPlan{
 				{
 					Name:        "coding-plan",
