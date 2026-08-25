@@ -16,6 +16,7 @@ import (
 	"github.com/ponygates/icode/internal/core/checkpoint"
 	"github.com/ponygates/icode/internal/core/conversation"
 	"github.com/ponygates/icode/internal/core/hooks"
+	"github.com/ponygates/icode/internal/core/knowledge"
 	"github.com/ponygates/icode/internal/core/permission"
 	"github.com/ponygates/icode/internal/core/prefmem"
 	"github.com/ponygates/icode/internal/core/router"
@@ -24,17 +25,22 @@ import (
 	"github.com/ponygates/icode/internal/core/tool"
 	"github.com/ponygates/icode/internal/db"
 	"github.com/ponygates/icode/internal/llm/provider"
+	"github.com/ponygates/icode/internal/llm/provider/agnes"
 	"github.com/ponygates/icode/internal/llm/provider/anthropic"
 	"github.com/ponygates/icode/internal/llm/provider/deepseek"
 	"github.com/ponygates/icode/internal/llm/provider/huawei"
 	"github.com/ponygates/icode/internal/llm/provider/kimi"
 	"github.com/ponygates/icode/internal/llm/provider/nvidia"
+	"github.com/ponygates/icode/internal/llm/provider/openai_compat"
 	"github.com/ponygates/icode/internal/llm/provider/openrouter"
 	"github.com/ponygates/icode/internal/llm/provider/scnet"
+	"github.com/ponygates/icode/internal/llm/provider/sensenova"
 	"github.com/ponygates/icode/internal/llm/provider/tencent"
 	"github.com/ponygates/icode/internal/llm/provider/volcengine"
 	"github.com/ponygates/icode/internal/llm/provider/zhipu"
 	"github.com/ponygates/icode/internal/lsp"
+	"github.com/ponygates/icode/internal/notify"
+	"github.com/ponygates/icode/internal/scheduler"
 	"github.com/ponygates/icode/internal/types"
 	"github.com/ponygates/icode/pkg/modelupdate"
 )
@@ -49,12 +55,19 @@ type App struct {
 	Gate       *permission.Gate
 	Updater    *modelupdate.Service
 	LSPManager *lsp.Manager // nil when LSP disabled
+	// Knowledge is the local document knowledge base (RAG), nil when no
+	// knowledge.dirs are configured.
+	Knowledge *knowledge.Manager
+	// Scheduler runs WorkBuddy-style scheduled automations (may be nil when
+	// there is no persistence backend).
+	Scheduler *scheduler.Scheduler
 }
 
 // Bootstrap initializes all subsystems and returns a ready-to-use App.
 func Bootstrap() (*App, error) {
 	app := &App{}
 	t0 := time.Now()
+	log.Printf("[iCode] bootstrap: entering (config.Load)")
 
 	// 1. Load configuration
 	cfg, err := config.Load()
@@ -107,6 +120,8 @@ func Bootstrap() (*App, error) {
 	if cfg.Defaults.Mode != "" {
 		app.Gate.SetMode(permission.Mode(cfg.Defaults.Mode))
 	}
+	// Strike-counter escalation: N consecutive blocks force manual mode.
+	app.Gate.SetStrikeThreshold(cfg.Permission.StrikeThreshold)
 	// Claude Code settings.json permission compatibility: rules from
 	// ~/.claude/settings.json + .claude/settings.json take effect in Agent
 	// mode just like iCode's own hooks.yaml rules.
@@ -116,6 +131,10 @@ func Bootstrap() (*App, error) {
 	// 5. Initialize conversation engine (with permission gate wired in)
 	app.Engine = conversation.NewEngine(app.Reg, app.SessStore, app.Gate)
 	app.Engine.SetGenerationParams(cfg.Defaults.Temperature, cfg.Defaults.MaxTokens)
+	// Extended thinking (Anthropic): config thinking_tokens > 0 enables it.
+	if cfg.Defaults.ThinkingTokens > 0 {
+		app.Engine.SetThinking(cfg.Defaults.ThinkingTokens)
+	}
 	app.Engine.SetSystemPrompt(config.EffectiveSystemPrompt(cfg))
 	app.Engine.SetFallbackModels(cfg.Defaults.FallbackModels)
 	// Load remembered user preferences from disk (persisted on Close) so they
@@ -237,6 +256,30 @@ func Bootstrap() (*App, error) {
 		}
 	}
 
+	// 5e2. Document knowledge base (RAG) — /kb + search_knowledge. Indexing
+	// runs in the background so a large docs directory never blocks boot.
+	if len(cfg.Knowledge.Dirs) > 0 {
+		app.Knowledge = knowledge.New(cfg.Knowledge.Dirs)
+		app.Engine.SetKnowledgeManager(app.Knowledge)
+		app.Engine.RegisterTool(knowledge.NewTool(app.Knowledge, cfg.Knowledge.TopK))
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[iCode knowledge] index panic: %v", r)
+				}
+			}()
+			n, err := app.Knowledge.Index(context.Background())
+			if err != nil {
+				log.Printf("[iCode knowledge] index error: %v", err)
+			} else {
+				log.Printf("[iCode knowledge] indexed %d chunks from %v", n, cfg.Knowledge.Dirs)
+			}
+		}()
+	}
+
+	// 5e3. Notification policy (enable/disable + do-not-disturb window).
+	notify.SetPolicy(cfg.Notify.Enabled, cfg.Notify.QuietFrom, cfg.Notify.QuietTo)
+
 	// 5f. Lifecycle hooks (PreToolUse/PostToolUse/UserPromptSubmit/Stop) —
 	// Claude Code parity.
 	if len(cfg.Hooks) > 0 {
@@ -281,6 +324,34 @@ func Bootstrap() (*App, error) {
 	}
 	log.Printf("[iCode] bootstrap: updater ready (t=%dms)", time.Since(t0).Milliseconds())
 
+	// 8. Scheduled automations (WorkBuddy-style). Only active when there is a
+	//    persistent store (SQLite); in-memory fallback sessions skip it.
+	if dbStore != nil {
+		newSess := func() (string, error) {
+			sess := &types.Session{
+				ID:           fmt.Sprintf("%x", time.Now().UnixNano()),
+				ModelID:      cfg.Defaults.Model,
+				ProviderName: cfg.Defaults.Provider,
+				Title:        "定时任务",
+			}
+			if sess.ModelID == "" {
+				sess.ModelID = "deepseek-chat"
+			}
+			if sess.ProviderName == "" {
+				sess.ProviderName = "deepseek"
+			}
+			if err := app.SessStore.Create(sess); err != nil {
+				return "", err
+			}
+			return sess.ID, nil
+		}
+		sch := scheduler.New(dbStore, app.Engine, newSess)
+		sch.SetIdleWindow(cfg.Scheduler.IdleStart, cfg.Scheduler.IdleEnd)
+		app.Scheduler = sch
+		sch.Start(context.Background())
+		log.Printf("[iCode] bootstrap: scheduler ready (t=%dms)", time.Since(t0).Milliseconds())
+	}
+
 	return app, nil
 }
 
@@ -299,6 +370,8 @@ func (app *App) registerProviders(cfg *config.Config) {
 		{"huawei", func(k, b string) types.Provider { return huawei.New(k, b) }},
 		{"scnet", func(k, b string) types.Provider { return scnet.New(k, b) }},
 		{"nvidia", func(k, b string) types.Provider { return nvidia.New(k, b) }},
+		{"sensenova", func(k, b string) types.Provider { return sensenova.New(k, b) }},
+		{"agnes", func(k, b string) types.Provider { return agnes.New(k, b) }},
 	}
 
 	for _, entry := range providers {
@@ -327,6 +400,84 @@ func (app *App) registerProviders(cfg *config.Config) {
 			log.Printf("[iCode] Failed to register anthropic: %v", err)
 		}
 	}
+
+	// Register any user-defined vendors from the config file as generic
+	// OpenAI-compatible providers (added via `icode config provider`, the
+	// desktop settings UI, or a shared config). These back user-added custom
+	// models and give CLI/TUI/simpleUI the same capability the server exposes.
+	// Also register any persisted custom models so the engine can resolve them
+	// at chat time in every frontend.
+	app.registerCustomProviders(cfg)
+	app.registerCustomModels(cfg)
+}
+
+// registerCustomProviders registers non-built-in vendors from the config file
+// (e.g. a user's OpenAI-compatible gateway) as generic providers.
+func (app *App) registerCustomProviders(cfg *config.Config) {
+	if app.Reg == nil {
+		return
+	}
+	for name, pc := range cfg.Providers {
+		if _, err := app.Reg.Get(name); err == nil {
+			continue // already registered (built-in or earlier custom)
+		}
+		if pc.Disabled {
+			continue
+		}
+		np := openai_compat.New(openai_compat.Config{
+			Name:         name,
+			APIKey:       pc.APIKey,
+			APIBase:      pc.APIBase,
+			TimeoutSec:   pc.Timeout,
+			CacheSupport: true,
+		})
+		if err := app.Reg.Register(np); err != nil {
+			log.Printf("[iCode] Failed to register custom provider %s: %v", name, err)
+		}
+	}
+}
+
+// registerCustomModels registers user-defined model entries from the config
+// file into the live registry so the engine can resolve them at chat time.
+func (app *App) registerCustomModels(cfg *config.Config) {
+	if app.Reg == nil {
+		return
+	}
+	for _, m := range cfg.Models {
+		if m.Custom {
+			app.registerCustomModel(m)
+		}
+	}
+}
+
+// registerCustomModel registers a single user-defined model (used both at
+// bootstrap and when a custom model is added while running).
+func (app *App) registerCustomModel(m config.ModelCfg) {
+	if m.ID == "" {
+		m.ID = config.ModelKey(m.Provider, m.ModelID)
+	}
+	info := types.ModelInfo{
+		ID:              m.ID,
+		Name:            m.Name,
+		Provider:        m.Provider,
+		ContextWindow:   m.ContextWindow,
+		MaxOutputTokens: m.MaxOutput,
+	}
+	app.Reg.RegisterCustomModel(info, m.ModelID)
+}
+
+// RegisterCustomModel registers a custom model at runtime (used by slash
+// commands and the simple UI after persisting the new model to config).
+func (app *App) RegisterCustomModel(m config.ModelCfg) {
+	app.registerCustomModel(m)
+}
+
+// RemoveCustomModel deregisters a custom model at runtime.
+func (app *App) RemoveCustomModel(id string) {
+	if app.Reg == nil {
+		return
+	}
+	app.Reg.RemoveCustomModel(id)
 }
 
 // hasExternalKeys returns true if any non-local provider has an API key set.

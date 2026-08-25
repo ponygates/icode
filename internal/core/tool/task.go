@@ -94,7 +94,15 @@ func (t *TaskTool) Execute(ctx context.Context, args string) (*types.ToolResult,
 		}, nil
 	}
 
-	// Delegate to the sub-agent runner.
+	// Delegate to the sub-agent runner. Emit a live progress line first so the
+	// user sees the sub-agent start (instead of a silent multi-second stall).
+	if progress := ProgressFromContext(ctx); progress != nil {
+		brief := in.Prompt
+		if len(brief) > 120 {
+			brief = brief[:120] + "…"
+		}
+		progress(fmt.Sprintf("🔍 子代理 %s 正在执行：%s\n", in.Name, brief))
+	}
 	result, totalTokens, err := t.runner.RunSubAgent(ctx, in.Name, in.Prompt)
 	if err != nil {
 		return &types.ToolResult{

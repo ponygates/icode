@@ -42,3 +42,31 @@ func SetLite(store types.SessionStore, sess *types.Session, n int) error {
 	}
 	return store.Update(sess)
 }
+
+// SemanticKey marks that the archived summary (MetadataKey) was produced by
+// the model (SummarizeConversation) rather than the free local stats summary.
+// /resume --compact reuses an existing semantic summary without a second
+// model call; /resume --lite keeps accepting either kind.
+const SemanticKey = "summary_semantic"
+
+// IsSemantic reports whether the session's archived summary is model-generated.
+func IsSemantic(sess *types.Session) bool {
+	if sess == nil || sess.Metadata == nil {
+		return false
+	}
+	v, _ := sess.Metadata[SemanticKey].(bool)
+	return v
+}
+
+// MarkSemantic records that the session's archived summary is model-generated.
+// Failures are swallowed — it is a cache hint, never a hard requirement.
+func MarkSemantic(store types.SessionStore, sess *types.Session) error {
+	if store == nil || sess == nil {
+		return nil
+	}
+	if sess.Metadata == nil {
+		sess.Metadata = map[string]any{}
+	}
+	sess.Metadata[SemanticKey] = true
+	return store.Update(sess)
+}

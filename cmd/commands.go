@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,10 +15,12 @@ import (
 	"github.com/ponygates/icode/internal/config"
 	"github.com/ponygates/icode/internal/config/i18n"
 	"github.com/ponygates/icode/internal/core/checkpoint"
+	"github.com/ponygates/icode/internal/core/knowledge"
 	"github.com/ponygates/icode/internal/core/permission"
 	"github.com/ponygates/icode/internal/core/searchreplace"
 	"github.com/ponygates/icode/internal/core/sessionum"
 	"github.com/ponygates/icode/internal/core/todo"
+	"github.com/ponygates/icode/internal/core/tool"
 	"github.com/ponygates/icode/internal/core/voice"
 	"github.com/ponygates/icode/internal/llm/provider"
 	"github.com/ponygates/icode/internal/server"
@@ -104,6 +107,16 @@ func startChat(provider, model, mode string) error {
 
 	// Wire TUI stream writer back to callback
 	cb.tui = t
+
+	// Notify in the TUI when a background task completes (P1-3: task-done
+	// notification, Claude Code / opencode parity).
+	tool.SetCompleteHook(func(id, errMsg string) {
+		status := "✓ 后台任务完成: " + id
+		if errMsg != "" {
+			status = "⚠ 后台任务失败: " + id + " — " + errMsg
+		}
+		t.AddMessage(tui.RoleSystem, status)
+	})
 
 	// Populate the available model list so the /model picker and Tab model
 	// switching work. Without this t.models stays empty and both features
@@ -306,6 +319,16 @@ func orEmptyJSON(s string) string {
 		return "{}"
 	}
 	return s
+}
+
+// clipStr truncates s to n runes and appends "…" when shortened (used to keep
+// error messages inside slash-command replies short).
+func clipStr(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }
 
 var authCmd = &cobra.Command{
@@ -856,10 +879,11 @@ func printDefaultModels() {
 		{"openrouter", "auto", "Auto Router"},
 		{"openrouter", "openrouter/free", "Free Tier"},
 		{"openrouter", "openai/gpt-4o", "Token Plan"},
-		{"openrouter", "anthropic/claude-sonnet-4", "Coding Plan"},
+		{"openrouter", "anthropic/claude-sonnet-5", "Coding Plan"},
 		{"openrouter", "google/gemini-2.0-flash-exp:free", "Free Tier"},
-		{"anthropic", "claude-sonnet-4-20250514", "Coding Plan"},
-		{"anthropic", "claude-haiku-4-20250514", "Token Plan"},
+		{"anthropic", "claude-opus-5", "Coding Plan"},
+		{"anthropic", "claude-sonnet-5", "Coding Plan"},
+		{"anthropic", "claude-haiku-4-5-20251001", "Token Plan"},
 	}
 
 	fmt.Println()
@@ -1115,6 +1139,28 @@ func (c *chatCallback) OnResume(id string) string {
 	return fmt.Sprintf("Resumed session %s — %d messages loaded", id, len(msgs))
 }
 
+// OnCompactSummarize asks the engine to produce a model-generated semantic
+// summary of the active session's older turns (/compact parity). The summary
+// is cached into the session metadata (marked semantic) so a later
+// /resume --compact or /resume --lite reuses it without another model call.
+// Returns "" on any failure — the TUI then falls back to the free local trim.
+func (c *chatCallback) OnCompactSummarize(instruction string) string {
+	if c.app == nil || c.app.Engine == nil || c.sessionID == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	sum, err := c.app.Engine.SummarizeConversation(ctx, c.sessionID, instruction)
+	if err != nil || sum == "" {
+		return ""
+	}
+	if sess, err := c.app.SessStore.Get(c.sessionID); err == nil {
+		_ = sessionum.Save(c.app.SessStore, sess, sum)
+		_ = sessionum.MarkSemantic(c.app.SessStore, sess)
+	}
+	return sum
+}
+
 func (c *chatCallback) OnSlashCommand(cmd string, args []string) {
 	switch strings.ToLower(cmd) {
 	case "/model":
@@ -1128,6 +1174,43 @@ func (c *chatCallback) OnSlashCommand(cmd string, args []string) {
 			}
 			c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("Mode set to: %s", args[0]))
 		}
+	case "/thinking":
+		if c.app == nil || c.app.Engine == nil {
+			c.tui.AddMessage(tui.RoleSystem, "引擎未初始化。")
+			break
+		}
+		if len(args) == 0 {
+			if b := c.app.Engine.ThinkingBudget(); b > 0 {
+				c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("当前 extended thinking 已开启，预算 %d tokens。用法: /thinking <on|off|<tokens>>", b))
+			} else {
+				c.tui.AddMessage(tui.RoleSystem, "当前 extended thinking 已关闭。用法: /thinking <on|off|<tokens>>（如 /thinking 4096，对 Anthropic 模型生效）")
+			}
+			break
+		}
+		budget := 0
+		switch strings.ToLower(strings.TrimSpace(args[0])) {
+		case "on":
+			budget = 4096
+		case "off", "0":
+			budget = 0
+		default:
+			n, err := strconv.Atoi(strings.TrimSpace(args[0]))
+			if err != nil || n < 1024 {
+				c.tui.AddMessage(tui.RoleSystem, "无效预算（至少 1024 tokens）。用法: /thinking <on|off|<tokens>>")
+				break
+			}
+			budget = n
+		}
+		c.app.Engine.SetThinking(budget)
+		if cfg, err := config.Load(); err == nil {
+			cfg.Defaults.ThinkingTokens = budget
+			_ = cfg.Save(config.DefaultPath())
+		}
+		if budget > 0 {
+			c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("✓ extended thinking 已开启（预算 %d tokens，对 Anthropic 模型生效，已持久化）", budget))
+		} else {
+			c.tui.AddMessage(tui.RoleSystem, "✓ extended thinking 已关闭（已持久化）。")
+		}
 	case "/session":
 		if c.sessionID != "" {
 			c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("Active session: %s", c.sessionID))
@@ -1136,35 +1219,78 @@ func (c *chatCallback) OnSlashCommand(cmd string, args []string) {
 		}
 	case "/resume":
 		if len(args) == 0 || c.app == nil || c.app.SessStore == nil {
-			c.tui.AddMessage(tui.RoleSystem, "Usage: /resume <session-id> [--lite[=<n>]]")
+			c.tui.AddMessage(tui.RoleSystem, "Usage: /resume <session-id> [--lite[=<n>] | --compact[=<n>]]")
 			break
 		}
 		id := args[0]
 		lite := 0
+		compact := false
+		bad := false
 		if len(args) > 1 {
 			switch a := strings.TrimSpace(args[1]); {
 			case a == "--lite":
 				lite = 4
 			case strings.HasPrefix(a, "--lite="):
 				fmt.Sscanf(strings.TrimPrefix(a, "--lite="), "%d", &lite)
+				if lite <= 0 {
+					c.tui.AddMessage(tui.RoleSystem, "用法: /resume <session-id> --lite=<n>（应为正整数）")
+					bad = true
+				}
+			case a == "--compact":
+				compact = true
+				lite = 4
+			case strings.HasPrefix(a, "--compact="):
+				compact = true
+				fmt.Sscanf(strings.TrimPrefix(a, "--compact="), "%d", &lite)
+				if lite <= 0 {
+					c.tui.AddMessage(tui.RoleSystem, "用法: /resume <session-id> --compact=<n>（应为正整数）")
+					bad = true
+				}
 			default:
-				c.tui.AddMessage(tui.RoleSystem, "用法: /resume <session-id> --lite=<n>（应为正整数）")
+				c.tui.AddMessage(tui.RoleSystem, "用法: /resume <session-id> --lite=<n> 或 --compact[=<n>]")
+				bad = true
+			}
+		}
+		if !bad && lite > 0 {
+			sess, err := c.app.SessStore.Get(id)
+			if err != nil {
+				c.tui.AddMessage(tui.RoleSystem, "会话不存在: "+id)
 				break
 			}
-		}
-		if lite > 0 {
-			if sess, err := c.app.SessStore.Get(id); err == nil {
-				if sessionum.Get(sess) == "" {
-					c.tui.AddMessage(tui.RoleSystem, "该会话还没有存档摘要，无法 lite 恢复。先 /summarize 或退出时自动存档后再试。")
-					break
-				}
-				if err := sessionum.SetLite(c.app.SessStore, sess, lite); err != nil {
-					c.tui.AddMessage(tui.RoleSystem, "设置 lite 模式失败: "+err.Error())
-					break
+			if compact && !sessionum.IsSemantic(sess) && c.app.Engine != nil {
+				// Resume compaction (Claude Code parity): generate a semantic
+				// summary on the spot and cache it, so the resumed session
+				// feeds the model only summary + recent turns. A cached
+				// semantic summary is reused without a second model call.
+				c.tui.AddMessage(tui.RoleSystem, "⏳ 正在生成会话语义摘要…（模型压缩，约 10–60 秒）")
+				ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+				sum, serr := c.app.Engine.SummarizeConversation(ctx, id, "")
+				cancel()
+				switch {
+				case serr != nil:
+					c.tui.AddMessage(tui.RoleSystem, "⚠ 模型摘要生成失败（"+clipStr(serr.Error(), 140)+"），已回退为本地存档摘要。")
+				case sum == "":
+					c.tui.AddMessage(tui.RoleSystem, "该会话轮次太少，无需模型摘要；如已有本地摘要则继续压缩恢复。")
+				default:
+					_ = sessionum.Save(c.app.SessStore, sess, sum)
+					_ = sessionum.MarkSemantic(c.app.SessStore, sess)
 				}
 			}
+			if sessionum.Get(sess) == "" {
+				c.tui.AddMessage(tui.RoleSystem, "该会话还没有存档摘要，无法压缩恢复。先 /summarize、/compact 或退出时自动存档后再试。")
+				break
+			}
+			if err := sessionum.SetLite(c.app.SessStore, sess, lite); err != nil {
+				c.tui.AddMessage(tui.RoleSystem, "设置 lite 模式失败: "+err.Error())
+				break
+			}
+			if compact {
+				c.tui.AddMessage(tui.RoleSystem, fmt.Sprintf("✓ 已启用紧凑恢复（语义摘要 + 最近 %d 条消息送入模型，后续轮次自动生效）", lite))
+			}
 		}
-		c.tui.AddMessage(tui.RoleSystem, c.OnResume(id))
+		if !bad {
+			c.tui.AddMessage(tui.RoleSystem, c.OnResume(id))
+		}
 	case "/restore":
 		if len(args) == 0 || c.app == nil || c.app.SessStore == nil {
 			c.tui.AddMessage(tui.RoleSystem, "Usage: /restore <session-id> — 恢复被 /clear 软删除的会话")
@@ -1259,23 +1385,54 @@ func (c *chatCallback) OnSlashCommand(cmd string, args []string) {
 		switch sub {
 		case "set":
 			if len(args) < 2 {
-				c.tui.AddMessage(tui.RoleSystem, "用法: /goal set <目标文本>")
+				c.tui.AddMessage(tui.RoleSystem, "用法: /goal set <目标文本> [--verify <验收命令>]")
 				break
 			}
-			goal := strings.TrimSpace(strings.Join(args[1:], " "))
-			withSess(func(sess *types.Session) {
-				if err := sessionum.SetGoal(c.app.SessStore, sess, goal); err != nil {
-					c.tui.AddMessage(tui.RoleSystem, "保存目标失败: "+err.Error())
-				} else {
-					c.tui.AddMessage(tui.RoleSystem, "已设置长目标（后续每轮对话都会自动携带）：\n"+goal)
+			goal, verify := "", ""
+			rest := args[1:]
+			for i := 0; i < len(rest); i++ {
+				if rest[i] == "--verify" || rest[i] == "-v" {
+					if i+1 < len(rest) {
+						verify = strings.TrimSpace(strings.Join(rest[i+1:], " "))
+					}
+					break
 				}
+				if goal != "" {
+					goal += " "
+				}
+				goal += rest[i]
+			}
+			goal = strings.TrimSpace(goal)
+			if goal == "" {
+				c.tui.AddMessage(tui.RoleSystem, "目标不能为空。用法: /goal set <目标文本> [--verify <验收命令>]")
+				break
+			}
+			finalGoal, finalVerify := goal, verify
+			withSess(func(sess *types.Session) {
+				if err := sessionum.SetGoal(c.app.SessStore, sess, finalGoal); err != nil {
+					c.tui.AddMessage(tui.RoleSystem, "保存目标失败: "+err.Error())
+					return
+				}
+				if finalVerify != "" {
+					if err := sessionum.SetGoalVerify(c.app.SessStore, sess, finalVerify); err != nil {
+						c.tui.AddMessage(tui.RoleSystem, "保存验收命令失败: "+err.Error())
+						return
+					}
+					c.tui.AddMessage(tui.RoleSystem, "已设置可验收目标（每轮自动迭代直到验收命令通过）：\n目标："+finalGoal+"\n验收命令："+finalVerify)
+					return
+				}
+				c.tui.AddMessage(tui.RoleSystem, "已设置长目标（后续每轮对话都会自动携带）：\n"+finalGoal)
 			})
 		case "show":
 			withSess(func(sess *types.Session) {
 				if g := sessionum.GetGoal(sess); g != "" {
-					c.tui.AddMessage(tui.RoleSystem, "当前目标（长目标模式生效中）：\n"+g)
+					msg := "当前目标（长目标模式生效中）：\n" + g
+					if v := sessionum.GetGoalVerify(sess); v != "" {
+						msg += "\n验收命令：" + v
+					}
+					c.tui.AddMessage(tui.RoleSystem, msg)
 				} else {
-					c.tui.AddMessage(tui.RoleSystem, "当前没有目标。\n用法: /goal set <目标> | /goal show | /goal clear")
+					c.tui.AddMessage(tui.RoleSystem, "当前没有目标。\n用法: /goal set <目标> [--verify <验收命令>] | /goal show | /goal clear")
 				}
 			})
 		case "clear", "unset":
@@ -1283,11 +1440,12 @@ func (c *chatCallback) OnSlashCommand(cmd string, args []string) {
 				if err := sessionum.SetGoal(c.app.SessStore, sess, ""); err != nil {
 					c.tui.AddMessage(tui.RoleSystem, "清除目标失败: "+err.Error())
 				} else {
+					_ = sessionum.SetGoalVerify(c.app.SessStore, sess, "")
 					c.tui.AddMessage(tui.RoleSystem, "已清除目标，退出长目标模式。")
 				}
 			})
 		default:
-			c.tui.AddMessage(tui.RoleSystem, "用法: /goal set <目标> | /goal show | /goal clear")
+			c.tui.AddMessage(tui.RoleSystem, "用法: /goal set <目标> [--verify <验收命令>] | /goal show | /goal clear")
 		}
 	case "/budget":
 		withSess := func(fn func(*types.Session)) {
@@ -1822,6 +1980,114 @@ func (c *chatCallback) OnUpdateModels() string {
 		}
 	}
 	return b.String()
+}
+
+func (c *chatCallback) OnAddCustomModel(provider, modelID, name string) string {
+	if c.app == nil || c.app.Reg == nil {
+		return "引擎未初始化。"
+	}
+	if provider == "" || modelID == "" {
+		return "用法: /models add <provider> <model_id> [name]"
+	}
+	if name == "" {
+		name = modelID
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return "读取配置失败: " + err.Error()
+	}
+	m := config.ModelCfg{
+		Provider: provider,
+		ModelID:  modelID,
+		Name:     name,
+		Custom:   true,
+	}
+	m.ID = config.ModelKey(provider, modelID)
+	cfg.UpsertModel(m)
+	if err := cfg.Save(config.DefaultPath()); err != nil {
+		return "保存配置失败: " + err.Error()
+	}
+	// Live-register so the model works immediately (no restart needed).
+	c.app.RegisterCustomModel(m)
+	if c.tui != nil {
+		if all := c.app.Reg.ListAllModels(); len(all) > 0 {
+			ids := make([]string, 0, len(all))
+			for _, mm := range all {
+				ids = append(ids, mm.ID)
+			}
+			c.tui.SetModels(ids)
+		}
+	}
+	return fmt.Sprintf("✓ 已添加自定义模型 %s（%s / %s）", m.ID, provider, name)
+}
+
+func (c *chatCallback) OnRemoveCustomModel(id string) string {
+	if c.app == nil || c.app.Reg == nil {
+		return "引擎未初始化。"
+	}
+	if id == "" {
+		return "用法: /models rm <id>（id 形如 provider/model_id）"
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return "读取配置失败: " + err.Error()
+	}
+	if !cfg.DeleteModel(id) {
+		return fmt.Sprintf("模型 %q 未找到。", id)
+	}
+	if err := cfg.Save(config.DefaultPath()); err != nil {
+		return "保存配置失败: " + err.Error()
+	}
+	c.app.RemoveCustomModel(id)
+	if c.tui != nil {
+		if all := c.app.Reg.ListAllModels(); len(all) > 0 {
+			ids := make([]string, 0, len(all))
+			for _, mm := range all {
+				ids = append(ids, mm.ID)
+			}
+			c.tui.SetModels(ids)
+		}
+	}
+	return fmt.Sprintf("✓ 已移除自定义模型 %s", id)
+}
+
+// LSPQuery implements tui.Callback — runs an on-demand LSP code-intelligence
+// query for /lsp. Delegates to the shared lsp.Manager.QueryReport so the TUI
+// behaves identically to the HTTP slash layer.
+func (c *chatCallback) LSPQuery(sub string, args []string) string {
+	if c.app == nil || c.app.LSPManager == nil {
+		return "LSP 未启用。请在配置中开启 lsp.enabled（config.toml 或 /config）。"
+	}
+	out, err := c.app.LSPManager.QueryReport(sub, args)
+	if err != nil {
+		return "⚠ " + err.Error()
+	}
+	return out
+}
+
+// KnowledgeQuery implements tui.Callback — searches the local document
+// knowledge base for /kb.
+func (c *chatCallback) KnowledgeQuery(query string) string {
+	if c.app == nil || c.app.Knowledge == nil {
+		return "知识库未配置。请在 config.yaml 的 knowledge.dirs 中指定文档目录。"
+	}
+	if strings.TrimSpace(query) == "" {
+		return fmt.Sprintf("知识库状态：已索引 %d 个片段。\n用法: /kb <查询>", c.app.Knowledge.ChunkCount())
+	}
+	results := c.app.Knowledge.Search(query, 5)
+	return knowledge.Format(results)
+}
+
+// CreateIdleTask implements tui.Callback — creates an off-peak task for /idle.
+func (c *chatCallback) CreateIdleTask(name, prompt string) string {
+	if c.app == nil || c.app.Scheduler == nil {
+		return "调度器不可用（需持久化后端）。"
+	}
+	t, err := c.app.Scheduler.Create(name, prompt, "idle")
+	if err != nil {
+		return "创建闲时任务失败: " + err.Error()
+	}
+	return fmt.Sprintf("✓ 已创建闲时任务「%s」（ID: %s）\n将在闲时窗口（低峰时段）自动执行，完成后通知你。", t.Name, t.ID)
 }
 
 // formatInt renders an integer with thousands separators.

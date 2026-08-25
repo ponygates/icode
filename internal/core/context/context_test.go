@@ -96,3 +96,53 @@ func TestAppendUserMemoryRoundtrip(t *testing.T) {
 		t.Fatalf("second note missing: %q", got)
 	}
 }
+
+// TestDetectTestCommand covers the Claude Code parity feature: the project's
+// test command is discovered from the CWD's manifest files so the system
+// prompt can tell the model exactly how to verify changes.
+func TestDetectTestCommand(t *testing.T) {
+	cases := []struct {
+		name     string
+		files    map[string]string // filename -> content ("" = empty file)
+		expected string
+	}{
+		{"go", map[string]string{"go.mod": "module example\n"}, "go test ./..."},
+		{"npm-default", map[string]string{"package.json": `{"scripts":{"test":"vitest run"}}`}, "npm test"},
+		{"yarn", map[string]string{"package.json": "{}", "yarn.lock": ""}, "yarn test"},
+		{"pnpm", map[string]string{"package.json": "{}", "pnpm-lock.yaml": ""}, "pnpm test"},
+		{"python", map[string]string{"pyproject.toml": ""}, "pytest"},
+		{"python-pytest-ini", map[string]string{"pytest.ini": ""}, "pytest"},
+		{"rust", map[string]string{"Cargo.toml": ""}, "cargo test"},
+		{"makefile", map[string]string{"Makefile": ""}, "make test"},
+		{"justfile", map[string]string{"justfile": ""}, "just test"},
+		{"none", map[string]string{}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for name, content := range tc.files {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+					t.Fatalf("write %s: %v", name, err)
+				}
+			}
+			t.Chdir(dir)
+			if got := DetectTestCommand(); got != tc.expected {
+				t.Fatalf("DetectTestCommand() = %q, want %q", got, tc.expected)
+			}
+		})
+	}
+}
+
+// TestLoadProjectAnalysis_IncludesTestCommand verifies the detected test
+// command is surfaced as a "Test:" line so buildSystemPrompt picks it up.
+func TestLoadProjectAnalysis_IncludesTestCommand(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example\n"), 0o644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+	t.Chdir(dir)
+	got := LoadProjectAnalysis()
+	if !strings.Contains(got, "Test: go test ./...") {
+		t.Fatalf("project analysis missing test command:/n%s", got)
+	}
+}

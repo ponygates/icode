@@ -336,10 +336,56 @@ func LoadProjectAnalysis() string {
 		parts = append(parts, "Build: Makefile")
 	}
 
+	// 6. Detect the project's test command so the system prompt can tell the
+	// model exactly how to verify changes (Claude Code parity: know the test
+	// command before being told).
+	if tc := DetectTestCommand(); tc != "" {
+		parts = append(parts, fmt.Sprintf("Test: %s", tc))
+	}
+
 	if len(parts) == 0 {
 		return ""
 	}
 	return "## Project Analysis\n" + strings.Join(parts, "\n") + "\n"
+}
+
+// DetectTestCommand inspects the CWD for the project's test command.
+// Returns "" when none is detectable. Detection order: Go → Node (respecting
+// the package manager lockfile) → Python → Rust → Makefile → justfile.
+func DetectTestCommand() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	switch {
+	case fileExists(cwd, "go.mod"):
+		return "go test ./..."
+	case fileExists(cwd, "package.json"):
+		switch {
+		case fileExists(cwd, "yarn.lock"):
+			return "yarn test"
+		case fileExists(cwd, "pnpm-lock.yaml") || fileExists(cwd, "pnpm-lock.yml"):
+			return "pnpm test"
+		default:
+			return "npm test"
+		}
+	case fileExists(cwd, "pyproject.toml") || fileExists(cwd, "pytest.ini") ||
+		fileExists(cwd, "setup.py") || fileExists(cwd, "tox.ini"):
+		return "pytest"
+	case fileExists(cwd, "Cargo.toml"):
+		return "cargo test"
+	case fileExists(cwd, "Makefile"):
+		return "make test"
+	case fileExists(cwd, "justfile"):
+		return "just test"
+	}
+	return ""
+}
+
+// fileExists reports whether name exists under dir and is a regular file.
+func fileExists(dir, name string) bool {
+	info, err := os.Stat(filepath.Join(dir, name))
+	return err == nil && !info.IsDir()
 }
 
 func extractGoModule(content string) string {

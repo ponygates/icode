@@ -130,18 +130,18 @@ func TestAllowedPathsIgnoresNonFileTools(t *testing.T) {
 // Four-tier permission classification (本书 ch.22).
 func TestAccessLevelOf(t *testing.T) {
 	cases := map[string]AccessLevel{
-		"read_file":     AccessRead,
-		"grep":          AccessRead,
-		"git_diff":      AccessRead,
-		"write_file":    AccessWrite,
-		"edit":          AccessWrite,
+		"read_file":      AccessRead,
+		"grep":           AccessRead,
+		"git_diff":       AccessRead,
+		"write_file":     AccessWrite,
+		"edit":           AccessWrite,
 		"search_replace": AccessWrite,
-		"bash":          AccessExecute,
-		"git_commit":    AccessExecute,
-		"fetch":         AccessConnect,
-		"web_search":    AccessConnect,
-		"image_gen":     AccessConnect,
-		"unknown_tool":  AccessRead,
+		"bash":           AccessExecute,
+		"git_commit":     AccessExecute,
+		"fetch":          AccessConnect,
+		"web_search":     AccessConnect,
+		"image_gen":      AccessConnect,
+		"unknown_tool":   AccessRead,
 	}
 	for tool, want := range cases {
 		if got := AccessLevelOf(tool); got != want {
@@ -177,12 +177,10 @@ func TestAutoModeConnectDomainWhitelist(t *testing.T) {
 		t.Fatal("example.com should be trusted after approval")
 	}
 
-	if res := g.Check("s1", Action{Tool: "fetch", URL: "https://example.com/other"});
-		res.Decision != DecisionAllow {
+	if res := g.Check("s1", Action{Tool: "fetch", URL: "https://example.com/other"}); res.Decision != DecisionAllow {
 		t.Errorf("fetch to trusted host → %s, want allow (silent whitelist)", res.Decision)
 	}
-	if res := g.Check("s1", Action{Tool: "fetch", URL: "https://example.org/doc"});
-		res.Decision != DecisionAsk {
+	if res := g.Check("s1", Action{Tool: "fetch", URL: "https://example.org/doc"}); res.Decision != DecisionAsk {
 		t.Errorf("fetch to untrusted host → %s, want ask", res.Decision)
 	}
 
@@ -191,8 +189,7 @@ func TestAutoModeConnectDomainWhitelist(t *testing.T) {
 	if g.IsDomainTrusted("example.com") {
 		t.Fatal("example.com should be untrusted after UntrustDomain")
 	}
-	if res := g.Check("s1", Action{Tool: "fetch", URL: "https://example.com/x"});
-		res.Decision != DecisionAsk {
+	if res := g.Check("s1", Action{Tool: "fetch", URL: "https://example.com/x"}); res.Decision != DecisionAsk {
 		t.Errorf("fetch after untrust → %s, want ask", res.Decision)
 	}
 }
@@ -200,16 +197,48 @@ func TestAutoModeConnectDomainWhitelist(t *testing.T) {
 // The whitelist matches the host, not the path, and is case-insensitive.
 func TestHostOf(t *testing.T) {
 	cases := map[string]string{
-		"https://Example.COM/path?a=b": "example.com",
+		"https://Example.COM/path?a=b":  "example.com",
 		"http://api.example.com:8080/x": "api.example.com",
-		"example.org":                  "example.org",
-		"user:pass@sub.host.io:9090/p": "sub.host.io",
-		"not a url":                    "",
-		"":                             "",
+		"example.org":                   "example.org",
+		"user:pass@sub.host.io:9090/p":  "sub.host.io",
+		"not a url":                     "",
+		"":                              "",
 	}
 	for in, want := range cases {
 		if got := HostOf(in); got != want {
 			t.Errorf("HostOf(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestStrikeEscalation(t *testing.T) {
+	g := NewGate(ModeAuto)
+	g.SetStrikeThreshold(3)
+
+	// Allow decisions reset the counter.
+	for i := 0; i < 5; i++ {
+		g.Check("s1", Action{Tool: "read_file", Arguments: `{"path":"a"}`})
+	}
+	// Three consecutive asks/denies → escalate.
+	act := Action{Tool: "bash", Arguments: `{"command":"echo hi"}`}
+	var escalated *CheckResult
+	for i := 0; i < 3; i++ {
+		r := g.Check("s1", act)
+		if r.Escalated {
+			escalated = &r
+		}
+	}
+	if escalated == nil {
+		t.Fatal("expected escalation after 3 consecutive blocks")
+	}
+	// After escalation, every action (even read-only) asks.
+	r := g.Check("s1", Action{Tool: "read_file", Arguments: `{"path":"a"}`})
+	if r.Decision != DecisionAsk {
+		t.Fatalf("escalated session should force ask, got %s", r.Decision)
+	}
+	// Other sessions are unaffected.
+	r2 := g.Check("s2", Action{Tool: "read_file", Arguments: `{"path":"a"}`})
+	if r2.Decision != DecisionAllow {
+		t.Fatalf("other session should still allow read, got %s", r2.Decision)
 	}
 }

@@ -61,10 +61,16 @@ type Config struct {
 	Defaults      DefaultCfg             `yaml:"defaults" json:"defaults"`
 	TUI           TUICfg                 `yaml:"tui" json:"tui"`
 	Tools         ToolsCfg               `yaml:"tools" json:"tools"`
+	Permission    PermissionCfg          `yaml:"permission" json:"permission"`
 	Server        ServerCfg              `yaml:"server" json:"server"`
+	Scheduler     SchedulerCfg           `yaml:"scheduler" json:"scheduler"`
 	Update        UpdateCfg              `yaml:"update" json:"update"`
 	LSP           LSPCfg                 `yaml:"lsp" json:"lsp"`
-	MCP           []MCPServerCfg         `yaml:"mcp" json:"mcp"`
+	// Knowledge configures the local document knowledge base (RAG).
+	Knowledge KnowledgeCfg `yaml:"knowledge" json:"knowledge"`
+	// Notify configures system-level desktop notifications.
+	Notify NotifyCfg      `yaml:"notify" json:"notify"`
+	MCP    []MCPServerCfg `yaml:"mcp" json:"mcp"`
 	// MCPImportWorkBuddy controls whether MCP servers configured in
 	// WorkBuddy's ~/.workbuddy/mcp.json are auto-imported at startup
 	// (explicit iCode entries always win on name conflicts). Default: true.
@@ -130,6 +136,9 @@ type DefaultCfg struct {
 	// OutputStyle controls answer verbosity injected into the system prompt:
 	// concise | normal | verbose (empty = normal).
 	OutputStyle string `yaml:"output_style,omitempty" json:"output_style,omitempty"`
+	// ThinkingTokens enables Anthropic extended thinking when > 0 (budget in
+	// tokens, e.g. 4096). 0 = disabled. Only affects Anthropic-capable models.
+	ThinkingTokens int `yaml:"thinking_tokens,omitempty" json:"thinking_tokens,omitempty"`
 	// ExtraDirs are additional working directories (beyond cwd) the agent may
 	// reference, surfaced in the system prompt (Claude Code /add-dir parity).
 	ExtraDirs []string `yaml:"extra_dirs,omitempty" json:"extra_dirs,omitempty"`
@@ -191,10 +200,27 @@ type ToolsCfg struct {
 	DeniedCommands []string `yaml:"denied_commands" json:"denied_commands"`
 }
 
+// PermissionCfg tunes the permission gate's escalation behaviour.
+type PermissionCfg struct {
+	// StrikeThreshold is the number of consecutive ask/deny decisions after
+	// which a session is forced back into manual mode (every action must be
+	// confirmed). 0 disables the escalation. Default 3.
+	StrikeThreshold int `yaml:"strike_threshold" json:"strike_threshold"`
+}
+
 type ServerCfg struct {
 	Enabled bool   `yaml:"enabled" json:"enabled"`
 	Port    int    `yaml:"port" json:"port"`
 	Host    string `yaml:"host" json:"host"`
+}
+
+// SchedulerCfg configures the automation scheduler, including the off-peak
+// window used by "idle" tasks (智谱 Idle Tasks parity).
+type SchedulerCfg struct {
+	// IdleStart / IdleEnd define the off-peak window ("HH:MM", 24h) in which
+	// "idle" tasks run. IdleStart > IdleEnd wraps midnight. Default 00:00–06:00.
+	IdleStart string `yaml:"idle_start" json:"idle_start"`
+	IdleEnd   string `yaml:"idle_end" json:"idle_end"`
 }
 
 type UpdateCfg struct {
@@ -209,6 +235,25 @@ type UpdateCfg struct {
 type LSPCfg struct {
 	Enabled   bool     `yaml:"enabled" json:"enabled"`
 	AutoStart []string `yaml:"auto_start" json:"auto_start"` // language IDs to start eagerly (e.g. ["go","python"])
+}
+
+// KnowledgeCfg configures the local document knowledge base (RAG).
+type KnowledgeCfg struct {
+	// Dirs lists directories to index for /kb search and search_knowledge.
+	Dirs []string `yaml:"dirs" json:"dirs"`
+	// TopK is the number of passages returned per search. Default 5.
+	TopK int `yaml:"top_k" json:"top_k"`
+}
+
+// NotifyCfg controls system-level desktop notifications (toast/balloon).
+type NotifyCfg struct {
+	// Enabled turns system notifications on/off. Default true.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// QuietFrom / QuietTo define a daily do-not-disturb window in "HH:MM"
+	// (24h). When both are set, notifications are suppressed inside the
+	// window. A window that wraps midnight is expressed as from > to.
+	QuietFrom string `yaml:"quiet_from" json:"quiet_from"`
+	QuietTo   string `yaml:"quiet_to" json:"quiet_to"`
 }
 
 // RoutingCfg configures the "auto" model router.
@@ -308,6 +353,7 @@ func Default() *Config {
 			"zhipu":      {APIBase: "https://open.bigmodel.cn/api/paas/v4", Timeout: 120},
 			"kimi":       {APIBase: "https://api.moonshot.cn/v1", Timeout: 120},
 			"nvidia":     {APIBase: "https://integrate.api.nvidia.com/v1", Timeout: 120},
+			"sensenova":  {APIBase: "https://api.sensenova.cn/v1", Timeout: 120},
 		},
 		TUI: TUICfg{
 			Theme:          "auto",
@@ -318,12 +364,19 @@ func Default() *Config {
 		Tools: ToolsCfg{
 			BashTimeout: 120,
 		},
+		Permission: PermissionCfg{
+			StrikeThreshold: 3,
+		},
 		Routing: RoutingCfg{
 			Mode: "embedding", // local, zero-token semantic routing by default
 		},
 		Server: ServerCfg{
 			Port: 0,
 			Host: "127.0.0.1",
+		},
+		Scheduler: SchedulerCfg{
+			IdleStart: "00:00",
+			IdleEnd:   "06:00",
 		},
 		Autostart: false,
 		Update: UpdateCfg{
@@ -332,6 +385,12 @@ func Default() *Config {
 			IntervalH:  24,
 		},
 		LSP: LSPCfg{
+			Enabled: true,
+		},
+		Knowledge: KnowledgeCfg{
+			TopK: 5,
+		},
+		Notify: NotifyCfg{
 			Enabled: true,
 		},
 	}

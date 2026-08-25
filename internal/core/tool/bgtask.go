@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/ponygates/icode/internal/executil"
+	"github.com/ponygates/icode/internal/notify"
 	"github.com/ponygates/icode/internal/types"
 	"github.com/ponygates/icode/internal/xgo"
 )
@@ -67,12 +68,24 @@ type bgTaskManager struct {
 	mu    sync.Mutex
 	seq   int
 	tasks map[string]*bgTask
+
+	// completeHook, when set, is invoked after a background task finishes so
+	// the host UI (TUI / simple UI / desktop) can surface a "task done"
+	// notification. Fields: task id, error message ("" on success).
+	completeHook func(id, errMsg string)
 }
 
 var bgTasks = &bgTaskManager{tasks: map[string]*bgTask{}}
 
 func KillAllBgTasks() {
 	bgTasks.KillAll()
+}
+
+// SetCompleteHook installs a callback invoked when a background task finishes.
+func SetCompleteHook(fn func(id, errMsg string)) {
+	bgTasks.mu.Lock()
+	bgTasks.completeHook = fn
+	bgTasks.mu.Unlock()
 }
 
 // Start launches cmdStr in the background and returns its task id.
@@ -120,6 +133,22 @@ func (m *bgTaskManager) Start(cmdStr, workDir string) (string, error) {
 		}
 		task.mu.Unlock()
 		cancel()
+		// System-level notification (toast/balloon) independent of the in-app
+		// hook, so the user is alerted even when the app window is unfocused.
+		status := "后台任务完成: " + id
+		if task.errMsg != "" {
+			status = "后台任务失败: " + id
+		}
+		notify.Notify("iCode 后台任务", status)
+
+		// Notify the host UI that a background task finished (off the hot
+		// path, under the manager lock to read the hook safely).
+		m.mu.Lock()
+		hook := m.completeHook
+		m.mu.Unlock()
+		if hook != nil {
+			xgo.GoSafe("bgtask.notify", func() { hook(id, task.errMsg) })
+		}
 	})
 
 	return id, nil

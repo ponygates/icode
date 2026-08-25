@@ -55,6 +55,16 @@ func (r *Runner) SetSessionID(sessionID string) {
 // definition and input prompt. Returns the agent's final response text and
 // the total tokens used (for cost tracking).
 func (r *Runner) Run(ctx context.Context, def *AgentDef, input string) (string, int, error) {
+	// Live-progress relay: the engine attaches a ToolProgressFunc via
+	// tool.WithProgress on the Task tool's context, so we forward the
+	// sub-agent's tool calls/rounds to the host UI in real time.
+	progress := tool.ProgressFromContext(ctx)
+	report := func(format string, a ...any) {
+		if progress != nil {
+			progress(fmt.Sprintf(format, a...))
+		}
+	}
+
 	// Resolve model
 	provider, modelInfo, err := r.providerReg.ResolveModel(def.Model)
 	if err != nil {
@@ -148,6 +158,7 @@ func (r *Runner) Run(ctx context.Context, def *AgentDef, input string) (string, 
 					Arguments: event.ToolCall.Arguments,
 				}
 				toolCalls = append(toolCalls, tc)
+				report("🔧 %s 调用工具 %s\n", def.Name, tc.Name)
 
 			case types.EventDone:
 				if len(toolCalls) == 0 {
@@ -174,6 +185,11 @@ func (r *Runner) Run(ctx context.Context, def *AgentDef, input string) (string, 
 						toolCalls[i] = tc
 					}
 					if tc.Result != nil {
+						if tc.Result.Success {
+							report("✓ %s 工具 %s 完成\n", def.Name, tc.Name)
+						} else {
+							report("⚠ %s 工具 %s 失败\n", def.Name, tc.Name)
+						}
 						opt.AddMessage(types.Message{
 							Role:      types.RoleTool,
 							Content:   tc.Result.Content,

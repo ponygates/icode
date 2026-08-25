@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/ponygates/icode/internal/core/tool"
 )
 
 // TeamRole defines the role an agent plays in a team.
@@ -66,6 +68,13 @@ func (tr *TeamRunner) Run(ctx context.Context, def *TeamDef, input string) (*Tea
 		Name:          def.Name,
 		MemberOutputs: make(map[string]string),
 	}
+	progress := tool.ProgressFromContext(ctx)
+	report := func(format string, a ...any) {
+		if progress != nil {
+			progress(fmt.Sprintf(format, a...))
+		}
+	}
+	report("👥 团队 %s 正在分解任务…\n", def.Name)
 
 	// Step 1: Leader decomposes the task.
 	decompPrompt := fmt.Sprintf(`You are the leader of a team of AI agents.
@@ -102,6 +111,7 @@ MEMBER: <member_name> | TASK: <detailed instructions>`,
 	}
 
 	// Step 3: Run specialists in parallel.
+	report("👥 团队 %s 并行执行 %d 名成员…\n", def.Name, len(memberTasks))
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var errs []string

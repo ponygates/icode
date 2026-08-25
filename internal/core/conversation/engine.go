@@ -17,6 +17,7 @@ import (
 	"github.com/ponygates/icode/internal/core/checkpoint"
 	projectcontext "github.com/ponygates/icode/internal/core/context"
 	"github.com/ponygates/icode/internal/core/hooks"
+	"github.com/ponygates/icode/internal/core/knowledge"
 	"github.com/ponygates/icode/internal/core/permission"
 	"github.com/ponygates/icode/internal/core/prefmem"
 	"github.com/ponygates/icode/internal/core/privacy"
@@ -80,6 +81,10 @@ type Engine struct {
 	// automatically injects fix hints to the model.
 	lspManager *lsp.Manager
 
+	// knowledge is the optional local document knowledge base (RAG) queried
+	// by the /kb command and the search_knowledge tool.
+	knowledge *knowledge.Manager
+
 	// diagCache remembers the last LSP diagnostics text injected per file so
 	// unchanged compile errors are not re-injected on every tool turn
 	// (they would bloat the context and alert the model to errors it already
@@ -113,9 +118,24 @@ type Engine struct {
 	// prefSavePath is where prefMem is persisted. When set, learnPreferences
 	// schedules a debounced auto-save so preferences survive a crash even if
 	// App.Close() is never reached.
-	prefSavePath string
+	prefSavePath  string
 	prefSaveTimer *time.Timer
 	prefSaveMu    sync.Mutex
+
+	// tool repair budget — per-session counter of automatic tool-JSON repairs
+	// spent in the current user turn. Reset in Send; caps repairBrokenToolCalls
+	// so a model that keeps emitting malformed arguments cannot loop forever.
+	repairMu     sync.Mutex
+	repairCounts map[string]int
+
+	// thinking, when non-nil, enables provider extended thinking (Anthropic
+	// Claude). Set via SetThinking / config thinking_tokens.
+	thinking *types.ThinkingConfig
+
+	// compactHinted tracks sessions that already received the one-time
+	// long-session /compact nudge (so it never nags on every turn).
+	hintMu        sync.Mutex
+	compactHinted map[string]bool
 }
 
 // NewEngine creates a conversation engine.
@@ -138,6 +158,8 @@ func NewEngine(
 		budgetEnforcer: tokenopt.NewBudgetEnforcer(tokenopt.DefaultBudgetConfig()),
 		truncDet:       NewTruncationDetector(DefaultTruncationRecoveryConfig()),
 		prefMem:        prefmem.New(prefmem.Options{}),
+		repairCounts:   make(map[string]int),
+		compactHinted:  make(map[string]bool),
 	}
 	if gate != nil {
 		slashcmd.SetShellGate(&shellGateAdapter{gate: gate})
@@ -251,6 +273,31 @@ func (e *Engine) SetGenerationParams(temperature float64, maxTokens int) {
 	e.maxTokens = maxTokens
 }
 
+// SetThinking toggles extended thinking for Anthropic-capable models.
+// budget <= 0 disables it; otherwise every ChatStream request carries a
+// thinking block with the given budget.
+func (e *Engine) SetThinking(budget int) {
+	if budget <= 0 {
+		e.thinking = nil
+		return
+	}
+	e.thinking = &types.ThinkingConfig{BudgetTokens: budget}
+}
+
+// thinkingConfig returns the active thinking config (nil when disabled).
+func (e *Engine) thinkingConfig() *types.ThinkingConfig {
+	return e.thinking
+}
+
+// ThinkingBudget returns the active extended-thinking budget in tokens, or 0
+// when extended thinking is disabled.
+func (e *Engine) ThinkingBudget() int {
+	if e.thinking == nil {
+		return 0
+	}
+	return e.thinking.BudgetTokens
+}
+
 // SetSystemPrompt configures a user-defined system prompt override.
 // When set, this replaces the hardcoded base system prompt.
 // Pass an empty string to restore the default.
@@ -276,6 +323,23 @@ func (e *Engine) SetRouter(r *router.Router) {
 // auto-fix hints to the model on compilation errors.
 func (e *Engine) SetLSPManager(m *lsp.Manager) {
 	e.lspManager = m
+}
+
+// LSPManager returns the attached LSP manager (nil when LSP is disabled), so
+// slash commands (/lsp) can query diagnostics/symbols/definitions on demand.
+func (e *Engine) LSPManager() *lsp.Manager {
+	return e.lspManager
+}
+
+// SetKnowledgeManager attaches a document knowledge base (RAG) so the
+// /kb slash command and search_knowledge tool can query it.
+func (e *Engine) SetKnowledgeManager(m *knowledge.Manager) {
+	e.knowledge = m
+}
+
+// KnowledgeManager returns the attached knowledge base (nil when unconfigured).
+func (e *Engine) KnowledgeManager() *knowledge.Manager {
+	return e.knowledge
 }
 
 // RegisterTeam registers a multi-agent team definition. Once registered,
@@ -684,6 +748,10 @@ func (e *Engine) executeTool(
 		}
 		return &types.ToolResult{Success: false, Error: "Permission denied: " + res.Reason}
 	case permission.DecisionAsk:
+		if res.Escalated {
+			// Strike counter tripped: surface a one-time "已退回手动" notice.
+			out <- types.StreamEvent{Type: types.EventSystem, Content: "⚠ " + res.Reason}
+		}
 		if e.permHandler != nil {
 			req := &types.PermissionReq{Tool: tc.Name, Prompt: res.Prompt}
 			return e.applyDecision(ctx, sessionID, tc, e.permHandler(sessionID, req, res))
@@ -817,6 +885,74 @@ func (e *Engine) runTool(ctx context.Context, tc types.ToolCall) *types.ToolResu
 	return res
 }
 
+// brokenToolCallIndex returns the index of the first tool call whose
+// arguments JSON is malformed, or -1 when every call is well-formed.
+func brokenToolCallIndex(toolCalls []types.ToolCall) int {
+	for i, tc := range toolCalls {
+		if !json.Valid([]byte(tc.Arguments)) {
+			return i
+		}
+	}
+	return -1
+}
+
+// maxToolRepairsPerTurn caps automatic tool-JSON repairs per user turn. One
+// repair is usually enough; the cap exists so a model that repeatedly emits
+// malformed arguments falls through to the tool's own "invalid args" error
+// instead of spinning the conversation loop forever.
+const maxToolRepairsPerTurn = 2
+
+// resetToolRepairBudget clears the per-turn tool-JSON repair counter for a
+// session (called at the start of every Send).
+func (e *Engine) resetToolRepairBudget(sessionID string) {
+	e.repairMu.Lock()
+	delete(e.repairCounts, sessionID)
+	e.repairMu.Unlock()
+}
+
+// takeToolRepair consumes one unit of the session's repair budget. Returns
+// false when the budget is already spent.
+func (e *Engine) takeToolRepair(sessionID string) bool {
+	e.repairMu.Lock()
+	defer e.repairMu.Unlock()
+	if e.repairCounts[sessionID] >= maxToolRepairsPerTurn {
+		return false
+	}
+	e.repairCounts[sessionID]++
+	return true
+}
+
+// longSessionThreshold is how many turns (user+assistant messages) trigger the
+// one-time /compact nudge in a session with no active compression.
+const longSessionThreshold = 40
+
+// longSessionHint returns a one-time, non-blocking nudge suggesting /compact
+// when a session has grown long WITHOUT any compression active (no /budget,
+// no --lite). It fires once per session so it never nags on every turn.
+func (e *Engine) longSessionHint(sess *types.Session) string {
+	if sess == nil || len(sess.Messages) < longSessionThreshold {
+		return ""
+	}
+	if sessionum.BudgetMax(sess) > 0 || sessionum.LiteN(sess) > 0 {
+		return ""
+	}
+	e.hintMu.Lock()
+	if e.compactHinted[sess.ID] {
+		e.hintMu.Unlock()
+		return ""
+	}
+	e.compactHinted[sess.ID] = true
+	e.hintMu.Unlock()
+
+	turns := 0
+	for _, m := range sess.Messages {
+		if m.Role == types.RoleUser || m.Role == types.RoleAssistant {
+			turns++
+		}
+	}
+	return fmt.Sprintf("ⓘ [省 token] 本会话已有 %d 条消息。上下文较长时运行 /compact 压缩历史（只把「语义摘要 + 最近消息」喂给模型），旧会话用 /resume --compact 同理。", turns)
+}
+
 // truncateForHook caps tool output passed to hook processes at 32KB so huge
 // outputs don't blow up the hook's stdin pipe.
 func truncateForHook(s string) string {
@@ -825,6 +961,138 @@ func truncateForHook(s string) string {
 		return s
 	}
 	return s[:max] + "\n…(truncated)"
+}
+
+// repairBrokenToolCalls implements tool-JSON auto-resend (Claude Code parity):
+// when a tool call's arguments JSON is malformed, instead of executing a
+// broken call (which would just fail with "invalid args" and force the model
+// to restart from scratch), re-ask the model to re-emit the arguments, then
+// dispatch the repaired calls.
+//
+// truncated tells the caller's assessment of whether the turn was cut off at
+// max_tokens: truncated calls escalate the output budget (8K→16K→32K→64K,
+// capped at MaxRetries attempts); non-truncated calls keep the current budget
+// and rely on a clear "请重发完整参数" instruction. This means a model that
+// simply emitted malformed JSON (a model bug) also gets one auto-repair
+// chance instead of an immediate tool failure.
+//
+// Anti-loop: each user turn has a small repair budget (maxToolRepairsPerTurn,
+// reset in Send) so a model that keeps emitting broken JSON cannot spin
+// forever — once the budget is spent the original (broken) call executes and
+// its "invalid args" error becomes the normal feedback loop.
+//
+// Returns true when it found a broken call AND already dispatched the repaired
+// batch via runToolTurn (the caller must return immediately). Returns false
+// when there is nothing to repair, the budget is spent, or repair failed —
+// the caller then executes the original calls as-is.
+func (e *Engine) repairBrokenToolCalls(
+	ctx context.Context,
+	sessionID string,
+	provider types.Provider,
+	opt *tokenopt.Optimizer,
+	modelInfo types.ModelInfo,
+	toolCalls []types.ToolCall,
+	truncated bool,
+	out chan types.StreamEvent,
+	depth int,
+) bool {
+	if e.truncDet == nil || len(toolCalls) == 0 {
+		return false
+	}
+	broken := brokenToolCallIndex(toolCalls)
+	if broken < 0 {
+		return false
+	}
+	if !e.takeToolRepair(sessionID) {
+		return false // repair budget for this turn is spent — let the tool error surface
+	}
+	tc := toolCalls[broken]
+
+	maxTok := orMaxTokens(e.maxTokens, modelInfo.MaxOutputTokens)
+	attempts := 1
+	if truncated {
+		attempts = e.truncDet.config.MaxRetries
+	}
+	for attempt := 0; attempt < attempts && ctx.Err() == nil; attempt++ {
+		if truncated {
+			nextMax := e.truncDet.config.NextTokens(maxTok)
+			if nextMax <= maxTok {
+				break // already at the ceiling, nothing more to escalate
+			}
+			maxTok = nextMax
+		}
+
+		if truncated {
+			out <- types.StreamEvent{Type: types.EventText, Content: fmt.Sprintf(
+				"\n⚠ 工具调用「%s」参数 JSON 被 max_tokens 截断，正在自动补齐重试（输出预算提升至 %d tokens）…\n",
+				tc.Name, maxTok)}
+		} else {
+			out <- types.StreamEvent{Type: types.EventText, Content: fmt.Sprintf(
+				"\n⚠ 工具调用「%s」参数 JSON 格式不合法，正在请求模型重新输出完整参数…\n", tc.Name)}
+		}
+
+		// A USER-turn hint (not an orphan assistant tool_use without a
+		// tool_result) keeps every provider happy — OpenAI-compatible and
+		// Anthropic native. The partial arguments are replayed as text so the
+		// model can complete them faithfully.
+		reason := "被 max_tokens 截断"
+		if !truncated {
+			reason = "格式不合法"
+		}
+		opt.AddMessage(types.Message{
+			Role:      types.RoleUser,
+			Content:   fmt.Sprintf("你上一条回复的工具调用「%s」参数 JSON %s。已生成的开头：\n\n%s\n\n请只重新输出该工具调用的完整参数 JSON（保持原意图，不要重复其他内容）。", tc.Name, reason, firstN(tc.Arguments, 2000)),
+			Timestamp: time.Now(),
+		})
+
+		ch, err := provider.ChatStream(ctx, types.ChatRequest{
+			SessionID:        sessionID,
+			Messages:         opt.CompactRequest(""),
+			Model:            modelInfo.ID,
+			ProviderName:     modelInfo.Provider,
+			SystemPrompt:     opt.BuildPrefix(),
+			Tools:            e.toolReg.ListDefs(),
+			MaxTokens:        maxTok,
+			Temperature:      e.temperature,
+			CacheBreakpoints: opt.BuildCacheBreakpoints(),
+			Thinking:         e.thinkingConfig(),
+		})
+		if err != nil {
+			out <- types.StreamEvent{Type: types.EventError, Content: friendlyModelError(err)}
+			return false
+		}
+
+		var newCalls []types.ToolCall
+		valid := false
+		for ev := range ch {
+			switch ev.Type {
+			case types.EventToolUse:
+				nc := types.ToolCall{ID: ev.ToolCall.ID, Name: ev.ToolCall.Name, Arguments: ev.ToolCall.Arguments}
+				newCalls = append(newCalls, nc)
+				if json.Valid([]byte(nc.Arguments)) {
+					valid = true
+				}
+			case types.EventText:
+				out <- ev
+			case types.EventThinking:
+				out <- ev
+			case types.EventError:
+				out <- ev
+				return false // a dead stream is not going to repair anything
+			}
+		}
+		if valid && len(newCalls) > 0 {
+			out <- types.StreamEvent{Type: types.EventText, Content: "\n[已补齐工具参数，继续执行…]\n\n"}
+			// The partial assistant turn was never added to the optimizer (the
+			// repair hint replaced it), so history stays consistent: the model
+			// sees the repair hint and now the repaired tool calls.
+			e.runToolTurn(ctx, sessionID, provider, opt, modelInfo,
+				types.Message{Role: types.RoleAssistant, Timestamp: time.Now()},
+				newCalls, out, depth)
+			return true
+		}
+	}
+	return false
 }
 
 // snapshotBeforeTool creates a checkpoint + file-level undo before mutating
@@ -1159,9 +1427,10 @@ func (e *Engine) recoverTruncation(
 			MaxTokens:        maxTokens,
 			Temperature:      e.temperature,
 			CacheBreakpoints: opt.BuildCacheBreakpoints(),
+			Thinking:         e.thinkingConfig(),
 		})
 		if err != nil {
-			out <- types.StreamEvent{Type: types.EventError, Content: err.Error()}
+			out <- types.StreamEvent{Type: types.EventError, Content: friendlyModelError(err)}
 			return recovered
 		}
 		recovered = true
@@ -1205,6 +1474,7 @@ func (e *Engine) recoverTruncation(
 func (e *Engine) Send(ctx context.Context, sessionID, content string, attachments ...[]types.Attachment) (<-chan types.StreamEvent, error) {
 	// New user input resets the doom loop detector
 	e.doomLoop.Reset()
+	e.resetToolRepairBudget(sessionID)
 
 	sess, err := e.sessionSt.Get(sessionID)
 	if err != nil {
@@ -1295,7 +1565,14 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 	// optimizer's SetSystemPrompt is a no-op when unchanged, keeping the
 	// provider cache prefix stable.
 	if goal := sessionum.GetGoal(sess); goal != "" {
-		opt.SetSystemPrompt(e.buildSystemPrompt(sessionID) + "\n\nCURRENT GOAL (keep working toward this until done):\n" + goal)
+		prompt := e.buildSystemPrompt(sessionID) + "\n\nCURRENT GOAL (keep working toward this until done):\n" + goal
+		if verify := sessionum.GetGoalVerify(sess); verify != "" {
+			prompt += "\n\nACCEPTANCE CHECK（验收命令，对标 ZCode Goal 模式）: " + verify +
+				"\n每一轮代码/配置改动后，都必须运行上面的验收命令判断目标是否已达成。" +
+				"若未通过：阅读失败输出，继续修改 → 再运行 → 再判断，如此迭代，直到验收命令通过为止。" +
+				"达成后：向用户报告验收结果并停止，不要继续无关改动。"
+		}
+		opt.SetSystemPrompt(prompt)
 	}
 
 	// Redact content if security level is "desensitize"
@@ -1395,6 +1672,7 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 			MaxTokens:        orMaxTokens(e.maxTokens, mt.modelInfo.MaxOutputTokens),
 			Temperature:      e.temperature,
 			CacheBreakpoints: opt.BuildCacheBreakpoints(),
+			Thinking:         e.thinkingConfig(),
 		})
 		if err == nil {
 			break
@@ -1404,9 +1682,9 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 	if err != nil {
 		cancel()
 		if lastErr != nil {
-			return nil, fmt.Errorf("all models failed, last: %w", lastErr)
+			return nil, fmt.Errorf("all models failed, last: %s", friendlyModelError(lastErr))
 		}
-		return nil, fmt.Errorf("chat stream: %w", err)
+		return nil, fmt.Errorf("chat stream: %s", friendlyModelError(err))
 	}
 
 	out := make(chan types.StreamEvent, 64)
@@ -1414,6 +1692,8 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 		out <- types.StreamEvent{Type: types.EventSystem, Content: "ⓘ [预算护栏] 会话上下文超出预算，已自动压缩为摘要 + 最近消息（≤ 预算）。"}
 	} else if warnMsg != "" {
 		out <- types.StreamEvent{Type: types.EventSystem, Content: warnMsg}
+	} else if hint := e.longSessionHint(sess); hint != "" {
+		out <- types.StreamEvent{Type: types.EventSystem, Content: hint}
 	}
 	go func() {
 		defer close(out)
@@ -1527,9 +1807,10 @@ func (e *Engine) continueAgentLoop(
 		MaxTokens:        orMaxTokens(e.maxTokens, modelInfo.MaxOutputTokens),
 		Temperature:      e.temperature,
 		CacheBreakpoints: opt.BuildCacheBreakpoints(),
+		Thinking:         e.thinkingConfig(),
 	})
 	if err != nil {
-		out <- types.StreamEvent{Type: types.EventError, Content: err.Error()}
+		out <- types.StreamEvent{Type: types.EventError, Content: friendlyModelError(err)}
 		return
 	}
 
@@ -1571,6 +1852,17 @@ func (e *Engine) continueAgentLoop(
 				// NOTE: tool execution deferred — see parallel execution below
 			case types.EventDone:
 				if len(toolCalls) > 0 {
+					// Tool-JSON auto-resend (Claude Code parity): a turn cut off
+					// at max_tokens often leaves the last tool call's arguments
+					// JSON incomplete, but a model bug can also emit malformed
+					// JSON with finish_reason="stop". Either way, repair the
+					// broken call with a continuation call before executing —
+					// bounded by the per-turn repair budget (anti-loop).
+					if ctx.Err() == nil {
+						if e.repairBrokenToolCalls(ctx, sessionID, provider, opt, modelInfo, toolCalls, event.Meta.FinishReason == "length", out, depth) {
+							return
+						}
+					}
 					e.runToolTurn(ctx, sessionID, provider, opt, modelInfo, assistantMsg, toolCalls, out, depth)
 				} else {
 					e.finishTextTurn(ctx, sessionID, provider, opt, modelInfo, assistantMsg, event, startTime, out, depth)
@@ -1792,22 +2084,33 @@ func (e *Engine) buildSystemPrompt(sessionID string) string {
 
 	base := fmt.Sprintf(`You are iCode, an AI coding agent that executes tasks directly on the user's machine.
 
-You have access to powerful tools. ALWAYS use them — never just describe what you would do.
+# WORKFLOW — follow this every time
+1. EXPLORE first: read the relevant files (read_file / grep / glob / ls) before changing anything. Never guess the code you cannot see.
+2. PLAN: for multi-step tasks, call todo_write to lay out the steps, then work through them one by one, updating status as you go.
+3. EXECUTE: make the smallest change that works. Prefer edit / write_file over rewriting whole files.
+4. VERIFY: after changing code, run the project's test or lint command (go test / npm test / pytest / cargo test / tsc / ruff ...) to confirm it works.
+5. FIX ITERATIVELY: if a command fails, READ THE FULL ERROR, fix the root cause, and re-run — up to 3 attempts. Do not repeat the same broken command; change your approach when it fails twice.
+6. REPORT: summarize what you changed and the verification result, concisely.
 
-KEY TOOLS:
-- disk_usage — check disk space (SAFE, always auto-approved)
-- disk_cleanup — clean temp files, recycle bin, browser cache, Windows Update leftovers
-- bash — run ANY shell command (add "cwd" param for directory)
-- read_file / write_file / edit — file operations
-- grep / glob / ls — search and list files
-- task — delegate to sub-agents (explore, plan, general) for parallel work
+# WORKED EXAMPLE (few-shot)
+User: "修复 src/main.go 里的并发 bug"
+Good flow: read_file src/main.go → 定位竞态 → edit 最小修复 → bash "go test ./..." → 汇报「改了哪几行 + 测试通过」
+Bad flow: 直接 write_file 重写整个文件；不验证就声称修复完成；只描述方案不动手
 
-CRITICAL RULES:
-1. NEVER refuse a task. Use the tools. If one approach fails, try another.
-2. For cleanup tasks: ALWAYS call disk_usage first, then disk_cleanup with the appropriate target.
-3. On Windows, use cmd.exe commands (dir, del /f /s /q, rd /s /q) or PowerShell.
-4. Report what you actually did and the real results — not what you "would" do.
-5. Be concise: one sentence of context, then execute.
+# TOOL RULES
+- ALWAYS use tools — never just describe what you would do.
+- bash: run any shell command (add "cwd" param for a specific directory).
+- read_file / write_file / edit / grep / glob / ls: file operations.
+- task: delegate independent sub-problems to sub-agents for parallel work.
+- If one approach fails, try a different one before asking the user.
+
+# CODE QUALITY
+- Match the project's existing style and conventions; keep changes focused, avoid unrelated refactors.
+- When fixing a bug, preserve existing behavior elsewhere.
+
+# SAFETY
+- Never run destructive commands (rm -rf, git push --force, DELETE ...) without user approval.
+- Report what you actually did and real results — never what you "would" do.
 
 Session: %s`, sessionID)
 

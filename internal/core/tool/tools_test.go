@@ -116,6 +116,84 @@ func TestReadFileTool_Def(t *testing.T) {
 	if _, ok := props["path"]; !ok {
 		t.Error("expected 'path' property")
 	}
+	// Chunked-read params advertised (large-file parity)
+	if _, ok := props["offset"]; !ok {
+		t.Error("expected 'offset' property")
+	}
+	if _, ok := props["limit"]; !ok {
+		t.Error("expected 'limit' property")
+	}
+}
+
+// TestReadFileTool_Chunked verifies offset/limit line-window reads: only the
+// requested block is returned, the header reports the total line count, and a
+// "continue with offset=N" hint is emitted when more content follows.
+func TestReadFileTool_Chunked(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "big.txt")
+	var sb strings.Builder
+	for i := 1; i <= 100; i++ {
+		fmt.Fprintf(&sb, "line %03d\n", i)
+	}
+	if err := os.WriteFile(path, []byte(sb.String()), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	tool := &ReadFileTool{}
+
+	// Second 10-line block (lines 11-20).
+	res, err := tool.Execute(context.Background(), fmt.Sprintf(`{"path": %q, "offset": 11, "limit": 10}`, path))
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if !res.Success {
+		t.Fatalf("expected success, got %+v", res)
+	}
+	if !strings.Contains(res.Content, "共 100 行") {
+		t.Fatalf("header missing total line count: %q", res.Content)
+	}
+	if !strings.Contains(res.Content, "第 11–20 行") {
+		t.Fatalf("header missing window range: %q", res.Content)
+	}
+	if strings.Contains(res.Content, "line 010") || strings.Contains(res.Content, "line 021") {
+		t.Fatalf("chunk leaked outside the window: %q", res.Content)
+	}
+	if !strings.Contains(res.Content, "line 011") || !strings.Contains(res.Content, "line 020") {
+		t.Fatalf("chunk missing expected lines: %q", res.Content)
+	}
+	if !strings.Contains(res.Content, "offset=21") {
+		t.Fatalf("continue hint missing: %q", res.Content)
+	}
+
+	// Last block with nothing after → no continue hint.
+	res2, err := tool.Execute(context.Background(), fmt.Sprintf(`{"path": %q, "offset": 95, "limit": 10}`, path))
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if !strings.Contains(res2.Content, "第 95–100 行") {
+		t.Fatalf("tail window range wrong: %q", res2.Content)
+	}
+	if strings.Contains(res2.Content, "offset=") {
+		t.Fatalf("tail chunk must not offer a next block: %q", res2.Content)
+	}
+
+	// No offset/limit → full content (backward compatible).
+	res3, err := tool.Execute(context.Background(), fmt.Sprintf(`{"path": %q}`, path))
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if !strings.Contains(res3.Content, "line 100") {
+		t.Fatalf("full read missing tail: %q", res3.Content)
+	}
+
+	// offset past EOF clamps to the last line.
+	res4, err := tool.Execute(context.Background(), fmt.Sprintf(`{"path": %q, "offset": 500, "limit": 5}`, path))
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if !strings.Contains(res4.Content, "line 100") {
+		t.Fatalf("clamped read should show last line: %q", res4.Content)
+	}
 }
 
 func TestWriteFileTool_Def(t *testing.T) {

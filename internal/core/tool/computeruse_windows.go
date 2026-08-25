@@ -165,19 +165,19 @@ const (
 	inputMouse = 0
 	inputKeybd = 1
 
-	mfMove         = 0x0001
-	mfLeftDown     = 0x0002
-	mfLeftUp       = 0x0004
-	mfRightDown    = 0x0008
-	mfRightUp      = 0x0010
-	mfMiddleDown   = 0x0020
-	mfMiddleUp     = 0x0040
-	mfWheel        = 0x0800
-	mfHWheel       = 0x1000
-	mfAbsolute     = 0x8000
+	mfMove       = 0x0001
+	mfLeftDown   = 0x0002
+	mfLeftUp     = 0x0004
+	mfRightDown  = 0x0008
+	mfRightUp    = 0x0010
+	mfMiddleDown = 0x0020
+	mfMiddleUp   = 0x0040
+	mfWheel      = 0x0800
+	mfHWheel     = 0x1000
+	mfAbsolute   = 0x8000
 
-	kfKeyUp   = 0x0002
-	kfUnicode = 0x0004
+	kfKeyUp    = 0x0002
+	kfUnicode  = 0x0004
 	kfScanCode = 0x0008
 )
 
@@ -415,22 +415,22 @@ func resolveKey(name string) uint16 {
 
 // Virtual-key codes used by computer use.
 const (
-	vk_Back  = 0x08
-	vk_Tab   = 0x09
-	vk_Enter = 0x0D
-	vk_Escape = 0x1B
-	vk_Space = 0x20
-	vk_PageUp = 0x21
+	vk_Back     = 0x08
+	vk_Tab      = 0x09
+	vk_Enter    = 0x0D
+	vk_Escape   = 0x1B
+	vk_Space    = 0x20
+	vk_PageUp   = 0x21
 	vk_PageDown = 0x22
-	vk_End   = 0x23
-	vk_Home  = 0x24
-	vk_Left  = 0x25
-	vk_Up    = 0x26
-	vk_Right = 0x27
-	vk_Down  = 0x28
-	vk_Delete = 0x2E
-	vk_Shift = 0x10
-	vk_Control = 0x11
-	vk_Alt   = 0x12
-	vk_F1    = 0x70
+	vk_End      = 0x23
+	vk_Home     = 0x24
+	vk_Left     = 0x25
+	vk_Up       = 0x26
+	vk_Right    = 0x27
+	vk_Down     = 0x28
+	vk_Delete   = 0x2E
+	vk_Shift    = 0x10
+	vk_Control  = 0x11
+	vk_Alt      = 0x12
+	vk_F1       = 0x70
 )

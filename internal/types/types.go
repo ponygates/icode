@@ -128,6 +128,16 @@ type ChatRequest struct {
 
 	// Cache hints for prefix-cache aware providers (DeepSeek, Anthropic, etc.).
 	CacheBreakpoints []int `json:"cache_breakpoints,omitempty"`
+
+	// Thinking, when non-nil, enables provider extended thinking (Anthropic
+	// Claude). Ignored by providers that do not support it.
+	Thinking *ThinkingConfig `json:"thinking,omitempty"`
+}
+
+// ThinkingConfig enables extended thinking (Anthropic Messages API
+// "thinking" block). BudgetTokens must be > 0 and less than MaxTokens.
+type ThinkingConfig struct {
+	BudgetTokens int `json:"budget_tokens,omitempty"`
 }
 
 // StreamEvent is pushed to the caller as the LLM responds.

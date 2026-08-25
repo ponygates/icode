@@ -14,6 +14,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/ponygates/icode/internal/scheduler"
 	"github.com/ponygates/icode/internal/types"
 )
 
@@ -124,6 +125,27 @@ func (s *Store) migrate() error {
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS automations (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL DEFAULT '',
+			prompt TEXT NOT NULL DEFAULT '',
+			schedule TEXT NOT NULL DEFAULT '',
+			enabled INTEGER NOT NULL DEFAULT 1,
+			last_run TEXT NOT NULL DEFAULT '',
+			next_run TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS automation_runs (
+			id TEXT PRIMARY KEY,
+			task_id TEXT NOT NULL,
+			started_at TEXT NOT NULL,
+			finished_at TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT '',
+			output TEXT NOT NULL DEFAULT '',
+			error TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_automation_runs_task ON automation_runs(task_id, started_at)`,
 		`PRAGMA foreign_keys = ON`,
 		`PRAGMA journal_mode = WAL`,
 	}
@@ -669,4 +691,99 @@ func (s *Store) AddSessionToWorkspace(id string, sessionID string) error {
 	_, err = s.db.Exec(`UPDATE workspaces SET session_ids = ?, updated_at = ? WHERE id = ?`,
 		string(ids), now, id)
 	return err
+}
+
+// ============================================================================
+// Automations (scheduled tasks) — WorkBuddy-style
+// ============================================================================
+
+// LoadAutomations returns all persisted automation tasks.
+func (s *Store) LoadAutomations() ([]scheduler.Task, error) {
+	rows, err := s.db.Query(`SELECT id, name, prompt, schedule, enabled, last_run, next_run, created_at, updated_at FROM automations`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []scheduler.Task
+	for rows.Next() {
+		var t scheduler.Task
+		var enabled int
+		var lastRun, nextRun, createdAt, updatedAt string
+		if err := rows.Scan(&t.ID, &t.Name, &t.Prompt, &t.Schedule, &enabled,
+			&lastRun, &nextRun, &createdAt, &updatedAt); err != nil {
+			return nil, err
+		}
+		t.Enabled = enabled != 0
+		t.LastRun, _ = time.Parse(time.RFC3339, lastRun)
+		t.NextRun, _ = time.Parse(time.RFC3339, nextRun)
+		t.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
+		t.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// SaveAutomation inserts or replaces an automation task.
+func (s *Store) SaveAutomation(t scheduler.Task) error {
+	enabled := 0
+	if t.Enabled {
+		enabled = 1
+	}
+	_, err := s.db.Exec(`INSERT OR REPLACE INTO automations
+		(id, name, prompt, schedule, enabled, last_run, next_run, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		t.ID, t.Name, t.Prompt, t.Schedule, enabled,
+		rf3339(t.LastRun), rf3339(t.NextRun), rf3339(t.CreatedAt), rf3339(t.UpdatedAt))
+	return err
+}
+
+// DeleteAutomation removes a task and its run history.
+func (s *Store) DeleteAutomation(id string) error {
+	if _, err := s.db.Exec(`DELETE FROM automation_runs WHERE task_id = ?`, id); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(`DELETE FROM automations WHERE id = ?`, id)
+	return err
+}
+
+// AppendAutomationRun records one execution result.
+func (s *Store) AppendAutomationRun(r scheduler.RunRecord) error {
+	_, err := s.db.Exec(`INSERT OR REPLACE INTO automation_runs
+		(id, task_id, started_at, finished_at, status, output, error)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.TaskID, rf3339(r.StartedAt), rf3339(r.FinishedAt),
+		r.Status, r.Output, r.Error)
+	return err
+}
+
+// ListAutomationRuns returns the most recent runs for a task.
+func (s *Store) ListAutomationRuns(taskID string, limit int) ([]scheduler.RunRecord, error) {
+	rows, err := s.db.Query(`SELECT id, task_id, started_at, finished_at, status, output, error
+		FROM automation_runs WHERE task_id = ? ORDER BY started_at DESC LIMIT ?`, taskID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []scheduler.RunRecord
+	for rows.Next() {
+		var r scheduler.RunRecord
+		var startedAt, finishedAt string
+		if err := rows.Scan(&r.ID, &r.TaskID, &startedAt, &finishedAt,
+			&r.Status, &r.Output, &r.Error); err != nil {
+			return nil, err
+		}
+		r.StartedAt, _ = time.Parse(time.RFC3339, startedAt)
+		r.FinishedAt, _ = time.Parse(time.RFC3339, finishedAt)
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// rf3339 renders a time as RFC3339 (empty for zero time), matching the rest
+// of the store's serialization.
+func rf3339(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
 }

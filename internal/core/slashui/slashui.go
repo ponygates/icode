@@ -16,6 +16,7 @@ import (
 	"github.com/ponygates/icode/internal/core/checkpoint"
 	projectcontext "github.com/ponygates/icode/internal/core/context"
 	"github.com/ponygates/icode/internal/core/conversation"
+	"github.com/ponygates/icode/internal/core/knowledge"
 	"github.com/ponygates/icode/internal/core/permission"
 	"github.com/ponygates/icode/internal/core/prefmem"
 	"github.com/ponygates/icode/internal/core/searchreplace"
@@ -24,6 +25,7 @@ import (
 	"github.com/ponygates/icode/internal/core/slashcmd"
 	"github.com/ponygates/icode/internal/core/todo"
 	"github.com/ponygates/icode/internal/executil"
+	"github.com/ponygates/icode/internal/scheduler"
 	"github.com/ponygates/icode/internal/types"
 	"github.com/ponygates/icode/pkg/modelupdate"
 )
@@ -36,6 +38,14 @@ type Backend struct {
 	SessStore     types.SessionStore
 	Gate          *permission.Gate
 	RefreshModels func(ctx context.Context) ([]modelupdate.ProviderUpdate, error)
+	// Scheduler is optional — when set, /idle can create off-peak tasks.
+	Scheduler *scheduler.Scheduler
+	// RegisterCustomModel persists + live-registers a user-defined model
+	// (/models add). It returns an error string, or "" on success. Optional —
+	// when nil, /models add reports "not available".
+	RegisterCustomModel func(provider, modelID, name string) string
+	// RemoveCustomModel removes a user-defined model (/models rm). Optional.
+	RemoveCustomModel func(id string) string
 }
 
 // State carries the caller's runtime state for the current turn. The caller
@@ -108,13 +118,15 @@ func Execute(ctx context.Context, b *Backend, st *State, text string) Result {
 	case "/config":
 		return cmdConfig(args)
 	case "/models":
-		return cmdModels()
+		return cmdModels(b, args)
 	case "/model":
 		return cmdModel(b, st, args)
 	case "/provider":
 		return cmdProvider(st, args)
 	case "/mode":
 		return cmdMode(b, st, args)
+	case "/thinking":
+		return cmdThinking(b, args)
 	case "/copy":
 		return cmdCopy(b, st, args)
 	case "/session", "/sessions":
@@ -146,6 +158,12 @@ func Execute(ctx context.Context, b *Backend, st *State, text string) Result {
 		return cmdUndo(st, args)
 	case "/diff":
 		return cmdDiff(args)
+	case "/lsp":
+		return cmdLsp(b, st, args)
+	case "/kb", "/knowledge":
+		return cmdKnowledge(b, args)
+	case "/idle":
+		return cmdIdle(b, args)
 	case "/export":
 		return cmdExport(b, st, args)
 	case "/share":
@@ -183,7 +201,7 @@ func Execute(ctx context.Context, b *Backend, st *State, text string) Result {
 	case "/summarize":
 		return cmdSummarize(b, st)
 	case "/compact":
-		return cmdCompact(b, st)
+		return cmdCompact(b, st, args)
 	case "/output-style":
 		return cmdOutputStyle(b, args)
 	case "/security":
@@ -465,21 +483,52 @@ func cmdConfigSet(args []string) Result {
 	return ok(fmt.Sprintf("已设置 %s = %s", key, value))
 }
 
-func cmdModels() Result {
+func cmdModels(b *Backend, args []string) Result {
+	if len(args) > 0 {
+		switch strings.ToLower(args[0]) {
+		case "add":
+			if b == nil || b.RegisterCustomModel == nil {
+				return errf("当前界面不支持添加模型。请用 `icode config model add <provider> <model_id> [name]` 或桌面端设置。")
+			}
+			if len(args) < 3 {
+				return errf("用法: /models add <provider> <model_id> [name]")
+			}
+			name := args[2]
+			if len(args) >= 4 {
+				name = strings.Join(args[3:], " ")
+			}
+			if msg := b.RegisterCustomModel(args[1], args[2], name); msg != "" {
+				return errf("%s", msg)
+			}
+			return ok(fmt.Sprintf("✓ 已添加自定义模型 %s（%s / %s）", config.ModelKey(args[1], args[2]), args[1], name))
+		case "rm", "remove", "del", "delete":
+			if b == nil || b.RemoveCustomModel == nil {
+				return errf("当前界面不支持删除模型。请用 `icode config model rm <id>` 或桌面端设置。")
+			}
+			if len(args) < 2 {
+				return errf("用法: /models rm <id>（id 形如 provider/model_id）")
+			}
+			if msg := b.RemoveCustomModel(args[1]); msg != "" {
+				return errf("%s", msg)
+			}
+			return ok(fmt.Sprintf("✓ 已移除自定义模型 %s", args[1]))
+		}
+	}
+
 	cfg, err := config.Load()
 	if err != nil || len(cfg.Models) == 0 {
-		return ok("暂无自定义模型。\n用 `icode config model add <provider> <model_id> [name]` 新增。")
+		return ok("暂无自定义模型。\n用 `/models add <provider> <model_id> [name]` 新增。")
 	}
-	var b strings.Builder
-	b.WriteString("自定义模型:\n")
+	var out strings.Builder
+	out.WriteString("自定义模型:\n")
 	for _, m := range cfg.Models {
 		name := m.Name
 		if name == "" {
 			name = m.ModelID
 		}
-		b.WriteString(fmt.Sprintf("  %-26s %s / %s\n", m.ID, m.Provider, name))
+		out.WriteString(fmt.Sprintf("  %-26s %s / %s\n", m.ID, m.Provider, name))
 	}
-	return ok(b.String())
+	return ok(out.String())
 }
 
 func cmdModel(b *Backend, st *State, args []string) Result {
@@ -514,6 +563,39 @@ func cmdMode(b *Backend, st *State, args []string) Result {
 	}
 	persistSetting(func(c *config.Config) { c.Defaults.Mode = want })
 	return Result{Output: "Mode -> " + want, Mode: want}
+}
+
+// cmdThinking toggles Anthropic extended thinking at runtime and persists it
+// to config (Defaults.ThinkingTokens), matching the CLI /thinking command.
+func cmdThinking(b *Backend, args []string) Result {
+	if b == nil || b.Engine == nil {
+		return ok("引擎未初始化。")
+	}
+	if len(args) == 0 {
+		if bg := b.Engine.ThinkingBudget(); bg > 0 {
+			return ok(fmt.Sprintf("当前 extended thinking 已开启，预算 %d tokens。用法: /thinking <on|off|<tokens>>", bg))
+		}
+		return ok("当前 extended thinking 已关闭。用法: /thinking <on|off|<tokens>>（如 /thinking 4096，对 Anthropic 模型生效）")
+	}
+	budget := 0
+	switch strings.ToLower(strings.TrimSpace(args[0])) {
+	case "on":
+		budget = 4096
+	case "off", "0":
+		budget = 0
+	default:
+		v, err := strconv.Atoi(strings.TrimSpace(args[0]))
+		if err != nil || v < 1024 {
+			return errf("无效预算（至少 1024 tokens）。用法: /thinking <on|off|<tokens>>")
+		}
+		budget = v
+	}
+	b.Engine.SetThinking(budget)
+	persistSetting(func(c *config.Config) { c.Defaults.ThinkingTokens = budget })
+	if budget > 0 {
+		return ok(fmt.Sprintf("✓ extended thinking 已开启（预算 %d tokens，对 Anthropic 模型生效，已持久化）", budget))
+	}
+	return ok("✓ extended thinking 已关闭（已持久化）。")
 }
 
 // cmdModeShortcut maps the mode-shortcut commands to /mode values:
@@ -684,13 +766,14 @@ const defaultLiteN = 4
 
 func cmdResume(b *Backend, st *State, args []string) Result {
 	if len(args) == 0 {
-		return ok("用法: /resume <session-id> [--lite[=<最近消息数>]]\n  --lite 只把摘要+最近 N 条消息送给模型，省 token（需要该会话已有存档摘要）")
+		return ok("用法: /resume <session-id> [--lite[=<最近消息数>] | --compact[=<最近消息数>]]\n  --lite 只把摘要+最近 N 条消息送给模型，省 token（需要该会话已有存档摘要）\n  --compact 同 --lite，但摘要不足时先用模型生成语义摘要并缓存")
 	}
 	if b == nil || b.SessStore == nil {
 		return ok("无会话存储可用。")
 	}
 	id := args[0]
 	lite := 0
+	compact := false
 	if len(args) > 1 {
 		switch a := strings.TrimSpace(args[1]); {
 		case a == "--lite":
@@ -701,8 +784,18 @@ func cmdResume(b *Backend, st *State, args []string) Result {
 			} else {
 				return errf("用法: /resume <session-id> --lite=<最近消息数>（应为正整数）")
 			}
+		case a == "--compact":
+			compact = true
+			lite = defaultLiteN
+		case strings.HasPrefix(a, "--compact="):
+			compact = true
+			if v, err := strconv.Atoi(strings.TrimPrefix(a, "--compact=")); err == nil && v > 0 {
+				lite = v
+			} else {
+				return errf("用法: /resume <session-id> --compact=<最近消息数>（应为正整数）")
+			}
 		default:
-			return errf("未知参数: %s（支持 --lite 或 --lite=<n>）", a)
+			return errf("未知参数: %s（支持 --lite、--lite=<n>、--compact、--compact=<n>）", a)
 		}
 	}
 	if st.SessionID != "" && st.SessionID != id {
@@ -716,8 +809,26 @@ func cmdResume(b *Backend, st *State, args []string) Result {
 		return errf("该会话已被软删除，先用 /restore %s 恢复。", id)
 	}
 	if lite > 0 {
+		if compact && !sessionum.IsSemantic(sess) && b.Engine != nil {
+			// Resume compaction (Claude Code parity): generate a semantic
+			// summary on the spot and cache it, so the resumed session feeds
+			// the model only summary + recent turns. A cached semantic summary
+			// is reused without a second model call.
+			ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+			sum, serr := b.Engine.SummarizeConversation(ctx, id, "")
+			cancel()
+			switch {
+			case serr != nil:
+				return errf("⚠ 模型摘要生成失败（%s），已回退为本地存档摘要。", clip(serr.Error(), 140))
+			case sum == "":
+				return errf("该会话轮次太少，无需模型摘要；如已有本地摘要可改用 /resume %s --lite。", id)
+			default:
+				_ = sessionum.Save(b.SessStore, sess, sum)
+				_ = sessionum.MarkSemantic(b.SessStore, sess)
+			}
+		}
 		if sessionum.Get(sess) == "" {
-			return errf("该会话还没有存档摘要，无法 lite 恢复。先运行 /summarize，或退出时自动存档后再试。")
+			return errf("该会话还没有存档摘要，无法压缩恢复。先 /summarize、/compact 或退出时自动存档后再试。")
 		}
 		if err := sessionum.SetLite(b.SessStore, sess, lite); err != nil {
 			return errf("设置 lite 模式失败: %v", err)
@@ -726,7 +837,11 @@ func cmdResume(b *Backend, st *State, args []string) Result {
 	st.SessionID = sess.ID
 	out := fmt.Sprintf("已载入会话 %s — %d 条消息", sess.ID, len(sess.Messages))
 	if lite > 0 {
-		out = fmt.Sprintf("已载入会话 %s（lite 模式）— 摘要 + 最近 %d 条消息（共 %d 条）送入模型", sess.ID, lite, len(sess.Messages))
+		if compact {
+			out = fmt.Sprintf("已载入会话 %s（紧凑恢复）— 语义摘要 + 最近 %d 条消息（共 %d 条）送入模型，后续轮次自动生效", sess.ID, lite, len(sess.Messages))
+		} else {
+			out = fmt.Sprintf("已载入会话 %s（lite 模式）— 摘要 + 最近 %d 条消息（共 %d 条）送入模型", sess.ID, lite, len(sess.Messages))
+		}
 	}
 	return Result{
 		Output:    out,
@@ -815,11 +930,27 @@ func cmdGoal(b *Backend, st *State, args []string) Result {
 	switch strings.ToLower(args[0]) {
 	case "set":
 		if len(args) < 2 {
-			return ok("用法: /goal set <目标文本>")
+			return ok("用法: /goal set <目标文本> [--verify <验收命令>]")
 		}
-		goal := strings.TrimSpace(strings.Join(args[1:], " "))
+		// Parse optional --verify <acceptance command> (ZCode Goal parity).
+		goal := ""
+		verify := ""
+		rest := args[1:]
+		for i := 0; i < len(rest); i++ {
+			if rest[i] == "--verify" || rest[i] == "-v" {
+				if i+1 < len(rest) {
+					verify = strings.TrimSpace(strings.Join(rest[i+1:], " "))
+				}
+				break
+			}
+			if goal != "" {
+				goal += " "
+			}
+			goal += rest[i]
+		}
+		goal = strings.TrimSpace(goal)
 		if goal == "" {
-			return ok("目标不能为空。用法: /goal set <目标文本>")
+			return ok("目标不能为空。用法: /goal set <目标文本> [--verify <验收命令>]")
 		}
 		sess, r := load()
 		if sess == nil {
@@ -828,6 +959,12 @@ func cmdGoal(b *Backend, st *State, args []string) Result {
 		if err := sessionum.SetGoal(b.SessStore, sess, goal); err != nil {
 			return errf("保存目标失败: %v", err)
 		}
+		if verify != "" {
+			if err := sessionum.SetGoalVerify(b.SessStore, sess, verify); err != nil {
+				return errf("保存验收命令失败: %v", err)
+			}
+			return ok("已设置可验收目标（每轮自动迭代直到验收命令通过）：\n目标：" + goal + "\n验收命令：" + verify)
+		}
 		return ok("已设置长目标（后续每轮对话都会自动携带）：\n" + goal)
 	case "show":
 		sess, r := load()
@@ -835,7 +972,11 @@ func cmdGoal(b *Backend, st *State, args []string) Result {
 			return r
 		}
 		if g := sessionum.GetGoal(sess); g != "" {
-			return ok("当前目标（长目标模式生效中）：\n" + g)
+			msg := "当前目标（长目标模式生效中）：\n" + g
+			if v := sessionum.GetGoalVerify(sess); v != "" {
+				msg += "\n验收命令：" + v
+			}
+			return ok(msg)
 		}
 		return ok("当前没有目标。")
 	case "clear", "unset":
@@ -1065,6 +1206,66 @@ func cmdDiff(args []string) Result {
 		return ok("没有未提交的改动。")
 	}
 	return ok("```diff\n" + strings.TrimRight(string(output), "\n") + "\n```")
+}
+
+// cmdIdle creates an off-peak task (/idle), 对齐智谱 ZCode 的"闲时任务"：
+// 把非紧急重活排到低峰窗口（默认 00:00–06:00）自动执行。
+func cmdIdle(b *Backend, args []string) Result {
+	if b == nil || b.Scheduler == nil {
+		return errf("调度器不可用（需持久化后端）。")
+	}
+	if len(args) < 2 {
+		return errf("用法: /idle <名称> <任务描述>（如 /idle 全仓库重构 扫描 internal/ 下所有 Go 文件并修复明显问题）")
+	}
+	name := args[0]
+	prompt := strings.Join(args[1:], " ")
+	t, err := b.Scheduler.Create(name, prompt, "idle")
+	if err != nil {
+		return errf("创建闲时任务失败: %v", err)
+	}
+	return ok(fmt.Sprintf("✓ 已创建闲时任务「%s」（ID: %s）\n将在闲时窗口（低峰时段）自动执行，完成后通知你。", t.Name, t.ID))
+}
+
+// cmdKnowledge searches the local document knowledge base (/kb), 对标
+// WorkBuddy 的"资料库"能力（本地 RAG，零 API 零 token）。
+func cmdKnowledge(b *Backend, args []string) Result {
+	if b == nil || b.Engine == nil {
+		return errf("知识库不可用（引擎未就绪）。")
+	}
+	mgr := b.Engine.KnowledgeManager()
+	if mgr == nil {
+		return errf("知识库未配置。请在 config.yaml 的 knowledge.dirs 中指定文档目录，或在 /config 中设置。")
+	}
+	if len(args) == 0 {
+		return ok(fmt.Sprintf("知识库状态：已索引 %d 个片段。\n用法: /kb <查询>（如 /kb 保险犹豫期退保规则）", mgr.ChunkCount()))
+	}
+	query := strings.Join(args, " ")
+	if mgr.ChunkCount() == 0 {
+		if _, err := mgr.Index(context.Background()); err != nil {
+			return errf("索引失败: %v", err)
+		}
+	}
+	results := mgr.Search(query, 5)
+	return ok(knowledge.Format(results))
+}
+func cmdLsp(b *Backend, st *State, args []string) Result {
+	if b == nil || b.Engine == nil {
+		return errf("LSP 不可用（引擎未就绪）。")
+	}
+	mgr := b.Engine.LSPManager()
+	if mgr == nil {
+		return errf("LSP 未启用。请在配置中开启 lsp.enabled（config.toml 或 /config）。")
+	}
+	sub := "status"
+	if len(args) > 0 {
+		sub = strings.ToLower(args[0])
+		args = args[1:]
+	}
+	out, err := mgr.QueryReport(sub, args)
+	if err != nil {
+		return errf("%v", err)
+	}
+	return ok(out)
 }
 
 func cmdExport(b *Backend, st *State, args []string) Result {
@@ -1594,18 +1795,43 @@ func cmdSummarize(b *Backend, st *State) Result {
 	return ok(summary + "\n\n（摘要已存档，之后 /resume 会作为上下文前缀注入）")
 }
 
-func cmdCompact(b *Backend, st *State) Result {
+func cmdCompact(b *Backend, st *State, args []string) Result {
 	if b == nil || b.Engine == nil {
 		return ok("引擎未初始化。")
 	}
 	if st.SessionID == "" {
 		return ok("没有活跃会话。")
 	}
+	instruction := strings.Join(args, " ")
 	stats := b.Engine.SessionStats(st.SessionID)
+
+	// Claude Code parity: /compact now generates a model semantic summary of
+	// the older turns and caches it (summary + recent turns from now on). The
+	// Cache-First Loop stats are reported alongside.
+	sess, err := b.SessStore.Get(st.SessionID)
+	if err == nil && sess != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		sum, serr := b.Engine.SummarizeConversation(ctx, st.SessionID, instruction)
+		cancel()
+		if serr != nil {
+			return errf("⚠ 模型语义摘要生成失败（%s）。Cache-First Loop 自动压缩不受影响，仍按原逻辑运行。", clip(serr.Error(), 140))
+		}
+		if sum == "" {
+			return ok("会话轮次太少，无需模型压缩；Cache-First Loop 自动压缩会按需处理。")
+		}
+		_ = sessionum.Save(b.SessStore, sess, sum)
+		_ = sessionum.MarkSemantic(b.SessStore, sess)
+		out := "✓ 已用模型语义摘要压缩较早对话（已缓存，后续轮次按「摘要+最近消息」喂给模型）。\n"
+		if stats != nil {
+			out += fmt.Sprintf("Cache-First Loop 已自动压缩 %d 次，共节省 %s tokens。当前 Prompt: %s tokens。",
+				stats.CompactionsDone, formatInt(stats.TokensSaved), formatInt(stats.PromptTokens))
+		}
+		return ok(out)
+	}
 	if stats == nil {
 		return ok("会话采用 Cache-First Loop 自动压缩，无需手动操作。")
 	}
-	return ok(fmt.Sprintf("Cache-First Loop 自动压缩已运行 %d 次，已节省 %s tokens。\n当前 Prompt: %s tokens。\n如需手动压缩，请在 CLI 中使用 /compact。",
+	return ok(fmt.Sprintf("Cache-First Loop 自动压缩已运行 %d 次，已节省 %s tokens。\n当前 Prompt: %s tokens。",
 		stats.CompactionsDone, formatInt(stats.TokensSaved), formatInt(stats.PromptTokens)))
 }
 
@@ -1873,6 +2099,16 @@ func shortDir(dir string) string {
 		return "~" + strings.TrimPrefix(dir, home)
 	}
 	return dir
+}
+
+// clip truncates s to n runes and appends "…" when shortened (keeps error
+// messages inside slash-command replies short).
+func clip(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }
 
 func formatInt(n int) string {

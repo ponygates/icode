@@ -34,6 +34,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	executil "github.com/ponygates/icode/internal/executil"
@@ -45,6 +46,7 @@ var (
 	cachedReg *Registry
 	cacheTime time.Time
 	cacheTTL  = 5 * time.Second
+	cacheMu   sync.RWMutex
 )
 
 type ShellGate interface {
@@ -56,6 +58,18 @@ func SetShellGate(g ShellGate) {
 }
 
 func CachedLoad(dirs ...string) *Registry {
+	cacheMu.RLock()
+	if cachedReg != nil && time.Since(cacheTime) < cacheTTL {
+		reg := cachedReg
+		cacheMu.RUnlock()
+		return reg
+	}
+	cacheMu.RUnlock()
+
+	cacheMu.Lock()
+	defer cacheMu.Unlock()
+	// Double-check after acquiring write lock: another goroutine may have
+	// refreshed the cache between the RUnlock and the Lock.
 	if cachedReg != nil && time.Since(cacheTime) < cacheTTL {
 		return cachedReg
 	}
@@ -65,6 +79,8 @@ func CachedLoad(dirs ...string) *Registry {
 }
 
 func InvalidateCache() {
+	cacheMu.Lock()
+	defer cacheMu.Unlock()
 	cachedReg = nil
 	cacheTime = time.Time{}
 }

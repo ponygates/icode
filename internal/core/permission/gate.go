@@ -142,6 +142,18 @@ type Gate struct {
 	// (loaded from ~/.claude/settings.json + project .claude/settings.json).
 	// Evaluated in Agent mode alongside hooks.yaml; deny wins over allow.
 	claudeSettings *ClaudeSettings
+
+	// strikes counts consecutive non-allow decisions per session (the
+	// "分类器兜底" escalation counter). An allow resets it; N consecutive
+	// ask/deny decisions (strikeThreshold) force the session into manual mode.
+	strikes map[string]int
+	// escalated marks sessions that have been forced into manual mode after
+	// too many consecutive blocks. Once set, every action in that session
+	// requires explicit confirmation (DecisionAsk) regardless of mode.
+	escalated map[string]bool
+	// strikeThreshold is the consecutive-block count that triggers escalation
+	// back to manual mode. 0 disables the feature.
+	strikeThreshold int
 }
 
 // SetClaudeSettings installs Claude Code permission rules for Agent mode.
@@ -211,6 +223,9 @@ func NewGate(mode Mode) *Gate {
 		hooks:             loadHooks(),
 		ToolRules:         make(map[string]string),
 		connectDomains:    make(map[string]bool),
+		strikes:           make(map[string]int),
+		escalated:         make(map[string]bool),
+		strikeThreshold:   3,
 	}
 }
 
@@ -496,10 +511,77 @@ type CheckResult struct {
 	Decision Decision
 	Reason   string
 	Prompt   string // User-facing description of what would be done
+	// Escalated is true when this decision forced the session into manual mode
+	// (strike counter hit the threshold). The UI shows a "已退回手动" notice.
+	Escalated bool
 }
 
-// Check evaluates a tool action against the current permission mode.
+// Check evaluates a tool action against the current permission mode, then
+// applies the strike-counter escalation: consecutive ask/deny decisions count
+// up (an allow resets them), and reaching the threshold forces the session
+// into manual mode (every later action must be confirmed by the user).
 func (g *Gate) Check(sessionID string, action Action) CheckResult {
+	// A session already forced into manual mode: require confirmation for
+	// everything, regardless of mode. Escalated stays false here so the UI
+	// only shows the "已退回手动" notice once (on the triggering decision).
+	g.mu.RLock()
+	esc := g.escalated[sessionID]
+	g.mu.RUnlock()
+	if esc {
+		return CheckResult{
+			Decision: DecisionAsk,
+			Reason:   "手动模式：连续拦截后已退回人工确认，本会话所有操作需显式批准",
+			Prompt:   g.buildPrompt(action),
+		}
+	}
+
+	result := g.check(sessionID, action)
+	g.recordStrike(sessionID, &result)
+	return result
+}
+
+// recordStrike updates the per-session strike counter based on the decision
+// and escalates to manual mode when the threshold is crossed.
+func (g *Gate) recordStrike(sessionID string, result *CheckResult) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.strikeThreshold <= 0 {
+		return
+	}
+	switch result.Decision {
+	case DecisionAllow, DecisionAllowAll:
+		g.strikes[sessionID] = 0
+	case DecisionAsk, DecisionDeny:
+		g.strikes[sessionID]++
+		if g.strikes[sessionID] >= g.strikeThreshold {
+			g.escalated[sessionID] = true
+			result.Escalated = true
+			result.Decision = DecisionAsk
+			if result.Reason != "" {
+				result.Reason += "；"
+			}
+			result.Reason += fmt.Sprintf("已连续 %d 次拦截，自动退回手动模式", g.strikes[sessionID])
+		}
+	}
+}
+
+// SetStrikeThreshold sets the consecutive-block count that escalates a session
+// to manual mode. 0 disables the feature.
+func (g *Gate) SetStrikeThreshold(n int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.strikeThreshold = n
+}
+
+// StrikeThreshold returns the current escalation threshold.
+func (g *Gate) StrikeThreshold() int {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.strikeThreshold
+}
+
+// check is the core permission evaluator (the original Check logic).
+func (g *Gate) check(sessionID string, action Action) CheckResult {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 

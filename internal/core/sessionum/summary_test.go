@@ -243,6 +243,27 @@ func TestTrimToBudget_KeepsNewest(t *testing.T) {
 	}
 }
 
+func TestSemantic_MarkAndIs(t *testing.T) {
+	store := mkStore(t)
+	sess := mkSession(t, store, "sem")
+	if IsSemantic(sess) {
+		t.Fatalf("new session must not be marked semantic")
+	}
+	if err := MarkSemantic(store, sess); err != nil {
+		t.Fatalf("mark: %v", err)
+	}
+	// Persists through reload.
+	got, err := store.Get(sess.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !IsSemantic(got) {
+		t.Fatalf("semantic flag not persisted")
+	}
+	// JSON round-trip (persisted stores) keeps the bool flag.
+	_ = got
+}
+
 func TestGoal_SetShowClear(t *testing.T) {
 	store := mkStore(t)
 	sess := mkSession(t, store, "goal")
