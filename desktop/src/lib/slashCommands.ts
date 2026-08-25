@@ -559,20 +559,87 @@ export function exportActiveSession() {
   URL.revokeObjectURL(url);
 }
 
+// fuzzyScore scores name against a typed query using Claude Code-style
+// subsequence matching: contiguous prefix ranks best (0), in-order
+// subsequences are penalised by the gap since the previous matched rune.
+// Returns -1 when the query cannot be embedded in order. Mirrors the TUI's
+// Go implementation so both ends rank identically.
+export function fuzzyScore(query: string, name: string): number {
+  if (!query) return 0;
+  const q = query.toLowerCase();
+  const n = name.toLowerCase();
+  if (n.startsWith(q)) return 0;
+  let score = 0;
+  let qi = 0;
+  let last = 0;
+  for (let ni = 0; ni < n.length && qi < q.length; ni++) {
+    if (n[ni] !== q[qi]) continue;
+    if (qi > 0) score -= ni - last - 1; // relative gap penalty
+    last = ni;
+    qi++;
+  }
+  return qi < q.length ? -1 : score;
+}
+
+const recentSlashKey = 'icode.recentSlash';
+
+// noteRecentSlash records a dispatched command (most recent first, max 8)
+// in localStorage so the dropdown ranks frequently-used commands on top.
+export function noteRecentSlash(name: string) {
+  try {
+    const prev: string[] = JSON.parse(localStorage.getItem(recentSlashKey) || '[]');
+    const next = [name, ...prev.filter((n) => n !== name)].slice(0, 8);
+    localStorage.setItem(recentSlashKey, JSON.stringify(next));
+  } catch {
+    /* storage unavailable — recency is best-effort */
+  }
+}
+
+function recentSlashes(): string[] {
+  try {
+    return JSON.parse(localStorage.getItem(recentSlashKey) || '[]');
+  } catch {
+    return [];
+  }
+}
+
 // filterSlash returns commands matching the current input buffer (which must
-// start with '/'). Matching is by prefix on name or alias.
+// start with '/'). Matching is fuzzy on name or alias — prefix matches rank
+// first, then contiguous subsequences, then gappy ones; recently used
+// commands jump to the top within their score band (Claude Code parity).
 export function filterSlash(input: string): SlashCommand[] {
   if (!input.startsWith('/')) return [];
-  const partial = input.slice(1).split(/\s/)[0].toLowerCase();
   if (input.includes(' ')) return []; // args already entered — no dropdown
-  return slashCommands.filter(
-    (c) => c.name.startsWith(partial) || (c.aliases || []).some((a) => a.startsWith(partial))
-  );
+  const partial = input.slice(1).split(/\s/)[0].toLowerCase();
+  const recent = recentSlashes();
+  const recency = new Map(recent.map((n, i) => [n, recent.length - i]));
+  const scored = slashCommands
+    .map((c) => {
+      let s = fuzzyScore(partial, c.name);
+      if (s < 0 && c.aliases) {
+        for (const a of c.aliases) {
+          s = Math.max(s, fuzzyScore(partial, a));
+        }
+      }
+      return { c, s };
+    })
+    .filter((x) => x.s >= 0);
+  // Sort: score ascending (best first), then recency descending, stable.
+  const withIdx = scored.map((x, i) => ({ ...x, i }));
+  withIdx.sort((a, b) => {
+    if (a.s !== b.s) return a.s - b.s;
+    const ra = recency.get(a.c.name) ?? 0;
+    const rb = recency.get(b.c.name) ?? 0;
+    if (ra !== rb) return rb - ra;
+    return a.i - b.i;
+  });
+  return withIdx.map((x) => x.c);
 }
 
 // executeSlash parses and runs a slash command. Unknown commands return
 // 'passthrough' so the caller forwards the raw text to the engine (same as
-// before this feature existed).
+// before this feature existed). Dispatched commands are recorded for
+// recency-ranked autocomplete.
 export async function executeSlash(input: string): Promise<SlashOutcome> {
   const trimmed = input.trim();
   if (!trimmed.startsWith('/')) return { type: 'passthrough' };
@@ -581,5 +648,6 @@ export async function executeSlash(input: string): Promise<SlashOutcome> {
   const args = sp < 0 ? '' : trimmed.slice(sp + 1);
   const cmd = slashCommands.find((c) => c.name === name || (c.aliases || []).includes(name));
   if (!cmd) return { type: 'passthrough' };
+  noteRecentSlash('/' + cmd.name);
   return cmd.run(args);
 }

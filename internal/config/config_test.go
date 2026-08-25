@@ -448,6 +448,40 @@ func TestLanguageDirective(t *testing.T) {
 	}
 }
 
+func TestEffectiveLanguageProjectOverride(t *testing.T) {
+	// No project file → falls back to config language.
+	c := Default()
+	c.Language = "zh-CN"
+	if got := EffectiveLanguage(c); got != "zh-CN" {
+		t.Errorf("fallback = %q, want zh-CN", got)
+	}
+
+	// Project .icode/language wins.
+	if err := os.MkdirAll(".icode", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(".icode", "language"), []byte("en\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(filepath.Join(".icode", "language"))
+	if got := EffectiveLanguage(c); got != "en" {
+		t.Errorf("override = %q, want en", got)
+	}
+	// The effective system prompt honours the override too.
+	out := EffectiveSystemPrompt(c)
+	if !strings.Contains(out, "in English") {
+		t.Error("system prompt did not honour project language override")
+	}
+
+	// Invalid override content is ignored (falls back to config).
+	if err := os.WriteFile(filepath.Join(".icode", "language"), []byte("klingon"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := EffectiveLanguage(c); got != "zh-CN" {
+		t.Errorf("invalid override = %q, want fallback zh-CN", got)
+	}
+}
+
 // TestSaveEncryptsMCPHeaders verifies MCP request headers (e.g. Authorization
 // bearer tokens) never reach the config file in plaintext, and that a
 // Save → reload → decrypt round-trip restores them.

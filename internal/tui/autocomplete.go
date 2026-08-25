@@ -116,8 +116,10 @@ func (t *TUI) updateSuggestions() {
 }
 
 // filesAutocomplete returns files and directories that match the given
-// prefix (text after the @ sign). Results are gitignore-aware: directories
-// named .git, node_modules, vendor, dist, target, release are excluded.
+// prefix (text after the @ sign). Matching is fuzzy (subsequence) with
+// prefix matches ranked first, mirroring slash-command behaviour. Results
+// are gitignore-aware: directories named .git, node_modules, vendor, dist,
+// target, release are excluded.
 func (t *TUI) filesAutocomplete(prefix string) []acItem {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -126,7 +128,7 @@ func (t *TUI) filesAutocomplete(prefix string) []acItem {
 	// Determine the directory to search.
 	searchDir := cwd
 	if strings.Contains(prefix, "/") {
-		// User typed a sub-path: "src/foo" 鈫?search cwd/src/
+		// User typed a sub-path: "src/foo" searches cwd/src/
 		rel := filepath.Dir(prefix)
 		searchDir = filepath.Join(cwd, rel)
 	}
@@ -134,36 +136,56 @@ func (t *TUI) filesAutocomplete(prefix string) []acItem {
 	if err != nil {
 		return nil
 	}
-	var items []acItem
 	basePattern := strings.TrimPrefix(prefix, filepath.Dir(prefix)+"/")
 	if basePattern == filepath.Dir(prefix) {
 		basePattern = prefix
 	}
+	type scored struct {
+		item  acItem
+		score int
+	}
+	var items []scored
 	for _, e := range entries {
 		name := e.Name()
 		if isIgnoredDir(name) {
 			continue
 		}
-		relPath := strings.TrimPrefix(filepath.Join(filepath.Dir(prefix), name), ".")
-		relPath = strings.TrimPrefix(relPath, "/")
-		if !strings.HasPrefix(strings.ToLower(name), strings.ToLower(basePattern)) {
+		s := fuzzyScore(basePattern, name)
+		if basePattern != "" && s < 0 {
 			continue
 		}
+		relPath := strings.TrimPrefix(filepath.Join(filepath.Dir(prefix), name), ".")
+		relPath = strings.TrimPrefix(relPath, "/")
 		if e.IsDir() {
-			items = append(items, acItem{Name: relPath + "/", Desc: "directory"})
+			// Directories rank just below equally-scoring files so exact
+			// file matches surface first.
+			items = append(items, scored{acItem{Name: relPath + "/", Desc: "directory"}, s - 1})
 		} else {
 			info, _ := e.Info()
 			size := ""
 			if info != nil {
 				size = formatFileSize(info.Size())
 			}
-			items = append(items, acItem{Name: relPath, Desc: size})
+			items = append(items, scored{acItem{Name: relPath, Desc: size}, s})
 		}
-		if len(items) >= 50 {
+		if len(items) >= 200 {
 			break
 		}
 	}
-	return items
+	// Best score first (stable insertion sort — tiny lists).
+	for i := 1; i < len(items); i++ {
+		for j := i; j > 0 && items[j].score < items[j-1].score; j-- {
+			items[j], items[j-1] = items[j-1], items[j]
+		}
+	}
+	out := make([]acItem, 0, len(items))
+	for _, it := range items {
+		out = append(out, it.item)
+		if len(out) >= 50 {
+			break
+		}
+	}
+	return out
 }
 
 // isIgnoredDir returns true for directories that should be hidden from
@@ -440,7 +462,7 @@ func (t *TUI) autocompleteLines() []string {
 		return nil
 	}
 	var out []string
-	out = append(out, t.paint("dim", "  鈻?"+t.tstr("ac.title")+"   ("+t.tstr("ac.hint")+")"))
+	out = append(out, t.paint("dim", "  ▾"+t.tstr("ac.title")+"   ("+t.tstr("ac.hint")+")"))
 
 	const maxShow = 9
 	from := 0
@@ -459,7 +481,9 @@ func (t *TUI) autocompleteLines() []string {
 		sel := globalIdx == t.acIdx
 		name := padEnd(it.Name, 16)
 		if sel {
-			out = append(out, "  "+t.c("cyan")+"> "+name+" "+it.Desc+"\x1b[0m")
+			// Claude Code parity: the highlighted row carries an explicit
+			// "tab" affordance so the accept key is always discoverable.
+			out = append(out, "  "+t.c("cyan")+"> "+name+" "+it.Desc+t.paint("dim", "  (tab)")+"\x1b[0m")
 		} else {
 			out = append(out, "    "+t.paint("dim", name+" "+it.Desc))
 		}

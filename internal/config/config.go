@@ -333,11 +333,30 @@ func OutputStyleDirective(style string) string {
 	}
 }
 
+// EffectiveLanguage resolves the locale that governs model output language:
+// a project-level override file (.icode/language, plain text, e.g. "en")
+// wins over the global cfg.Language. This lets one repo demand English
+// comments while the rest of the machine runs in Chinese. Empty when
+// nothing is set.
+func EffectiveLanguage(c *Config) string {
+	if data, err := os.ReadFile(filepath.Join(".icode", "language")); err == nil {
+		lang := strings.TrimSpace(string(data))
+		switch lang {
+		case "zh-CN", "zh-TW", "en":
+			return lang
+		}
+	}
+	if c != nil {
+		return strings.TrimSpace(c.Language)
+	}
+	return ""
+}
+
 // EffectiveSystemPrompt composes the runtime system prompt from the user's
 // base prompt plus the output-style directive, any extra working dirs
-// (/output-style, /add-dir), and the language directive derived from
-// c.Language. Centralized so CLI startup and live slash-command changes stay
-// consistent.
+// (/output-style, /add-dir), and the language directive derived from the
+// effective locale (project .icode/language overrides global cfg.Language).
+// Centralized so CLI startup and live slash-command changes stay consistent.
 func EffectiveSystemPrompt(c *Config) string {
 	if c == nil {
 		return ""
@@ -353,7 +372,7 @@ func EffectiveSystemPrompt(c *Config) string {
 	if len(c.Defaults.ExtraDirs) > 0 {
 		parts = append(parts, "Additional working directories you may read and reference beyond the current directory:\n"+strings.Join(c.Defaults.ExtraDirs, "\n"))
 	}
-	if d := LanguageDirective(c.Language); d != "" {
+	if d := LanguageDirective(EffectiveLanguage(c)); d != "" {
 		parts = append(parts, d)
 	}
 	return strings.Join(parts, "\n\n")
