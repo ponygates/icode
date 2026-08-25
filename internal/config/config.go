@@ -206,6 +206,28 @@ type PermissionCfg struct {
 	// which a session is forced back into manual mode (every action must be
 	// confirmed). 0 disables the escalation. Default 3.
 	StrikeThreshold int `yaml:"strike_threshold" json:"strike_threshold"`
+
+	// Rules are parameter-level permission rules evaluated BEFORE any mode
+	// logic, following Claude Code's Tool(payload) pattern syntax:
+	//
+	//	[[permission.rules]]
+	//	pattern  = "Bash(git push:*)"
+	//	decision = "ask"     # always confirm, even in auto/yolo
+	//
+	//	[[permission.rules]]
+	//	pattern  = "Edit(**.md)"
+	//	decision = "allow"
+	//
+	// Decisions: "allow" | "deny" | "ask". First match wins; a matched rule
+	// overrides every other path (mode defaults, tool rules, session allows)
+	// so destructive patterns can be hard-blocked regardless of exceptions.
+	Rules []PermRule `yaml:"rules" json:"rules"`
+}
+
+// PermRule is one parameter-level permission rule (pattern + outcome).
+type PermRule struct {
+	Pattern  string `yaml:"pattern" json:"pattern"`
+	Decision string `yaml:"decision" json:"decision"`
 }
 
 type ServerCfg struct {

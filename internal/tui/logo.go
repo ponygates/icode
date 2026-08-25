@@ -50,25 +50,27 @@ func Logo() []string {
 }
 
 // textWordRows returns the 5-row "iCODE" wordmark, colourised per glyph:
-// █ = bright white body, ░ = dim inner shadow, ● = yellow dot.
+// █ = bright white body, ░ = dim inner shadow, ● = yellow dot (rendered as a
+// full-height block — the dot is twice the stem width and shares the top edge
+// with C/O/D/E so the mark reads as one aligned line).
 //
 // The letterforms follow opencode's wordmark geometry (packages/ui logo.tsx):
 // every letter is a thick rectangular block whose counter carries a shadow
 // band across its lower half — the "bevel" that makes the mark read at a
 // glance. "I" keeps its dot so the word stays unambiguous.
 //
-//	●   ████ ████ ███  ████
-//	█   █    █  █ █  █ █
-//	█   █░░░ █░░█ █░░█ ████
-//	█   █░░░ █░░█ █░░█ █░░░
-//	█   ████ ████ ████ ████
+//	██   ████ ████ ███  ████
+//	██   █    █  █ █  █ █
+//	██   █░░░ █░░█ █░░█ ████
+//	██   █░░░ █░░█ █░░█ █░░░
+//	██   ████ ████ ████ ████
 func textWordRows(paint logoPainter) []string {
 	rows := []string{
-		" ●   ████ ████ ███  ████",
-		" █   █    █  █ █  █ █   ",
-		" █   █░░░ █░░█ █░░█ ████",
-		" █   █░░░ █░░█ █░░█ █░░░",
-		" █   ████ ████ ████ ████",
+		" \uFFED   ████ ████ ███  ████",
+		" ██   █    █  █ █  █ █   ",
+		" ██   █░░░ █░░█ █░░█ ████",
+		" ██   █░░░ █░░█ █░░█ █░░░",
+		" ██   ████ ████ ████ ████",
 	}
 	out := make([]string, len(rows))
 	for i, row := range rows {
@@ -78,8 +80,11 @@ func textWordRows(paint logoPainter) []string {
 }
 
 // colorizeWordRow maps each glyph of one wordmark row to its colour: █ body →
-// white, ░ shadow → dim, ● dot → yellow; everything else stays a space. Runs
-// of the same glyph are painted as one span so the ANSI output stays small.
+// white, ░ shadow → dim, ● dot → yellow. The full-width U+FFED dot (2 cells)
+// is rendered as two yellow block cells so it shares the stem's width and top
+// edge instead of looking like a small floating circle; everything else stays
+// a space. Runs of the same glyph are painted as one span so the ANSI output
+// stays small.
 func colorizeWordRow(row string, paint logoPainter) string {
 	runes := []rune(row)
 	var b strings.Builder
@@ -95,6 +100,9 @@ func colorizeWordRow(row string, paint logoPainter) string {
 			b.WriteString(paint("white", seg))
 		case '░':
 			b.WriteString(paint("dim", seg))
+		case '\uFFED':
+			// Big dot: two yellow block cells (width matches the stem below).
+			b.WriteString(paint("yellow", "██"))
 		case '●':
 			b.WriteString(paint("yellow", seg))
 		default:

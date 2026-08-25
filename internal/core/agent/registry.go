@@ -35,6 +35,19 @@ type AgentDef struct {
 	Tools        []string // Permitted tool names. Empty = all tools allowed.
 	MaxRounds    int      // Max tool rounds before forced stop. 0 = default (8).
 	MaxTokens    int      // Max completion tokens. 0 = default (4096).
+	// Memory enables a persistent per-agent knowledge directory reloaded on
+	// every run: "user" (~/.icode/agent-memory/<name>), "project"
+	// (<proj>/.icode/agent-memory/<name>, VCS-shareable), or "local"
+	// (<proj>/.icode/agent-memory-local/<name>). Empty disables memory.
+	Memory string `yaml:"memory"`
+	// Fork makes this agent inherit the parent conversation prefix on every
+	// dispatch (task tool fork:true, or always when true here). The replayed
+	// bytes hit the provider prompt cache, so delegation is nearly free.
+	Fork bool `yaml:"fork"`
+	// Isolation: "worktree" runs this agent against a temporary git worktree
+	// (own branch) instead of the user's checkout; changes come back as a
+	// patch and the worktree is discarded after the run.
+	Isolation string `yaml:"isolation"`
 }
 
 // Registry indexes sub-agent definitions by name.
@@ -119,6 +132,9 @@ func loadFile(path string) (*AgentDef, error) {
 		Tools       []string `yaml:"tools"`
 		MaxRounds   int      `yaml:"max_rounds"`
 		MaxTokens   int      `yaml:"max_tokens"`
+		Memory      string   `yaml:"memory"`
+		Fork        bool     `yaml:"fork"`
+		Isolation   string   `yaml:"isolation"`
 	}
 
 	body := string(data)
@@ -143,6 +159,9 @@ func loadFile(path string) (*AgentDef, error) {
 		Tools:        meta.Tools,
 		MaxRounds:    meta.MaxRounds,
 		MaxTokens:    meta.MaxTokens,
+		Memory:       NormalizeMemoryScope(meta.Memory).String(),
+		Fork:         meta.Fork,
+		Isolation:    strings.TrimSpace(meta.Isolation),
 	}
 	if def.MaxRounds <= 0 {
 		def.MaxRounds = 8

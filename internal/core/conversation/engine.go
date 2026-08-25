@@ -61,6 +61,9 @@ type Engine struct {
 	agentRunner    *agent.Runner
 	agentRegistry  *agent.Registry
 	loadAgentsOnce sync.Once
+	// curSessionID tracks the active conversation so fork-mode sub-agents can
+	// replay its message prefix and tool permission checks use the right key.
+	curSessionID string
 
 	// Doom-loop detector prevents the model from repeating the same tool
 	// call more than N consecutive times (OpenCode parity).
@@ -465,6 +468,23 @@ func (e *Engine) WireTaskRunner() {
 	e.toolReg.SetTaskRunner(e)
 }
 
+// WireMessageStore injects the persistence layer into the cross-session
+// messaging tools (send_message / inbox / list_agents). The store must also
+// implement the messaging surface; a plain SessionStore is tolerated with
+// messaging disabled (tools report "unavailable") to keep optional deps soft.
+func (e *Engine) WireMessageStore(store MessageStore) {
+	e.toolReg.SetMessageStore(store)
+}
+
+// MessageStore is the messaging slice of the persistence layer, kept here so
+// the engine does not import db directly.
+type MessageStore interface {
+	SendAgentMessage(fromID, toID, body string) error
+	AgentInbox(sessionID string, limit int, unreadOnly bool) ([]types.AgentMessage, error)
+	MarkAgentMessagesRead(sessionID string) error
+	ListSessions(limit, offset int) ([]types.Session, error)
+}
+
 // ExecuteTool runs a tool directly without going through the permission
 // gate. Used by CLI commands (cleanup, etc.) and model-free operations.
 func (e *Engine) ExecuteTool(name string, args string) *types.ToolResult {
@@ -530,6 +550,61 @@ func (e *Engine) RunSubAgent(ctx context.Context, name, prompt string) (string, 
 		return "", 0, fmt.Errorf("unknown sub-agent %q (available: %v)", name, known)
 	}
 	return runner.Run(ctx, def, prompt)
+}
+
+// forkPrefixMaxMessages caps how much parent history a fork replays. The
+// bytes must match the parent's actual messages verbatim for cache hits, so
+// we take the tail verbatim instead of summarising.
+const forkPrefixMaxMessages = 40
+
+// forkPrefix extracts the replay prefix from a parent conversation: the tail
+// (verbatim bytes for prompt-cache hits), with trailing orphan tool results
+// dropped since they only make sense paired with their assistant tool_calls.
+func forkPrefix(msgs []types.Message) []types.Message {
+	if len(msgs) == 0 {
+		return nil
+	}
+	start := len(msgs) - forkPrefixMaxMessages
+	if start < 0 {
+		start = 0
+	}
+	prefix := append([]types.Message(nil), msgs[start:]...)
+	for len(prefix) > 0 && prefix[len(prefix)-1].Role == types.RoleTool {
+		prefix = prefix[:len(prefix)-1]
+	}
+	return prefix
+}
+
+// RunForkedSubAgent dispatches a sub-agent with the parent conversation's
+// recent messages replayed as prefix context (fork mode). Same system prompt
+// + same message bytes → provider prompt-cache hits → delegation costs only
+// cache-read tokens. Falls back to a plain run when no session is loaded.
+func (e *Engine) RunForkedSubAgent(ctx context.Context, name, prompt string) (string, int, error) {
+	e.mu.Lock()
+	sessionID := e.curSessionID
+	e.mu.Unlock()
+
+	var prefix []types.Message
+	if e.sessionSt != nil && sessionID != "" {
+		if sess, err := e.sessionSt.Get(sessionID); err == nil && sess != nil {
+			prefix = forkPrefix(sess.Messages)
+		}
+	}
+
+	e.mu.Lock()
+	runner := e.getAgentRunner()
+	reg := e.agentRegistry
+	e.mu.Unlock()
+
+	var def *agent.AgentDef
+	if d, ok := reg.Get(name); ok {
+		def = d
+	} else if _, isTeam := e.teamRegistry[name]; isTeam {
+		return e.RunSubAgent(ctx, name, prompt)
+	} else {
+		return "", 0, fmt.Errorf("fork: unknown sub-agent %q", name)
+	}
+	return runner.RunWithPrefix(ctx, def, prompt, prefix)
 }
 
 // getAgentRunner lazily initialises the sub-agent runner and loads agent
@@ -1480,6 +1555,15 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 	if err != nil {
 		return nil, fmt.Errorf("get session: %w", err)
 	}
+
+	// Track the active session for fork-mode sub-agents and route the ID into
+	// the agent runner so sub-agent permission checks key on the same session.
+	e.mu.Lock()
+	e.curSessionID = sessionID
+	if runner := e.getAgentRunner(); runner != nil {
+		runner.SetSessionID(sessionID)
+	}
+	e.mu.Unlock()
 
 	// Stash-and-continue audit: if the user pivots to a (different) task while
 	// in-progress work exists in this session, snapshot a checkpoint + refresh

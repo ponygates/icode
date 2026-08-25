@@ -148,16 +148,22 @@ func (t *TUI) printAssistant(text string) {
 	fmt.Fprintln(t.writer)
 }
 
-// AppendStream appends assistant text as it streams in.
+// AppendStream appends assistant text as it streams in. Model output is
+// sanitised first: ANSI escapes and control bytes that a model might echo
+// would otherwise corrupt the TUI layout and render as caret garbage such as
+// "^¿^¿" between CJK runs. An escape split across two chunks is buffered in
+// t.ansiPending and joined with the next chunk.
 func (t *TUI) AppendStream(text string) {
 	t.mu.Lock()
-	t.streamBuf.WriteString(text)
+	clean, pending := sanitizeStreamText(t.ansiPending + text)
+	t.ansiPending = pending
+	t.streamBuf.WriteString(clean)
 	t.mu.Unlock()
 	if t.rawMode {
 		t.ensureAnim()
 		t.scheduleRender()
 	} else {
-		fmt.Fprint(t.writer, text)
+		fmt.Fprint(t.writer, clean)
 	}
 }
 
@@ -186,11 +192,12 @@ func (t *TUI) scheduleRender() {
 
 // EndStream finalizes the streaming turn.
 func (t *TUI) EndStream() {
-	final := strings.TrimSpace(t.streamBuf.String())
+	t.mu.Lock()
+	final := strings.TrimSpace(sanitizeFullText(t.streamBuf.String()))
+	t.ansiPending = ""
+	t.mu.Unlock()
 	if final != "" {
-		t.mu.Lock()
 		t.messages = append(t.messages, Message{Role: RoleAssistant, Content: final})
-		t.mu.Unlock()
 	}
 	t.streamBuf.Reset()
 	select {

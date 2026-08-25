@@ -81,6 +81,11 @@ func NewRegistry() *Registry {
 	r.Register(&MouseScrollTool{})
 	r.Register(&TypeTextTool{})
 	r.Register(&KeyPressTool{})
+	// Cross-session messaging (Claude Code SendMessage parity). The store is
+	// injected later via SetMessageStore during app bootstrap.
+	r.Register(NewSendMessageTool(nil))
+	r.Register(NewInboxTool(nil))
+	r.Register(NewListAgentsTool(nil))
 
 	return r
 }
@@ -101,6 +106,28 @@ func (r *Registry) SetTaskRunner(runner SubAgentRunner) {
 	if tt, ok := r.tools["task"]; ok {
 		if task, ok := tt.(*TaskTool); ok {
 			task.runner = runner
+		}
+	}
+}
+
+// SetMessageStore injects the persistence layer into the cross-session
+// messaging tools. Called during app bootstrap once SQLite is ready.
+func (r *Registry) SetMessageStore(store MessageStore) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if st, ok := r.tools["send_message"]; ok {
+		if t, ok := st.(*SendMessageTool); ok {
+			t.store = store
+		}
+	}
+	if it, ok := r.tools["inbox"]; ok {
+		if t, ok := it.(*InboxTool); ok {
+			t.store = store
+		}
+	}
+	if la, ok := r.tools["list_agents"]; ok {
+		if t, ok := la.(*ListAgentsTool); ok {
+			t.store = store
 		}
 	}
 }

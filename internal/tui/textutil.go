@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"unicode/utf8"
 )
 
 func formatTokens(n int) string {
@@ -116,30 +117,6 @@ func runeWidth(r rune) int {
 		(r >= 0x4E00 && r <= 0x9FFF) ||
 		(r >= 0xA000 && r <= 0xA4CF) ||
 		(r >= 0xAC00 && r <= 0xD7A3) ||
-		// Block Elements (U+2580..U+259F) — ▀ ▁ ▂ ▃ ▄ ▅ ▆ ▇ █ ▉ ▊ ▋ ▌ ▍ ▎ ▏ ▐
-		// ░ ▒ ▓ ▔ ▕ ▖ ▗ ▘ ▙ ▚ ▛ ▜ ▝ ▞ ▟. Every one of these is East-Asian
-		// WIDE (display width 2) on a real terminal, including legacy conhost
-		// raster-font and OEM-CP437 code page. Mis-measuring them as width 1
-		// was the source of the mis-aligned box borders in the welcome panel:
-		// the ICODE wordmark, context meter, and progress bar all silently
-		// shrank by half a cell per glyph, pushing the centring math off and
-		// making side borders visibly jut out.
-		(r >= 0x2580 && r <= 0x259F) ||
-		// Geometric Shapes (U+25A0..U+25FF) — ● ○ ◆ ◇ ◌ ▶ ▼ ◀ ▲ ■ □ and the
-		// like. East-Asian Ambiguous in a CJK locale, but in practice every
-		// terminal the TUI targets renders them as 2 cells (CJK Wide), so we
-		// count them as 2 to keep progress indicators aligned with framed
-		// boxes. These never appear in the welcome box content itself, so
-		// the over-count is harmless; under-counting was the visible bug.
-		(r >= 0x25A0 && r <= 0x25FF) ||
-		// General Punctuation (U+2010..U+2027) — – (en dash) — (em dash) …
-		// (ellipsis) ‗ „ " " ‛ '. These are East-Asian Ambiguous and rendered
-		// as fullwidth (2 cells) on Windows Terminal / WezTerm / iTerm2 in a
-		// zh-CN locale. The welcome panel uses ─ and — in the context/cache
-		// rows; counting them as width 1 left those rows one cell short,
-		// which is what made the right-hand │ "stick out" past the rest of
-		// the border.
-		(r >= 0x2010 && r <= 0x2027) ||
 		(r >= 0xF900 && r <= 0xFAFF) ||
 		(r >= 0xFE30 && r <= 0xFE4F) ||
 		(r >= 0xFF00 && r <= 0xFF60) ||
@@ -153,11 +130,20 @@ func runeWidth(r rune) int {
 	if r >= 0x1F1E6 && r <= 0x1F1FF {
 		return 2 // regional indicator symbols (flags)
 	}
-	if r >= 0x2600 && r <= 0x27BF {
-		return 2 // Miscellaneous Symbols + Dingbats (★☀☂✅…)
-	}
+	// Miscellaneous Symbols + Dingbats (U+2600..U+27BF) such as ★ ☀ ☂ ✅ are
+	// East-Asian Ambiguous: they render fullwidth (2 cells) only when the
+	// terminal widens ambiguous glyphs (legacy conhost raster / CJK locale).
+	// Default Windows Terminal and most modern terminals render them at 1 cell
+	// — counting them as 2 pushed the ❯ prompt cursor one cell too far right
+	// and left the IME pre-edit text drawn one cell off ("光标错位/中文上浮").
+	// The TUI targets modern terminals, so count them as 1.
+	//
+	// Note: ❯ (U+276F) used for the input prompt lives in this block; measuring
+	// it as width 2 made the editable cursor land past the last typed rune on
+	// every keystroke. Same fix as the block-elements / geometric-shapes /
+	// general-punctuation ranges above: match the terminal, not the locale.
 	if r >= 0x2B00 && r <= 0x2BFF {
-		return 2 // Miscellaneous Symbols and Arrows
+		return 2 // Miscellaneous Symbols and Arrows (★-adjacent ⭐⬤ etc.)
 	}
 	if r >= 0x20000 {
 		return 2 // CJK Extension B+ and the rest of the Supplementary planes
@@ -190,6 +176,139 @@ func repeat(s string, n int) string {
 		return ""
 	}
 	return strings.Repeat(s, n)
+}
+
+// ansiSequenceLen returns the length (in bytes) of the ANSI escape sequence
+// starting at s[0], which must be 0x1B. Handles CSI (ESC [ … final), OSC (ESC ]
+// … BEL or ESC \), and single-character escapes (ESC X). Returns 0 when the
+// sequence is incomplete (streaming chunks may split one escape across two
+// chunks — the caller must buffer the fragment and re-feed it).
+func ansiSequenceLen(s string) int {
+	if len(s) == 0 || s[0] != 0x1b {
+		return 0
+	}
+	if len(s) == 1 {
+		return 0 // lone ESC — wait for the next byte
+	}
+	switch s[1] {
+	case '[': // CSI: ESC [ params… final (0x40–0x7E)
+		for i := 2; i < len(s); i++ {
+			c := s[i]
+			if c >= 0x40 && c <= 0x7E {
+				return i + 1
+			}
+		}
+		return 0 // incomplete
+	case ']': // OSC: ESC ] … BEL (0x07) or ESC \
+		for i := 2; i < len(s); i++ {
+			if s[i] == 0x07 {
+				return i + 1
+			}
+			if s[i] == 0x1b {
+				if i+1 < len(s) && s[i+1] == '\\' {
+					return i + 2
+				}
+				return 0 // nested/truncated
+			}
+		}
+		return 0 // incomplete
+	default: // single-character escape (ESC 7, ESC M, ESC (, …)
+		return 2
+	}
+}
+
+// sanitizeStreamText strips ANSI escape sequences and C0/C1 control characters
+// from a chunk of streamed model text, keeping only printable content plus
+// \n, \r and \t. Without this, a model reply that echoes terminal escapes
+// (or a provider that leaks control bytes) would corrupt the TUI layout and
+// render as caret notation garbage such as "^¿^¿" between CJK runs.
+//
+// Because a single escape (or a multi-byte UTF-8 rune) may be split across
+// streaming chunks, any trailing incomplete sequence is returned as `pending`;
+// the caller must prepend it to the next chunk before sanitising again.
+func sanitizeStreamText(s string) (clean, pending string) {
+	if s == "" {
+		return "", ""
+	}
+	var b strings.Builder
+	for len(s) > 0 {
+		// ANSI escape sequence (always pure ASCII).
+		if s[0] == 0x1b {
+			n := ansiSequenceLen(s)
+			if n == 0 {
+				return b.String(), s // incomplete — hold for next chunk
+			}
+			s = s[n:]
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s)
+		if r == utf8.RuneError && size == 1 {
+			// Invalid byte — unless it is a multi-byte rune truncated at the
+			// chunk boundary, in which case hold the fragment as pending.
+			if n := incompleteUTF8Len(s); n > 0 {
+				return b.String(), s[:n]
+			}
+			s = s[1:]
+			continue
+		}
+		switch {
+		case r < 0x20 && r != '\n' && r != '\r' && r != '\t':
+			// drop other C0 controls
+		case r == 0x7f || (r >= 0x80 && r <= 0x9f):
+			// drop DEL and C1 controls (U+0080–U+009F, incl. 2-byte UTF-8)
+		default:
+			b.WriteString(s[:size])
+		}
+		s = s[size:]
+	}
+	return b.String(), ""
+}
+
+// incompleteUTF8Len reports how many leading bytes of s form a multi-byte
+// UTF-8 rune whose remaining continuation bytes are missing (i.e. it was cut
+// off at a streaming chunk boundary). Returns 0 when s[0] is not such a
+// truncated lead byte.
+func incompleteUTF8Len(s string) int {
+	if len(s) == 0 {
+		return 0
+	}
+	first := s[0]
+	var need int
+	switch {
+	case first < 0x80:
+		return 0
+	case first < 0xC2:
+		return 0 // illegal lead byte (0x80–0xC1)
+	case first < 0xE0:
+		need = 2
+	case first < 0xF0:
+		need = 3
+	case first < 0xF5:
+		need = 4
+	default:
+		return 0 // illegal lead byte (0xF5+)
+	}
+	// Count how many continuation bytes are present.
+	n := 1
+	for n < len(s) && n < need {
+		if s[n] >= 0x80 && s[n] <= 0xBF {
+			n++
+		} else {
+			break
+		}
+	}
+	if n < need && n == len(s) {
+		return n // truncated at the end of the chunk
+	}
+	return 0
+}
+
+// sanitizeFullText sanitises a complete (non-streamed) block of model text in
+// one pass — no pending buffer, so an incomplete trailing escape or truncated
+// rune is simply dropped.
+func sanitizeFullText(s string) string {
+	clean, _ := sanitizeStreamText(s)
+	return clean
 }
 
 func padEnd(s string, n int) string {

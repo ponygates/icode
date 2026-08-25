@@ -122,6 +122,20 @@ func Bootstrap() (*App, error) {
 	}
 	// Strike-counter escalation: N consecutive blocks force manual mode.
 	app.Gate.SetStrikeThreshold(cfg.Permission.StrikeThreshold)
+	// Parameter-level hard rules (config [permission.rules]): first match
+	// wins and overrides every other decision path, so patterns like
+	// "Bash(git push:*)" → ask are enforced even in auto/yolo modes.
+	if len(cfg.Permission.Rules) > 0 {
+		rules := make([]permission.ParamRule, 0, len(cfg.Permission.Rules))
+		for _, r := range cfg.Permission.Rules {
+			d := permission.Decision(strings.ToLower(strings.TrimSpace(r.Decision)))
+			if d != permission.DecisionAllow && d != permission.DecisionDeny && d != permission.DecisionAsk {
+				continue
+			}
+			rules = append(rules, permission.ParamRule{Pattern: r.Pattern, Decision: d})
+		}
+		app.Gate.SetParamRules(rules)
+	}
 	// Claude Code settings.json permission compatibility: rules from
 	// ~/.claude/settings.json + .claude/settings.json take effect in Agent
 	// mode just like iCode's own hooks.yaml rules.
@@ -130,6 +144,11 @@ func Bootstrap() (*App, error) {
 
 	// 5. Initialize conversation engine (with permission gate wired in)
 	app.Engine = conversation.NewEngine(app.Reg, app.SessStore, app.Gate)
+	// Cross-session messaging: wire SQLite into send_message / inbox /
+	// list_agents so sessions can address each other (SendMessage parity).
+	if msgStore, ok := interface{}(dbStore).(conversation.MessageStore); ok {
+		app.Engine.WireMessageStore(msgStore)
+	}
 	app.Engine.SetGenerationParams(cfg.Defaults.Temperature, cfg.Defaults.MaxTokens)
 	// Extended thinking (Anthropic): config thinking_tokens > 0 enables it.
 	if cfg.Defaults.ThinkingTokens > 0 {
@@ -494,6 +513,7 @@ func hasExternalKeys(cfg *config.Config) bool {
 // Close shuts down all subsystems gracefully.
 func (app *App) Close() error {
 	tool.KillAllBgTasks()
+	tool.KillAllAgentTasks()
 	// Persist remembered preferences so they survive restarts. flushPrefSave
 	// cancels any pending debounce timer and writes a final synchronous copy.
 	// A failure here is non-fatal — memory is an enhancement, not a requirement.

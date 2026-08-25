@@ -81,6 +81,10 @@ func KillAllBgTasks() {
 	bgTasks.KillAll()
 }
 
+// ListShellTaskLines renders one status line per background shell command.
+// Exported for the /tasks slash panel.
+func ListShellTaskLines() []string { return bgTasks.List() }
+
 // SetCompleteHook installs a callback invoked when a background task finishes.
 func SetCompleteHook(fn func(id, errMsg string)) {
 	bgTasks.mu.Lock()
@@ -222,11 +226,41 @@ func (t *TaskOutputTool) Def() types.ToolDef {
 func (t *TaskOutputTool) Execute(ctx context.Context, args string) (*types.ToolResult, error) {
 	id := parseStrArg(args, "task_id", "")
 	if id == "" {
-		lines := bgTasks.List()
-		if len(lines) == 0 {
+		shellLines := bgTasks.List()
+		agentLines := agentBGTasks.list()
+		var b strings.Builder
+		if len(shellLines) == 0 && len(agentLines) == 0 {
 			return &types.ToolResult{Success: true, Content: "No background tasks."}, nil
 		}
-		return &types.ToolResult{Success: true, Content: "Background tasks:\n" + strings.Join(lines, "\n")}, nil
+		b.WriteString("Background tasks:\n")
+		for _, l := range agentLines {
+			b.WriteString("  " + l + "\n")
+		}
+		for _, l := range shellLines {
+			b.WriteString("  " + l + "\n")
+		}
+		return &types.ToolResult{Success: true, Content: strings.TrimRight(b.String(), "\n")}, nil
+	}
+	// Agent tasks (agt-N) are served by the background-agent manager.
+	if len(id) > 4 && id[:4] == "agt-" {
+		task := agentBGTasks.get(id)
+		if task == nil {
+			return &types.ToolResult{Success: false, Error: fmt.Sprintf("no such task: %s", id)}, nil
+		}
+		output, tokens, done, errMsg, elapsed := task.snapshot()
+		status := "running"
+		if done {
+			status = "finished"
+			if errMsg != "" {
+				status = "failed (" + errMsg + ")"
+			}
+		}
+		head := fmt.Sprintf("[%s] status=%s elapsed=%s agent=%s tokens=%d\n---\n", id, status, elapsed.Round(time.Second), task.name, tokens)
+		content := head + output
+		if !done {
+			content += "\n（仍在运行，稍后可再次查询）"
+		}
+		return &types.ToolResult{Success: true, Content: content}, nil
 	}
 	task := bgTasks.Get(id)
 	if task == nil {

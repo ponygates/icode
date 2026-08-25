@@ -154,6 +154,45 @@ type Gate struct {
 	// strikeThreshold is the consecutive-block count that triggers escalation
 	// back to manual mode. 0 disables the feature.
 	strikeThreshold int
+
+	// paramRules are parameter-level rules (Tool(payload) patterns) evaluated
+	// before any mode logic. First match wins and overrides every other
+	// decision path — the "hard deny / hard ask" layer.
+	paramRules []ParamRule
+}
+
+// ParamRule is a parameter-level permission rule evaluated before any mode
+// logic. The pattern uses Claude Code's Tool(payload) syntax — e.g.
+// "Bash(git push:*)" or "Edit(**.md)" — matched with the same engine as
+// .claude/settings.json patterns. A matched rule overrides every other
+// decision path (mode defaults, tool rules, session allow-all), so users can
+// hard-deny destructive commands even in YOLO mode.
+type ParamRule struct {
+	Pattern  string
+	Decision Decision // allow | deny | ask
+}
+
+// SetParamRules replaces the parameter-level rule list at runtime.
+func (g *Gate) SetParamRules(rules []ParamRule) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.paramRules = append([]ParamRule(nil), rules...)
+}
+
+// ParamRules returns a copy of the current parameter-level rules.
+func (g *Gate) ParamRules() []ParamRule {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return append([]ParamRule(nil), g.paramRules...)
+}
+
+// checkParamRules evaluates the parameter-level rules in order. First match
+// wins; nil means no rule applied. Convenience wrapper used outside Check.
+func (g *Gate) checkParamRules(action Action) *CheckResult {
+	g.mu.RLock()
+	rules := append([]ParamRule(nil), g.paramRules...)
+	g.mu.RUnlock()
+	return g.evalParamRules(rules, action)
 }
 
 // SetClaudeSettings installs Claude Code permission rules for Agent mode.
@@ -535,9 +574,37 @@ func (g *Gate) Check(sessionID string, action Action) CheckResult {
 		}
 	}
 
+	// Parameter-level rules: first match wins and overrides every other
+	// decision path (mode defaults, tool rules, session allow-all, even the
+	// Claude settings allow list) so destructive patterns can be hard-blocked.
+	g.mu.RLock()
+	rules := append([]ParamRule(nil), g.paramRules...)
+	g.mu.RUnlock()
+	if result := g.evalParamRules(rules, action); result != nil {
+		g.recordStrike(sessionID, result)
+		return *result
+	}
+
 	result := g.check(sessionID, action)
 	g.recordStrike(sessionID, &result)
 	return result
+}
+
+// evalParamRules matches action against the ordered rule list (first match
+// wins). Split from checkParamRules so Check can snapshot the rules under a
+// short read lock without holding it across prompt building.
+func (g *Gate) evalParamRules(rules []ParamRule, action Action) *CheckResult {
+	for _, r := range rules {
+		if !claudeAllowMatch(action, r.Pattern) {
+			continue
+		}
+		return &CheckResult{
+			Decision: r.Decision,
+			Reason:   fmt.Sprintf("参数级规则命中 %s", r.Pattern),
+			Prompt:   g.buildPrompt(action),
+		}
+	}
+	return nil
 }
 
 // recordStrike updates the per-session strike counter based on the decision

@@ -118,6 +118,16 @@ func startChat(provider, model, mode string) error {
 		t.AddMessage(tui.RoleSystem, status)
 	})
 
+	// Same notification path for background SUB-AGENTS (agt-N): when a
+	// detached agent finishes, surface its result availability in-chat.
+	tool.SetAgentTaskCompleteHook(func(id, errMsg string) {
+		status := "✓ 后台子代理完成: " + id + "（用 task_output 查看结果）"
+		if errMsg != "" {
+			status = "⚠ 后台子代理失败: " + id + " — " + errMsg
+		}
+		t.AddMessage(tui.RoleSystem, status)
+	})
+
 	// Populate the available model list so the /model picker and Tab model
 	// switching work. Without this t.models stays empty and both features
 	// silently no-op.

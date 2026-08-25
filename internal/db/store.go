@@ -145,6 +145,15 @@ func (s *Store) migrate() error {
 			output TEXT NOT NULL DEFAULT '',
 			error TEXT NOT NULL DEFAULT ''
 		)`,
+		`CREATE TABLE IF NOT EXISTS agent_messages (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			from_session TEXT NOT NULL,
+			to_session TEXT NOT NULL,
+			body TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			read_at TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_agent_messages_to ON agent_messages(to_session, read_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_automation_runs_task ON automation_runs(task_id, started_at)`,
 		`PRAGMA foreign_keys = ON`,
 		`PRAGMA journal_mode = WAL`,
@@ -786,4 +795,58 @@ func rf3339(t time.Time) string {
 		return ""
 	}
 	return t.UTC().Format(time.RFC3339)
+}
+
+// ============================================================================
+// Cross-session agent messaging (Claude Code SendMessage parity)
+// ============================================================================
+
+// SendAgentMessage stores one message addressed to another session.
+func (s *Store) SendAgentMessage(fromID, toID, body string) error {
+	if strings.TrimSpace(fromID) == "" || strings.TrimSpace(toID) == "" {
+		return fmt.Errorf("agent message needs from and to")
+	}
+	_, err := s.db.Exec(`INSERT INTO agent_messages (from_session, to_session, body, created_at)
+		VALUES (?, ?, ?, ?)`, fromID, toID, body, rf3339(time.Now()))
+	return err
+}
+
+// AgentInbox returns messages addressed to sessionID, newest first. When
+// unreadOnly is set only un-read ones are returned (and marked read).
+func (s *Store) AgentInbox(sessionID string, limit int, unreadOnly bool) ([]types.AgentMessage, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	q := `SELECT id, from_session, to_session, body, created_at, read_at
+		FROM agent_messages WHERE to_session = ?`
+	if unreadOnly {
+		q += ` AND read_at = ''`
+	}
+	q += ` ORDER BY id DESC LIMIT ?`
+	rows, err := s.db.Query(q, sessionID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []types.AgentMessage
+	for rows.Next() {
+		var m types.AgentMessage
+		var created, readAt string
+		if err := rows.Scan(&m.ID, &m.FromID, &m.ToID, &m.Body, &created, &readAt); err != nil {
+			return nil, err
+		}
+		m.CreatedAt, _ = time.Parse(time.RFC3339, created)
+		if readAt != "" {
+			m.ReadAt, _ = time.Parse(time.RFC3339, readAt)
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// MarkAgentMessagesRead stamps all of a session's unread messages as read.
+func (s *Store) MarkAgentMessagesRead(sessionID string) error {
+	_, err := s.db.Exec(`UPDATE agent_messages SET read_at = ?
+		WHERE to_session = ? AND read_at = ''`, rf3339(time.Now()), sessionID)
+	return err
 }

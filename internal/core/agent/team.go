@@ -295,6 +295,7 @@ type teamFile struct {
 			Tools        []string `yaml:"tools"`
 			MaxRounds    int      `yaml:"max_rounds"`
 			MaxTokens    int      `yaml:"max_tokens"`
+			Memory       string   `yaml:"memory"`
 		} `yaml:"agent"`
 	} `yaml:"members"`
 }
@@ -336,6 +337,7 @@ func (tf *teamFile) toTeamDef() *TeamDef {
 			Tools:        m.Agent.Tools,
 			MaxRounds:    m.Agent.MaxRounds,
 			MaxTokens:    m.Agent.MaxTokens,
+			Memory:       NormalizeMemoryScope(m.Agent.Memory).String(),
 		}
 		if ad.MaxRounds <= 0 {
 			ad.MaxRounds = 8

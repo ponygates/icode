@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/ponygates/icode/internal/core/checkpoint"
 	"github.com/ponygates/icode/internal/core/permission"
 	"github.com/ponygates/icode/internal/core/tool"
 	"github.com/ponygates/icode/internal/llm/tokenopt"
@@ -25,6 +27,9 @@ type Runner struct {
 	mu          sync.Mutex
 
 	sessionID string
+
+	// projectDir anchors project/local memory scopes; set by the host.
+	projectDir string
 }
 
 func NewRunner(reg types.ProviderRegistry, tr *tool.Registry) *Runner {
@@ -42,6 +47,28 @@ func NewRunnerWithGate(reg types.ProviderRegistry, tr *tool.Registry, gate *perm
 	}
 }
 
+// SetProjectDir records the workspace root used to anchor project-scoped
+// agent memory directories.
+func (r *Runner) SetProjectDir(dir string) {
+	r.mu.Lock()
+	r.projectDir = dir
+	r.mu.Unlock()
+}
+
+// projectDirSafe returns the recorded project dir (cwd when unset).
+func (r *Runner) projectDirSafe() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.projectDir != "" {
+		return r.projectDir
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	return wd
+}
+
 // SetSessionID records the current session ID so it is injected into the
 // context for every tool call the sub-agent makes. Called by the Engine
 // before dispatching a Task tool invocation.
@@ -55,6 +82,14 @@ func (r *Runner) SetSessionID(sessionID string) {
 // definition and input prompt. Returns the agent's final response text and
 // the total tokens used (for cost tracking).
 func (r *Runner) Run(ctx context.Context, def *AgentDef, input string) (string, int, error) {
+	return r.RunWithPrefix(ctx, def, input, nil)
+}
+
+// RunWithPrefix is Run with an optional conversation prefix seeded into the
+// sub-agent's context before the user input — the fork mode. Replaying the
+// parent's exact message bytes keeps the provider prompt-cache prefix intact,
+// so forking costs only the cache-read price instead of re-ingesting history.
+func (r *Runner) RunWithPrefix(ctx context.Context, def *AgentDef, input string, prefix []types.Message) (string, int, error) {
 	// Live-progress relay: the engine attaches a ToolProgressFunc via
 	// tool.WithProgress on the Task tool's context, so we forward the
 	// sub-agent's tool calls/rounds to the host UI in real time.
@@ -64,6 +99,7 @@ func (r *Runner) Run(ctx context.Context, def *AgentDef, input string) (string, 
 			progress(fmt.Sprintf(format, a...))
 		}
 	}
+	var finalText strings.Builder
 
 	// Resolve model
 	provider, modelInfo, err := r.providerReg.ResolveModel(def.Model)
@@ -71,9 +107,59 @@ func (r *Runner) Run(ctx context.Context, def *AgentDef, input string) (string, 
 		return "", 0, fmt.Errorf("resolve model for sub-agent %q: %w", def.Name, err)
 	}
 
+	// Worktree isolation: run the agent against a temporary checkout so its
+	// writes never touch the user's repo. No changes → discard silently;
+	// changes → append the patch to the output for the caller to apply.
+	isolated := strings.EqualFold(def.Isolation, "worktree")
+	if isolated {
+		wt, wtErr := checkpoint.CreateWorktree(r.projectDirSafe())
+		if wtErr == nil {
+			defer func() {
+				if !wt.HasChanges() {
+					_ = wt.Discard()
+				}
+			}()
+			r.mu.Lock()
+			oldDir := r.projectDir
+			r.projectDir = wt.Dir
+			r.mu.Unlock()
+			defer func() {
+				r.mu.Lock()
+				r.projectDir = oldDir
+				r.mu.Unlock()
+			}()
+			// Surface the isolation branch so path-based tools can cd into it.
+			input = fmt.Sprintf("[工作目录已隔离至 git worktree：%s（分支 %s）]\n\n%s", wt.Dir, wt.Branch, input)
+			defer func() {
+				if wt.HasChanges() {
+					if diff, derr := wt.Diff(); derr == nil && strings.TrimSpace(diff) != "" {
+						finalText.WriteString("\n\n<worktree-patch branch=\"" + wt.Branch + "\">\n" + diff + "\n</worktree-patch>")
+					} else {
+						_ = wt.Commit("iCode isolated agent run")
+						finalText.WriteString("\n\n[worktree 变更已提交至分支 " + wt.Branch + "，可用 git cherry-pick 应用]")
+					}
+				}
+			}()
+		} else {
+			report("⚠ worktree 隔离创建失败，回退到普通执行：%v\n", wtErr)
+		}
+	}
+
+	// Per-agent persistent memory: inject the MEMORY.md head plus maintenance
+	// instructions so the agent builds institutional knowledge across runs.
+	systemPrompt := def.SystemPrompt
+	if scope := NormalizeMemoryScope(def.Memory); scope != "" {
+		r.mu.Lock()
+		pdir := r.projectDir
+		r.mu.Unlock()
+		if block, merr := memoryBlock(scope.String(), def.Name, pdir); merr == nil {
+			systemPrompt += block
+		}
+	}
+
 	// Build a dedicated Optimizer for this sub-agent run.
 	optCfg := tokenopt.DefaultConfig(modelInfo)
-	optCfg.SystemPrompt = def.SystemPrompt
+	optCfg.SystemPrompt = systemPrompt
 	optCfg.ProviderName = modelInfo.Provider
 	opt := tokenopt.New(optCfg)
 
@@ -94,6 +180,16 @@ func (r *Runner) Run(ctx context.Context, def *AgentDef, input string) (string, 
 	}
 	opt.SetTools(toolDefs)
 
+	// Fork prefix: replay the parent conversation (same bytes → cache hits).
+	for _, m := range prefix {
+		if m.Content == "" && len(m.ToolCalls) == 0 {
+			continue
+		}
+		pm := m
+		pm.Timestamp = time.Time{} // normalise; timestamps don't affect caching
+		opt.AddMessage(pm)
+	}
+
 	// One-shot prompt: just add the user message and go.
 	opt.AddMessage(types.Message{
 		Role:      types.RoleUser,
@@ -106,7 +202,6 @@ func (r *Runner) Run(ctx context.Context, def *AgentDef, input string) (string, 
 	defer cancel()
 
 	startTime := time.Now()
-	var finalText strings.Builder
 	const maxRounds = 12
 	depth := def.MaxRounds
 	if depth <= 0 || depth > maxRounds {

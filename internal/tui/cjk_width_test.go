@@ -19,8 +19,8 @@ func TestRuneWidthCJKAndEmoji(t *testing.T) {
 		{"emoji-face", '\U0001F600', 2},
 		{"emoji-rocket", '\U0001F680', 2},
 		{"regional-indicator", '\U0001F1E8', 2},
-		{"star", '★', 2},
-		{"heart", '❤', 2},
+		{"star", '★', 1}, // dingbats render 1 cell on modern terminals
+		{"heart", '❤', 1},
 		{"variation-selector", '\uFE0F', 0},
 		{"combining-acute", '\u0301', 0},
 		{"combining-ring", '\U00001AB5', 0},
@@ -46,12 +46,13 @@ func TestWrapTextCJKNoOverflow(t *testing.T) {
 	}
 }
 
-// TestCursorColCJK verifies the drawInputBox cursor-column formula. A full-width
-// prompt (❯ counted as 2 by runeWidth after the emoji/dingbat extension) must not
-// cause the cursor to land on top of an already-rendered CJK character — that is
-// the "汉字输入时重叠显示" symptom.
+// TestCursorColCJK verifies the drawInputBox cursor-column formula. The prompt
+// (❯ counted as 1 cell on modern terminals, 2 on CJK-wide ones) must not
+// cause the cursor to land on top of an already-rendered CJK character — that
+// is the "汉字输入时重叠显示" symptom. The expected columns are derived from
+// the measured prompt width, so the assertion holds for both width models.
 func TestCursorColCJK(t *testing.T) {
-	prompt := "❯ " // prompt + space; visibleWidth may be 2 or 3 depending on ❯ width
+	prompt := "❯ " // prompt + space; visibleWidth is 2 or 3 depending on ❯ width
 	prefixW := visibleWidth(prompt)
 
 	cases := []struct {

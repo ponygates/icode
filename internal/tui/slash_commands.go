@@ -20,6 +20,7 @@ import (
 	"github.com/ponygates/icode/internal/core/searchreplace"
 	"github.com/ponygates/icode/internal/core/skills"
 	"github.com/ponygates/icode/internal/core/slashcmd"
+	"github.com/ponygates/icode/internal/core/tool"
 	"github.com/ponygates/icode/internal/executil"
 )
 
@@ -697,6 +698,32 @@ func (t *TUI) handleSlash(text string) {
 
 	case "/memory":
 		t.memoryCommand(args)
+
+	case "/tasks":
+		var b strings.Builder
+		agentLines := tool.ListAgentTaskLines()
+		shellLines := tool.ListShellTaskLines()
+		if len(agentLines) == 0 && len(shellLines) == 0 {
+			b.WriteString("当前没有后台任务。\n后台子代理：task 工具传 background=true；\n后台命令：bash 工具传 run_in_background=true。")
+		} else {
+			if len(agentLines) > 0 {
+				b.WriteString("后台子代理 (agt-N):\n")
+				for _, l := range agentLines {
+					b.WriteString("  " + l + "\n")
+				}
+			}
+			if len(shellLines) > 0 {
+				if len(agentLines) > 0 {
+					b.WriteString("\n")
+				}
+				b.WriteString("后台命令 (bg-N):\n")
+				for _, l := range shellLines {
+					b.WriteString("  " + l + "\n")
+				}
+			}
+			b.WriteString("\n查询输出：让模型调用 task_output(task_id=...)，或直接问「bg-1 输出是什么」。")
+		}
+		t.add(RoleSystem, b.String())
 
 	case "/feedback":
 		t.add(RoleSystem, "反馈渠道:\n  · GitHub Issues: https://github.com/ponygates/icode/issues\n  · 对话中输入 `# <建议>` 可写入记忆文件")

@@ -387,6 +387,18 @@ type SearchResult struct {
 	MatchPos     int       `json:"match_pos"` // character position of first match
 }
 
+// AgentMessage is one cross-session message (Claude Code SendMessage parity).
+// Sessions address each other by session ID; the model discovers peers via
+// the list_agents tool and reads its inbox with the inbox tool.
+type AgentMessage struct {
+	ID        int64     `json:"id"`
+	FromID    string    `json:"from"`
+	ToID      string    `json:"to"`
+	Body      string    `json:"body"`
+	CreatedAt time.Time `json:"created_at"`
+	ReadAt    time.Time `json:"read_at,omitempty"` // zero while unread
+}
+
 type SessionStore interface {
 	Create(s *Session) error
 	Get(id string) (*Session, error)

@@ -30,6 +30,14 @@ type SubAgentRunner interface {
 	RunSubAgent(ctx context.Context, name, prompt string) (result string, tokensUsed int, err error)
 }
 
+// ForkingSubAgentRunner is optionally implemented by hosts that can replay
+// the parent conversation prefix into a sub-agent (fork mode). When the task
+// is called with fork=true and the runner supports it, the sub-agent starts
+// from the parent's cached context instead of a cold one.
+type ForkingSubAgentRunner interface {
+	RunForkedSubAgent(ctx context.Context, name, prompt string) (result string, tokensUsed int, err error)
+}
+
 // TaskTool delegates to a sub-agent with its own Optimizer context.
 type TaskTool struct {
 	runner SubAgentRunner
@@ -48,7 +56,9 @@ func (t *TaskTool) Def() types.ToolDef {
 			"general (catch-all). The sub-agent runs in its own context — only its final " +
 			"answer is returned, saving thousands of tokens. Use when: searching for " +
 			"code patterns, analysing architecture, or doing any work the main agent " +
-			"could do but that would pollute the main conversation with intermediate output.",
+			"could do but that would pollute the main conversation with intermediate output. " +
+			"Set background=true to run it detached and keep working — you get a task id " +
+			"(agt-N) immediately; poll task_output later for the result.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -60,6 +70,14 @@ func (t *TaskTool) Def() types.ToolDef {
 					"type":        "string",
 					"description": "The task description for the sub-agent. Be specific about what to find, look for, or analyse.",
 				},
+				"background": map[string]any{
+					"type":        "boolean",
+					"description": "Run detached in the background. Returns a task id at once; fetch results via task_output. Default false.",
+				},
+				"fork": map[string]any{
+					"type":        "boolean",
+					"description": "Replay the parent conversation into this sub-agent (prompt-cache friendly) so it knows the full context. Use when the subtask needs conversation history.",
+				},
 			},
 			"required": []string{"name", "prompt"},
 		},
@@ -68,8 +86,10 @@ func (t *TaskTool) Def() types.ToolDef {
 
 func (t *TaskTool) Execute(ctx context.Context, args string) (*types.ToolResult, error) {
 	var in struct {
-		Name   string `json:"name"`
-		Prompt string `json:"prompt"`
+		Name       string `json:"name"`
+		Prompt     string `json:"prompt"`
+		Background bool   `json:"background"`
+		Fork       bool   `json:"fork"`
 	}
 	if err := json.Unmarshal([]byte(args), &in); err != nil {
 		return &types.ToolResult{
@@ -94,16 +114,45 @@ func (t *TaskTool) Execute(ctx context.Context, args string) (*types.ToolResult,
 		}, nil
 	}
 
-	// Delegate to the sub-agent runner. Emit a live progress line first so the
-	// user sees the sub-agent start (instead of a silent multi-second stall).
-	if progress := ProgressFromContext(ctx); progress != nil {
-		brief := in.Prompt
-		if len(brief) > 120 {
-			brief = brief[:120] + "…"
+	// run resolves fork mode: when requested and the host supports it, the
+	// sub-agent replays the parent conversation prefix (cache-friendly).
+	run := func(ctx context.Context, name, prompt string) (string, int, error) {
+		if in.Fork {
+			if fr, ok := t.runner.(ForkingSubAgentRunner); ok {
+				return fr.RunForkedSubAgent(ctx, name, prompt)
+			}
 		}
+		return t.runner.RunSubAgent(ctx, name, prompt)
+	}
+
+	brief := in.Prompt
+	if len(brief) > 120 {
+		brief = brief[:120] + "…"
+	}
+
+	// Background launch: hand off to the detached runner and return the
+	// handle immediately so the main loop keeps working.
+	if in.Background {
+		id, err := launchBackgroundAgent(funcAdapter(run), in.Name, in.Prompt)
+		if err != nil {
+			return &types.ToolResult{Success: false, Error: "background launch failed: " + err.Error()}, nil
+		}
+		if progress := ProgressFromContext(ctx); progress != nil {
+			progress(fmt.Sprintf("🚀 子代理 %s 已后台启动（%s）\n", in.Name, id))
+		}
+		return &types.ToolResult{
+			Success: true,
+			Content: fmt.Sprintf("【后台子代理已启动】id=%s agent=%s 任务：%s\n结果尚未就绪。继续你的工作；稍后用 task_output(task_id=%q) 查询状态与输出。",
+				id, in.Name, brief, id),
+		}, nil
+	}
+
+	// Foreground delegation. Emit a live progress line first so the user sees
+	// the sub-agent start (instead of a silent multi-second stall).
+	if progress := ProgressFromContext(ctx); progress != nil {
 		progress(fmt.Sprintf("🔍 子代理 %s 正在执行：%s\n", in.Name, brief))
 	}
-	result, totalTokens, err := t.runner.RunSubAgent(ctx, in.Name, in.Prompt)
+	result, totalTokens, err := run(ctx, in.Name, in.Prompt)
 	if err != nil {
 		return &types.ToolResult{
 			Success: false,

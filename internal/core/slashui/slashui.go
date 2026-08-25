@@ -328,6 +328,7 @@ func helpDefs() []helpItem {
 		{"/hooks", "查看/生成 hooks.yaml"}, {"/init", "创建 ICODE.md"},
 		{"/agents", "列出 agent"}, {"/skills", "列出已安装技能"},
 		{"/teams", "列出团队"}, {"/todo", "查看任务"},
+		{"/tasks", "后台任务面板（子代理 + 命令）"},
 		{"/add-dir <dir>", "添加工作目录"}, {"/update", "刷新模型目录"},
 		{"/lang [zh-CN|zh-TW|en]", "切换语言"}, {"/login", "配置 API Key"},
 		{"/logout", "清除 API Key"}, {"/feedback", "反馈问题"},

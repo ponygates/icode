@@ -177,6 +177,11 @@ type TUI struct {
 	streamBuf  strings.Builder
 	streamDone chan struct{}
 
+	// ansiPending holds a trailing incomplete ANSI escape from the previous
+	// streamed chunk (one escape can be split across two chunks); it is
+	// prepended to the next chunk before sanitising.
+	ansiPending string
+
 	// renderPending / renderTimer coalesce full-screen redraws so a burst of
 	// streamed tokens doesn't trigger one expensive redraw per chunk.
 	renderPending bool
