@@ -215,7 +215,7 @@ func Execute(ctx context.Context, b *Backend, st *State, text string) Result {
 	case "/doctor":
 		return cmdDoctor(b, st)
 	case "/lang":
-		return cmdLang(args)
+		return cmdLang(args, b)
 	case "/theme":
 		return ok("该命令是 CLI 终端专用（主题切换）。请使用应用内的主题/深浅色设置。")
 	case "/login":
@@ -2022,14 +2022,20 @@ func cmdDoctor(b *Backend, st *State) Result {
 	return ok(sb.String())
 }
 
-func cmdLang(args []string) Result {
+func cmdLang(args []string, b *Backend) Result {
 	if len(args) == 0 {
-		return ok("用法: /lang <zh-CN|zh-TW|en>（UI 版请在设置中切换语言）")
+		return ok("用法: /lang <zh-CN|zh-TW|en>。UI 与模型输出同步切换语言。")
 	}
 	switch args[0] {
 	case "zh-CN", "zh-TW", "en":
-		persistSetting(func(c *config.Config) { c.Language = args[0] })
-		return ok("语言已设为 " + args[0] + "（重启界面后生效）")
+		var updated *config.Config
+		persistSetting(func(c *config.Config) { c.Language = args[0]; updated = c })
+		// Live-refresh the engine so the language directive (replies,
+		// reasoning, code comments) reaches the model without a restart.
+		if b != nil && b.Engine != nil && updated != nil {
+			b.Engine.SetSystemPrompt(config.EffectiveSystemPrompt(updated))
+		}
+		return ok("语言已设为 " + args[0] + "，模型回复/思考/注释语言已同步生效。")
 	default:
 		return errf("无效语言: %s（可选 zh-CN/zh-TW/en）", args[0])
 	}

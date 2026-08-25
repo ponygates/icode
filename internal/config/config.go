@@ -334,9 +334,10 @@ func OutputStyleDirective(style string) string {
 }
 
 // EffectiveSystemPrompt composes the runtime system prompt from the user's
-// base prompt plus the output-style directive and any extra working dirs
-// (/output-style, /add-dir). Centralized so CLI startup and live slash-command
-// changes stay consistent.
+// base prompt plus the output-style directive, any extra working dirs
+// (/output-style, /add-dir), and the language directive derived from
+// c.Language. Centralized so CLI startup and live slash-command changes stay
+// consistent.
 func EffectiveSystemPrompt(c *Config) string {
 	if c == nil {
 		return ""
@@ -352,7 +353,35 @@ func EffectiveSystemPrompt(c *Config) string {
 	if len(c.Defaults.ExtraDirs) > 0 {
 		parts = append(parts, "Additional working directories you may read and reference beyond the current directory:\n"+strings.Join(c.Defaults.ExtraDirs, "\n"))
 	}
+	if d := LanguageDirective(c.Language); d != "" {
+		parts = append(parts, d)
+	}
 	return strings.Join(parts, "\n\n")
+}
+
+// LanguageDirective returns the system-prompt instruction that pins the
+// model's conversation language (replies AND reasoning) plus code-comment
+// language to the configured UI locale. Empty for unknown locales — the model
+// then follows the user's input language naturally.
+func LanguageDirective(lang string) string {
+	switch strings.TrimSpace(lang) {
+	case "zh-CN":
+		return "语言要求：始终使用简体中文与用户交流，包括所有解释、分析与思考过程（thinking）文本；" +
+			"代码注释也用简体中文书写（除非用户明确要求英文注释或编辑的是已有英文注释的文件——保持该文件原有注释语言一致）。" +
+			"标识符、commit 信息遵循项目现有惯例。"
+	case "zh-TW":
+		return "語言要求：始終使用繁體中文與使用者交流，包括所有解釋、分析與思考過程（thinking）文字；" +
+			"程式碼註解亦以繁體中文撰寫（除非使用者明確要求英文註解，或編輯既有英文註解的檔案——維持該檔案原有註解語言一致）。" +
+			"識別字、commit 訊息遵循專案現有慣例。"
+	case "en":
+		return "Language requirement: always communicate with the user in English, including all explanations, " +
+			"analysis, and reasoning (thinking) text. Write code comments in English as well, unless the user " +
+			"explicitly requests another language or you are editing a file whose existing comments are in a " +
+			"different language — keep that file's comment language consistent. Identifiers and commit messages " +
+			"follow the project's existing conventions."
+	default:
+		return ""
+	}
 }
 
 func Default() *Config {

@@ -87,7 +87,9 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		// Push generation parameters into the live engine.
 		s.engine.SetGenerationParams(cfg.Defaults.Temperature, cfg.Defaults.MaxTokens)
-		s.engine.SetSystemPrompt(cfg.Defaults.SystemPrompt)
+		// EffectiveSystemPrompt (not the raw field) so the language
+		// directive, output-style, and extra dirs all reach the model.
+		s.engine.SetSystemPrompt(config.EffectiveSystemPrompt(&cfg))
 		s.engine.SetFallbackModels(cfg.Defaults.FallbackModels)
 		// Push the extended-thinking toggle into the live engine so the
 		// desktop "深度思考" setting takes effect without a restart.

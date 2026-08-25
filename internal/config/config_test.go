@@ -407,11 +407,44 @@ func TestEffectiveSystemPrompt(t *testing.T) {
 			t.Fatalf("EffectiveSystemPrompt missing %q:\n%s", want, out)
 		}
 	}
+	// Default locale (zh-CN) must inject its language directive.
+	if !strings.Contains(out, "简体中文") {
+		t.Fatalf("default config missing zh-CN language directive:\n%s", out)
+	}
 	if EffectiveSystemPrompt(nil) != "" {
 		t.Fatal("nil config should produce empty prompt")
 	}
-	if EffectiveSystemPrompt(Default()) != "" {
-		t.Fatal("empty defaults should produce empty prompt")
+}
+
+func TestLanguageDirective(t *testing.T) {
+	cases := []struct {
+		lang string
+		want string
+	}{
+		{"zh-CN", "简体中文"},
+		{"zh-TW", "繁體中文"},
+		{"en", "in English"},
+		{"", ""},
+		{"xx-unknown", ""},
+	}
+	for _, tc := range cases {
+		got := LanguageDirective(tc.lang)
+		if tc.want == "" {
+			if got != "" {
+				t.Errorf("LanguageDirective(%q) = %q, want empty", tc.lang, got)
+			}
+			continue
+		}
+		if !strings.Contains(got, tc.want) {
+			t.Errorf("LanguageDirective(%q) missing %q: %q", tc.lang, tc.want, got)
+		}
+	}
+	// Comments are explicitly covered in every non-empty directive.
+	for _, lang := range []string{"zh-CN", "zh-TW", "en"} {
+		d := LanguageDirective(lang)
+		if !strings.Contains(d, "注释") && !strings.Contains(d, "註解") && !strings.Contains(d, "comments") {
+			t.Errorf("directive for %q does not mention code comments", lang)
+		}
 	}
 }
 

@@ -146,6 +146,35 @@ type Config struct {
 
 // ── TUI ──────────────────────────────────────────────────────────
 
+// SetOnConfigChanged installs the host hook invoked after every successful
+// persistSetting (config write from any TUI slash command).
+func (t *TUI) SetOnConfigChanged(fn func(*config.Config)) {
+	t.mu.Lock()
+	t.onConfigChanged = fn
+	t.mu.Unlock()
+}
+
+// noteRecentCmd records a dispatched slash command for recency-ranked
+// autocomplete. Keeps at most 8 entries, most recent first.
+func (t *TUI) noteRecentCmd(name string) {
+	if !strings.HasPrefix(name, "/") {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]string, 0, 9)
+	out = append(out, name)
+	for _, c := range t.recentCmds {
+		if c != name {
+			out = append(out, c)
+		}
+	}
+	if len(out) > 8 {
+		out = out[:8]
+	}
+	t.recentCmds = out
+}
+
 type TUI struct {
 	mode          Mode
 	model         string
@@ -157,6 +186,12 @@ type TUI struct {
 	securityLevel string
 	version       string
 	callback      Callback
+	// onConfigChanged, when installed by the host (cmd layer), fires after
+	// every persistSetting so engine-side config derivatives — the system
+	// prompt carrying the language directive — refresh live.
+	onConfigChanged func(*config.Config)
+	// recentCmds tracks slash-command usage for recency-ranked autocomplete.
+	recentCmds []string
 
 	// input autocomplete state (raw mode)
 	acOpen  bool

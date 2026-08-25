@@ -108,6 +108,15 @@ func startChat(provider, model, mode string) error {
 	// Wire TUI stream writer back to callback
 	cb.tui = t
 
+	// Config changes made from the TUI (e.g. /lang) must refresh everything
+	// the engine derived at startup — chiefly the system prompt that carries
+	// the language directive (replies/reasoning/comments follow /lang).
+	if a.Engine != nil {
+		t.SetOnConfigChanged(func(c *config.Config) {
+			a.Engine.SetSystemPrompt(config.EffectiveSystemPrompt(c))
+		})
+	}
+
 	// Notify in the TUI when a background task completes (P1-3: task-done
 	// notification, Claude Code / opencode parity).
 	tool.SetCompleteHook(func(id, errMsg string) {

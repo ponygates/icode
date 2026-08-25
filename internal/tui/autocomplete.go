@@ -7,21 +7,28 @@ import (
 	"strings"
 
 	"github.com/ponygates/icode/internal/config"
+	"github.com/ponygates/icode/internal/core/slashcmd"
 )
 
-// ── Helpers ──────────────────────────────────────────────────────
+// 鈹€鈹€ Helpers 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 // persistSetting loads config, applies fn, and writes it back to disk.
-// Errors are reported via the UI rather than silently ignored.
+// Errors are reported via the UI rather than silently ignored. When the host
+// installed an OnConfigChanged hook (wired in cmd/commands.go), it is invoked
+// afterwards so engine-side settings derived from config —?most importantly
+// the system prompt carrying the language directive —?refresh immediately.
 func (t *TUI) persistSetting(fn func(*config.Config)) {
 	cfg, err := config.Load()
 	if err != nil {
-		t.add(RoleError, "配置加载失败: "+err.Error())
+		t.add(RoleError, "閰嶇疆鍔犺浇澶辫触: "+err.Error())
 		return
 	}
 	fn(cfg)
 	if err := cfg.Save(config.DefaultPath()); err != nil {
-		t.add(RoleError, "配置保存失败: "+err.Error())
+		t.add(RoleError, "閰嶇疆淇濆瓨澶辫触: "+err.Error())
+	}
+	if t.onConfigChanged != nil {
+		t.onConfigChanged(cfg)
 	}
 }
 
@@ -45,10 +52,34 @@ func (t *TUI) updateSuggestions() {
 		prefix := strings.TrimSpace(buf)
 		var items []acItem
 		for _, d := range slashDefs {
-			if prefix == "/" || strings.HasPrefix(d.Name, prefix) {
+			if prefix == "/" {
 				items = append(items, acItem{Name: d.Name, Desc: t.tstr(d.Key)})
+				continue
+			}
+			if score := fuzzyScore(prefix, d.Name); score >= 0 {
+				items = append(items, acItem{Name: d.Name, Desc: t.tstr(d.Key) + usageHint(d.Name)})
 			}
 		}
+		// Custom commands (.icode/commands/*.md) participate in completion
+		// too —?Claude Code lists them alongside built-ins with their
+		// frontmatter argument hints.
+		customSeen := map[string]bool{}
+		for _, it := range items {
+			customSeen[it.Name] = true
+		}
+		for _, c := range slashcmd.CachedLoad(slashcmd.DefaultDirs()...).List() {
+			if customSeen[c.Name] {
+				continue
+			}
+			if prefix == "/" || fuzzyScore(prefix, c.Name) >= 0 {
+				desc := c.Description
+				if desc == "" {
+					desc = t.tstr("ac.custom")
+				}
+				items = append(items, acItem{Name: c.Name, Desc: desc + " " + c.ArgumentHint})
+			}
+		}
+		t.rankSuggestions(items)
 		if len(items) == 0 {
 			t.acOpen = false
 			t.acItems = nil
@@ -64,7 +95,7 @@ func (t *TUI) updateSuggestions() {
 		}
 		return
 	}
-	// @file completions — matches Claude Code's file-attachment autocomplete.
+	// @file completions —?matches Claude Code's file-attachment autocomplete.
 	if idx := strings.LastIndex(buf, "@"); idx >= 0 {
 		prefix := buf[idx+1:] // text after the @
 		items := t.filesAutocomplete(prefix)
@@ -95,7 +126,7 @@ func (t *TUI) filesAutocomplete(prefix string) []acItem {
 	// Determine the directory to search.
 	searchDir := cwd
 	if strings.Contains(prefix, "/") {
-		// User typed a sub-path: "src/foo" → search cwd/src/
+		// User typed a sub-path: "src/foo" 鈫?search cwd/src/
 		rel := filepath.Dir(prefix)
 		searchDir = filepath.Join(cwd, rel)
 	}
@@ -215,11 +246,106 @@ func isWordChar(b byte) bool {
 
 // allSuggestions returns every slash command as an autocomplete entry.
 func (t *TUI) allSuggestions() []acItem {
-	items := make([]acItem, 0, len(slashDefs))
+	items := make([]acItem, 0, len(slashDefs)+8)
+	seen := map[string]bool{}
 	for _, d := range slashDefs {
-		items = append(items, acItem{Name: d.Name, Desc: t.tstr(d.Key)})
+		items = append(items, acItem{Name: d.Name, Desc: t.tstr(d.Key) + usageHint(d.Name)})
+		seen[d.Name] = true
 	}
+	for _, c := range slashcmd.CachedLoad(slashcmd.DefaultDirs()...).List() {
+		if seen[c.Name] {
+			continue
+		}
+		desc := c.Description
+		if desc == "" {
+			desc = t.tstr("ac.custom")
+		}
+		items = append(items, acItem{Name: c.Name, Desc: desc + " " + c.ArgumentHint})
+	}
+	t.rankSuggestions(items)
 	return items
+}
+
+// usageHint returns a dim argument placeholder for commands that take one,
+// mirroring Claude Code's inline hints. Empty for zero-arg commands.
+func usageHint(name string) string {
+	hints := map[string]string{
+		"/model":        " <model-id>",
+		"/lang":         " <zh-CN|zh-TW|en>",
+		"/theme":        " <auto|dark|light>",
+		"/add-dir":      " <dir>",
+		"/cd":           " <dir>",
+		"/goal":         " set <goal> --verify <cmd> | show | clear",
+		"/idle":         " <name> <desc>",
+		"/security":     " <level>",
+		"/config":       " key=value",
+		"/output-style": " [style]",
+		"/export":       " [file]",
+		"/copy":         " [file]",
+		"/compact":      " [instructions]",
+		"/summarize":    " [focus]",
+		"/resume":       " [session-id]",
+		"/fork":         " <session-id>",
+		"/lsp":          " diag <file>",
+	}
+	return hints[name]
+}
+
+// rankSuggestions orders the completion list: recently used commands first
+// (recency), then built-in definition order. Custom commands keep their
+// relative order after matching built-ins.
+func (t *TUI) rankSuggestions(items []acItem) {
+	t.mu.Lock()
+	recent := append([]string(nil), t.recentCmds...)
+	t.mu.Unlock()
+	if len(recent) == 0 {
+		return
+	}
+	pos := map[string]int{}
+	for i, name := range recent {
+		pos[name] = len(recent) - i // higher = more recent
+	}
+	stableSortedByRecency(items, pos)
+}
+
+// stableSortedByRecency is an insertion sort keyed on recency rank (0 =
+// never used). Stable, and the lists are tiny (<90 entries).
+func stableSortedByRecency(items []acItem, pos map[string]int) {
+	for i := 1; i < len(items); i++ {
+		for j := i; j > 0 && pos[items[j].Name] > pos[items[j-1].Name]; j-- {
+			items[j], items[j-1] = items[j-1], items[j]
+		}
+	}
+}
+
+// fuzzyScore scores name against a typed prefix using Claude Code-style
+// subsequence matching: contiguous prefix match ranks best, then in-order
+// subsequences penalised by the gap since the previous matched rune.
+// Returns -1 when the query cannot be embedded in order.
+func fuzzyScore(query, name string) int {
+	if query == "" {
+		return 0
+	}
+	if strings.HasPrefix(strings.ToLower(name), strings.ToLower(query)) {
+		return 0
+	}
+	q := strings.ToLower(query)
+	n := strings.ToLower(name)
+	score, qi, last := 0, 0, 0
+	for ni := 0; ni < len(n) && qi < len(q); ni++ {
+		if n[ni] != q[qi] {
+			continue
+		}
+		if qi > 0 {
+			score -= ni - last - 1 // relative gap penalty
+		}
+		last = ni
+		qi++
+	}
+	if qi < len(q) {
+		return -1
+	}
+	return score
 }
 
 // completeSlashCommand expands an incomplete slash-command prefix when the
@@ -235,21 +361,40 @@ func (t *TUI) completeSlashCommand(text string) (string, bool) {
 	if i := strings.IndexByte(text, ' '); i >= 0 {
 		token, rest = text[:i], text[i:]
 	}
+	// All completable commands: built-ins first (definition order), then
+	// user-defined ones from .icode/commands.
+	names := make([]string, 0, len(slashDefs)+8)
+	for _, d := range slashDefs {
+		names = append(names, d.Name)
+	}
+	for _, c := range slashcmd.CachedLoad(slashcmd.DefaultDirs()...).List() {
+		dup := false
+		for _, n := range names {
+			if n == c.Name {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			names = append(names, c.Name)
+		}
+	}
+
 	// Bare "/" — can't dispatch an empty command; fall back to the first one.
 	if token == "/" {
-		if len(slashDefs) == 0 {
+		if len(names) == 0 {
 			return text, false
 		}
-		return slashDefs[0].Name + rest, true
+		return names[0] + rest, true
 	}
 	var first string
-	for _, d := range slashDefs {
-		if d.Name == token {
+	for _, name := range names {
+		if name == token {
 			// Exact command — already complete, never rewrite it.
 			return text, false
 		}
-		if first == "" && strings.HasPrefix(d.Name, token) {
-			first = d.Name
+		if first == "" && strings.HasPrefix(name, token) {
+			first = name
 		}
 	}
 	if first != "" {
@@ -295,7 +440,7 @@ func (t *TUI) autocompleteLines() []string {
 		return nil
 	}
 	var out []string
-	out = append(out, t.paint("dim", "  ▾ "+t.tstr("ac.title")+"   ("+t.tstr("ac.hint")+")"))
+	out = append(out, t.paint("dim", "  鈻?"+t.tstr("ac.title")+"   ("+t.tstr("ac.hint")+")"))
 
 	const maxShow = 9
 	from := 0

@@ -16,6 +16,7 @@ var tuiStrings = map[string]map[string]string{
 	langZhCN: {
 		"ac.title":             "命令提示",
 		"ac.hint":              "↑↓ 选择 · Tab 补全 · Esc 关闭",
+		"ac.custom":            "自定义命令",
 		"banner.hint":          "输入你的需求，或 /help 查看命令。按 Ctrl+C 退出。",
 		"welcome.hint":         "输入你的需求开始对话，或 /help 查看全部命令 · Tab 补全 · ↑↓ 历史",
 		"welcome.tagline":      "你的 AI 编程伙伴",
@@ -31,6 +32,8 @@ var tuiStrings = map[string]map[string]string{
 		"status.gen":           "生成中…",
 		"lang.usage":           "用法: /lang <zh-CN|zh-TW|en>",
 		"lang.set":             "语言已设为 %s",
+		"lang.current":         "当前语言: %s",
+		"lang.modelNote":       "模型回复、思考过程与代码注释语言已同步切换。",
 		"theme.usage":          "用法: /theme <auto|dark|light>",
 		"theme.set":            "主题已设为 %s（已持久化）",
 		"sc.title":             "快捷键",
@@ -114,6 +117,7 @@ var tuiStrings = map[string]map[string]string{
 	langZhTW: {
 		"ac.title":             "指令提示",
 		"ac.hint":              "↑↓ 選擇 · Tab 補全 · Esc 關閉",
+		"ac.custom":            "自訂指令",
 		"banner.hint":          "輸入你的需求，或 /help 檢視指令。按 Ctrl+C 退出。",
 		"welcome.hint":         "輸入你的需求開始對話，或 /help 檢視全部指令 · Tab 補全 · ↑↓ 歷史",
 		"welcome.tagline":      "你的 AI 程式設計夥伴",
@@ -129,6 +133,8 @@ var tuiStrings = map[string]map[string]string{
 		"status.gen":           "生成中…",
 		"lang.usage":           "用法: /lang <zh-CN|zh-TW|en>",
 		"lang.set":             "語言已設為 %s",
+		"lang.current":         "目前語言: %s",
+		"lang.modelNote":       "模型回覆、思考過程與程式碼註解語言已同步切換。",
 		"theme.usage":          "用法: /theme <auto|dark|light>",
 		"theme.set":            "主題已設為 %s（已儲存）",
 		"sc.title":             "快捷鍵",
@@ -210,6 +216,7 @@ var tuiStrings = map[string]map[string]string{
 	langEn: {
 		"ac.title":             "Commands",
 		"ac.hint":              "↑↓ to move · Tab to complete · Esc to close",
+		"ac.custom":            "custom command",
 		"banner.hint":          "Type your request, or /help for commands. Ctrl+C to exit.",
 		"welcome.hint":         "Type your request to start, or /help for all commands · Tab to complete · ↑↓ history",
 		"welcome.tagline":      "your AI coding partner",
@@ -225,6 +232,8 @@ var tuiStrings = map[string]map[string]string{
 		"status.gen":           "generating…",
 		"lang.usage":           "usage: /lang <zh-CN|zh-TW|en>",
 		"lang.set":             "Language set to %s",
+		"lang.current":         "Current language: %s",
+		"lang.modelNote":       "Model replies, reasoning, and code comments now follow this language.",
 		"theme.usage":          "usage: /theme <auto|dark|light>",
 		"theme.set":            "Theme set to %s (saved)",
 		"sc.title":             "Shortcuts",
@@ -397,32 +406,32 @@ type acItem struct {
 
 var palettes = map[string]map[string]string{
 	"dark": {
-		"dim":     "\x1b[90m",
-		"bold":    "\x1b[1m",
-		"red":     "\x1b[31m",
-		"green":   "\x1b[32m",
-		"yellow":  "\x1b[33m",
+		"dim":          "\x1b[90m",
+		"bold":         "\x1b[1m",
+		"red":          "\x1b[31m",
+		"green":        "\x1b[32m",
+		"yellow":       "\x1b[33m",
 		"brightyellow": "\x1b[38;5;220m", // 大黄 (golden yellow ~#FFD75F, iCODE dot)
-		"orange":  "\x1b[38;5;209m", // brand orange (~#ff7a45)
-		"blue":    "\x1b[34m",
-		"magenta": "\x1b[38;5;205m",
-		"purple":  "\x1b[38;5;141m", // brighter violet for better contrast
-		"cyan":    "\x1b[36m",
-		"white":   "\x1b[37m",
+		"orange":       "\x1b[38;5;209m", // brand orange (~#ff7a45)
+		"blue":         "\x1b[34m",
+		"magenta":      "\x1b[38;5;205m",
+		"purple":       "\x1b[38;5;141m", // brighter violet for better contrast
+		"cyan":         "\x1b[36m",
+		"white":        "\x1b[37m",
 	},
 	"light": {
-		"dim":     "\x1b[90m",
-		"bold":    "\x1b[1m",
-		"red":     "\x1b[31m",
-		"green":   "\x1b[38;5;28m",
-		"yellow":  "\x1b[38;5;136m",
+		"dim":          "\x1b[90m",
+		"bold":         "\x1b[1m",
+		"red":          "\x1b[31m",
+		"green":        "\x1b[38;5;28m",
+		"yellow":       "\x1b[38;5;136m",
 		"brightyellow": "\x1b[38;5;178m", // deep golden yellow on light bg (~#D7AF00)
-		"orange":  "\x1b[38;5;166m",
-		"blue":    "\x1b[34m",
-		"magenta": "\x1b[35m",
-		"purple":  "\x1b[38;5;129m",
-		"cyan":    "\x1b[38;5;30m",
-		"white":   "\x1b[30m",
+		"orange":       "\x1b[38;5;166m",
+		"blue":         "\x1b[34m",
+		"magenta":      "\x1b[35m",
+		"purple":       "\x1b[38;5;129m",
+		"cyan":         "\x1b[38;5;30m",
+		"white":        "\x1b[30m",
 	},
 }
 

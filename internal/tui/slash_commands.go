@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ponygates/icode/internal/config"
+	i18n "github.com/ponygates/icode/internal/config/i18n"
 	"github.com/ponygates/icode/internal/core/agent"
 	"github.com/ponygates/icode/internal/core/checkpoint"
 	projectcontext "github.com/ponygates/icode/internal/core/context"
@@ -45,6 +46,7 @@ func (t *TUI) handleSlash(text string) {
 	}
 	cmd := strings.ToLower(parts[0])
 	args := parts[1:]
+	t.noteRecentCmd(cmd)
 
 	switch cmd {
 	case "/help":
@@ -542,13 +544,21 @@ func (t *TUI) handleSlash(text string) {
 			switch args[0] {
 			case "zh-CN", "zh-TW", "en":
 				t.lang = args[0]
+				// Sync the global translator so cmd-layer i18n.Tr strings
+				// (prompts, CLI banners) follow the same locale.
+				i18n.T.SetLanguage(i18n.Lang(args[0]))
 				t.persistSetting(func(c *config.Config) { c.Language = t.lang })
-				t.add(RoleSystem, fmt.Sprintf(t.tstr("lang.set"), t.lang))
+				t.add(RoleSystem, fmt.Sprintf(t.tstr("lang.set"), t.lang)+
+					"\n"+t.tstr("lang.modelNote"))
 			default:
 				t.add(RoleSystem, t.tstr("lang.usage"))
 			}
 		} else {
-			t.add(RoleSystem, t.tstr("lang.usage"))
+			cur := t.lang
+			if cur == "" {
+				cur = "zh-CN"
+			}
+			t.add(RoleSystem, t.tstr("lang.usage")+"\n"+fmt.Sprintf(t.tstr("lang.current"), cur))
 		}
 
 	case "/summarize":

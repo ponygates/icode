@@ -247,6 +247,17 @@ export const useAppStore = create<AppStore>()(
     set({ language: lang });
     i18n.changeLanguage(lang);
     localStorage.setItem('icode.language', lang);
+    // Sync the backend so the ENGINE follows too: /lang persists
+    // cfg.Language and refreshes the system prompt, making model replies,
+    // reasoning, and code comments match the UI locale.
+    const url = get().backendUrl;
+    if (url) {
+      fetch(`${url}/api/slash`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: `/lang ${lang}`, session_id: get().activeSessionId || '' }),
+      }).catch(() => {});
+    }
   },
 
   // Security level — defaults to "local" (safest). iCode NEVER sends
