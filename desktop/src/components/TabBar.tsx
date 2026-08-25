@@ -13,9 +13,10 @@ interface TabBarProps {
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
   onNew: () => void;
+  onContextMenu?: (e: React.MouseEvent, id: string) => void;
 }
 
-const TabBar: React.FC<TabBarProps> = ({ tabs, activeId, onSelect, onClose, onNew }) => {
+const TabBar: React.FC<TabBarProps> = ({ tabs, activeId, onSelect, onClose, onNew, onContextMenu }) => {
   const { t } = useTranslation();
   if (tabs.length === 0) return null;
 
@@ -31,6 +32,8 @@ const TabBar: React.FC<TabBarProps> = ({ tabs, activeId, onSelect, onClose, onNe
           <div
             key={tab.id}
             onClick={() => onSelect(tab.id)}
+            onContextMenu={(e) => onContextMenu?.(e, tab.id)}
+            title={active ? t('tab.ctxHint') : undefined}
             style={{
               display: 'flex', alignItems: 'center', gap: 5,
               padding: '0 10px', height: '100%', cursor: 'pointer',

@@ -2,27 +2,23 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next';
 import i18n from '../i18n';
 import { useAppStore, Message, Attachment, type Model } from '../stores/appStore';
-import { Send, Plus, Trash2, MessageSquare, Cpu, Shield, Square, ShieldAlert, GitBranch, FileText, RefreshCw, Folder, Edit3, Download, FileJson, Upload, ChevronDown, Mic } from 'lucide-react';
+import { Send, Plus, Trash2, MessageSquare, Cpu, Shield, Square, ShieldAlert, GitBranch, FileText, RefreshCw, Edit3, Download, FileJson, Upload, ChevronDown, Mic } from 'lucide-react';
 import Markdown from '../components/Markdown';
 import CommandPalette, { useCommandPalette } from '../components/CommandPalette';
 import TodoPanel from '../components/TodoPanel';
 import TokenBar from '../components/TokenBar';
 import TabBar from '../components/TabBar';
 import CheckpointPanel from '../components/CheckpointPanel';
+import LspPanel from '../components/LspPanel';
+import KnowledgePanel from '../components/KnowledgePanel';
+import GoalPanel from '../components/GoalPanel';
 import FilePicker from '../components/FilePicker';
 import FileTree from '../components/FileTree';
 import ModelPicker from '../components/ModelPicker';
 import PlumBlossom from '../components/PlumBlossom';
+import WorkspaceSwitcher from '../components/WorkspaceSwitcher';
 import { executeSlash, filterSlash, type SlashCommand } from '../lib/slashCommands';
 import { apiAppendMessage, apiUpdateMessage, apiClearSession } from '../lib/sessionMessages';
-
-// Shorten a path to its last 2 segments for display.
-function shortDir(p: string): string {
-  if (!p) return '';
-  const parts = p.replace(/\\/g, '/').split('/').filter(Boolean);
-  if (parts.length <= 2) return parts.join('/');
-  return parts.slice(-2).join('/');
-}
 
 // A permission prompt surfaced from the engine's tool gate while a session is
 // blocked waiting on the user's decision.
@@ -137,13 +133,31 @@ function AttachmentView({ items, onZoom }: { items: Attachment[]; onZoom: (src: 
 // Memoized message list. Isolates message rendering from ChatPage's local
 // state (typing) and from unrelated store updates (backend health pings,
 // token usage, …) so the list only re-renders when messages actually change.
-const MessageList = React.memo(({ messages, isStreaming, onRegenerate, onZoom }: {
+
+// msgTime renders a message timestamp as a compact HH:MM (e.g. "14:05").
+function msgTime(ts?: number): string {
+  if (!ts) return '';
+  try {
+    return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  } catch {
+    return '';
+  }
+}
+const MessageList = React.memo(({ messages, isStreaming, onRegenerate, onEditResend, onZoom }: {
   messages: Message[];
   isStreaming: boolean;
   onRegenerate: (id: string) => void;
+  onEditResend: (id: string) => void;
   onZoom: (src: string) => void;
 }) => {
   const { t } = useTranslation();
+  // Model display name for the per-message label row (Claude Code-style
+  // "Claude Sonnet" header). Selector returns a stable string so the memo
+  // stays effective.
+  const modelName = useAppStore((s) => {
+    const m = s.models.find((x) => x.id === s.selectedModel);
+    return m?.name || '';
+  });
   return (
     <>
 {messages.map((msg, idx) => {
@@ -241,6 +255,16 @@ const MessageList = React.memo(({ messages, isStreaming, onRegenerate, onZoom }:
                   })()
                 ) : (
                   <>
+                    {/* Per-message model label (Claude Code-style header) */}
+                    <div style={{
+                      display: 'flex', alignItems: 'center', gap: 6,
+                      fontSize: 10, color: 'var(--text-muted)', fontWeight: 500,
+                      marginBottom: 6, letterSpacing: '0.01em',
+                    }}>
+                      <span style={{ color: 'var(--accent)' }}>{modelName || 'iCode'}</span>
+                      <span style={{ opacity: 0.6 }}>·</span>
+                      <span style={{ fontWeight: 400, opacity: 0.8 }}>{msgTime(msg.timestamp)}</span>
+                    </div>
                     <Markdown text={msg.content} streaming={msgStreaming} />
                     {/* Action buttons — hidden until bubble hover */}
                     <div className="action-hidden" style={{ display: 'flex', gap: 6, marginTop: 8 }}>
@@ -259,6 +283,14 @@ const MessageList = React.memo(({ messages, isStreaming, onRegenerate, onZoom }:
               ) : '')
             ) : (
               <span style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</span>
+            )}
+            {msg.role === 'user' && (
+              <div className="action-hidden" style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+                <ActionBtn icon="📋" label={t('chat.copy')} title={t('chat.copyTitle')}
+                  onClick={() => navigator.clipboard.writeText(msg.content)} />
+                <ActionBtn icon="✏️" label={t('chat.editResend')} title={t('chat.editResendTitle')}
+                  onClick={() => onEditResend(msg.id)} />
+              </div>
             )}
             {msg.attachments && msg.attachments.length > 0 && (
               <AttachmentView items={msg.attachments} onZoom={onZoom} />
@@ -293,6 +325,7 @@ const ChatPage: React.FC = () => {
   const [lightbox, setLightbox] = useState<string | null>(null);
   const [attachedImages, setAttachedImages] = useState<{ mime: string; data: string }[]>([]);
   const [gitBranch, setGitBranch] = useState('');
+  const [branchCopied, setBranchCopied] = useState(false);
   const [cwdPath, setCwdPath] = useState('');
   // Session runtime is measured from the session's createdAt; tick once a second
   // so the "runtime" card stays live without re-rendering the message list.
@@ -307,6 +340,8 @@ const ChatPage: React.FC = () => {
   // Slash-command autocomplete (visible while the input starts with "/" and no
   // args have been typed yet). Selected index for ↑/↓/Tab navigation.
   const [slashSel, setSlashSel] = useState(0);
+  // Session-tab context menu (right-click a tab → 重命名/复制ID/关闭).
+  const [tabMenu, setTabMenu] = useState<{ x: number; y: number; id: string } | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const scrollRafRef = useRef<number | null>(null);
@@ -350,6 +385,10 @@ const ChatPage: React.FC = () => {
   const closeTab = useAppStore(s => s.closeTab);
   const addMessage = useAppStore(s => s.addMessage);
   const updateMessage = useAppStore(s => s.updateMessage);
+  const renameSession = useAppStore(s => s.renameSession);
+  const loadSessions = useAppStore(s => s.loadSessions);
+  const securityLevel = useAppStore(s => s.securityLevel);
+  const setSecurityLevel = useAppStore(s => s.setSecurityLevel);
   const clearMessages = useAppStore(s => s.clearMessages);
   const updateTokenUsage = useAppStore(s => s.updateTokenUsage);
   const checkBackend = useAppStore(s => s.checkBackend);
@@ -391,6 +430,28 @@ const ChatPage: React.FC = () => {
     setInput(userMsg.content);
     // Let the store update flush, then send (same pattern as the toolbar buttons).
     setTimeout(() => handleSendRef.current?.(), 60);
+  }, [activeSession, activeSessionId, setInput]);
+
+  // Edit-and-resend: put a user message back into the input box and drop the
+  // conversation after it, so the user can edit and send again. Unlike
+  // regenerate it does NOT auto-send — the user edits first (opencode-style
+  // message resend, without rewriting history).
+  const handleEditResend = useCallback((id: string) => {
+    const msgs = activeSession?.messages || [];
+    const idx = msgs.findIndex((m) => m.id === id);
+    if (idx < 0) return;
+    const msg = msgs[idx];
+    if (!msg || msg.role !== 'user') return;
+    const sid = activeSessionId;
+    if (!sid) return;
+    // Keep only what precedes this message; drop it and everything after.
+    const keep = msgs.slice(0, idx);
+    useAppStore.setState(prev => ({
+      sessions: prev.sessions.map(s => s.id === sid ? { ...s, messages: keep } : s),
+    }));
+    setInput(msg.content);
+    // Let the store update flush, then focus the input so the user can edit.
+    setTimeout(() => inputRef.current?.focus(), 0);
   }, [activeSession, activeSessionId, setInput]);
 
   // Multi-tab state lives in the store (openTabIds) so it survives route
@@ -453,6 +514,76 @@ const ChatPage: React.FC = () => {
     closeTab(id);
   };
 
+  // Model resolution + context-window gauge + mode. Declared here (before
+  // runCompactNow below) because runCompactNow's useCallback dependency array
+  // references currentModel/mode — a const referenced before its declaration
+  // in the same scope throws a TDZ ReferenceError at render time.
+  const currentModel = models.find((m) => m.id === selectedModel);
+  const ctxWindow = currentModel?.contextWindow || 200000;
+  const ctxWindowLabel = ctxWindow >= 1000000
+    ? (ctxWindow / 1000000).toFixed(1) + 'M'
+    : (ctxWindow / 1000).toFixed(0) + 'K';
+  const mode = useAppStore((s) => s.mode);
+
+  // exportSessionJson downloads a session as .json (used by the toolbar export
+  // button and the tab context menu).
+  const exportSessionJson = useCallback(async (id: string) => {
+    if (!backendUrl) return;
+    try {
+      const res = await fetch(`${backendUrl}/api/sessions/${id}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `icode-${(data.title || 'session')}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch { /* ignore */ }
+  }, [backendUrl]);
+
+  // runCompactNow executes /compact directly against the backend slash layer
+  // WITHOUT touching the input box (so an in-progress draft survives), then
+  // appends a system notice so the user sees the outcome. Used by the token
+  // bar and the context-window card ("click to compress").
+  const runCompactNow = useCallback(async () => {
+    const url = backendUrl, sid = activeSessionId;
+    if (!url || !sid) return;
+    let outText = '✓ 已执行 /compact（语义摘要压缩）';
+    try {
+      const res = await fetch(`${url}/api/slash`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: '/compact',
+          session_id: sid,
+          model: currentModel?.id || selectedModel || 'openrouter/free',
+          provider: currentModel?.provider || 'openrouter',
+          mode,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.output) outText = String(data.output);
+      } else {
+        outText = '⚠ /compact 执行失败（后端未响应）';
+      }
+    } catch {
+      outText = '⚠ /compact 执行失败';
+    }
+    addMessage(sid, { id: Math.random().toString(36).slice(2), role: 'system', content: outText, timestamp: Date.now() });
+    loadSessions().catch(() => {});
+  }, [backendUrl, activeSessionId, currentModel, selectedModel, mode, addMessage, loadSessions]);
+
+  // Any UI control (token bar, context card) can trigger compaction via this
+  // custom event, keeping the actual execution logic in one place.
+  useEffect(() => {
+    const onCompact = () => { runCompactNow(); };
+    window.addEventListener('icode:compact-session', onCompact);
+    return () => window.removeEventListener('icode:compact-session', onCompact);
+  }, [runCompactNow]);
+
   const handleTabNew = () => {
     createSession(selectedModel, currentModel?.provider || 'openrouter');
   };
@@ -499,16 +630,6 @@ const ChatPage: React.FC = () => {
       });
     }
   };
-  const currentModel = models.find((m) => m.id === selectedModel);
-  // Context-window gauge: use the model's real context window when known;
-  // fall back to 200K so the card never renders a divide-by-zero.
-  const ctxWindow = currentModel?.contextWindow || 200000;
-  const ctxWindowLabel = ctxWindow >= 1000000
-    ? (ctxWindow / 1000000).toFixed(1) + 'M'
-    : (ctxWindow / 1000).toFixed(0) + 'K';
-  // Mode is synced from Zustand store (bidirectional with backend)
-  const mode = useAppStore((s) => s.mode);
-
   const openSettings = () => {
     window.dispatchEvent(new CustomEvent('icode:open-settings'));
   };
@@ -906,6 +1027,13 @@ const ChatPage: React.FC = () => {
             setSelectedModel(`${data.provider}/${currentModel?.id?.split('/')[1] || model.split('/')[1] || 'free'}`);
           }
           if (data?.mode && data.mode !== mode) setMode(data.mode);
+          // session_id → the command switched the active session (/resume, /fork)
+          if (data?.session_id && data.session_id !== sid) {
+            setActiveSession(data.session_id);
+          }
+          if (data?.security && data.security !== securityLevel) {
+            setSecurityLevel(data.security);
+          }
           if (data?.cwd) {
             // /cd moved the session working directory server-side — reload
             // workspaces so the FileTree and workspace list pick up the new path.
@@ -1153,21 +1281,8 @@ const ChatPage: React.FC = () => {
         </div>
 
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          {/* Open folder */}
-          <button className="interactive" title={t('chat.openDir')}
-            onClick={() => {
-              // Use the Electron shell API if available
-              if (window.icode?.openFolder) {
-                window.icode.openFolder('.').catch(() => {});
-              }
-            }}
-            style={{
-              background: 'none', border: '0.5px solid var(--border-color)',
-              color: 'var(--text-muted)', padding: '4px 8px', borderRadius: 6,
-              display: 'flex', alignItems: 'center', gap: 4, fontSize: 11,
-            }}>
-            <Folder size={12} />
-          </button>
+          {/* Workspace switcher — clickable working-folder control (choose/switch) */}
+          <WorkspaceSwitcher />
           {/* Export session */}
           <button className="interactive" title={t('chat.export')}
             onClick={() => {
@@ -1326,7 +1441,63 @@ const ChatPage: React.FC = () => {
         onSelect={handleTabSelect}
         onClose={handleTabClose}
         onNew={handleTabNew}
+        onContextMenu={(e, id) => {
+          e.preventDefault();
+          setTabMenu({ x: e.clientX, y: e.clientY, id });
+        }}
       />
+
+      {/* Session-tab context menu */}
+      {tabMenu && (
+        <div
+          onClick={() => setTabMenu(null)}
+          style={{ position: 'fixed', inset: 0, zIndex: 300 }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              position: 'absolute', top: tabMenu.y, left: tabMenu.x,
+              minWidth: 160, padding: 5,
+              background: 'var(--bg-elev)', border: '0.5px solid var(--border-color)',
+              borderRadius: 10, boxShadow: '0 12px 32px rgba(0,0,0,0.3)',
+            }}
+          >
+            {[
+              {
+                label: '✏️ ' + t('sidebar.rename'),
+                run: () => {
+                  const title = window.prompt(t('sidebar.rename'), '');
+                  if (title) renameSession(tabMenu.id, title.trim());
+                },
+              },
+              {
+                label: '🔗 ' + t('tab.copyId'),
+                run: () => navigator.clipboard?.writeText(tabMenu.id).catch(() => {}),
+              },
+              {
+                label: '📄 ' + t('chat.exportJson'),
+                run: () => exportSessionJson(tabMenu.id),
+              },
+              { label: '× ' + t('tab.close'), run: () => handleTabClose(tabMenu.id) },
+            ].map((item) => (
+              <button
+                key={item.label}
+                onClick={() => { setTabMenu(null); item.run(); }}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 6, width: '100%',
+                  padding: '6px 10px', borderRadius: 6, cursor: 'pointer',
+                  fontSize: 12, color: 'var(--text-secondary)',
+                  background: 'transparent', border: 'none', textAlign: 'left',
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--bg-hover)'; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Middle: conversation + session-stats sidebar (Reasonix style) */}
       <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
@@ -1353,7 +1524,7 @@ const ChatPage: React.FC = () => {
               alignItems: 'center', justifyContent: 'center',
               padding: 60, color: 'var(--text-muted)',
             }}>
-              {/* Plum blossom brand mark + iCode wordmark (Apple-style) */}
+              {/* Plum blossom brand mark + iCODE wordmark (Apple-style) */}
               <PlumBlossom
                 size={76}
                 style={{ marginBottom: 4, filter: 'drop-shadow(0 4px 12px rgba(230,111,168,0.28))' }}
@@ -1362,33 +1533,35 @@ const ChatPage: React.FC = () => {
                 fontSize: 34, fontWeight: 700, letterSpacing: '-0.03em',
                 color: 'var(--text-primary)', lineHeight: 1.1,
               }}>
-                iCode
+                iCODE
               </div>
               <div className="page-subtitle" style={{ fontSize: 15, marginBottom: 32, marginTop: 6 }}>
                 {t('chat.yourPartner')}
               </div>
               <div style={{
-                display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center',
+                display: 'grid', gridTemplateColumns: 'repeat(2, minmax(170px, 1fr))',
+                gap: 10, width: 'min(440px, 100%)',
               }}>
                 {[
-                  { label: t('chat.promptReact'), icon: '⚛' },
-                  { label: t('chat.promptExplain'), icon: '🔍' },
-                  { label: t('chat.promptRefactor'), icon: '🔄' },
-                  { label: t('chat.promptDebug'), icon: '🐛' },
+                  { label: t('chat.promptReact'), icon: '⚛', desc: t('chat.promptReactDesc') },
+                  { label: t('chat.promptExplain'), icon: '🔍', desc: t('chat.promptExplainDesc') },
+                  { label: t('chat.promptRefactor'), icon: '🔄', desc: t('chat.promptRefactorDesc') },
+                  { label: t('chat.promptDebug'), icon: '🐛', desc: t('chat.promptDebugDesc') },
                 ].map((s) => (
                   <button
                     key={s.label}
                     onClick={() => { setInput(s.label); }}
                     className="interactive"
                     style={{
-                      padding: '10px 18px', borderRadius: 'var(--r-full)',
+                      display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 5,
+                      padding: '14px 16px', borderRadius: 'var(--r-lg)',
                       background: 'var(--bg-secondary)', border: '0.5px solid var(--border-color)',
-                      color: 'var(--text-secondary)', fontSize: 13,
-                      display: 'flex', alignItems: 'center', gap: 6,
+                      color: 'var(--text-primary)', fontSize: 13, textAlign: 'left',
                     }}
                   >
-                    <span>{s.icon}</span>
-                    {s.label}
+                    <span style={{ fontSize: 18, lineHeight: 1 }}>{s.icon}</span>
+                    <span style={{ fontWeight: 600, fontSize: 12.5 }}>{s.label}</span>
+                    <span style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.5 }}>{s.desc}</span>
                   </button>
                 ))}
               </div>
@@ -1443,6 +1616,7 @@ const ChatPage: React.FC = () => {
             messages={activeSession?.messages || []}
             isStreaming={isStreaming}
             onRegenerate={handleRegenerate}
+            onEditResend={handleEditResend}
             onZoom={setLightbox}
           />
           <div ref={messagesEndRef} />
@@ -1535,8 +1709,13 @@ const ChatPage: React.FC = () => {
               </div>
           )}
 
-          {/* Card 1: Context Window */}
-          <div className="card" style={{ padding: 14 }}>
+          {/* Card 1: Context Window — click to compress (/compact) */}
+          <div
+            className="card interactive"
+            onClick={runCompactNow}
+            title={t('chat.ctxClickCompact')}
+            style={{ padding: 14, cursor: 'pointer' }}
+          >
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
               <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>{t('chat.contextWindow')}</span>
               <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>{ctxWindowLabel}</span>
@@ -1633,9 +1812,12 @@ const ChatPage: React.FC = () => {
             </div>
           </div>
 
-          {/* Todo & Checkpoint panels */}
+          {/* Todo & Checkpoint & LSP & Knowledge panels */}
           <TodoPanel />
           <CheckpointPanel />
+          <LspPanel />
+          <KnowledgePanel />
+          <GoalPanel />
         </div>
       </div>
 
@@ -1648,23 +1830,21 @@ const ChatPage: React.FC = () => {
         <Pill icon={<Cpu size={12} />} label={currentModel?.name || selectedModel} onClick={openSettings} />
         <Pill icon={<span>◈</span>} label={currentModel?.provider || 'openrouter'} onClick={openSettings} />
         <Pill icon={<Shield size={12} />} label={mode} onClick={openSettings} />
-        {/* CWD + Git branch — click opens the folder in the OS file manager */}
-        <Pill
-          icon={<Folder size={12} />}
-          label={cwdPath ? shortDir(cwdPath) : '~'}
-          onClick={() => {
-            if (cwdPath) {
-              if (window.icode?.openFolder) window.icode.openFolder(cwdPath);
-              else window.open('file:///' + cwdPath.replace(/\\/g, '/'));
-            }
-          }}
-        />
+        {/* CWD — click opens the workspace switcher (choose / re-bind a
+            folder). The old window.icode.openFolder only exists on the
+            Electron build, so it never worked on the WebView2 desktop. */}
+        <WorkspaceSwitcher compact />
+        {/* Git branch — click copies the branch name (with feedback) */}
         <Pill
           icon={<GitBranch size={12} />}
-          label={gitBranch || '—'}
-          title={gitBranch ? t('chat.copyBranch') : ''}
+          label={gitBranch ? (branchCopied ? t('chat.copied') : gitBranch) : '—'}
+          title={gitBranch ? t('chat.copyBranch') : t('chat.noBranch')}
           onClick={() => {
-            if (gitBranch && navigator.clipboard) navigator.clipboard.writeText(gitBranch).catch(() => {});
+            if (gitBranch && navigator.clipboard) {
+              navigator.clipboard.writeText(gitBranch).catch(() => {});
+              setBranchCopied(true);
+              setTimeout(() => setBranchCopied(false), 2000);
+            }
           }}
         />
         <span style={{ marginLeft: 'auto', display: 'flex', gap: 14 }}>
@@ -1801,6 +1981,27 @@ const ChatPage: React.FC = () => {
             </button>
           </div>
         )}
+        {/* Context bar — Claude Code style context meter right above the input */}
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 8,
+          marginBottom: 6, padding: '0 4px',
+        }}>
+          <span style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>ctx</span>
+          <div style={{
+            flex: 1, height: 3, borderRadius: 999,
+            background: 'var(--border-color)', overflow: 'hidden',
+          }}>
+            <div style={{
+              width: `${Math.min((tokenUsage.input / ctxWindow) * 100, 100)}%`,
+              height: '100%', borderRadius: 999,
+              background: Math.min((tokenUsage.input / ctxWindow) * 100, 100) > 80 ? 'var(--error)' : 'var(--success)',
+              transition: 'width 0.3s ease',
+            }} />
+          </div>
+          <span style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+            {Math.min((tokenUsage.input / ctxWindow) * 100, 100).toFixed(0)}% · {ctxWindowLabel}
+          </span>
+        </div>
         <div style={{
           display: 'flex', gap: 10, alignItems: 'flex-end',
           background: 'var(--bg-primary)', borderRadius: 10,
@@ -1895,7 +2096,7 @@ const ChatPage: React.FC = () => {
               style={{
                 background: input.trim() ? 'var(--grad-accent)' : 'var(--border-color)',
                 border: 'none', color: input.trim() ? '#fff' : 'var(--text-muted)',
-                padding: '6px 10px', borderRadius: 8, cursor: input.trim() ? 'pointer' : 'default',
+                padding: '7px 12px', borderRadius: 999, cursor: input.trim() ? 'pointer' : 'default',
                 display: 'flex', alignItems: 'center', transition: 'filter 0.15s, opacity 0.15s',
               }}
               onMouseEnter={(e) => { if (input.trim()) (e.currentTarget as HTMLElement).style.filter = 'brightness(1.1)'; }}
@@ -1931,6 +2132,27 @@ const ChatPage: React.FC = () => {
           <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
             {currentModel?.name || selectedModel} · {mode}
           </span>
+        </div>
+        {/* Live token/cost — updates on every streamed token (session totals) */}
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 14, marginTop: 6,
+          fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)',
+        }}>
+          <span>↑ {(tokenUsage.input / 1000).toFixed(1)}K</span>
+          <span>↓ {(tokenUsage.output / 1000).toFixed(1)}K</span>
+          {tokenUsage.cacheHit > 0 && (
+            <span style={{ color: 'var(--success)' }}>
+              cache {((tokenUsage.cacheHit / (tokenUsage.input + tokenUsage.output + 1)) * 100).toFixed(0)}%
+            </span>
+          )}
+          <span style={{ color: 'var(--accent)' }}>{tokenUsage.cost}</span>
+          <div style={{ flex: 1 }} />
+          {isStreaming && (
+            <span style={{ color: 'var(--text-secondary)', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              {t('chat.generatingShort')}
+              <span className="typing-dots"><span /><span /><span /></span>
+            </span>
+          )}
         </div>
       </div>
 

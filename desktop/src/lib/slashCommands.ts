@@ -147,9 +147,198 @@ export const slashCommands: SlashCommand[] = [
       return handled;
     },
   },
+  {
+    name: 'mode',
+    usage: '<agent|plan|yolo|ask>',
+    descKey: 'slash.descMode',
+    run: (args) => {
+      const valid = ['plan', 'agent', 'yolo', 'ask', 'auto'];
+      const arg = args.trim().toLowerCase();
+      if (!arg) {
+        const st = useAppStore.getState();
+        sysMsg(`🎛️ 当前模式: ${st.mode}\n\n用法: /mode <${valid.join('|')}>`);
+        return handled;
+      }
+      if (!valid.includes(arg)) {
+        sysMsg(`❌ 无效模式: ${arg}\n用法: /mode <${valid.join('|')}>`);
+        return handled;
+      }
+      const st = useAppStore.getState();
+      st.setMode(arg);
+      const label = { plan: '🧭', agent: '🤖', yolo: '🚀', ask: '❓', auto: '⚡' }[arg] || '•';
+      sysMsg(`${label} Mode → ${arg}`);
+      return handled;
+    },
+  },
+  {
+    name: 'lang',
+    usage: '<zh-CN|zh-TW|en>',
+    descKey: 'slash.descLang',
+    run: (args) => {
+      const langs = ['zh-CN', 'zh-TW', 'en'];
+      const arg = args.trim();
+      if (!arg) {
+        const st = useAppStore.getState();
+        sysMsg(`🌐 当前语言: ${st.language}\n用法: /lang <${langs.join('|')}>`);
+        return handled;
+      }
+      if (!langs.includes(arg)) {
+        sysMsg(`❌ 无效语言: ${arg}\n用法: /lang <${langs.join('|')}>`);
+        return handled;
+      }
+      const st = useAppStore.getState();
+      st.setLanguage(arg);
+      sysMsg(`🌐 语言已切换为 ${arg}`);
+      return handled;
+    },
+  },
+  {
+    name: 'security',
+    usage: '<local|desensitize|local-llm|foreign-llm|unrestricted>',
+    descKey: 'slash.descSecurity',
+    run: (args) => {
+      const valid = ['local', 'desensitize', 'local-llm', 'foreign-llm', 'unrestricted'];
+      const arg = args.trim();
+      const st = useAppStore.getState();
+      if (!arg) {
+        sysMsg(`🛡️ 当前安全等级: ${st.securityLevel}\n用法: /security <${valid.join('|')}>`);
+        return handled;
+      }
+      if (!valid.includes(arg)) {
+        sysMsg(`❌ 无效安全等级: ${arg}\n用法: /security <${valid.join('|')}>`);
+        return handled;
+      }
+      st.setSecurityLevel(arg);
+      sysMsg(`🛡️ 安全等级已设为 ${arg}`);
+      return handled;
+    },
+  },
+  {
+    name: 'update',
+    descKey: 'slash.descUpdate',
+    run: async () => {
+      const st = useAppStore.getState();
+      await st.refreshModels();
+      sysMsg(`🔄 模型目录已刷新`);
+      return handled;
+    },
+  },
+  {
+    name: 'goal',
+    usage: '<set|show|clear> [文本]',
+    descKey: 'slash.descGoal',
+    run: () => ({ type: 'passthrough' as const }),
+  },
+  {
+    name: 'budget',
+    usage: '<set|show|warn|clear> [值]',
+    descKey: 'slash.descBudget',
+    run: () => ({ type: 'passthrough' as const }),
+  },
+  {
+    name: 'todo',
+    descKey: 'slash.descTodo',
+    run: () => ({ type: 'passthrough' as const }),
+  },
+  {
+    name: 'memory',
+    usage: '<edit|prefs|list|forget|clear>',
+    descKey: 'slash.descMemory',
+    run: () => ({ type: 'passthrough' as const }),
+  },
+  {
+    name: 'resume',
+    usage: '<session-id> [--lite[=<n>]]',
+    descKey: 'slash.descResume',
+    run: () => ({ type: 'passthrough' as const }),
+  },
+  {
+    name: 'sessions',
+    aliases: ['session'],
+    descKey: 'slash.descSessions',
+    run: () => ({ type: 'passthrough' as const }),
+  },
+  {
+    name: 'add-dir',
+    usage: '<dir>',
+    descKey: 'slash.descAddDir',
+    run: () => ({ type: 'passthrough' as const }),
+  },
+  {
+    name: 'undo',
+    aliases: ['rewind'],
+    usage: '[N]',
+    descKey: 'slash.descUndo',
+    run: () => ({ type: 'passthrough' as const }),
+  },
+  {
+    name: 'wipe',
+    descKey: 'slash.descWipe',
+    run: () => {
+      const st = useAppStore.getState();
+      if (st.activeSessionId) st.clearMessages(st.activeSessionId);
+      sysMsg('🗑️ 对话已清空并重置。');
+      return handled;
+    },
+  },
+  {
+    name: 'share',
+    usage: '[filename]',
+    descKey: 'slash.descShare',
+    run: () => ({ type: 'passthrough' as const }),
+  },
+  {
+    name: 'context',
+    descKey: 'slash.descContext',
+    run: () => ({ type: 'passthrough' as const }),
+  },
+  {
+    name: 'output-style',
+    usage: '<concise|normal|verbose>',
+    descKey: 'slash.descOutputStyle',
+    run: () => ({ type: 'passthrough' as const }),
+  },
+  {
+    name: 'hooks',
+    descKey: 'slash.descHooks',
+    run: () => ({ type: 'passthrough' as const }),
+  },
+  {
+    name: 'keys',
+    descKey: 'slash.descKeys',
+    run: () => ({ type: 'passthrough' as const }),
+  },
+  {
+    name: 'models',
+    usage: '[add|rm] [参数]',
+    descKey: 'slash.descModels',
+    run: () => ({ type: 'passthrough' as const }),
+  },
+  {
+    name: 'config',
+    usage: 'set <key> <value>',
+    descKey: 'slash.descConfig',
+    run: () => ({ type: 'passthrough' as const }),
+  },
+  {
+    name: 'agents',
+    descKey: 'slash.descAgents',
+    run: () => ({ type: 'passthrough' as const }),
+  },
+  {
+    name: 'init',
+    descKey: 'slash.descInit',
+    run: () => ({ type: 'passthrough' as const }),
+  },
+  {
+    name: 'admin',
+    usage: '[off]',
+    descKey: 'slash.descAdmin',
+    run: () => ({ type: 'passthrough' as const }),
+  },
   // Backend-implemented commands — pass through so the server's /api/slash
-  // layer (internal/core/slashui, same vocabulary as the TUI) runs them. These
-  // entries only exist so they show up in the autocomplete dropdown.
+// layer (internal/core/slashui, same vocabulary as the TUI) runs them. These
+// entries only exist so they show up in the autocomplete dropdown.
   { name: 'cd', usage: '<dir>', descKey: 'slash.descCd', run: () => ({ type: 'passthrough' as const }) },
   {
     name: 'rename',

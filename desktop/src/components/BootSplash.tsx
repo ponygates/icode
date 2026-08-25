@@ -9,6 +9,9 @@ import PlumBlossom from './PlumBlossom';
 // It is intentionally independent of the backend: it never waits on
 // /api/health, so even if the backend is slow or unreachable the splash still
 // auto-closes and the (offline-capable) UI is revealed.
+//
+// Brand: the plum blossom mark stays (desktop identity), paired with an
+// opencode-style indeterminate progress bar below the wordmark.
 const BootSplash: React.FC = () => {
   const [show, setShow] = useState(true);
   const [fade, setFade] = useState(false);
@@ -35,8 +38,8 @@ const BootSplash: React.FC = () => {
         flexDirection: 'column',
         alignItems: 'center',
         justifyContent: 'center',
-        gap: 18,
-        background: 'var(--bg-1)',
+        gap: 22,
+        background: 'var(--bg-app)',
         color: 'var(--text-primary)',
         opacity: fade ? 0 : 1,
         transition: 'opacity 0.45s ease',
@@ -44,11 +47,11 @@ const BootSplash: React.FC = () => {
       }}
     >
       <PlumBlossom size={64} />
-      <div style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.02em', color: 'var(--accent)' }}>
-        iCode
+      <div style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.02em', color: 'var(--text-primary)' }}>
+        iCODE
       </div>
-      <div className="boot-spinner" />
-      <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>正在启动…</div>
+      <div className="boot-bar" />
+      <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>正在启动…</div>
     </div>
   );
 };

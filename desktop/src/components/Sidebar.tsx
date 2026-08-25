@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { useAppStore } from '../stores/appStore';
+import { useAppStore, type Session } from '../stores/appStore';
 import { MessageSquare, Cpu, Settings, BarChart, ArrowLeftRight, PanelLeftClose, Github, Plus, Server, Pencil, RotateCcw, Trash2, Search } from 'lucide-react';
 import PlumBlossom from './PlumBlossom';
 import WorkspaceSidebar from './WorkspaceSidebar';
@@ -13,6 +13,30 @@ interface SearchHit {
   session_title?: string;
   content?: string;
   timestamp?: string | number;
+}
+
+// groupSessions buckets a session list by recency — 今天/昨天/7 天内/更早 —
+// Claude Code-style timeline grouping so the sidebar reads like a modern chat
+// app instead of a flat list. Uses updatedAt when available, createdAt as the
+// fallback.
+function groupSessions(sessions: Session[], t: (k: string) => string): { label: string; items: Session[] }[] {
+  const now = Date.now();
+  const day = 86400000;
+  const buckets = [
+    { label: t('sidebar.today'), items: [] as Session[] },
+    { label: t('sidebar.yesterday'), items: [] as Session[] },
+    { label: t('sidebar.last7'), items: [] as Session[] },
+    { label: t('sidebar.earlier'), items: [] as Session[] },
+  ];
+  for (const s of sessions) {
+    const ts = s.updatedAt || s.createdAt || now;
+    const days = Math.floor((now - ts) / day);
+    if (days <= 0) buckets[0].items.push(s);
+    else if (days === 1) buckets[1].items.push(s);
+    else if (days < 7) buckets[2].items.push(s);
+    else buckets[3].items.push(s);
+  }
+  return buckets.filter((b) => b.items.length > 0);
 }
 
 const Sidebar: React.FC<Props> = ({ onToggle }) => {
@@ -126,7 +150,7 @@ const Sidebar: React.FC<Props> = ({ onToggle }) => {
           <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <PlumBlossom size={22} style={{ flexShrink: 0 }} />
             <span style={{ fontSize: 18, fontWeight: 700, color: 'var(--accent)', letterSpacing: '-0.02em' }}>
-              iCode
+              iCODE
             </span>
           </span>
         )}
@@ -252,10 +276,23 @@ const Sidebar: React.FC<Props> = ({ onToggle }) => {
             {t('sidebar.noSessions')}
           </div>
         )}
-        {sessions.slice(-20).reverse().map((s) => {
-          const active = s.id === activeSessionId;
-          const isEditing = editingId === s.id;
-          return (
+        {(() => {
+          const recent = sessions.slice(-20).reverse();
+          const groups = collapsed
+            ? [{ label: '', items: recent }]
+            : groupSessions(recent, t);
+          return groups.map((g) => (
+            <div key={g.label || '__flat'}>
+              {!collapsed && (
+                <div style={{
+                  padding: '6px 8px 2px', color: 'var(--text-muted)',
+                  fontSize: 9, letterSpacing: 1, textTransform: 'uppercase', fontWeight: 600,
+                }}>{g.label}</div>
+              )}
+              {g.items.map((s) => {
+                const active = s.id === activeSessionId;
+                const isEditing = editingId === s.id;
+                return (
             <div
               key={s.id}
               onClick={() => { if (!isEditing) { setActiveSession(s.id); navigate('/'); } }}
@@ -334,9 +371,12 @@ const Sidebar: React.FC<Props> = ({ onToggle }) => {
                   >×</button>
                 </>
               )}
+              </div>
+                );
+              })}
             </div>
-          );
-        })}
+          ));
+        })()}
       </div>
 
       {/* Trash — soft-deleted sessions, restorable */}

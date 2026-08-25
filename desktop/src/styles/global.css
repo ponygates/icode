@@ -279,15 +279,29 @@ hr { border: none; border-top: 0.5px solid var(--border-color); margin: var(--s3
   border-radius: var(--r-sm);
 }
 
-/* Boot splash spinner */
-@keyframes bootspin { to { transform: rotate(360deg); } }
-.boot-spinner {
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  border: 3px solid var(--border-color);
-  border-top-color: var(--accent);
-  animation: bootspin 0.8s linear infinite;
+/* Boot splash progress bar — opencode-style indeterminate sweep */
+@keyframes bootsweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
+}
+.boot-bar {
+  width: 220px;
+  height: 2px;
+  border-radius: var(--r-full);
+  overflow: hidden;
+  background: var(--border-color);
+  position: relative;
+}
+.boot-bar::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 38%;
+  border-radius: var(--r-full);
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  animation: bootsweep 1.15s ease-in-out infinite;
 }
 
 /* Toast notification — hairline border, minimal */

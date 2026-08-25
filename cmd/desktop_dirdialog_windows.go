@@ -13,14 +13,14 @@ import (
 // feature. Bound into the WebView2 page as window.pickDirectory() so the React
 // UI can choose a real local directory instead of hand-typing a path.
 var (
-	shell32DLL                  = windows.NewLazySystemDLL("shell32.dll")
-	ole32DLL                    = windows.NewLazySystemDLL("ole32.dll")
-	procSHBrowseForFolder       = shell32DLL.NewProc("SHBrowseForFolderW")
-	procSHGetPathFromIDListW    = shell32DLL.NewProc("SHGetPathFromIDListW")
-	procCoTaskMemFree           = ole32DLL.NewProc("CoTaskMemFree")
-	procOleInitialize           = ole32DLL.NewProc("OleInitialize")
-	procOleUninitialize         = ole32DLL.NewProc("OleUninitialize")
-	procGetShellWindow          = windows.NewLazySystemDLL("user32.dll").NewProc("GetShellWindow")
+	shell32DLL               = windows.NewLazySystemDLL("shell32.dll")
+	ole32DLL                 = windows.NewLazySystemDLL("ole32.dll")
+	procSHBrowseForFolder    = shell32DLL.NewProc("SHBrowseForFolderW")
+	procSHGetPathFromIDListW = shell32DLL.NewProc("SHGetPathFromIDListW")
+	procCoTaskMemFree        = ole32DLL.NewProc("CoTaskMemFree")
+	procOleInitialize        = ole32DLL.NewProc("OleInitialize")
+	procOleUninitialize      = ole32DLL.NewProc("OleUninitialize")
+	procGetShellWindow       = windows.NewLazySystemDLL("user32.dll").NewProc("GetShellWindow")
 )
 
 const (

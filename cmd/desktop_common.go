@@ -161,15 +161,16 @@ func bootDesktopBackend() (*desktopBoot, error) {
 	}
 
 	srv := server.New(server.ServerConfig{
-		Config:   a.Cfg,
-		Registry: a.Reg,
-		Store:    a.SessStore,
-		DB:       a.DB,
-		Engine:   a.Engine,
-		Gate:     a.Gate,
-		Updater:  a.Updater,
-		Version:  appVersion,
-		Port:     port,
+		Config:    a.Cfg,
+		Registry:  a.Reg,
+		Store:     a.SessStore,
+		DB:        a.DB,
+		Engine:    a.Engine,
+		Gate:      a.Gate,
+		Updater:   a.Updater,
+		Scheduler: a.Scheduler,
+		Version:   appVersion,
+		Port:      port,
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())

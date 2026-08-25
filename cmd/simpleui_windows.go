@@ -22,6 +22,7 @@ import (
 	"github.com/ponygates/icode/internal/core/permission"
 	"github.com/ponygates/icode/internal/core/sessionum"
 	"github.com/ponygates/icode/internal/core/slashui"
+	"github.com/ponygates/icode/internal/core/tool"
 	"github.com/ponygates/icode/internal/executil"
 	"github.com/ponygates/icode/internal/types"
 	"github.com/ponygates/icode/internal/xgo"
@@ -84,6 +85,86 @@ func (b *simpleUIBridge) SetModel(id string) {
 	}
 	b.mu.Unlock()
 	b.push(fmt.Sprintf("uiStatus('model', %s)", jsStr(id)))
+}
+
+// AddCustomModel persists and live-registers a user-defined model. Returns an
+// error message, or "" on success. Bound to JS for the "添加模型" dialog.
+func (b *simpleUIBridge) AddCustomModel(provider, modelID, name string) string {
+	if b.app == nil || b.app.Reg == nil {
+		return "引擎未初始化。"
+	}
+	if provider == "" || modelID == "" {
+		return "provider 与 model_id 不能为空。"
+	}
+	if name == "" {
+		name = modelID
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return "读取配置失败: " + err.Error()
+	}
+	m := config.ModelCfg{
+		Provider: provider,
+		ModelID:  modelID,
+		Name:     name,
+		Custom:   true,
+	}
+	m.ID = config.ModelKey(provider, modelID)
+	cfg.UpsertModel(m)
+	if err := cfg.Save(config.DefaultPath()); err != nil {
+		return "保存配置失败: " + err.Error()
+	}
+	// Live-register so the model works immediately, and refresh the dropdown.
+	b.app.RegisterCustomModel(m)
+	b.refreshModelList()
+	return ""
+}
+
+// RemoveCustomModel removes a user-defined model. Returns an error message,
+// or "" on success.
+func (b *simpleUIBridge) RemoveCustomModel(id string) string {
+	if b.app == nil || b.app.Reg == nil {
+		return "引擎未初始化。"
+	}
+	if id == "" {
+		return "id 不能为空（形如 provider/model_id）。"
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return "读取配置失败: " + err.Error()
+	}
+	if !cfg.DeleteModel(id) {
+		return fmt.Sprintf("模型 %q 未找到。", id)
+	}
+	if err := cfg.Save(config.DefaultPath()); err != nil {
+		return "保存配置失败: " + err.Error()
+	}
+	b.app.RemoveCustomModel(id)
+	b.refreshModelList()
+	return ""
+}
+
+// refreshModelList re-pushes the current model catalogue to the UI so newly
+// added/removed custom models appear in the <select> immediately.
+func (b *simpleUIBridge) refreshModelList() {
+	if b.w == nil {
+		return
+	}
+	if all := b.app.Reg.ListAllModels(); len(all) > 0 {
+		ids := make([]string, 0, len(all))
+		for _, m := range all {
+			if m.Deprecated {
+				ids = append(ids, "⚠ "+m.ID)
+			} else {
+				ids = append(ids, m.ID)
+			}
+		}
+		quoted := make([]string, 0, len(ids))
+		for _, id := range ids {
+			quoted = append(quoted, jsStr(id))
+		}
+		b.push(fmt.Sprintf("fillModelList([%s], null)", strings.Join(quoted, ", ")))
+	}
 }
 
 // SetMode switches the permission mode (Tab/Shift+Tab cycle) and persists it
@@ -468,8 +549,9 @@ func (b *simpleUIBridge) Clear() {
 
 // SessionEntry is a lightweight session descriptor for the dropdown.
 type SessionEntry struct {
-	ID    string `json:"id"`
-	Title string `json:"title"`
+	ID        string `json:"id"`
+	Title     string `json:"title"`
+	UpdatedAt int64  `json:"updated_at"` // Unix milliseconds, for timeline grouping
 }
 
 // Sessions lists saved sessions (id + title) for the UI dropdown.
@@ -487,7 +569,11 @@ func (b *simpleUIBridge) Sessions() []SessionEntry {
 		if title == "" {
 			title = s.ID
 		}
-		out = append(out, SessionEntry{ID: s.ID, Title: title})
+		upd := s.UpdatedAt.UnixMilli()
+		if upd == 0 {
+			upd = s.CreatedAt.UnixMilli()
+		}
+		out = append(out, SessionEntry{ID: s.ID, Title: title, UpdatedAt: upd})
 	}
 	return out
 }
@@ -612,6 +698,12 @@ func (b *simpleUIBridge) runSlash(text string) {
 		backend.SessStore = b.app.SessStore
 		backend.Gate = b.app.Gate
 		backend.RefreshModels = b.app.RefreshModels
+		backend.RegisterCustomModel = func(provider, modelID, name string) string {
+			return b.AddCustomModel(provider, modelID, name)
+		}
+		backend.RemoveCustomModel = func(id string) string {
+			return b.RemoveCustomModel(id)
+		}
 	}
 
 	sec := "local"
@@ -819,11 +911,35 @@ func runSimpleUI() error {
 	}
 	defer release()
 
-	a, err := app.Bootstrap()
+	// Watchdog: if Bootstrap itself ever hangs (seen in the field — some runs
+	// stall before "config loaded"), log it instead of freezing silently.
+	bootDone := make(chan struct{})
+	go func() {
+		select {
+		case <-bootDone:
+		case <-time.After(20 * time.Second):
+			log.Printf("[simpleui] WARNING: app.Bootstrap still in progress after 20s")
+		}
+	}()
+
+	var a *app.App
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[simpleui] Bootstrap panic: %v", r)
+				showDesktopError("iCode", fmt.Sprintf("启动异常: %v", r))
+			}
+		}()
+		a, err = app.Bootstrap()
+	}()
+	close(bootDone)
 	if err != nil {
 		log.Printf("[simpleui] Bootstrap failed: %v", err)
 		showDesktopError("iCode", "启动失败: "+err.Error())
 		return err
+	}
+	if a == nil {
+		return fmt.Errorf("bootstrap returned nil app")
 	}
 	defer a.Close()
 	log.Printf("[simpleui] stage: Bootstrap done")
@@ -898,9 +1014,25 @@ func runSimpleUI() error {
 	}
 
 	b := &simpleUIBridge{app: a, w: w, model: model, provider: provider, curAssistant: -1}
+
+	// Notify in the simple UI when a background task completes.
+	tool.SetCompleteHook(func(id, errMsg string) {
+		status := "✓ 后台任务完成: " + id
+		if errMsg != "" {
+			status = "⚠ 后台任务失败: " + id + " — " + errMsg
+		}
+		b.sys(status)
+	})
+
 	w.Bind("send", func(text string) { b.Send(text) })
 	w.Bind("models", func() []string { return b.Models() })
 	w.Bind("setModel", func(id string) { b.SetModel(id) })
+	w.Bind("addCustomModel", func(provider, modelID, name string) string {
+		return b.AddCustomModel(provider, modelID, name)
+	})
+	w.Bind("removeCustomModel", func(id string) string {
+		return b.RemoveCustomModel(id)
+	})
 	w.Bind("setMode", func(m string) { b.SetMode(m) })
 	w.Bind("clear", func() { b.Clear() })
 	w.Bind("runCommand", func(text string) { b.RunCommand(text) })
@@ -997,14 +1129,26 @@ func simpleUIHTML(model, provider string) string {
     animation: msgIn .18s ease-out;
     box-shadow: 0 1px 3px rgba(0,0,0,.35);
   }
+  .msg-copy, .msg-resend { position: absolute; top: 6px; right: 6px; background: #232b38; border: 1px solid #313846; color: #9aa7b8; border-radius: 5px; padding: 2px 8px; font-size: 11px; cursor: pointer; opacity: 0; transition: opacity .15s; }
+  .msg:hover .msg-copy, .msg:hover .msg-resend { opacity: 1; }
+  .msg-resend { right: auto; left: 6px; }
+  .msg-copy:hover, .msg-resend:hover { color: #fff; border-color: #ff7a45; }
   @keyframes msgIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
   .user { background: linear-gradient(135deg, #1c3a63, #1d3a5f); margin-left: auto; }
   .assistant { background: #161b26; border: 1px solid #262d3e; }
   .system { background: #1a1f2c; color: #98a3b5; font-size: 13px; }
   .error { background: #3a1d1d; color: #ffb4b4; border: 1px solid #5a2a2a; }
   .tool { background: #131e2b; border: 1px solid #223140; color: #9ecbff; font-size: 13px; }
-  .tool .name { font-weight: 700; color: #7fd1ff; }
-  .tool pre { margin: 6px 0 0; white-space: pre-wrap; word-break: break-word; color: #c7d2e0; }
+  .tool .tool-head { display: flex; align-items: center; gap: 7px; }
+  .tool .tool-icon { font-size: 12px; }
+  .tool .name { font-weight: 700; color: #7fd1ff; flex: 1; }
+  .tool .tool-status { font-size: 10px; padding: 1px 8px; border-radius: 10px; font-weight: 600; }
+  .tool .tool-status.running { background: rgba(255,170,60,.15); color: #ffb84d; }
+  .tool .tool-status.ok { background: rgba(46,160,67,.15); color: #4cd26a; }
+  .tool details.tool-args { margin-top: 8px; }
+  .tool details.tool-args summary { cursor: pointer; font-size: 11px; color: #6f8db0; user-select: none; }
+  .tool details.tool-args summary:hover { color: #9ecbff; }
+  .tool pre { margin: 6px 0 0; white-space: pre-wrap; word-break: break-word; color: #c7d2e0; font-size: 12px; max-height: 240px; overflow-y: auto; }
   .thinking { background: #1a1f2c; border: 1px dashed #2f3a52; color: #98a3b5; font-size: 12px; }
   .thinking summary { cursor: pointer; color: #7fd1ff; font-weight: 600; }
   .thinking pre { margin: 6px 0 0; white-space: pre-wrap; word-break: break-word; color: #8a93a3; }
@@ -1139,12 +1283,13 @@ func simpleUIHTML(model, provider string) string {
 <body>
   <div id="main">
     <div id="bar">
-      <span class="logo">iCode</span>
+      <span class="logo">iCODE</span>
       <input id="session" class="listbar" list="sessionList" autocomplete="off" title="搜索/切换会话" placeholder="会话…" />
       <datalist id="sessionList"></datalist>
       <button id="newBtn" title="开启新会话（旧会话保留在下拉列表中）">新会话</button>
       <input id="model" class="listbar" list="modelList" autocomplete="off" title="搜索/切换模型" placeholder="模型…" />
       <datalist id="modelList"></datalist>
+      <button id="addModelBtn" title="添加自定义模型" class="theme-btn" style="font-size:13px;">＋模型</button>
       <button id="updateBtn" title="一键刷新所有提供商模型列表" class="theme-btn" style="font-size:13px;">↻</button>
       <span class="spacer"></span>
       <button id="themeBtn" title="切换主题" class="theme-btn">☀</button>
@@ -1181,6 +1326,19 @@ func simpleUIHTML(model, provider string) string {
       </div>
     </div>
   </div>
+  <div id="modelModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:999; align-items:center; justify-content:center;">
+    <div style="background:#171a21; border:1px solid #2a2e3a; border-radius:10px; padding:18px; width:380px;">
+      <div style="font-weight:600; margin-bottom:4px;">添加自定义模型</div>
+      <div style="font-size:12px; color:#888; margin-bottom:10px;">为任意 OpenAI 兼容端点添加模型（如自建网关 / 中转站）。保存后立即可用。</div>
+      <input id="modelProvider" placeholder="提供商名称，如 mygate" style="width:100%; box-sizing:border-box; padding:7px 9px; border-radius:6px; border:1px solid #2a2e3a; background:#0f1115; color:#e6e6e6; margin-bottom:8px;"/>
+      <input id="modelID" placeholder="模型 ID，如 gpt-4o" style="width:100%; box-sizing:border-box; padding:7px 9px; border-radius:6px; border:1px solid #2a2e3a; background:#0f1115; color:#e6e6e6; margin-bottom:8px;"/>
+      <input id="modelName" placeholder="显示名称（可选，默认同模型 ID）" style="width:100%; box-sizing:border-box; padding:7px 9px; border-radius:6px; border:1px solid #2a2e3a; background:#0f1115; color:#e6e6e6; margin-bottom:12px;"/>
+      <div style="display:flex; gap:8px; justify-content:flex-end;">
+        <button onclick="document.getElementById('modelModal').style.display='none';" style="padding:6px 14px; border-radius:6px; border:1px solid #2a2e3a; background:transparent; color:#aaa; cursor:pointer;">取消</button>
+        <button onclick="modelSave()" style="padding:6px 14px; border-radius:6px; border:none; background:#4f6ef7; color:#fff; cursor:pointer;">保存</button>
+      </div>
+    </div>
+  </div>
 <script>
   var log = document.getElementById('log');
   var inp = document.getElementById('inp');
@@ -1202,6 +1360,7 @@ func simpleUIHTML(model, provider string) string {
     s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
     s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
     s = s.replace(/~~([^~]+)~~/g, '<del>$1</del>');
+    s = s.replace(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g, '<span class="md-img"><span>🖼️</span><a href="$2" target="_blank" rel="noopener noreferrer">$1</a></span>');
     s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
     s = s.replace(/(^|[^"=\/])(https?:\/\/[^\s<>"{}|]+)/g, function(m, pre, url) {
       return pre + '<a href="' + url + '" target="_blank" rel="noopener noreferrer">' + url + '</a>';
@@ -1258,6 +1417,15 @@ func simpleUIHTML(model, provider string) string {
         continue;
       }
       if (ln.trim() === '') { closeList(); continue; }
+      // Standalone image line: ![alt](url) with nothing else on the line
+      var img = /^\!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)\s*$/.exec(ln.trim());
+      if (img) {
+        closeList();
+        var alt = img[1] || '';
+        var src = img[2];
+        out.push('<div class="md-img-block"><a href="' + src + '" target="_blank" rel="noopener noreferrer"><span>🖼️</span> <span>' + inlineMd(alt || src) + '</span></a></div>');
+        continue;
+      }
       closeList();
       out.push('<div class="md-p">' + inlineMd(ln) + '</div>');
     }
@@ -1279,6 +1447,17 @@ func simpleUIHTML(model, provider string) string {
     if (role === 'user') {
       var r = document.createElement('div'); r.className = 'role'; r.textContent = '你';
       d.appendChild(r);
+      // Resend: put the raw message text back into the input box (opencode-
+      // style message resend, without editing history).
+      var re = document.createElement('button'); re.className = 'msg-resend'; re.type = 'button'; re.textContent = '↻';
+      re.title = '重新发送';
+      re.addEventListener('click', function() {
+        var inp = document.getElementById('inp');
+        inp.value = (d.__raw || text || '').trim();
+        inp.focus();
+      });
+      d.appendChild(re);
+      d.__raw = text;
     }
     var c = document.createElement('div'); c.className = 'content';
     c.innerHTML = useMd ? renderMarkdownHTML(text) : escapeHtml(text || '');
@@ -1286,11 +1465,17 @@ func simpleUIHTML(model, provider string) string {
     log.appendChild(d); stick(); return d;
   }
 
-  function uiAppend(role, text) { current = null; addBlock(role, text, role === 'user' || role === 'system'); }
+  function uiAppend(role, text) { current = null; addBlock(role, text, role === 'user' || role === 'system' || role === 'assistant'); }
   function uiDelta(text) {
     if (!current) { current = addBlock('assistant', '', false); current.__raw = ''; }
     current.__raw += text;
-    current.querySelector('.content').textContent = current.__raw;
+    // Stream with live Markdown rendering (previously rendered as plain text).
+    // Try/catch prevents a transient parse error from dropping the whole output.
+    try {
+      current.querySelector('.content').innerHTML = renderMarkdownHTML(current.__raw);
+    } catch(e) {
+      current.querySelector('.content').textContent = current.__raw;
+    }
     stick();
   }
   function uiThinking(text) {
@@ -1305,15 +1490,31 @@ func simpleUIHTML(model, provider string) string {
   function uiTool(name, args) {
     current = null;
     var d = document.createElement('div'); d.className = 'msg tool';
-    var n = document.createElement('div'); n.className = 'name'; n.textContent = '⏺ ' + name;
-    d.appendChild(n);
-    if (args) { var p = document.createElement('pre'); p.textContent = args; d.appendChild(p); }
+    var head = document.createElement('div'); head.className = 'tool-head';
+    var icon = document.createElement('span'); icon.className = 'tool-icon'; icon.textContent = '🔧';
+    var n = document.createElement('span'); n.className = 'name'; n.textContent = name;
+    var status = document.createElement('span'); status.className = 'tool-status running'; status.textContent = '运行中';
+    head.appendChild(icon); head.appendChild(n); head.appendChild(status);
+    d.appendChild(head);
+    if (args) {
+      var det = document.createElement('details'); det.className = 'tool-args';
+      var s = document.createElement('summary'); s.textContent = '参数';
+      var p = document.createElement('pre'); p.textContent = args;
+      det.appendChild(s); det.appendChild(p); d.appendChild(det);
+    }
+    d.__status = status;
     log.appendChild(d); stick();
   }
   function uiToolResult(text) {
     var blocks = log.querySelectorAll('.msg.tool');
     var last = blocks[blocks.length - 1];
-    if (last) { var p = document.createElement('pre'); p.textContent = text; last.appendChild(p); }
+    if (last) {
+      if (last.__status && last.__status.className.indexOf('running') >= 0) {
+        last.__status.textContent = '✓';
+        last.__status.className = 'tool-status ok';
+      }
+      var p = document.createElement('pre'); p.textContent = text; last.appendChild(p);
+    }
     stick();
   }
   function uiDone() {
@@ -1495,13 +1696,24 @@ func simpleUIHTML(model, provider string) string {
   });
 
   // Populate the session input; selecting an entry opens that session.
+  function timeGroup(ts) {
+    if (!ts) return '';
+    var days = Math.floor((Date.now() - ts) / 86400000);
+    if (days <= 0) return '今天';
+    if (days === 1) return '昨天';
+    if (days < 7) return '近7天';
+    return '更早';
+  }
   function fillSessions(list) {
     var dl = document.getElementById('sessionList');
     var cur = document.getElementById('session').value;
     dl.innerHTML = '';
     (list || []).forEach(function(e){
       var o = document.createElement('option');
-      o.value = e.id; o.label = e.title; dl.appendChild(o);
+      o.value = e.id;
+      var g = e.updated_at ? timeGroup(e.updated_at) : '';
+      o.label = g ? (g + ' · ' + e.title) : e.title;
+      dl.appendChild(o);
     });
     if (cur) document.getElementById('session').value = cur;
   }
@@ -1591,6 +1803,28 @@ func simpleUIHTML(model, provider string) string {
     if (!p) { addBlock('system', '请填写提供商名称（如 deepseek / openrouter / zhipu）', true); return; }
     if (window.setKey) {
       window.setKey(p, k).then(function(msg){ addBlock('system', msg, true); }).catch(function(e){ addBlock('system', '设置失败: ' + e, true); });
+    }
+  }
+
+  // 添加自定义模型对话框。
+  document.getElementById('addModelBtn').addEventListener('click', function(){
+    document.getElementById('modelProvider').value = '';
+    document.getElementById('modelID').value = '';
+    document.getElementById('modelName').value = '';
+    document.getElementById('modelModal').style.display = 'flex';
+    document.getElementById('modelProvider').focus();
+  });
+  function modelSave() {
+    var p = document.getElementById('modelProvider').value.trim();
+    var id = document.getElementById('modelID').value.trim();
+    var n = document.getElementById('modelName').value.trim();
+    document.getElementById('modelModal').style.display = 'none';
+    if (!p || !id) { addBlock('system', '请填写提供商名称与模型 ID', true); return; }
+    if (window.addCustomModel) {
+      window.addCustomModel(p, id, n).then(function(msg){
+        if (msg) { addBlock('system', '添加失败: ' + msg, true); return; }
+        addBlock('system', '✓ 已添加自定义模型 ' + p + '/' + id, true);
+      }).catch(function(e){ addBlock('system', '添加失败: ' + e, true); });
     }
   }
 </script>

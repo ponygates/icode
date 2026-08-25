@@ -78,11 +78,12 @@ const copyBtn: React.CSSProperties = {
   borderRadius: 5, color: 'var(--text-secondary)', cursor: 'pointer', fontSize: 11, padding: '2px 8px',
 };
 
-// ── inline renderer (Supports: **bold**, *italic*, ~~strike~~, `code`, [link](url), bare URLs) ──
+// ── inline renderer (Supports: **bold**, *italic*, ~~strike~~, `code`,
+// [link](url), ![image](url), bare URLs) ──
 function renderInline(text: string, keyBase: string): React.ReactNode[] {
   const nodes: React.ReactNode[] = [];
-  // Tokenizer: match **bold**, *italic*, ~~strike~~, `code`, [text](url)
-  const re = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|_[^_]+_|~~[^~]+~~|\[[^\]]+\]\([^)]+\))/g;
+  // Tokenizer: match **bold**, *italic*, ~~strike~~, `code`, [text](url), ![alt](url)
+  const re = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|_[^_]+_|~~[^~]+~~|!\[[^\]]*\]\([^)]+\)|\[[^\]]+\]\([^)]+\))/g;
   let last = 0, m: RegExpExecArray | null, i = 0;
   while ((m = re.exec(text)) !== null) {
     if (m.index > last) {
@@ -100,6 +101,26 @@ function renderInline(text: string, keyBase: string): React.ReactNode[] {
       nodes.push(<del key={keyBase + i}>{tok.slice(2, -2)}</del>);
     } else if (tok.startsWith('_')) {
       nodes.push(<em key={keyBase + i}>{tok.slice(1, -1)}</em>);
+    } else if (tok.startsWith('![')) {
+      const im = /!\[([^\]]*)\]\(([^)]+)\)/.exec(tok);
+      if (im) {
+        const alt = im[1] || '';
+        const url = im[2];
+        nodes.push(
+          <span key={keyBase + i} style={{
+            display: 'inline-flex', alignItems: 'center', gap: 4,
+            padding: '2px 6px', margin: '2px 0',
+            background: 'var(--bg-tertiary)', borderRadius: 4,
+            fontSize: 11, color: 'var(--text-muted)',
+          }}>
+            <span>🖼️</span>
+            <a href={url} target="_blank" rel="noopener noreferrer"
+              style={{ color: 'var(--accent)', textDecoration: 'none' }}>
+              {alt || url}
+            </a>
+          </span>,
+        );
+      } else { nodes.push(tok); }
     } else {
       const lm = /\[([^\]]+)\]\(([^)]+)\)/.exec(tok);
       if (lm) {

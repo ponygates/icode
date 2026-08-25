@@ -30,6 +30,9 @@ export interface Model {
   }>;
   contextWindow?: number;
   maxOutputTokens?: number;
+  // custom marks user-added models (created via 添加自定义模型), which also
+  // means their provider is a user-defined vendor.
+  custom?: boolean;
   capabilities?: {
     tools?: boolean;
     streaming?: boolean;
@@ -62,6 +65,7 @@ interface ApiSession {
   model_id?: string;
   provider_name?: string;
   created_at?: string | number;
+  updated_at?: string | number;
   metadata?: Record<string, unknown>;
 }
 interface ApiModelRef { id: string; name?: string; }
@@ -107,6 +111,7 @@ export interface Session {
   modelId: string;
   provider: string;
   createdAt: number;
+  updatedAt?: number;
 }
 
 export interface Workspace {
@@ -141,11 +146,13 @@ interface AppStore {
   setBackendUrl: (url: string | null) => void;
   checkBackend: () => Promise<void>;
 
-  // Desktop settings (launch-on-login + fixed backend port)
+  // Desktop settings (launch-on-login + fixed backend port + deep thinking)
   autostart: boolean;
   serverPort: number;
+  thinkingTokens: number;
   setAutostart: (enabled: boolean) => void;
   setServerPort: (port: number) => void;
+  setThinkingTokens: (tokens: number) => void;
   loadDesktopSettings: () => Promise<void>;
 
   // Models
@@ -200,8 +207,13 @@ interface AppStore {
 
   // Custom models (user-added providers)
   customModels: Model[];
-  addCustomModel: (model: Model) => void;
-  removeCustomModel: (modelId: string) => void;
+  addCustomModel: (model: Model) => Promise<string | null>;
+  removeCustomModel: (modelId: string, provider: string) => Promise<string | null>;
+  loadCustomModels: () => Promise<void>;
+  // Custom providers (vendors): PUT creates/updates an OpenAI-compatible
+  // vendor, DELETE removes it together with its custom models.
+  saveProvider: (name: string, apiBase: string, apiKey: string, timeoutSec: number) => Promise<string | null>;
+  deleteProvider: (name: string) => Promise<string | null>;
 }
 
 const defaultModels: Model[] = [
@@ -295,6 +307,7 @@ export const useAppStore = create<AppStore>()(
   // Desktop settings — kept in sync with the backend config (/api/config).
   autostart: false,
   serverPort: 0,
+  thinkingTokens: 0,
   setAutostart: (enabled) => {
     set({ autostart: enabled });
     const url = get().backendUrl;
@@ -317,6 +330,17 @@ export const useAppStore = create<AppStore>()(
       }).catch(() => { /* retry on next change */ });
     }
   },
+  setThinkingTokens: (tokens) => {
+    set({ thinkingTokens: tokens });
+    const url = get().backendUrl;
+    if (url) {
+      fetch(`${url}/api/config`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ defaults: { thinking_tokens: tokens } }),
+      }).catch(() => { /* retry on next change */ });
+    }
+  },
   loadDesktopSettings: async () => {
     const url = get().backendUrl;
     if (!url) return;
@@ -326,6 +350,7 @@ export const useAppStore = create<AppStore>()(
         const cfg = await res.json();
         if (typeof cfg?.autostart === 'boolean') set({ autostart: cfg.autostart });
         if (typeof cfg?.server?.port === 'number') set({ serverPort: cfg.server.port });
+        if (typeof cfg?.defaults?.thinking_tokens === 'number') set({ thinkingTokens: cfg.defaults.thinking_tokens });
       }
     } catch { /* keep defaults */ }
   },
@@ -439,6 +464,8 @@ export const useAppStore = create<AppStore>()(
     }
     // Also check backend health
     get().checkBackend();
+    // Keep the user-added custom models in sync with the backend config.
+    await get().loadCustomModels();
   },
 
   sessions: [],
@@ -473,6 +500,7 @@ export const useAppStore = create<AppStore>()(
         modelId: s.model_id || 'openrouter/free',
         provider: s.provider_name || 'openrouter',
         createdAt: s.created_at ? new Date(s.created_at).getTime() : Date.now(),
+        updatedAt: s.updated_at ? new Date(s.updated_at).getTime() : undefined,
       };
     };
     const loadActive = (aid: string) => {
@@ -821,6 +849,19 @@ export const useAppStore = create<AppStore>()(
   setActiveWorkspace: (id) => {
     set({ activeWorkspaceId: id });
     const ws = get().workspaces.find((w) => w.id === id);
+    // Bind the backend working directory to the workspace path so bash /
+    // file tools act on the chosen folder (三端 cwd 打通). The /cd command
+    // routes through the shared slash layer and persists the change.
+    if (ws?.path) {
+      const url = get().backendUrl;
+      if (url) {
+        fetch(`${url}/api/slash`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: '/cd ' + ws.path, session_id: get().activeSessionId || '' }),
+        }).catch(() => { /* ignore — workspace switch still proceeds */ });
+      }
+    }
     // When switching into a workspace that already holds sessions, jump to
     // its most recent one (deep session↔workspace binding).
     if (ws && ws.session_ids.length > 0) {
@@ -891,24 +932,111 @@ export const useAppStore = create<AppStore>()(
     }));
   },
 
-  // Custom models (user-added providers)
-  customModels: loadCustomModels(),
-  addCustomModel: (model) => {
-    set((state) => {
-      const updated = [...state.customModels, model];
-      saveCustomModels(updated);
-      return { customModels: updated, models: [...state.models, model] };
-    });
+  // Custom models (user-added providers). The backend config file is the
+  // source of truth: adding/removing goes through PUT/DELETE /api/config/model
+  // so the model is persisted server-side and registered in the engine — a
+  // localStorage-only write (the old behaviour) never reached chat time.
+  customModels: [],
+  addCustomModel: async (model) => {
+    const { backendUrl } = get();
+    if (!backendUrl) return 'Backend not connected';
+    try {
+      const res = await fetchWithTimeout(`${backendUrl}/api/config/model`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: model.provider,
+          model_id: model.id,
+          name: model.name,
+          base_url: model.apiBase || '',
+          custom: true,
+        }),
+      });
+      if (!res.ok) return `HTTP ${res.status}`;
+      await get().loadCustomModels();
+      await get().refreshModels();
+      return null;
+    } catch (e) {
+      return String(e);
+    }
   },
-  removeCustomModel: (modelId) => {
-    set((state) => {
-      const updated = state.customModels.filter((m) => m.id !== modelId);
-      saveCustomModels(updated);
-      return {
-        customModels: updated,
-        models: state.models.filter((m) => m.id !== modelId),
-      };
-    });
+  removeCustomModel: async (modelId, provider) => {
+    const { backendUrl } = get();
+    if (!backendUrl) return 'Backend not connected';
+    const canonical = provider ? `${provider}/${modelId}` : modelId;
+    try {
+      const res = await fetchWithTimeout(
+        `${backendUrl}/api/config/model?id=${encodeURIComponent(canonical)}`,
+        { method: 'DELETE' }
+      );
+      if (!res.ok) return `HTTP ${res.status}`;
+      await get().loadCustomModels();
+      await get().refreshModels();
+      return null;
+    } catch (e) {
+      return String(e);
+    }
+  },
+  loadCustomModels: async () => {
+    const { backendUrl } = get();
+    if (!backendUrl) return;
+    try {
+      const res = await fetchWithTimeout(`${backendUrl}/api/config/models`, { cache: 'no-cache' });
+      if (res.ok) {
+        const data = await res.json();
+        const list = data.models || [];
+        const mapped: Model[] = list
+          .filter((m: any) => m && m.custom)
+          .map((m: any) => ({
+            id: m.model_id || m.id,
+            name: m.name || m.model_id,
+            provider: m.provider,
+            plan: 'Custom',
+            apiBase: m.base_url || undefined,
+          }));
+        set({ customModels: mapped });
+      }
+    } catch { /* ignore — backend may be down; keep previous state */ }
+  },
+  saveProvider: async (name, apiBase, apiKey, timeoutSec) => {
+    const { backendUrl } = get();
+    if (!backendUrl) return 'Backend not connected';
+    try {
+      const res = await fetchWithTimeout(`${backendUrl}/api/config/provider`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name,
+          api_base: apiBase || '',
+          api_key: apiKey || '',
+          timeout_sec: timeoutSec || 0,
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        const msg = (data as any)?.error;
+        return msg ? `HTTP ${res.status}: ${msg}` : `HTTP ${res.status}`;
+      }
+      await get().refreshModels();
+      return null;
+    } catch (e) {
+      return String(e);
+    }
+  },
+  deleteProvider: async (name) => {
+    const { backendUrl } = get();
+    if (!backendUrl) return 'Backend not connected';
+    try {
+      const res = await fetchWithTimeout(
+        `${backendUrl}/api/config/provider?name=${encodeURIComponent(name)}`,
+        { method: 'DELETE' }
+      );
+      if (!res.ok) return `HTTP ${res.status}`;
+      await get().refreshModels();
+      return null;
+    } catch (e) {
+      return String(e);
+    }
   },
 })));
 
@@ -1029,21 +1157,3 @@ function loadActiveWorkspace(): string | null {
   }
 }
 
-// ── Custom models persistence ──
-
-const CUSTOM_MODELS_KEY = 'icode.customModels';
-
-function saveCustomModels(models: Model[]) {
-  try {
-    localStorage.setItem(CUSTOM_MODELS_KEY, JSON.stringify(models));
-  } catch {}
-}
-
-function loadCustomModels(): Model[] {
-  try {
-    const raw = localStorage.getItem(CUSTOM_MODELS_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch {
-    return [];
-  }
-}

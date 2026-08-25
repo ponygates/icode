@@ -137,11 +137,30 @@ describe('appStore', () => {
     expect(useAppStore.getState().tokenUsage.output).toBe(50);
   });
 
-  it('addCustomModel / removeCustomModel manage user models', () => {
-    const model: Model = { id: 'custom-x', name: 'Custom X', provider: 'self', plan: 'own' };
-    useAppStore.getState().addCustomModel(model);
-    expect(useAppStore.getState().customModels).toContainEqual(model);
-    useAppStore.getState().removeCustomModel('custom-x');
-    expect(useAppStore.getState().customModels).toEqual([]);
+  it('addCustomModel / removeCustomModel call the backend', async () => {
+    const calls: Array<{ method: string; url: string }> = [];
+    (globalThis as any).fetch = async (url: string, opts?: RequestInit) => {
+      calls.push({ method: opts?.method || 'GET', url: String(url) });
+      const okBody = JSON.stringify({ ok: true });
+      const modelsBody = JSON.stringify({ models: [] });
+      return {
+        ok: true,
+        status: 200,
+        json: async () => (String(url).includes('/api/config/model') && opts?.method === 'GET' ? modelsBody : okBody),
+      } as Response;
+    };
+    try {
+      useAppStore.setState({ backendUrl: 'http://localhost:PORT' });
+      const model: Model = { id: 'custom-x', name: 'Custom X', provider: 'self', plan: 'own' };
+      const addErr = await useAppStore.getState().addCustomModel(model);
+      expect(addErr).toBeNull();
+      expect(calls).toContainEqual({ method: 'PUT', url: 'http://localhost:PORT/api/config/model' });
+      const rmErr = await useAppStore.getState().removeCustomModel('custom-x', 'self');
+      expect(rmErr).toBeNull();
+      expect(calls).toContainEqual({ method: 'DELETE', url: `http://localhost:PORT/api/config/model?id=${encodeURIComponent('self/custom-x')}` });
+    } finally {
+      delete (globalThis as any).fetch;
+      useAppStore.setState({ backendUrl: null });
+    }
   });
 });

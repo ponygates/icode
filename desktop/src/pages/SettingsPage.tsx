@@ -1,18 +1,19 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../stores/appStore';
-import { PageTools, PageUpdates, PageAbout, PageNetwork } from './SettingsPagesExtra';
+import { PageTools, PageUpdates, PageAbout, PageNetwork, PageAutomations } from './SettingsPagesExtra';
 import {
   Settings, X, Key, Globe, Shield, Cpu, Moon, Sun, Monitor, Laptop,
   Zap, Wrench, Boxes, DollarSign, ChevronDown, Check, Plus, Trash2,
   Thermometer, Hash, Layers, RefreshCw, Info, ExternalLink, Star, AlertCircle,
+  Timer,
 } from 'lucide-react';
 
 // ═══════════════════════════════════════════════════════════════
 // Reasonix-style Settings Modal
 // ═══════════════════════════════════════════════════════════════
 
-type PageId = 'general' | 'models' | 'mcp' | 'skills' | 'billing' | 'shortcuts' | 'tools' | 'updates' | 'about' | 'desktop' | 'network';
+type PageId = 'general' | 'models' | 'mcp' | 'skills' | 'billing' | 'shortcuts' | 'tools' | 'updates' | 'about' | 'desktop' | 'network' | 'automations';
 
 interface PageMeta { id: PageId; icon: React.ElementType; labelKey: string; }
 
@@ -27,6 +28,7 @@ const PAGES: PageMeta[] = [
   { id: 'network',  icon: Globe,        labelKey: 'pageNetwork' },
   { id: 'shortcuts',icon: Boxes,       labelKey: 'pageShortcuts' },
   { id: 'desktop',  icon: Laptop,      labelKey: 'pageDesktop' },
+  { id: 'automations', icon: Timer,    labelKey: 'pageAutomations' },
   { id: 'about',    icon: Info,        labelKey: 'pageAbout' },
 ];
 
@@ -35,7 +37,7 @@ const pc: Record<string,string> = {
   deepseek:'#4F46E5', zhipu:'#7C3AED', kimi:'#0891B2',
   openrouter:'#F59E0B', volcengine:'#3B82F6', tencent:'#06B6D4',
   huawei:'#EF4444', scnet:'#10B981', nvidia:'#84CC16',
-  anthropic:'#D97706',
+  anthropic:'#D97706', sensenova:'#EC4899', agnes:'#8B5CF6',
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -105,6 +107,7 @@ const SettingsPage: React.FC<{ visible: boolean; onClose: () => void }> = ({ vis
             {page === 'network' && <PageNetwork store={store} />}
             {page === 'shortcuts' && <PageShortcuts />} 
             {page === 'desktop' && <PageDesktop store={store} />}
+            {page === 'automations' && <PageAutomations store={store} />}
             {page === 'about' && <PageAbout store={store} />}
           </div>
         </div>
@@ -1319,6 +1322,28 @@ function PageDesktop({ store }: { store: ReturnType<typeof useAppStore.getState>
         {store.serverPort > 0 && (
           <div style={{ fontSize: 11, color: 'var(--success)', marginTop: 6 }}>
             {t('settings.serverPortActive', { port: store.serverPort })}
+          </div>
+        )}
+      </Section>
+
+      {/* Deep thinking (Anthropic extended thinking) */}
+      <Section title={t('settings.thinkingTitle')} desc={t('settings.thinkingDesc')}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{t('settings.thinkingLabel')}</span>
+          <Toggle on={store.thinkingTokens > 0} onChange={(v) => store.setThinkingTokens(v ? 4096 : 0)} />
+        </div>
+        {store.thinkingTokens > 0 && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>
+            <input
+              type="number" min={1024} step={1024}
+              value={String(store.thinkingTokens)}
+              onChange={(e) => {
+                const n = parseInt(e.target.value, 10);
+                if (!isNaN(n) && n >= 1024) store.setThinkingTokens(n);
+              }}
+              style={{ ...selectStyle, width: 140 }}
+            />
+            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{t('settings.thinkingBudgetHint')}</span>
           </div>
         )}
       </Section>

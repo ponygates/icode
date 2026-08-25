@@ -318,12 +318,19 @@ const ModelsPage: React.FC = () => {
   const customModels = useAppStore(s => s.customModels);
   const addCustomModel = useAppStore(s => s.addCustomModel);
   const removeCustomModel = useAppStore(s => s.removeCustomModel);
+  const saveProvider = useAppStore(s => s.saveProvider);
+  const deleteProvider = useAppStore(s => s.deleteProvider);
   const [search, setSearch] = useState('');
   const [refreshing, setRefreshing] = useState(false);
   const [selectedSettingsModel, setSelectedSettingsModel] = useState<Model | null>(null);
   const [expandedProviders, setExpandedProviders] = useState<Set<string>>(new Set());
   const [showAddCustom, setShowAddCustom] = useState(false);
   const [newCustom, setNewCustom] = useState({ name: '', id: '', provider: '', apiBase: '' });
+  const [newCustomError, setNewCustomError] = useState('');
+  const [showAddProvider, setShowAddProvider] = useState(false);
+  const [newProvider, setNewProvider] = useState({ name: '', apiBase: '', apiKey: '', timeout: '' });
+  const [newProviderError, setNewProviderError] = useState('');
+  const [deletingProvider, setDeletingProvider] = useState<string | null>(null);
   const [showToast, setShowToast] = useState(false);
 
   useEffect(() => {
@@ -475,6 +482,18 @@ const ModelsPage: React.FC = () => {
           <Plus size={13} />
           {t('models.addCustom')}
         </button>
+        <button onClick={() => setShowAddProvider(true)}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 6,
+            background: 'transparent', color: 'var(--text-primary)',
+            border: '1px solid var(--border-color)', padding: '7px 14px',
+            borderRadius: 8, cursor: 'pointer', fontSize: 12, fontWeight: 500,
+            transition: 'all 0.15s',
+          }}
+        >
+          <Plus size={13} />
+          {t('models.addProvider')}
+        </button>
       </div>
 
       {/* Search bar */}
@@ -523,6 +542,14 @@ const ModelsPage: React.FC = () => {
               </div>
             </div>
             <div style={{ padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {newCustomError && (
+                <div style={{
+                  fontSize: 11, color: '#F87171', background: 'rgba(248,113,113,0.08)',
+                  border: '1px solid rgba(248,113,113,0.2)', borderRadius: 8, padding: '8px 12px',
+                }}>
+                  {newCustomError}
+                </div>
+              )}
               <div>
                 <label style={{ fontSize: 11, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>{t('models.modelName')} *</label>
                 <input value={newCustom.name} onChange={(e) => setNewCustom({...newCustom, name: e.target.value})}
@@ -550,7 +577,7 @@ const ModelsPage: React.FC = () => {
                 background: 'var(--bg-primary)', border: '1px solid var(--border-color)',
                 color: 'var(--text-secondary)',
               }}>{t('settings.cancel')}</button>
-              <button onClick={() => {
+              <button onClick={async () => {
                 if (!newCustom.name || !newCustom.id || !newCustom.provider) return;
                 const model: Model = {
                   id: newCustom.id,
@@ -560,7 +587,11 @@ const ModelsPage: React.FC = () => {
                   apiBase: newCustom.apiBase || undefined,
                   capabilities: { tools: true, streaming: true },
                 };
-                addCustomModel(model);
+                const err = await addCustomModel(model);
+                if (err) {
+                  setNewCustomError(err);
+                  return;
+                }
                 setNewCustom({ name: '', id: '', provider: '', apiBase: '' });
                 setShowAddCustom(false);
               }} style={{
@@ -569,6 +600,136 @@ const ModelsPage: React.FC = () => {
                 display: 'flex', alignItems: 'center', gap: 6,
               }}>
                 <Check size={13} /> {t('models.add')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add Provider Modal (custom OpenAI-compatible vendor) */}
+      {showAddProvider && (
+        <div onClick={() => setShowAddProvider(false)} style={{
+          position: 'fixed', inset: 0, zIndex: 1000,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(4px)',
+        }}>
+          <div onClick={(e) => e.stopPropagation()} style={{
+            background: 'var(--bg-secondary)', borderRadius: 16,
+            border: '1px solid var(--border-color)', width: 460,
+            boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
+          }}>
+            <div style={{ padding: '20px 24px 16px', borderBottom: '1px solid var(--border-color)' }}>
+              <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-primary)' }}>
+                <Plus size={16} style={{ display: 'inline', marginRight: 8 }} />
+                {t('models.addProvider')}
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                {t('models.addProviderHint')}
+              </div>
+            </div>
+            <div style={{ padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {newProviderError && (
+                <div style={{
+                  fontSize: 11, color: '#F87171', background: 'rgba(248,113,113,0.08)',
+                  border: '1px solid rgba(248,113,113,0.2)', borderRadius: 8, padding: '8px 12px',
+                }}>
+                  {newProviderError}
+                </div>
+              )}
+              <div>
+                <label style={{ fontSize: 11, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>{t('models.providerName')} *</label>
+                <input value={newProvider.name} onChange={(e) => setNewProvider({...newProvider, name: e.target.value})}
+                  placeholder={t('models.providerNameExample')} style={inputField} />
+              </div>
+              <div>
+                <label style={{ fontSize: 11, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>API Base URL</label>
+                <input value={newProvider.apiBase} onChange={(e) => setNewProvider({...newProvider, apiBase: e.target.value})}
+                  placeholder="https://api.example.com/v1（{t('models.keepDefault')}）" style={inputField} />
+              </div>
+              <div>
+                <label style={{ fontSize: 11, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>API Key</label>
+                <input type="password" value={newProvider.apiKey} onChange={(e) => setNewProvider({...newProvider, apiKey: e.target.value})}
+                  placeholder="sk-..." style={inputField} />
+              </div>
+              <div>
+                <label style={{ fontSize: 11, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>{t('models.providerTimeout')}</label>
+                <input value={newProvider.timeout} onChange={(e) => setNewProvider({...newProvider, timeout: e.target.value})}
+                  placeholder="120" style={inputField} />
+              </div>
+            </div>
+            <div style={{ padding: '16px 24px', borderTop: '1px solid var(--border-color)', display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button onClick={() => setShowAddProvider(false)} style={{
+                padding: '8px 16px', borderRadius: 8, cursor: 'pointer', fontSize: 12,
+                background: 'var(--bg-primary)', border: '1px solid var(--border-color)',
+                color: 'var(--text-secondary)',
+              }}>{t('settings.cancel')}</button>
+              <button onClick={async () => {
+                const name = newProvider.name.trim();
+                if (!name) return;
+                const timeoutSec = parseInt(newProvider.timeout, 10);
+                const err = await saveProvider(
+                  name,
+                  newProvider.apiBase.trim(),
+                  newProvider.apiKey.trim(),
+                  Number.isFinite(timeoutSec) && timeoutSec > 0 ? timeoutSec : 0,
+                );
+                if (err) {
+                  setNewProviderError(err);
+                  return;
+                }
+                setNewProvider({ name: '', apiBase: '', apiKey: '', timeout: '' });
+                setNewProviderError('');
+                setShowAddProvider(false);
+              }} style={{
+                padding: '8px 20px', borderRadius: 8, cursor: 'pointer', fontSize: 12,
+                background: '#6366F1', border: 'none', color: '#fff', fontWeight: 600,
+                display: 'flex', alignItems: 'center', gap: 6,
+              }}>
+                <Check size={13} /> {t('models.addProvider')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Provider confirm */}
+      {deletingProvider && (
+        <div onClick={() => setDeletingProvider(null)} style={{
+          position: 'fixed', inset: 0, zIndex: 1001,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(4px)',
+        }}>
+          <div onClick={(e) => e.stopPropagation()} style={{
+            background: 'var(--bg-secondary)', borderRadius: 16,
+            border: '1px solid var(--border-color)', width: 380,
+            boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
+          }}>
+            <div style={{ padding: '20px 24px 8px' }}>
+              <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-primary)' }}>
+                <AlertTriangle size={16} style={{ display: 'inline', marginRight: 8, color: '#F87171' }} />
+                {t('models.deleteProvider')}
+              </div>
+            </div>
+            <div style={{ padding: '8px 24px 20px', fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+              {t('models.deleteProviderConfirm', { name: deletingProvider })}
+            </div>
+            <div style={{ padding: '16px 24px', borderTop: '1px solid var(--border-color)', display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button onClick={() => setDeletingProvider(null)} style={{
+                padding: '8px 16px', borderRadius: 8, cursor: 'pointer', fontSize: 12,
+                background: 'var(--bg-primary)', border: '1px solid var(--border-color)',
+                color: 'var(--text-secondary)',
+              }}>{t('settings.cancel')}</button>
+              <button onClick={async () => {
+                const name = deletingProvider;
+                setDeletingProvider(null);
+                const err = await deleteProvider(name);
+                if (err) setNewProviderError(err);
+              }} style={{
+                padding: '8px 20px', borderRadius: 8, cursor: 'pointer', fontSize: 12,
+                background: '#EF4444', border: 'none', color: '#fff', fontWeight: 600,
+              }}>
+                <Trash2 size={13} style={{ display: 'inline', marginRight: 6 }} />
+                {t('models.deleteProvider')}
               </button>
             </div>
           </div>
@@ -614,6 +775,15 @@ const ModelsPage: React.FC = () => {
                     {t('models.modelsCount', { count: providerModels.length })}{hasActiveInProvider ? ' · ' + t('models.active') : ''}
                   </div>
                 </div>
+                {providerModels.every((m) => m.custom) && (
+                  <span
+                    onClick={(e) => { e.stopPropagation(); setDeletingProvider(provider); }}
+                    title={t('models.deleteProvider')}
+                    style={{ color: 'var(--text-muted)', cursor: 'pointer', display: 'flex', padding: 4, borderRadius: 6 }}
+                  >
+                    <Trash2 size={13} />
+                  </span>
+                )}
                 <ChevronRight
                   size={14} color="var(--text-muted)"
                   style={{
@@ -771,7 +941,10 @@ const ModelsPage: React.FC = () => {
                         </div>
                       </div>
                     </div>
-                    <button onClick={() => removeCustomModel(model.id)}
+                    <button onClick={async () => {
+                      const err = await removeCustomModel(model.id, model.provider);
+                      if (err) setNewCustomError(err);
+                    }}
                       title={t('models.deleteCustom')}
                       style={{
                         width: 28, height: 28, borderRadius: 6,

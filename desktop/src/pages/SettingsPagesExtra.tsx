@@ -265,11 +265,11 @@ export function PageAbout({ store }: { store: StoreState }) {
   };
   return (
     <div style={{ display:'flex', flexDirection:'column', gap:20 }}>
-      <Section title="iCode">
+      <Section title="iCODE">
         <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 14 }}>
           <PlumBlossom size={48} style={{ flexShrink: 0 }} />
           <div style={{ fontSize: 18, fontWeight: 700, letterSpacing: '-0.02em', color: 'var(--text-primary)' }}>
-            iCode
+            iCODE
             <div style={{ fontSize: 12, fontWeight: 400, color: 'var(--text-muted)', marginTop: 2 }}>
               {t('app.subtitle')}
             </div>
@@ -333,6 +333,221 @@ export function PageNetwork({ store }: { store: StoreState }) {
         <button onClick={save} style={{ ...btnGhost, marginTop: 10, color: 'var(--accent)', borderColor: 'var(--accent)' }}>
           {saved ? t('network.saved') : t('network.save')}
         </button>
+      </Section>
+    </div>
+  );
+}
+
+// ── Automations (WorkBuddy-style scheduled tasks) ──────────────────────────
+
+interface AutomationTask {
+  id: string;
+  name: string;
+  prompt: string;
+  schedule: string;
+  enabled: boolean;
+  last_run?: string;
+  next_run?: string;
+  created_at?: string;
+}
+interface AutomationRun {
+  id: string;
+  task_id: string;
+  started_at?: string;
+  finished_at?: string;
+  status: string;
+  output?: string;
+  error?: string;
+}
+
+export function PageAutomations({ store }: { store: StoreState }) {
+  const { t } = useTranslation();
+  const [tasks, setTasks] = useState<AutomationTask[]>([]);
+  const [enabled, setEnabled] = useState(true);
+  const [name, setName] = useState('');
+  const [prompt, setPrompt] = useState('');
+  const [schedule, setSchedule] = useState('every:24h');
+  const [history, setHistory] = useState<Record<string, AutomationRun[]>>({});
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const api = (path: string, opts?: RequestInit) =>
+    fetch(`${store.backendUrl}/api/automations${path}`, {
+      headers: { 'Content-Type': 'application/json' },
+      ...opts,
+    });
+
+  const load = () => {
+    if (!store.backendUrl) return;
+    api('').then(r => r.json()).then((d) => {
+      if (d && Array.isArray(d.tasks)) {
+        setTasks(d.tasks);
+        setEnabled(!!d.enabled);
+      }
+    }).catch(() => {});
+  };
+  useEffect(load, [store.backendUrl]);
+
+  const toggleHistory = async (id: string) => {
+    const next = { ...expanded, [id]: !expanded[id] };
+    setExpanded(next);
+    if (next[id] && !history[id]) {
+      try {
+        const r = await api(`/${id}/history?limit=5`);
+        const d = await r.json();
+        setHistory(h => ({ ...h, [id]: d.runs || [] }));
+      } catch { /* ignore */ }
+    }
+  };
+
+  const create = async () => {
+    if (!name.trim() || !prompt.trim()) return;
+    try {
+      const r = await api('', { method: 'POST', body: JSON.stringify({ name, prompt, schedule }) });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        alert(t('settings.automationCreateFailed', { error: d?.error || r.status }));
+        return;
+      }
+      setName(''); setPrompt('');
+      load();
+    } catch (e) {
+      alert(t('settings.automationCreateFailed', { error: String(e) }));
+    }
+  };
+
+  const run = async (id: string) => {
+    setBusy(id);
+    try {
+      await api(`/${id}/run`, { method: 'POST' });
+      load();
+    } catch (e) {
+      alert(t('settings.automationRunFailed', { error: String(e) }));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const toggle = async (task: AutomationTask) => {
+    try {
+      await api(`/${task.id}`, { method: 'PUT', body: JSON.stringify({ enabled: !task.enabled }) });
+      load();
+    } catch (e) { alert(String(e)); }
+  };
+
+  const del = async (task: AutomationTask) => {
+    if (!window.confirm(`${t('settings.automationDelete')}「${task.name}」？`)) return;
+    try {
+      await api(`/${task.id}`, { method: 'DELETE' });
+      load();
+    } catch (e) { alert(t('settings.automationDeleteFailed', { error: String(e) })); }
+  };
+
+  const fmt = (s?: string) => {
+    if (!s) return '—';
+    const d = new Date(s);
+    return Number.isNaN(d.getTime()) ? s : d.toLocaleString();
+  };
+
+  if (!enabled) {
+    return <Section title={t('settings.automationsTitle')}>
+      <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{t('settings.automationDisabled')}</div>
+    </Section>;
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <Section title={t('settings.automationsTitle')}>
+        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 10 }}>{t('settings.automationsDesc')}</div>
+        {tasks.length === 0 && (
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', padding: '8px 0' }}>{t('settings.automationsEmpty')}</div>
+        )}
+        {tasks.map(task => (
+          <div key={task.id} style={{
+            border: '1px solid var(--border-color)', borderRadius: 8, padding: '10px 12px', marginBottom: 8,
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{task.name}</div>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2, wordBreak: 'break-all' }}>
+                  {task.schedule} · {t('settings.automationLastRun')}: {fmt(task.last_run)} · {t('settings.automationNextRun')}: {fmt(task.next_run)}
+                </div>
+              </div>
+              <button onClick={() => toggle(task)} style={{
+                ...btnGhost, padding: '4px 10px', fontSize: 10,
+                color: task.enabled ? 'var(--accent)' : 'var(--text-muted)',
+                borderColor: task.enabled ? 'var(--accent)' : 'var(--border-color)',
+              }}>
+                {task.enabled ? '✓' : '○'} {t('settings.automationEnabled')}
+              </button>
+              <button onClick={() => run(task.id)} disabled={busy === task.id} style={{ ...btnGhost, padding: '4px 10px', fontSize: 10 }}>
+                {busy === task.id ? '…' : '▶'} {t('settings.automationRun')}
+              </button>
+              <button onClick={() => toggleHistory(task.id)} style={{ ...btnGhost, padding: '4px 10px', fontSize: 10 }}>
+                {expanded[task.id] ? '▾' : '▸'} {t('settings.automationHistory')}
+              </button>
+              <button onClick={() => del(task)} style={{ ...btnGhost, padding: '4px 10px', fontSize: 10, color: '#e5484d' }}>
+                <Trash2 size={11} /> {t('settings.automationDelete')}
+              </button>
+            </div>
+            {expanded[task.id] && (
+              <div style={{ marginTop: 8, borderTop: '1px solid var(--border-color)', paddingTop: 8 }}>
+                <div style={{ fontSize: 10.5, color: 'var(--text-muted)', marginBottom: 4 }}>提示词:</div>
+                <div style={{ fontSize: 11, color: 'var(--text-secondary)', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{task.prompt}</div>
+                {(history[task.id] || []).map(run => (
+                  <div key={run.id} style={{
+                    marginTop: 6, fontSize: 11, borderRadius: 6,
+                    border: '1px solid var(--border-color)', padding: '6px 8px',
+                    background: run.status === 'ok' ? 'rgba(46,160,67,0.08)' : run.status === 'error' ? 'rgba(229,72,77,0.08)' : 'transparent',
+                  }}>
+                    <div style={{ display: 'flex', gap: 8, color: 'var(--text-muted)' }}>
+                      <span style={{
+                        fontWeight: 600,
+                        color: run.status === 'running' ? '#e5484d' : run.status === 'ok' ? '#2ea043' : 'var(--accent)',
+                      }}>
+                        {run.status === 'running' ? t('settings.automationRunning') : run.status === 'ok' ? t('settings.automationOk') : t('settings.automationError')}
+                      </span>
+                      <span>{fmt(run.started_at)}</span>
+                      {run.error && <span style={{ color: '#e5484d' }}>{run.error}</span>}
+                    </div>
+                    {run.output && (
+                      <div style={{ marginTop: 4, whiteSpace: 'pre-wrap', wordBreak: 'break-all', color: 'var(--text-secondary)' }}>
+                        {run.output.length > 300 ? run.output.slice(0, 300) + '…' : run.output}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+      </Section>
+
+      <Section title={t('settings.automationAdd')}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div>
+            <span style={lbl}>{t('settings.automationName')}</span>
+            <input value={name} onChange={e => setName(e.target.value)} placeholder="每日代码检查"
+              style={selectStyle} />
+          </div>
+          <div>
+            <span style={lbl}>{t('settings.automationPrompt')}</span>
+            <textarea value={prompt} onChange={e => setPrompt(e.target.value)}
+              placeholder="运行 git status，报告未提交的改动"
+              rows={2}
+              style={{ ...selectStyle, resize: 'vertical', fontFamily: 'inherit' }} />
+          </div>
+          <div>
+            <span style={lbl}>{t('settings.automationSchedule')}</span>
+            <input value={schedule} onChange={e => setSchedule(e.target.value)} placeholder="every:24h"
+              style={selectStyle} />
+          </div>
+          <button onClick={create} style={{
+            ...btnGhost, justifyContent: 'center', background: 'var(--accent)', color: '#fff', borderColor: 'transparent',
+          }}>
+            {t('settings.automationAdd')}
+          </button>
+        </div>
       </Section>
     </div>
   );
