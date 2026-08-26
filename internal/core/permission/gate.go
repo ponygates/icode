@@ -666,7 +666,7 @@ func (g *Gate) check(sessionID string, action Action) CheckResult {
 			return CheckResult{Decision: DecisionAllow, Reason: "Auto mode: Read-tier operation", Prompt: prompt}
 		}
 		if g.isDenied(action) {
-			return CheckResult{Decision: DecisionDeny, Reason: "Command is in the deny list", Prompt: prompt}
+			return CheckResult{Decision: DecisionDeny, Reason: "Auto mode deny list: " + g.explainDeny(action), Prompt: prompt}
 		}
 		// Check runtime per-tool rules (persistent across sessions)
 		if g.ToolRules[action.Tool] == "deny" {
@@ -706,7 +706,7 @@ func (g *Gate) check(sessionID string, action Action) CheckResult {
 		if g.isDenied(action) {
 			return CheckResult{
 				Decision: DecisionDeny,
-				Reason:   fmt.Sprintf("Command %q is in the deny list", action.Command),
+				Reason:   fmt.Sprintf("YOLO deny list (%q): %s", action.Command, g.explainDeny(action)),
 				Prompt:   prompt,
 			}
 		}
@@ -744,7 +744,7 @@ func (g *Gate) check(sessionID string, action Action) CheckResult {
 		if g.isDenied(action) {
 			return CheckResult{
 				Decision: DecisionDeny,
-				Reason:   fmt.Sprintf("Command is in the deny list"),
+				Reason:   "Agent mode deny list: " + g.explainDeny(action),
 				Prompt:   prompt,
 			}
 		}
@@ -890,6 +890,64 @@ func (g *Gate) isDenied(action Action) bool {
 	}
 
 	return false
+}
+
+// explainDeny pinpoints WHY an action was denied, so the humanised refusal
+// can name the actual cause instead of a generic "in deny list" message.
+// Called only when isDenied already returned true.
+func (g *Gate) explainDeny(action Action) string {
+	if g.outsideAllowedPaths(action) {
+		return fmt.Sprintf("目标路径 %q 在工作区沙箱之外（AllowedPaths 白名单未包含）", action.Path)
+	}
+	if action.Tool == "bash" {
+		cmd := strings.ToLower(strings.TrimSpace(action.Command))
+		for _, d := range g.DeniedCommands {
+			if strings.Contains(cmd, strings.ToLower(d)) {
+				return fmt.Sprintf("命令命中危险模式 %q", d)
+			}
+		}
+		if v := IsDeniedBashCommand(action.Command); v != nil {
+			return "命令命中 Bash 安全引擎的硬性规则"
+		}
+		violations := CheckBashCommand(action.Command)
+		for _, v := range violations {
+			if v.Severity == SeverityBlock {
+				return "命令命中 Bash 安全引擎的硬性规则"
+			}
+		}
+	}
+	return "命中危险操作清单"
+}
+
+// HumanizeDeny translates a technical denial reason into plain language the
+// user can act on — Claude Code parity: a refusal must explain itself in
+// natural language ("如果你要拒绝用户的操作，至少要告诉他们原因"), never a raw
+// error code. Deterministic and free; the engine may additionally polish the
+// output with one temperature-0 LLM call.
+func HumanizeDeny(action Action, reason string) string {
+	switch {
+	case strings.HasPrefix(reason, "参数级规则命中"):
+		pattern := strings.TrimPrefix(reason, "参数级规则命中 ")
+		return fmt.Sprintf("⛔ 已拦截：%s 调用被你配置的硬性规则（%s）拦下。\n💡 如需放行：调整 config.toml 的 [permission.rules]，或让用户手动执行这一步。", action.Tool, pattern)
+
+	case strings.Contains(reason, ".claude/settings.json"):
+		return fmt.Sprintf("⛔ 已拦截：项目权限规则（.claude/settings.json 的 deny 列表）明确禁止 %s 操作。\n💡 如需放行：请用户编辑该文件的 permissions.deny，或由用户手动执行。", action.Tool)
+
+	case strings.Contains(reason, "hooks rule"):
+		return fmt.Sprintf("⛔ 已拦截：%s 调用命中 hooks.yaml 规则。\n💡 如需放行：请用户编辑 hooks.yaml 中对应工具的 deny/allow 列表。", action.Tool)
+
+	case strings.Contains(reason, "deny list") || strings.Contains(reason, "危险"):
+		return fmt.Sprintf("⛔ 已拦截：%s 命中危险操作清单。\n💡 建议：把任务拆解成更安全的步骤（例如用文件工具代替删除命令），或请用户手动执行高风险部分。", action.Tool)
+
+	case strings.Contains(reason, "Tool denied by user rule"):
+		return fmt.Sprintf("⛔ 已拦截：%s 之前被你设为「总是拒绝」（/permissions 可改）。\n💡 如需放行：运行 /permissions 调整该工具的持久规则。", action.Tool)
+
+	case strings.Contains(reason, "手动模式"):
+		return "⛔ 已拦截：" + reason + "\n💡 本会话所有操作都需要你逐条确认，这是连续多次拦截后的保护行为。"
+
+	default:
+		return "⛔ 已拦截：" + reason
+	}
 }
 
 // ClaudeSettings models the Claude Code settings.json permission block that

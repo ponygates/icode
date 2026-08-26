@@ -62,8 +62,11 @@ type Engine struct {
 	agentRegistry  *agent.Registry
 	loadAgentsOnce sync.Once
 	// curSessionID tracks the active conversation so fork-mode sub-agents can
-	// replay its message prefix and tool permission checks use the right key.
+	// replay its message prefix and tool permission checks use the same key.
 	curSessionID string
+	// cuStreaks counts consecutive computer-use input ops per session for the
+	// runaway-click guard (reset on any non-CU action or new user turn).
+	cuStreaks map[string]int
 
 	// Doom-loop detector prevents the model from repeating the same tool
 	// call more than N consecutive times (OpenCode parity).
@@ -821,7 +824,7 @@ func (e *Engine) executeTool(
 				Error:   fmt.Sprintf("「%s」已经被拒绝多次。AI 应更换方案，不要再调用此工具。", tc.Name),
 			}
 		}
-		return &types.ToolResult{Success: false, Error: "Permission denied: " + res.Reason}
+		return &types.ToolResult{Success: false, Error: e.humanizeDeny(ctx, sessionID, tc, res.Reason)}
 	case permission.DecisionAsk:
 		if res.Escalated {
 			// Strike counter tripped: surface a one-time "已退回手动" notice.
@@ -880,6 +883,22 @@ func (e *Engine) rememberConnectDomain(tc types.ToolCall) {
 }
 
 func (e *Engine) runTool(ctx context.Context, tc types.ToolCall) *types.ToolResult {
+	// Computer-use runaway guard: cap consecutive desktop-input operations so
+	// a confused model cannot keep clicking the user's real screen forever.
+	if isCUTool(tc.Name) {
+		sessionID := e.currentSessionID()
+		if blocked, n := e.bumpCUGuard(sessionID, tc.Name); blocked {
+			return &types.ToolResult{
+				Success: false,
+				Error: fmt.Sprintf("已连续执行 %d 次屏幕输入操作且无任何其他进展动作，CU 熔断触发。", n) +
+					"请停止点击/输入：先用 screenshot 或 screen_read 观察当前界面状态，或改用文件工具与命令行完成任务；若确需继续桌面操作，请向用户说明原因并等待下一轮指令。",
+			}
+		}
+	} else {
+		sessionID := e.currentSessionID()
+		e.resetCUStreak(sessionID)
+	}
+
 	// Circuit breaker check BEFORE executing (本书 ch.23 三态熔断): an open
 	// breaker blocks the tool until its cooldown elapses, then admits exactly
 	// one probe. This prevents the model from hammering a broken tool every
@@ -1564,6 +1583,9 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 		runner.SetSessionID(sessionID)
 	}
 	e.mu.Unlock()
+	// A fresh user turn signals intent — clear any computer-use runaway
+	// streak so the model gets a clean slate of desktop interactions.
+	e.resetCUStreak(sessionID)
 
 	// Stash-and-continue audit: if the user pivots to a (different) task while
 	// in-progress work exists in this session, snapshot a checkpoint + refresh
@@ -1653,8 +1675,16 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 		if verify := sessionum.GetGoalVerify(sess); verify != "" {
 			prompt += "\n\nACCEPTANCE CHECK（验收命令，对标 ZCode Goal 模式）: " + verify +
 				"\n每一轮代码/配置改动后，都必须运行上面的验收命令判断目标是否已达成。" +
-				"若未通过：阅读失败输出，继续修改 → 再运行 → 再判断，如此迭代，直到验收命令通过为止。" +
-				"达成后：向用户报告验收结果并停止，不要继续无关改动。"
+				"\n若未通过：阅读失败输出，继续修改 → 再运行 → 再判断，如此迭代，直到验收命令通过为止。" +
+				"\n达成后：向用户报告验收结果并停止，不要继续无关改动。"
+			// Computer-use closed loop (CC research-preview parity): for
+			// UI-shaped goals, compile-pass ≠ done — the model must LOOK at
+			// the result through screen_read before declaring victory.
+			if uiShapedGoal(goal + " " + verify) {
+				prompt += "\n\nVISUAL VERIFICATION（UI 类目标附加要求）: 验收命令通过后，还必须调用 screen_read 工具截取当前屏幕并确认界面真实可用（页面渲染正常、无报错弹窗、关键交互可见）。" +
+					"\n若需要交互验证（如登录后才能看到的页面），可用鼠标/键盘工具操作后再截图确认。" +
+					"\n只有「验收命令通过 + 屏幕确认无误」两者都满足才算目标达成；截图发现问题则继续修复并重复本流程。"
+			}
 		}
 		opt.SetSystemPrompt(prompt)
 	}
@@ -2285,4 +2315,127 @@ func (a *shellGateAdapter) CheckShellCommand(cmd string) (bool, string) {
 		return false, res.Reason
 	}
 	return true, ""
+}
+
+// humanizeDeny produces a user-understandable refusal: a deterministic plain
+// language mapping first (Claude Code parity — "拒绝至少要告诉用户原因"),
+// optionally polished by ONE temperature-0 LLM call so the explanation reads
+// naturally. The LLM pass is skipped in local security mode (no hidden
+// network calls, iCode ethos) and on any error falls back to the mapping.
+func (e *Engine) humanizeDeny(ctx context.Context, sessionID string, tc types.ToolCall, reason string) string {
+	a := buildAction(tc.Name, tc.Arguments)
+	out := permission.HumanizeDeny(a, reason)
+	if e.gate != nil && e.gate.SecurityLevel() == config.SecLocal {
+		return out // 隐私边界内不做任何额外网络调用
+	}
+	if polished := e.polishDenyWithLLM(ctx, sessionID, tc.Name, reason); polished != "" {
+		return polished
+	}
+	return out
+}
+
+// polishDenyWithLLM rewrites a denial reason with the session model at
+// temperature 0 (deterministic per 源码解析 ch.5), tiny budget, hard timeout.
+// Best-effort: empty string on any failure.
+func (e *Engine) polishDenyWithLLM(ctx context.Context, sessionID, toolName, reason string) string {
+	if e.sessionSt == nil || sessionID == "" {
+		return ""
+	}
+	sess, err := e.sessionSt.Get(sessionID)
+	if err != nil || sess == nil || sess.ModelID == "" {
+		return ""
+	}
+	provider, mi, err := e.providerReg.ResolveModel(sess.ModelID)
+	if err != nil || provider == nil {
+		return ""
+	}
+
+	pctx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	defer cancel()
+	prompt := "你是权限系统解释器。把下面的工具拒绝原因改写成一句普通用户能看懂的中文（不超过60字），再给一句「怎么办」建议。只输出这两行，不要任何前后缀。\n工具：" + toolName + "\n原因：" + reason
+
+	ch, err := provider.ChatStream(pctx, types.ChatRequest{
+		SessionID:    sessionID,
+		Messages:     []types.Message{{Role: types.RoleUser, Content: prompt, Timestamp: time.Now()}},
+		Model:        mi.ID,
+		ProviderName: mi.Provider,
+		SystemPrompt: "你只输出两行中文：第一行原因，第二行以「建议：」开头。",
+		MaxTokens:    150,
+		Temperature:  0, // 相同输入必须产生相同输出（源码解析 ch.5 温度=0 原则）
+	})
+	if err != nil {
+		return ""
+	}
+	var sb strings.Builder
+	for ev := range ch {
+		switch ev.Type {
+		case types.EventText:
+			sb.WriteString(ev.Content)
+		case types.EventDone, types.EventError:
+			return strings.TrimSpace(sb.String())
+		}
+	}
+	return strings.TrimSpace(sb.String())
+}
+
+// uiShapedGoal heuristically decides whether a goal involves a visual UI, so
+// the acceptance loop should include a screen_read verification step.
+func uiShapedGoal(text string) bool {
+	t := strings.ToLower(text)
+	keywords := []string{
+		"ui", "页面", "界面", "前端", "浏览器", "网页", "web", "localhost",
+		"渲染", "样式", "布局", "弹窗", "按钮", "表单", "dashboard", "预览",
+		"preview", "chrome", "app", "可视化",
+	}
+	for _, k := range keywords {
+		if strings.Contains(t, k) {
+			return true
+		}
+	}
+	return false
+}
+
+// ── Computer-use runaway guard ────────────────────────────────────
+// CU tools drive the real desktop; a model stuck in a click-loop can do real
+// damage (or just burn turns). Track consecutive CU operations per session:
+// exceeding the cap blocks further CU input until a non-CU action signals
+// progress (file edit, command, observation) or a fresh user turn arrives.
+
+const maxConsecutiveCUOps = 12
+
+var cuTools = map[string]bool{
+	"mouse_move": true, "mouse_click": true, "mouse_scroll": true,
+	"type_text": true, "key_press": true,
+}
+
+func isCUTool(name string) bool { return cuTools[name] }
+
+// bumpCUGuard records one CU operation and reports whether the per-session
+// cap is exceeded. Non-CU calls reset the streak. Safe on a zero Engine.
+func (e *Engine) bumpCUGuard(sessionID, toolName string) (blocked bool, count int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.cuStreaks == nil {
+		e.cuStreaks = map[string]int{}
+	}
+	if !isCUTool(toolName) {
+		delete(e.cuStreaks, sessionID)
+		return false, 0
+	}
+	e.cuStreaks[sessionID]++
+	return e.cuStreaks[sessionID] > maxConsecutiveCUOps, e.cuStreaks[sessionID]
+}
+
+// resetCUStreak clears the session's CU streak (new user turn).
+func (e *Engine) resetCUStreak(sessionID string) {
+	e.mu.Lock()
+	delete(e.cuStreaks, sessionID)
+	e.mu.Unlock()
+}
+
+// currentSessionID returns the tracked active session ("" when unknown).
+func (e *Engine) currentSessionID() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.curSessionID
 }

@@ -332,7 +332,7 @@ func (r *Runner) executeTool(ctx context.Context, tc types.ToolCall) *types.Tool
 		res := r.gate.Check(r.sessionID, action)
 		switch res.Decision {
 		case permission.DecisionDeny:
-			return &types.ToolResult{Success: false, Error: "Permission denied (sub-agent): " + res.Reason}
+			return &types.ToolResult{Success: false, Error: permission.HumanizeDeny(action, res.Reason)}
 		case permission.DecisionAsk:
 			return &types.ToolResult{Success: false, Error: "Sub-agent tool calls require auto-approve or YOLO mode"}
 		}

@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -191,6 +192,20 @@ func (r *Registry) ListDefs() []types.ToolDef {
 	for _, t := range r.tools {
 		defs = append(defs, t.Def())
 	}
+	// Cache-friendly ordering (Claude Code assembleToolPool parity): prompt
+	// caches only hit when the request prefix is byte-identical, and Go map
+	// iteration is randomised — without sorting, every request would present
+	// the tool list in a different order and silently invalidate the cache.
+	// Built-ins sort first alphabetically; MCP tools trail after so a late
+	// MCP connect/disconnect only perturbs the tail of the array.
+	sort.Slice(defs, func(i, j int) bool {
+		mi := strings.HasPrefix(defs[i].Name, "mcp_")
+		mj := strings.HasPrefix(defs[j].Name, "mcp_")
+		if mi != mj {
+			return mj // built-in before mcp
+		}
+		return defs[i].Name < defs[j].Name
+	})
 	return defs
 }
 
