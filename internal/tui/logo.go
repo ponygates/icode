@@ -59,7 +59,6 @@ func Logo() []string {
 // only coloured element is the yellow dot (██) above the "i".
 func textWordRows(paint logoPainter) []string {
 	dot := paint("yellow", "●")
-	tint := func(s string, fg string) string { return paint(fg, s) }
 
 	const cell = "  " // one empty 2-column cell (2 spaces)
 	const fill = "█"  // one filled 2-column block (█ = East Asian Wide, renders 2 cols)
@@ -102,29 +101,16 @@ func textWordRows(paint logoPainter) []string {
 		fill + fill + fill + fill, // base bar
 	}
 
-	// Colour one letter's glyphs (any non-space rune) with the given colour,
-	// leaving spaces untouched so ANSI codes never break alignment.
-	colorize := func(rows []string, fg string) []string {
-		out := make([]string, len(rows))
-		for r, row := range rows {
-			var b strings.Builder
-			for _, ch := range row {
-				if ch == ' ' {
-					b.WriteRune(ch)
-				} else {
-					b.WriteString(tint(string(ch), fg))
-				}
-			}
-			out[r] = b.String()
-		}
-		return out
-	}
-
-	i := colorize(iRows, "white")
-	c := colorize(cRows, "white")
-	o := colorize(oRows, "white")
-	d := colorize(dRows, "white")
-	e := colorize(eRows, "white")
+	// Letters stay UNPAINTED (terminal default foreground). Colouring them
+	// "white" backfired: the light theme maps white → \x1b[30m (black), so on
+	// any theme/background mismatch the whole wordmark rendered invisible —
+	// the "LOGO 空白" bug. Plain blocks are visible everywhere; only the dot
+	// keeps its yellow accent.
+	i := iRows
+	c := cRows
+	o := oRows
+	d := dRows
+	e := eRows
 
 	rows := make([]string, 7)
 

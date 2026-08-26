@@ -93,3 +93,28 @@ func TestRenderMarkdownColours(t *testing.T) {
 		t.Errorf("nested bullet not indented+coloured:\n%q", coloured)
 	}
 }
+
+// Regression: bold spanning two source lines inside one paragraph must pair
+// up (paragraph folding) — the model wraps long bold phrases constantly.
+func TestRenderMarkdownCrossLineBold(t *testing.T) {
+	tui := New(Config{Model: "m", Provider: "p", Lang: "zh-CN", Theme: "dark"})
+	out := renderPlain(tui, "**第一行要点：\n第二行继续说明** 完毕", 80)
+	if strings.Contains(out, "**") {
+		t.Errorf("literal ** leaked:\n%s", out)
+	}
+	if !strings.Contains(out, "第一行要点") || !strings.Contains(out, "第二行继续说明") {
+		t.Errorf("content lost:\n%s", out)
+	}
+}
+
+// Regression: table cells go through inline rendering.
+func TestRenderMarkdownTableInline(t *testing.T) {
+	tui := New(Config{Model: "m", Provider: "p", Lang: "zh-CN", Theme: "dark"})
+	out := renderPlain(tui, "| A | B |\n|---|---|\n| **重点** | 普通 |\n", 60)
+	if strings.Contains(out, "**") {
+		t.Errorf("literal ** in table cell:\n%s", out)
+	}
+	if !strings.Contains(out, "重点") || !strings.Contains(out, "普通") {
+		t.Errorf("table content missing:\n%s", out)
+	}
+}

@@ -169,9 +169,32 @@ func (t *TUI) renderMarkdown(content, prefix, cont string, width int) []string {
 			continue
 		}
 
-		// Normal paragraph line.
-		out = append(out, t.wrapANSI(prefix, cont, t.renderInline(ln), width)...)
-		lineIdx++
+		// Normal paragraph: fold consecutive plain lines into ONE logical
+		// paragraph so inline markup spanning a wrapped source line (e.g.
+		// **bold** broken across lines by the model) still pairs up. Lines
+		// are joined with a space, matching how the desktop renderer treats
+		// soft breaks.
+		var para []string
+		for lineIdx < len(lines) {
+			pt := strings.TrimSpace(lines[lineIdx])
+			if pt == "" ||
+				strings.HasPrefix(pt, "```") ||
+				headingLevel(pt) > 0 ||
+				pt == "---" || pt == "***" || pt == "___" ||
+				strings.HasPrefix(pt, ">") ||
+				func() bool { _, _, ok := listItemParts(pt); return ok }() ||
+				strings.HasPrefix(pt, "|") {
+				break
+			}
+			para = append(para, lines[lineIdx])
+			lineIdx++
+		}
+		if len(para) == 0 { // safety: shouldn't happen (current line is plain)
+			para = append(para, ln)
+			lineIdx++
+		}
+		styled := t.renderInline(strings.Join(para, " "))
+		out = append(out, t.wrapANSI(prefix, cont, styled, width)...)
 	}
 
 	if inCode {
@@ -275,6 +298,25 @@ func (t *TUI) renderInline(text string) string {
 				b.WriteString(inner)
 				b.WriteString("\x1b[0m")
 				i = end + 2
+				continue
+			}
+		}
+
+		// Triple emphasis: ***text*** (bold+italic) — must run before the
+		// plain bold branch or its markers get mis-consumed.
+		if r == '*' && i+2 < n && runes[i+1] == '*' && runes[i+2] == '*' {
+			end := -1
+			for j := i + 3; j < n-2; j++ {
+				if runes[j] == '*' && runes[j+1] == '*' && runes[j+2] == '*' {
+					end = j
+					break
+				}
+			}
+			if end > i+3 {
+				b.WriteString("\x1b[1m\x1b[3m")
+				b.WriteString(string(runes[i+3 : end]))
+				b.WriteString("\x1b[0m")
+				i = end + 3
 				continue
 			}
 		}
@@ -431,7 +473,15 @@ func (t *TUI) renderInline(text string) string {
 		b.WriteRune(r)
 		i++
 	}
-	return b.String()
+	out := b.String()
+	// Fallback sweep: any bold markers that survived without a pair (most
+	// commonly ** spanning two source lines before paragraph folding) are
+	// stripped so raw asterisks never leak into the conversation. Real
+	// multiplication ("2 ** 3" with spaces) is preserved.
+	if strings.Contains(out, "**") {
+		out = strings.ReplaceAll(out, "**", "")
+	}
+	return out
 }
 
 // findURLEnd returns the index just past the URL starting at position i.
@@ -485,7 +535,8 @@ func renderTable(t *TUI, out *[]string, prefix, cont string, width int, rows []s
 		}
 	}
 
-	// Build header
+	// Build header — cells go through inline rendering (**bold** etc.) with
+	// visible-width padding so ANSI never breaks column alignment.
 	var headerLine strings.Builder
 	headerLine.WriteString(t.paint("dim", "│"))
 	for ci := 0; ci < colCount; ci++ {
@@ -493,9 +544,15 @@ func renderTable(t *TUI, out *[]string, prefix, cont string, width int, rows []s
 		if ci < len(parsed[0]) {
 			cell = parsed[0][ci]
 		}
+		styled := t.renderInline(cell)
+		pad := colW[ci] - runeWidthStr(cell)
+		if pad < 0 {
+			pad = 0
+		}
 		headerLine.WriteString(" ")
 		headerLine.WriteString(t.c("cyan") + "\x1b[1m")
-		headerLine.WriteString(padEnd(cell, colW[ci]))
+		headerLine.WriteString(styled)
+		headerLine.WriteString(strings.Repeat(" ", pad))
 		headerLine.WriteString("\x1b[0m")
 		headerLine.WriteString(" " + t.paint("dim", "│"))
 	}
@@ -526,10 +583,16 @@ func renderTable(t *TUI, out *[]string, prefix, cont string, width int, rows []s
 			if ci < len(parsed[ri]) {
 				cell = parsed[ri][ci]
 			}
+			styled := t.renderInline(cell)
+			pad := colW[ci] - runeWidthStr(cell)
+			if pad < 0 {
+				pad = 0
+			}
 			rowLine.WriteString(" ")
 			// Body data in the default foreground (not dim) — only the
 			// frame stays dim so numbers/text stay readable.
-			rowLine.WriteString(padEnd(cell, colW[ci]))
+			rowLine.WriteString(styled)
+			rowLine.WriteString(strings.Repeat(" ", pad))
 			rowLine.WriteString(" " + t.paint("dim", "│"))
 		}
 		*out = append(*out, prefix+rowLine.String())
