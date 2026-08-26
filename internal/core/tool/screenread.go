@@ -21,7 +21,7 @@ type ScreenReadTool struct{}
 
 func (t *ScreenReadTool) Def() types.ToolDef {
 	return types.ToolDef{
-		Name: "screen_read",
+		Name:        "screen_read",
 		Description: "Recognise what is on the user's screen right now: captures the display as a vision image AND reports the foreground window title and owning application, so you can answer questions about the user's current context. Prefer this over screenshot when you need to understand the scene; use screenshot when you only need raw pixels of a region.",
 		Parameters: map[string]any{
 			"type": "object",

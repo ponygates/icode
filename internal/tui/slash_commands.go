@@ -2444,6 +2444,7 @@ func (t *TUI) meshCommand(args []string) {
 		t.add(RoleError, "用法: /mesh [list | add <名> <url> [token] | remove <名> | token]")
 	}
 }
+
 // toggleVoiceRecording starts/stops mic capture from the CLI. First /voice
 // begins recording (status bar shows the live indicator); a second /voice
 // stops, transcribes via Zhipu GLM-ASR in the background, and drops the
@@ -2480,7 +2481,7 @@ func (t *TUI) toggleVoiceRecording() {
 			t.inputBuf = strings.TrimRight(t.inputBuf, " ") + text + " "
 			t.cursor = len([]rune(t.inputBuf))
 			t.mu.Unlock()
-			t.add(RoleSystem, "🎤 已转写并填入输入框（可编辑后回车发送）:\n" + text)
+			t.add(RoleSystem, "🎤 已转写并填入输入框（可编辑后回车发送）:\n"+text)
 		})
 		return
 	}

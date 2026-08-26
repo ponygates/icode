@@ -23,8 +23,6 @@ import (
 	"github.com/ponygates/icode/internal/core/session"
 	"github.com/ponygates/icode/internal/core/skills"
 	"github.com/ponygates/icode/internal/core/tool"
-	"github.com/ponygates/icode/internal/mesh"
-	"github.com/ponygates/icode/internal/xgo"
 	"github.com/ponygates/icode/internal/db"
 	"github.com/ponygates/icode/internal/llm/provider"
 	"github.com/ponygates/icode/internal/llm/provider/agnes"
@@ -41,9 +39,11 @@ import (
 	"github.com/ponygates/icode/internal/llm/provider/volcengine"
 	"github.com/ponygates/icode/internal/llm/provider/zhipu"
 	"github.com/ponygates/icode/internal/lsp"
+	"github.com/ponygates/icode/internal/mesh"
 	"github.com/ponygates/icode/internal/notify"
 	"github.com/ponygates/icode/internal/scheduler"
 	"github.com/ponygates/icode/internal/types"
+	"github.com/ponygates/icode/internal/xgo"
 	"github.com/ponygates/icode/pkg/modelupdate"
 )
 
