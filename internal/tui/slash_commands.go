@@ -2312,6 +2312,7 @@ func renderEvalReport(rep skills.EvalReport) string {
 	}
 	return b.String()
 }
+
 // pluginCommand manages bundled plugins: list (default), install <dir|.zip>
 // [--force], remove <name>.
 func (t *TUI) pluginCommand(args []string) {

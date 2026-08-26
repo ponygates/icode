@@ -19,14 +19,14 @@ type MonitorTool struct{}
 
 func (t *MonitorTool) Def() types.ToolDef {
 	return types.ToolDef{
-		Name: "monitor",
+		Name:        "monitor",
 		Description: "Watch a background task (bg-N shell command or agt-N sub-agent) and stream its NEW output into this conversation as it appears. Returns when the task finishes, output goes quiet, or the deadline hits — whatever comes first. Use after run_in_background to follow a build/log live and react early.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"task_id":        map[string]any{"type": "string", "description": "Task id from bash(run_in_background) or task(background): bg-1, agt-2 …"},
-				"max_seconds":    map[string]any{"type": "integer", "description": "Give up after this long even if still running. Default 15, cap 60."},
-				"quiet_seconds":  map[string]any{"type": "number", "description": "Stop early after this much silence in the output. Default 3."},
+				"task_id":       map[string]any{"type": "string", "description": "Task id from bash(run_in_background) or task(background): bg-1, agt-2 …"},
+				"max_seconds":   map[string]any{"type": "integer", "description": "Give up after this long even if still running. Default 15, cap 60."},
+				"quiet_seconds": map[string]any{"type": "number", "description": "Stop early after this much silence in the output. Default 3."},
 			},
 			"required": []string{"task_id"},
 		},
