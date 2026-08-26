@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useAppStore, Model, Session } from '../stores/appStore';
+import { slashCommands, fuzzyScore, noteRecentSlash } from '../lib/slashCommands';
 
 interface Action {
   id: string;
@@ -89,13 +90,30 @@ const CommandPalette: React.FC<{ onClose: () => void }> = ({ onClose }) => {
       icon: '💬',
       action: () => { setActiveSession(s.id); onClose(); },
     })),
+    // Slash commands (CLI parity): picking fills the chat input with the
+    // command so arguments stay editable; recency is recorded for ranking.
+    ...slashCommands.map((c) => ({
+      id: `slash:${c.name}`,
+      label: '/' + c.name,
+      description: t(c.descKey) + (c.usage ? ` · ${c.usage}` : ''),
+      icon: '⌘',
+      action: () => {
+        noteRecentSlash('/' + c.name);
+        window.dispatchEvent(new CustomEvent('icode:insert-input', { detail: '/' + c.name + ' ' }));
+        onClose();
+      },
+    })),
   ];
 
+  // Fuzzy filtering (same scorer as the TUI): substring OR subsequence match
+  // across label + description.
   const filtered = query
-    ? actions.filter(a =>
-        a.label.toLowerCase().includes(query.toLowerCase()) ||
-        a.description.toLowerCase().includes(query.toLowerCase())
-      )
+    ? actions.filter(a => {
+        const q = query.toLowerCase();
+        const hay = (a.label + ' ' + a.description).toLowerCase();
+        if (hay.includes(q)) return true;
+        return fuzzyScore(q, a.label) >= 0;
+      })
     : actions;
 
   useEffect(() => {

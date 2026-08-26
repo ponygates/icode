@@ -234,6 +234,12 @@ type ServerCfg struct {
 	Enabled bool   `yaml:"enabled" json:"enabled"`
 	Port    int    `yaml:"port" json:"port"`
 	Host    string `yaml:"host" json:"host"`
+
+	// MeshListen is the dedicated cross-machine listener for peer message
+	// intake, e.g. "0.0.0.0:8788". Empty (default) = mesh inbound disabled
+	// and the main API stays loopback-only. The endpoint is token-gated
+	// (X-Mesh-Token), so exposure is limited to authenticated peers.
+	MeshListen string `yaml:"mesh_listen" json:"mesh_listen"`
 }
 
 // SchedulerCfg configures the automation scheduler, including the off-peak

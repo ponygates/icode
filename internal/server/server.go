@@ -234,6 +234,26 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 	// Write port to a temp file so the Electron app can discover it
 	s.writePortFile(s.port)
 
+	// Optional dedicated mesh listener: cross-machine peer message intake.
+	// Off by default; when server.mesh_listen is set (e.g. "0.0.0.0:8788") a
+	// minimal mux serves ONLY /api/mesh/messages, gated by X-Mesh-Token —
+	// the main browser-facing API stays loopback-only.
+	if ml := strings.TrimSpace(s.cfg.Server.MeshListen); ml != "" {
+		meshMux := http.NewServeMux()
+		meshMux.HandleFunc("/api/mesh/messages", s.handleMeshMessages)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[mesh] listener panic: %v", r)
+				}
+			}()
+			log.Printf("[mesh] inbound listener on %s (token-gated)", ml)
+			if err := http.ListenAndServe(ml, meshMux); err != nil {
+				log.Printf("[mesh] listener stopped: %v", err)
+			}
+		}()
+	}
+
 	// Register any user-defined (custom) models that were persisted in the
 	// config file so the engine can resolve them at chat time.
 	for _, m := range s.cfg.Models {

@@ -293,6 +293,9 @@ func (b *simpleUIBridge) Stop() {
 	if sid != "" && b.app != nil && b.app.Engine != nil {
 		b.app.Engine.Stop(sid)
 		b.push("uiBusy(false)")
+		// An interrupted turn may leave the permission bar hanging — the
+		// engine's pending request is cancelled with the context.
+		b.push("var pb=document.getElementById('permBar'); if(pb) pb.style.display='none'; permRequestId=null;")
 	}
 }
 
@@ -474,6 +477,15 @@ func (b *simpleUIBridge) runPrompt(prompt string) {
 					args = ""
 				}
 				b.push(fmt.Sprintf("uiTool(%s, %s)", jsStr(event.ToolCall.Name), jsStr(args)))
+			case types.EventPermission:
+				// Engine paused the tool pending user approval — surface the
+				// in-window approval bar (allow once / session allow / deny).
+				req := event.Permission
+				if req == nil {
+					break
+				}
+				b.push(fmt.Sprintf("uiPermission(%s, %s, %s)",
+					jsStr(req.RequestID), jsStr(req.Tool), jsStr(req.Prompt)))
 			case types.EventToolProgress:
 				// Live bash output — surface as tool-result updates so the
 				// SimpleUI transcript grows while the command runs.
@@ -955,13 +967,10 @@ func runSimpleUI() error {
 			provider = cfg.Defaults.Provider
 		}
 	}
-	// Auto-approve tool calls so the simple UI never blocks on a permission
-	// prompt (it has no terminal to show one). Mirrors the desktop agent flow.
-	if a.Engine != nil {
-		a.Engine.SetPermissionHandler(func(sessionID string, req *types.PermissionReq, res permission.CheckResult) permission.Decision {
-			return permission.DecisionAllow
-		})
-	}
+	// Permission approval: the SimpleUI now surfaces the engine's
+	// EventPermission pause as an in-window approval bar (allow-once /
+	// session-allow / deny), replacing the old blanket auto-approve that made
+	// this surface the only one without a permission gate.
 
 	cache, _ := os.UserCacheDir()
 	dataPath := filepath.Join(cache, "icode", "webview")
@@ -1037,6 +1046,32 @@ func runSimpleUI() error {
 	w.Bind("clear", func() { b.Clear() })
 	w.Bind("runCommand", func(text string) { b.RunCommand(text) })
 	w.Bind("stop", func() { b.Stop() })
+	// Permission bar: answer the engine's pending permission request and
+	// optionally register the session-scoped tool allow first.
+	w.Bind("respondPermission", func(requestID, decision string) {
+		if b.app == nil || b.app.Engine == nil {
+			return
+		}
+		switch strings.ToLower(decision) {
+		case "allow":
+			b.app.Engine.SetPermissionResponse(requestID, permission.DecisionAllow)
+		case "deny":
+			b.app.Engine.SetPermissionResponse(requestID, permission.DecisionDeny)
+		default:
+			b.app.Engine.SetPermissionResponse(requestID, permission.DecisionDeny)
+		}
+	})
+	w.Bind("allowToolForSession", func(toolName string) {
+		if b.app == nil || b.app.Gate == nil {
+			return
+		}
+		b.mu.Lock()
+		sid := b.sessionID
+		b.mu.Unlock()
+		if sid != "" {
+			b.app.Gate.SetSessionToolAllow(sid, toolName)
+		}
+	})
 	w.Bind("stats", func() string { return b.statsJSON() })
 	w.Bind("refreshModels", func() string { return b.RefreshModelsUI() })
 	w.Bind("sessions", func() []SessionEntry { return b.Sessions() })
@@ -1303,6 +1338,17 @@ func simpleUIHTML(model, provider string) string {
       <button id="planAccept" style="background:#4caf50; border:none; color:#fff; padding:4px 12px; border-radius:6px; cursor:pointer;">接受并执行</button>
       <button id="planDiscard" style="background:transparent; border:1px solid #555; color:#aaa; padding:4px 10px; border-radius:6px; cursor:pointer;">放弃</button>
     </div>
+    <div id="permBar" style="display:none; align-items:flex-start; gap:8px; flex-direction:column; padding:8px 12px; margin:0 12px 6px; background:#2a2113; border:1px solid #eab308; border-radius:8px; font-size:13px;">
+      <div style="width:100%; display:flex; align-items:center; gap:8px;">
+        <span style="color:#eab308; font-weight:600;">⚠ 需要授权</span>
+        <span id="permTool" style="color:#fff; font-weight:600;"></span>
+        <span style="flex:1;"></span>
+        <button id="permAllowOnce" style="background:#4caf50; border:none; color:#fff; padding:4px 12px; border-radius:6px; cursor:pointer;">允许一次</button>
+        <button id="permAlways" style="background:#2d5a88; border:none; color:#fff; padding:4px 12px; border-radius:6px; cursor:pointer;">本会话总是允许</button>
+        <button id="permDeny" style="background:#b0413e; border:none; color:#fff; padding:4px 12px; border-radius:6px; cursor:pointer;">拒绝</button>
+      </div>
+      <div id="permPrompt" style="width:100%; color:#c9c9c9; font-size:12px; word-break:break-all; max-height:72px; overflow:auto;"></div>
+    </div>
     <div id="inputbar">
       <textarea id="inp" placeholder="输入消息或 /命令，Enter 发送，Shift+Enter 换行…"></textarea>
       <button id="stopBtn" title="停止生成" style="display:none;">■ 停止</button>
@@ -1563,6 +1609,26 @@ func simpleUIHTML(model, provider string) string {
     var bar = document.getElementById('planBar');
     if (bar) bar.style.display = 'flex';
   }
+  // Permission approval bar — the SimpleUI surface of the engine's
+  // EventPermission pause. The engine blocks the tool until respondPermission
+  // answers, exactly like the desktop modal and the TUI's [1]/[2]/[3] keys.
+  var permRequestId = null;
+  function uiPermission(id, tool, prompt) {
+    permRequestId = id;
+    var bar = document.getElementById('permBar');
+    if (!bar) return;
+    document.getElementById('permTool').textContent = tool;
+    document.getElementById('permPrompt').textContent = prompt || '';
+    bar.style.display = 'flex';
+  }
+  function answerPermission(decision) {
+    var bar = document.getElementById('permBar');
+    if (bar) bar.style.display = 'none';
+    if (permRequestId && window.respondPermission) {
+      window.respondPermission(permRequestId, decision);
+    }
+    permRequestId = null;
+  }
   document.getElementById('planAccept').addEventListener('click', function(){
     document.getElementById('planBar').style.display = 'none';
     if (window.setMode) window.setMode('auto');
@@ -1571,6 +1637,15 @@ func simpleUIHTML(model, provider string) string {
   document.getElementById('planDiscard').addEventListener('click', function(){
     document.getElementById('planBar').style.display = 'none';
   });
+  document.getElementById('permAllowOnce').addEventListener('click', function(){ answerPermission('allow'); });
+  document.getElementById('permAlways').addEventListener('click', function(){
+    // Session-scoped tool allow (same as the desktop "总是允许"): register the
+    // per-session allow first, then answer the pending request with allow.
+    var tool = document.getElementById('permTool').textContent;
+    if (window.allowToolForSession) window.allowToolForSession(tool);
+    answerPermission('allow');
+  });
+  document.getElementById('permDeny').addEventListener('click', function(){ answerPermission('deny'); });
 
   document.getElementById('send').addEventListener('click', doSend);
   document.getElementById('clearBtn').addEventListener('click', function(){ if (window.clear) window.clear(); });

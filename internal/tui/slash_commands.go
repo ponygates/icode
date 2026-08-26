@@ -2396,6 +2396,7 @@ func (t *TUI) meshCommand(args []string) {
 			fmt.Fprintf(&b, "  %-12s %s\n", p.Name, p.URL)
 		}
 		b.WriteString("\n发送: 让模型调用 send_message，to 写 \"<名称>/<会话ID>\"；每 3 秒自动转发。")
+		b.WriteString("\n接收方需在 config.toml 配置 [server] mesh_listen = \"0.0.0.0:8788\" 开放入站（token 门禁）。")
 		t.add(RoleSystem, b.String())
 		return
 	}

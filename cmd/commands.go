@@ -26,6 +26,7 @@ import (
 	"github.com/ponygates/icode/internal/server"
 	"github.com/ponygates/icode/internal/tui"
 	"github.com/ponygates/icode/internal/types"
+	"github.com/ponygates/icode/internal/update"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -424,11 +425,34 @@ var authCmd = &cobra.Command{
 	},
 }
 
+var upgradeCmd = &cobra.Command{
+	Use:   "upgrade",
+	Short: "Check for a newer iCode release and self-update the binary",
+	Long: `Download the latest Windows amd64 release from GitHub and swap the
+running binary in place. The new version activates on next launch.
+The previous binary is kept as <exe>.old for manual rollback.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		fmt.Println("🔄 正在检查新版本…")
+		res, err := update.Upgrade(ctx, appVersion)
+		if err != nil {
+			return err
+		}
+		if res.Skipped != "" {
+			fmt.Println("✓ " + res.Skipped)
+			return nil
+		}
+		fmt.Printf("✅ 已升级 %s → %s\n", res.From, res.To)
+		fmt.Println("重启 iCode 即可使用新版本。回滚备份：" + res.Path + ".old")
+		return nil
+	},
+}
+
 var modelCmd = &cobra.Command{
 	Use:   "model",
 	Short: "List and manage available AI models",
-	Long:  `List installed models, search by provider, and trigger model list updates.`,
-	RunE: func(cmd *cobra.Command, args []string) error {
+	Long:  `List installed models, search by provider, and trigger model list updates.`, RunE: func(cmd *cobra.Command, args []string) error {
 		refresh, _ := cmd.Flags().GetBool("refresh")
 		search, _ := cmd.Flags().GetString("search")
 

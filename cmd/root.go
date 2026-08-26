@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/ponygates/icode/internal/config/i18n"
+	"github.com/ponygates/icode/internal/update"
 	"github.com/spf13/cobra"
 )
 
@@ -116,6 +117,9 @@ commands.
 }
 
 func init() {
+	// Clean up the .old binary left by a previous `icode upgrade`.
+	update.CleanupOldBinary()
+
 	rootCmd.AddCommand(chatCmd)
 	rootCmd.AddCommand(desktopCmd)
 	rootCmd.AddCommand(execCmd)
@@ -125,6 +129,7 @@ func init() {
 	rootCmd.AddCommand(doctorCmd)
 	rootCmd.AddCommand(serverCmd)
 	rootCmd.AddCommand(versionCmd)
+	rootCmd.AddCommand(upgradeCmd)
 
 	// Persistent flags
 	rootCmd.PersistentFlags().StringP("lang", "l", "zh-CN", "Language (zh-CN, zh-TW, en)")

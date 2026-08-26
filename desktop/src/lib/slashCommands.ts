@@ -603,6 +603,12 @@ function recentSlashes(): string[] {
   }
 }
 
+// recentSlashList exposes the recency order (most recent first) for the
+// command palette's default ranking.
+export function recentSlashList(): string[] {
+  return recentSlashes();
+}
+
 // filterSlash returns commands matching the current input buffer (which must
 // start with '/'). Matching is fuzzy on name or alias — prefix matches rank
 // first, then contiguous subsequences, then gappy ones; recently used

@@ -365,6 +365,20 @@ const ChatPage: React.FC = () => {
     checkBackend();
   }, []);
 
+  // Command palette picks land here: fill the input with the chosen slash
+  // command and focus it so arguments stay editable.
+  useEffect(() => {
+    const onInsert = (e: Event) => {
+      const detail = (e as CustomEvent<string>).detail;
+      if (typeof detail === 'string') {
+        setInput(detail);
+        setTimeout(() => inputRef.current?.focus(), 30);
+      }
+    };
+    window.addEventListener('icode:insert-input', onInsert);
+    return () => window.removeEventListener('icode:insert-input', onInsert);
+  }, []);
+
   // Precise selectors: subscribe only to the slices this component needs, so
   // unrelated store updates (e.g. settings changes, tokenUsage ticks on other
   // pages) don't re-render the whole ChatPage. Actions are stable refs.
