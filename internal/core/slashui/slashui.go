@@ -25,6 +25,7 @@ import (
 	"github.com/ponygates/icode/internal/core/skills"
 	"github.com/ponygates/icode/internal/core/slashcmd"
 	"github.com/ponygates/icode/internal/core/todo"
+	"github.com/ponygates/icode/internal/core/tool"
 	"github.com/ponygates/icode/internal/executil"
 	"github.com/ponygates/icode/internal/mesh"
 	"github.com/ponygates/icode/internal/scheduler"
@@ -188,6 +189,8 @@ func Execute(ctx context.Context, b *Backend, st *State, text string) Result {
 		return cmdInit()
 	case "/agents":
 		return cmdAgents()
+	case "/tasks":
+		return cmdTasks()
 	case "/skills":
 		return cmdSkills()
 	case "/skill-eval":
@@ -1662,14 +1665,80 @@ func cmdInit() Result {
 	return ok("已创建 " + p)
 }
 
+// cmdAgents renders the live agent panel — kept in sync with the TUI's
+// agentsCommand: capability flags (fork/memory/isolation), teams, and
+// background sub-agent runs.
 func cmdAgents() Result {
+	var b strings.Builder
+	b.WriteString("子 agent 注册表:\n")
 	v := agent.Load(agent.AgentDefaultDirs()...)
 	v.RegisterDefaults()
-	var b strings.Builder
-	b.WriteString("可用 agent:\n")
-	for _, d := range v.List() {
-		b.WriteString(fmt.Sprintf("  %s — %s\n", d.Name, d.Description))
+	list := v.List()
+	if len(list) == 0 {
+		b.WriteString("  （无）\n")
 	}
+	for _, d := range list {
+		flags := ""
+		if d.Fork {
+			flags += " fork"
+		}
+		if d.Memory != "" {
+			flags += " memory:" + d.Memory
+		}
+		if d.Isolation != "" {
+			flags += " isolation:" + d.Isolation
+		}
+		if flags != "" {
+			flags = "  [" + flags + "]"
+		}
+		fmt.Fprintf(&b, "  %s — %s%s\n", d.Name, d.Description, flags)
+	}
+
+	if teams := agent.LoadTeams(agent.TeamDefaultDirs()...); len(teams) > 0 {
+		b.WriteString("\n团队:\n")
+		for _, tm := range teams {
+			names := make([]string, 0, len(tm.Members))
+			for _, m := range tm.Members {
+				names = append(names, m.Name)
+			}
+			fmt.Fprintf(&b, "  %s (%d 成员: %s)\n", tm.Name, len(tm.Members), strings.Join(names, ", "))
+		}
+	}
+
+	if lines := tool.ListAgentTaskLines(); len(lines) > 0 {
+		b.WriteString("\n后台运行中:\n")
+		for _, l := range lines {
+			b.WriteString("  " + l + "\n")
+		}
+	}
+	return ok(b.String())
+}
+
+// cmdTasks surfaces background jobs (detached sub-agents + shell commands)
+// on the server/desktop/simpleui surface — parity with the TUI /tasks panel.
+func cmdTasks() Result {
+	agentLines := tool.ListAgentTaskLines()
+	shellLines := tool.ListShellTaskLines()
+	if len(agentLines) == 0 && len(shellLines) == 0 {
+		return ok("当前没有后台任务。\n后台子代理：task 工具传 background=true；\n后台命令：bash 工具传 run_in_background=true。")
+	}
+	var b strings.Builder
+	if len(agentLines) > 0 {
+		b.WriteString("后台子代理 (agt-N):\n")
+		for _, l := range agentLines {
+			b.WriteString("  " + l + "\n")
+		}
+	}
+	if len(shellLines) > 0 {
+		if len(agentLines) > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString("后台命令 (bg-N):\n")
+		for _, l := range shellLines {
+			b.WriteString("  " + l + "\n")
+		}
+	}
+	b.WriteString("\n查询输出：task_output(task_id=...)；实时跟踪：monitor(task_id=...)。")
 	return ok(b.String())
 }
 

@@ -1,5 +1,13 @@
 # 更新日志
 
+## v0.42.3 — 三端同步批次：/tasks 进服务端、/agents 面板对齐（2026-08-25）
+
+### 🔁 三端命令词汇表对齐（CLI ↔ Desktop ↔ SimpleUI）
+- **`/tasks` 进入 slashui 共享层**：桌面与 SimpleUI 的 `/api/slash` 路径现在与 TUI 一样能查看后台任务面板（子代理 agt-N + shell bg-N 状态/耗时/token）。
+- **`/agents` 升级到 TUI 同版**：补齐能力标注（fork / memory / isolation）、团队清单、后台运行任务三段——此前是只有名字的旧列表。
+- 核实项关闭：`/cost` 别名两端皆有；思考过程 SimpleUI 已是 `<details>` 折叠式，三端一致。
+- 纯终端类命令（/expand /multiline /statusline 等）保持 CLI 独有，属合理差异。
+
 ## v0.42.2 — Mesh 入站监听修复 + 应用自升级 + SimpleUI 权限审批条 + 命令面板整合（2026-08-25）
 
 ### 🐛 修复：Mesh 跨机消息无法入站
