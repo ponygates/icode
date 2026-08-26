@@ -1265,6 +1265,26 @@ func simpleUIHTML(model, provider string) string {
   .content { line-height: 1.55; }
   .md-h { display: block; font-weight: 700; margin: 6px 0 2px; color: #ffd9c2; }
   .md-h1 { font-size: 1.15em; } .md-h2 { font-size: 1.08em; } .md-h3, .md-h4, .md-h5, .md-h6 { font-size: 1em; }
+  /* Heading hierarchy: colour + spacing so structure survives scanning */
+  .md-h { display: block; font-weight: 600; margin: 10px 0 4px; line-height: 1.35; }
+  .md-h:first-child { margin-top: 0; }
+  .md-h1 { color: #7ec8ff; border-bottom: 1px solid #2a3140; padding-bottom: 4px; }
+  .md-h2 { color: #eab308; }
+  .md-h3, .md-h4, .md-h5, .md-h6 { color: var(--text-primary); opacity: 0.92; }
+  html.light .md-h1 { color: #0b62c4; border-bottom-color: #d8dde6; }
+  html.light .md-h2 { color: #a16207; }
+  /* Syntax highlight tokens for fenced code blocks */
+  .hl-k { color: #c678dd; }
+  .hl-s { color: #98c379; }
+  .hl-c { color: #6b7280; font-style: italic; }
+  .hl-n { color: #d19a66; }
+  html.light .hl-k { color: #a626a4; }
+  html.light .hl-s { color: #40782f; }
+  html.light .hl-c { color: #9a9aa5; }
+  html.light .hl-n { color: #b76b01; }
+  /* Nested list indentation */
+  .md-ul .md-ul, .md-ol .md-ul, .md-ul .md-ol, .md-ol .md-ol { margin: 2px 0; }
+  li > .md-ul, li > .md-ol { padding-left: 18px; }
   .md-quote { border-left: 3px solid #3a4151; padding: 2px 10px; color: #b9c2d0; margin: 4px 0; }
   .md-hr { border: none; border-top: 1px solid #2a3140; margin: 8px 0; }
   .md-ul, .md-ol { margin: 4px 0; padding-left: 22px; }
@@ -1438,6 +1458,46 @@ func simpleUIHTML(model, provider string) string {
     });
     return s;
   }
+  // Lightweight syntax highlighter for fenced code blocks (client-side, no
+  // deps): comments / strings / numbers / keywords per language family.
+  // Input is already HTML-escaped upstream; we only wrap tokens in spans.
+  var HL_KW = {
+    go: 'func|var|const|type|struct|interface|map|chan|defer|if|else|for|range|switch|case|default|break|continue|return|package|import|select',
+    js: 'function|var|let|const|class|extends|new|this|async|await|if|else|for|while|do|switch|case|default|break|continue|return|typeof|instanceof|import|export|from|try|catch|finally|throw|yield',
+    py: 'def|class|if|elif|else|for|while|return|import|from|as|with|try|except|finally|lambda|yield|pass|raise|in|not|and|or|is|global|assert|del',
+    sh: 'if|then|else|elif|fi|for|while|do|done|case|esac|function|export|source|local|return',
+    sql: 'select|from|where|insert|into|values|update|set|delete|join|left|right|inner|outer|on|group|by|order|having|limit|create|table|index|drop|alter'
+  };
+  function hlFamily(lang) {
+    var l = (lang || '').toLowerCase();
+    if (/^(js|jsx|javascript|ts|tsx|typescript)$/.test(l)) return 'js';
+    if (/^(py|python)$/.test(l)) return 'py';
+    if (/^(bash|sh|shell|zsh|console)$/.test(l)) return 'sh';
+    if (/^sql$/.test(l)) return 'sql';
+    if (/^(go|golang)$/.test(l)) return 'go';
+    return 'js';
+  }
+  function hlCode(lang, code) {
+    var fam = hlFamily(lang);
+    var kw = HL_KW[fam] || '';
+    var hashComment = (fam === 'py' || fam === 'sh');
+    // Single-pass alternation: comment → string → number → keyword.
+    var cRe = hashComment ? '#[^\\n]*' : '//[^\\n]*|/\\*[\\s\\S]*?\\*/';
+    var re = new RegExp(
+      '(' + cRe + ')' +
+      '|("(?:[^"\\\\\\n]|\\\\.)*"|\'(?:[^\'\\\\\\n]|\\\\.)*\')' +
+      '|\\b(\\d+(?:\\.\\d+)?)\\b' +
+      (kw ? '|\\b(' + kw + ')\\b' : ''),
+      'g');
+    return code.replace(re, function (m, c, s, n, k) {
+      if (c) return '<span class="hl-c">' + m + '</span>';
+      if (s) return '<span class="hl-s">' + m + '</span>';
+      if (n) return '<span class="hl-n">' + m + '</span>';
+      if (k) return '<span class="hl-k">' + m + '</span>';
+      return m;
+    });
+  }
+
   // Lightweight Markdown → HTML for the chat bubbles. Input is first escaped,
   // so model output can never inject scripts. Block elements rely on the
   // .msg white-space:pre-wrap to preserve paragraph line breaks.
@@ -1446,29 +1506,61 @@ func simpleUIHTML(model, provider string) string {
     var blocks = [];
     esc = esc.replace(/\u0060\u0060\u0060(\w*)\n?([\s\S]*?)\u0060\u0060\u0060/g, function (_, lang, code) {
       var i = blocks.length;
-      blocks.push('<div class="md-codewrap"><button class="md-copy" type="button">复制</button><pre class="md-code"><code>' + code.replace(/\n$/, '') + '</code></pre></div>');
+      var body = hlCode(lang, code.replace(/\n$/, ''));
+      blocks.push('<div class="md-codewrap"><button class="md-copy" type="button">复制</button><pre class="md-code"><code>' + body + '</code></pre></div>');
       return ' CB' + i + ' ';
     });
     var lines = esc.split('\n');
     var out = [];
-    var listType = null;
-    function closeList() { if (listType) { out.push('</' + listType + '>'); listType = null; } }
+    // List stack for nesting: each entry is 'ul' or 'ol' at its indent level
+    // (2 spaces per level; tabs count as 2).
+    var listStack = [];
+    function listLevel(s) {
+      var m = /^([ \t]*)/.exec(s)[1];
+      var n = 0;
+      for (var q = 0; q < m.length; q++) n += (m.charAt(q) === '\t' ? 2 : 1);
+      return Math.floor(n / 2);
+    }
+    function closeToList(level, type) {
+      while (listStack.length > level) out.push('</' + listStack.pop() + '>');
+      if (type && listStack.length === level && listStack[listStack.length - 1] !== type) {
+        out.push('</' + listStack.pop() + '>');
+      }
+      while (type && listStack.length < level) { out.push('<ul class="md-ul">'); listStack.push('ul'); }
+      if (type && listStack.length === level) { out.push('<' + type + ' class="md-' + type + '">'); listStack.push(type); }
+    }
+    function closeAllLists() { closeToList(0, null); }
     for (var i = 0; i < lines.length; i++) {
       var ln = lines[i];
       var cb = /^ CB(\d+) $/.exec(ln);
-      if (cb) { closeList(); out.push(blocks[+cb[1]]); continue; }
+      if (cb) { closeAllLists(); out.push(blocks[+cb[1]]); continue; }
       var h = /^(#{1,6})\s+(.*)$/.exec(ln);
-      if (h) { closeList(); out.push('<span class="md-h md-h' + h[1].length + '">' + inlineMd(h[2]) + '</span>'); continue; }
-      if (/^(---|\*\*\*|___)\s*$/.test(ln)) { closeList(); out.push('<hr class="md-hr">'); continue; }
-      if (/^&gt;\s?/.test(ln)) { closeList(); out.push('<div class="md-quote">' + inlineMd(ln.replace(/^&gt;\s?/, '')) + '</div>'); continue; }
-      var task = /^[-*+]\s+\[([ xX])\]\s+(.*)$/.exec(ln);
-      if (task) { closeList(); var chk = task[1] !== ' '; out.push('<div class="md-task"><span class="md-chk' + (chk ? ' checked' : '') + '">' + (chk ? '✓' : '') + '</span><span class="md-task-text' + (chk ? ' done' : '') + '">' + inlineMd(task[2]) + '</span></div>'); continue; }
-      var ul = /^[-*+]\s+(.*)$/.exec(ln);
-      if (ul) { if (listType !== 'ul') { closeList(); out.push('<ul class="md-ul">'); listType = 'ul'; } out.push('<li>' + inlineMd(ul[1]) + '</li>'); continue; }
-      var ol = /^(\d+)\.\s+(.*)$/.exec(ln);
-      if (ol) { if (listType !== 'ol') { closeList(); out.push('<ol class="md-ol">'); listType = 'ol'; } out.push('<li>' + inlineMd(ol[2]) + '</li>'); continue; }
+      if (h) { closeAllLists(); out.push('<span class="md-h md-h' + h[1].length + '">' + inlineMd(h[2]) + '</span>'); continue; }
+      if (/^(---|\*\*\*|___)\s*$/.test(ln)) { closeAllLists(); out.push('<hr class="md-hr">'); continue; }
+      if (/^&gt;\s?/.test(ln)) { closeAllLists(); out.push('<div class="md-quote">' + inlineMd(ln.replace(/^&gt;\s?/, '')) + '</div>'); continue; }
+      // List items (nested by 2-space indent levels). Tasks render as list
+      // items so they participate in nesting like any other bullet.
+      var lvl = listLevel(ln);
+      var trimmed = ln.trim();
+      var taskM = /^[-*+]\s+\[([ xX])\]\s+(.*)$/.exec(trimmed);
+      var ulm = /^[-*+]\s+(.*)$/.exec(trimmed);
+      var olm = /^(\d+)\.\s+(.*)$/.exec(trimmed);
+      if (taskM || ulm || olm) {
+        var ltype = 'ul', liInner = '';
+        if (taskM) {
+          var chk = taskM[1] !== ' ';
+          liInner = '<span class="md-chk' + (chk ? ' checked' : '') + '">' + (chk ? '✓' : '') + '</span><span class="md-task-text' + (chk ? ' done' : '') + '">' + inlineMd(taskM[2]) + '</span>';
+        } else if (olm) {
+          ltype = 'ol'; liInner = inlineMd(olm[2]);
+        } else {
+          liInner = inlineMd(ulm[1]);
+        }
+        closeToList(lvl, ltype);
+        out.push('<li>' + liInner + '</li>');
+        continue;
+      }
       if (/^\|.+\|$/.test(ln.trim())) {
-        closeList();
+        closeAllLists();
         var trows = [];
         while (i < lines.length && /^\|.+\|$/.test(lines[i].trim())) { trows.push(lines[i]); i++; }
         i--;
@@ -1487,20 +1579,20 @@ func simpleUIHTML(model, provider string) string {
         }
         continue;
       }
-      if (ln.trim() === '') { closeList(); continue; }
+      if (ln.trim() === '') { closeAllLists(); continue; }
       // Standalone image line: ![alt](url) with nothing else on the line
       var img = /^\!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)\s*$/.exec(ln.trim());
       if (img) {
-        closeList();
+        closeAllLists();
         var alt = img[1] || '';
         var src = img[2];
         out.push('<div class="md-img-block"><a href="' + src + '" target="_blank" rel="noopener noreferrer"><span>🖼️</span> <span>' + inlineMd(alt || src) + '</span></a></div>');
         continue;
       }
-      closeList();
+      closeAllLists();
       out.push('<div class="md-p">' + inlineMd(ln) + '</div>');
     }
-    closeList();
+    closeAllLists();
     return out.join('');
   }
 

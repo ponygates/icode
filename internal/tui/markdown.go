@@ -33,7 +33,15 @@ func (t *TUI) renderMarkdown(content, prefix, cont string, width int) []string {
 		if inner < 8 {
 			inner = 8
 		}
-		out = append(out, prefix+t.paint("dim", "┌"+repeat("─", inner)+"┐"))
+		// Language tag rides the top border: ┌─ go ───…
+		top := "┌" + repeat("─", inner)
+		if codeLang != "" {
+			tag := " " + codeLang + " "
+			if len(tag)+2 < inner {
+				top = "┌─" + tag + repeat("─", inner-len(tag)-2)
+			}
+		}
+		out = append(out, prefix+t.paint("dim", top+"┐"))
 		// Syntax-highlight the block by language when the theme supports it;
 		// fall back to the plain cyan treatment otherwise. The output is
 		// post-processed so CJK width math never sees ANSI bytes.
@@ -103,12 +111,24 @@ func (t *TUI) renderMarkdown(content, prefix, cont string, width int) []string {
 			continue
 		}
 
-		// Headings: # .. ######
+		// Headings: # .. ###### — visually tiered so hierarchy survives a
+		// monochrome glance: h1 bold cyan + full rule, h2 yellow + short
+		// rule, h3+ plain bold (no rule).
 		if h := headingLevel(trim); h > 0 {
 			text := strings.TrimSpace(trim[h:])
-			styled := t.c("cyan") + "\x1b[1m" + text + "\x1b[0m"
-			out = append(out, t.wrapANSI(prefix, cont, styled, width)...)
-			out = append(out, prefix+t.paint("dim", repeat("─", width-runeWidthStr(prefix))))
+			var styled string
+			switch {
+			case h == 1:
+				styled = t.c("cyan") + "\x1b[1m" + text + "\x1b[0m"
+				out = append(out, t.wrapANSI(prefix, cont, styled, width)...)
+				out = append(out, prefix+t.paint("dim", repeat("─", width-runeWidthStr(prefix))))
+			case h == 2:
+				styled = t.c("yellow") + "\x1b[1m" + "▍" + text + "\x1b[0m"
+				out = append(out, t.wrapANSI(prefix, cont, styled, width)...)
+			default:
+				styled = "\x1b[1m" + text + "\x1b[0m"
+				out = append(out, t.wrapANSI(prefix, cont, styled, width)...)
+			}
 			lineIdx++
 			continue
 		}
@@ -129,9 +149,14 @@ func (t *TUI) renderMarkdown(content, prefix, cont string, width int) []string {
 			continue
 		}
 
-		// List items.
+		// List items. Two leading spaces (or a tab) mark a nested item —
+		// indent it under its parent instead of rendering flat.
 		if marker, rest, ok := listItemParts(trim); ok {
-			styled := t.c("yellow") + marker + "\x1b[0m " + t.renderInline(rest)
+			indent := ""
+			if strings.HasPrefix(ln, "  ") || strings.HasPrefix(ln, "\t") {
+				indent = "    "
+			}
+			styled := indent + t.c("yellow") + marker + "\x1b[0m " + t.renderInline(rest)
 			out = append(out, t.wrapANSI(prefix, cont, styled, width)...)
 			lineIdx++
 			continue
@@ -502,7 +527,9 @@ func renderTable(t *TUI, out *[]string, prefix, cont string, width int, rows []s
 				cell = parsed[ri][ci]
 			}
 			rowLine.WriteString(" ")
-			rowLine.WriteString(t.paint("dim", padEnd(cell, colW[ci])))
+			// Body data in the default foreground (not dim) — only the
+			// frame stays dim so numbers/text stay readable.
+			rowLine.WriteString(padEnd(cell, colW[ci]))
 			rowLine.WriteString(" " + t.paint("dim", "│"))
 		}
 		*out = append(*out, prefix+rowLine.String())
