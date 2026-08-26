@@ -198,7 +198,7 @@ func Execute(ctx context.Context, b *Backend, st *State, text string) Result {
 	case "/plugin":
 		return cmdPlugin(args)
 	case "/mesh":
-		return cmdMesh(args)
+		return cmdMesh(args, ctx)
 	case "/teams":
 		return cmdTeams()
 	case "/todo":
@@ -2336,7 +2336,7 @@ func formatInt(n int) string {
 }
 
 // cmdMesh manages cross-machine message peers (server/desktop surface).
-func cmdMesh(args []string) Result {
+func cmdMesh(args []string, ctx context.Context) Result {
 	if len(args) == 0 || args[0] == "list" {
 		peers, _ := mesh.LoadPeers()
 		if len(peers) == 0 {
@@ -2345,9 +2345,8 @@ func cmdMesh(args []string) Result {
 		}
 		var b strings.Builder
 		b.WriteString("已配置的远程机器:\n")
-		for _, p := range peers {
-			fmt.Fprintf(&b, "  %-12s %s\n", p.Name, p.URL)
-		}
+		b.WriteString(mesh.RenderPeerStatuses(mesh.PingAll(ctx)))
+		b.WriteString("\n发送: to 写 \"<名称>/<会话ID>\"；接收方需配置 [server] mesh_listen。")
 		return ok(b.String())
 	}
 	switch strings.ToLower(args[0]) {

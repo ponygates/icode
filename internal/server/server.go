@@ -164,6 +164,7 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 	// Mesh — cross-machine message intake (peer iCode instances POST here;
 	// auth via the shared ~/.icode/mesh.token in X-Mesh-Token).
 	mux.HandleFunc("/api/mesh/messages", s.handleMeshMessages)
+	mux.HandleFunc("/api/mesh/ping", s.handleMeshPing)
 
 	// Checkpoints — Reasonix-style rewind history
 	mux.HandleFunc("/api/checkpoints/", s.handleCheckpoints)
@@ -241,6 +242,7 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 	if ml := strings.TrimSpace(s.cfg.Server.MeshListen); ml != "" {
 		meshMux := http.NewServeMux()
 		meshMux.HandleFunc("/api/mesh/messages", s.handleMeshMessages)
+		meshMux.HandleFunc("/api/mesh/ping", s.handleMeshPing)
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {

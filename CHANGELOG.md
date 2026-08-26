@@ -1,5 +1,15 @@
 # 更新日志
 
+## v0.42.5 — Mesh 连通性可视化（三端）+ SimpleUI 会话搜索核实（2026-08-25）
+
+### 📡 Mesh 对端连通性探测
+- 新端点 `POST /api/mesh/ping`（X-Mesh-Token 门禁，主 mux 与 mesh 独立监听均注册）：回本机主机名与版本。
+- `/mesh list` 三端升级为实时探测：每条对端显示 ✅ 在线（版本/主机名）或 ❌ 离线（原因），3 秒超时。
+- 渲染逻辑收敛到 `mesh.RenderPeerStatuses` 共享函数，TUI 与 slashui 输出保证一致。
+
+### ✅ 核实关闭：SimpleUI 会话搜索
+- 会话选择器是 `<input list>` + `<datalist>` 原生组合——输入即按标题/ID 过滤，无需另做搜索框。
+
 ## v0.42.4 — 模式快捷键三端一致（2026-08-25）
 
 ### 🔁 Shift+Tab 模式循环统一
