@@ -1179,11 +1179,12 @@ const ChatPage: React.FC = () => {
       }
     }
     // Tab / Shift+Tab cycle the agent mode (Claude Code style): Tab moves to
-    // the next mode, Shift+Tab to the previous. The slash-menu completion
-    // above already claims Tab while a slash command is open.
+    // the next mode, Shift+Tab to the previous. Order matches the TUI's
+    // cycleMode exactly (plan → agent → yolo → auto). The slash-menu
+    // completion above already claims Tab while a slash command is open.
     if (e.key === 'Tab' && !e.altKey) {
       e.preventDefault();
-      const modes = ['plan', 'auto', 'ask', 'yolo'];
+      const modes = ['plan', 'agent', 'yolo', 'auto'];
       const idx = modes.indexOf(mode);
       const next = modes[(idx + (e.shiftKey ? -1 : 1) + modes.length) % modes.length];
       useAppStore.getState().setMode(next);

@@ -494,7 +494,7 @@ func (t *TUI) helpBox(W, bodyH int) []string {
 	type row struct{ k, d string }
 	rows := []row{
 		{"Enter", "发送消息"},
-		{"Shift+Tab", "切换模式 auto → plan → agent → yolo"},
+		{"Shift+Tab", "切换模式 plan → agent → yolo → auto（三端一致）"},
 		{"↑ / ↓", "历史记录上 / 下（Claude Code）"},
 		{"Ctrl+R", "反向搜索历史（isearch）"},
 		{"← / →", "光标左右移动"},

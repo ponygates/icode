@@ -1043,6 +1043,31 @@ func runSimpleUI() error {
 		return b.RemoveCustomModel(id)
 	})
 	w.Bind("setMode", func(m string) { b.SetMode(m) })
+	// Tab / Shift+Tab mode cycling — canonical order matches the TUI's
+	// cycleMode exactly (plan → agent → yolo → auto) so muscle memory
+	// transfers across all three surfaces.
+	w.Bind("cycleMode", func(dir string) {
+		if b.app == nil || b.app.Gate == nil {
+			return
+		}
+		modes := []permission.Mode{permission.ModePlan, permission.ModeAgent, permission.ModeYOLO, permission.ModeAuto}
+		cur := b.app.Gate.Mode()
+		idx := 0
+		for i, m := range modes {
+			if m == cur {
+				idx = i
+				break
+			}
+		}
+		step := 1
+		if dir == "-1" || dir == "prev" {
+			step = -1
+		}
+		next := modes[(idx+step+len(modes))%len(modes)]
+		b.app.Gate.SetMode(next)
+		b.pushStats()
+		b.sys("模式: " + string(next))
+	})
 	w.Bind("clear", func() { b.Clear() })
 	w.Bind("runCommand", func(text string) { b.RunCommand(text) })
 	w.Bind("stop", func() { b.Stop() })
@@ -1661,15 +1686,13 @@ func simpleUIHTML(model, provider string) string {
       return;
     }
     // Tab / Shift+Tab cycle the permission mode (Claude Code style): Tab
-    // moves forward, Shift+Tab backwards. Backend vocabulary is plan/agent/
-    // auto/yolo; "ask" from the desktop UI maps to agent on the gate.
+    // moves forward, Shift+Tab backwards. The Go bridge computes the next
+    // mode from the gate's authoritative state using the SAME canonical
+    // order as the TUI (plan → agent → yolo → auto), then pushStats()
+    // refreshes this status bar — no local drift possible.
     if (e.key === 'Tab' && !e.altKey) {
       e.preventDefault();
-      var MODES = ['plan', 'auto', 'agent', 'yolo'];
-      var i = MODES.indexOf(currentMode);
-      var next = MODES[(i < 0 ? 0 : i + (e.shiftKey ? -1 : 1) + MODES.length) % MODES.length];
-      currentMode = next;
-      if (window.setMode) window.setMode(next);
+      if (window.cycleMode) window.cycleMode(e.shiftKey ? '-1' : '1');
     }
   });
 

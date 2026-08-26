@@ -1,5 +1,14 @@
 # 更新日志
 
+## v0.42.4 — 模式快捷键三端一致（2026-08-25）
+
+### 🔁 Shift+Tab 模式循环统一
+- 规范循环序固定为 **plan → agent → yolo → auto**（Claude Code 风格），三端完全一致：
+  - **TUI**：参考实现（不变），帮助文案修正为实际循环序。
+  - **桌面**：修复循环序不一致（此前是 plan→auto→ask→yolo，含已废弃的 ask、缺 agent）。
+  - **SimpleUI**：从「前端本地算下一模式」改为调用后端 bridge `cycleMode`——以 gate 权威状态计算、设置并刷新状态条 + 系统提示，杜绝前端状态漂移。
+- 桌面底部模式 Pill 与 SimpleUI 状态条随切换即时更新。
+
 ## v0.42.3 — 三端同步批次：/tasks 进服务端、/agents 面板对齐（2026-08-25）
 
 ### 🔁 三端命令词汇表对齐（CLI ↔ Desktop ↔ SimpleUI）
