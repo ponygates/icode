@@ -86,7 +86,11 @@ func KillAllAgentTasks() {
 }
 
 func (m *agentBgManager) launch(runner SubAgentRunner, name, prompt string) (string, error) {
-	ctx, cancel := context.WithCancel(context.Background())
+	return m.launchCtx(context.Background(), runner, name, prompt)
+}
+
+func (m *agentBgManager) launchCtx(parent context.Context, runner SubAgentRunner, name, prompt string) (string, error) {
+	ctx, cancel := context.WithCancel(parent)
 
 	m.mu.Lock()
 	m.seq++
@@ -210,9 +214,33 @@ func launchBackgroundAgent(runner SubAgentRunner, name, prompt string) (string, 
 	return agentBGTasks.launch(runner, name, prompt)
 }
 
+// launchBackgroundAgentCtx is launchBackgroundAgent carrying a caller-supplied
+// context (spawn-depth tracking survives the detach).
+func launchBackgroundAgentCtx(ctx context.Context, runner SubAgentRunner, name, prompt string) (string, error) {
+	return agentBGTasks.launchCtx(ctx, runner, name, prompt)
+}
+
 // ListAgentTaskLines renders one status line per background sub-agent run.
 // Exported for the /tasks slash panel.
 func ListAgentTaskLines() []string { return agentBGTasks.list() }
+
+// RunningAgentTaskCount reports how many detached sub-agent runs are active.
+func RunningAgentTaskCount() int { return agentBGTasks.runningCount() }
+
+func (m *agentBgManager) runningCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, t := range m.tasks {
+		t.mu.Lock()
+		done := t.done
+		t.mu.Unlock()
+		if !done {
+			n++
+		}
+	}
+	return n
+}
 
 // funcAdapter turns a run function into a SubAgentRunner so background
 // launches can carry fork behaviour.

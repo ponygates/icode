@@ -1,5 +1,34 @@
 # 更新日志
 
+## v0.41.0 — 状态栏增强 + 思考滑块 + 参数级补全 + 语言体系闭环（2026-08-25）
+
+> UI 精致度对齐 Claude Code / opencode；语言指令全链路打通（界面 ↔ 模型回复/思考/注释）。
+
+### 📊 状态栏增强（CLI/TUI，Claude Code 风格）
+- 模式徽章 `[auto]/[plan]/[yolo]`（按 CC 配色）+ git 分支 `⎇ main`（后台懒刷新，detached 显示短 SHA）。
+- 上下文用量可视化 `▓▓▓░░░░░ 42%`：<60% 绿、<85% 黄、≥85% 红。
+- **正在做的工作提示**：流式执行时黄色高亮当前工具 `⚙ bash`，完成自动清除。
+- 后台任务计数 `⚡2 bg`（子代理 + shell 合并）。
+
+### 🎚 思考滑块（桌面，opencode 尺寸样式 + 黄色系）
+- 数字输入框 → 细轨道滑块（4px 轨道 / 14px 圆拇指 / 悬停放大），主色 #eab308。
+- 实时数值显示 + 4k/8k/16k/32k 快捷档位（选中态黄底黄框）。
+
+### ⌨ 斜杠补全向 Claude Code 看齐
+- **模糊匹配**：`/cnf` → `/config`、`/mod` → `/model`（前缀 > 连续子序列 > 跨字符，相对 gap 惩罚）；@文件补全同算法并按相关性排序。
+- **自定义命令进列表**：`.icode/commands/*.md` 与内置命令同面板展示（含 frontmatter 参数提示）。
+- **参数级补全**：`/model ` 空格后弹出模型列表；同样支持 /lang /theme /security /mode。
+- **最近使用优先**：常用命令自动置顶（TUI 内存 + 桌面 localStorage 双实现）。
+- 选中行尾 `(tab)` 提示。
+
+### 🌐 语言体系闭环（三端全链路）
+- 新增 `LanguageDirective()`：按 locale 注入「回复 + 思考过程 + 代码注释」语言要求进系统提示词。
+- 三级优先：`.icode/language` 文件 > ICODE.md 声明（`language: en`，前 40 行）> 全局设置。
+- TUI `/lang` 与桌面设置页切换均实时刷新引擎，无需重启；修复服务端 config PUT 绕过 EffectiveSystemPrompt 的老 bug。
+
+### 🤖 /agents 实时面板
+- 升级为完整视图：代理注册表（带 fork/memory/isolation 能力标注）+ 团队成员清单 + 后台运行任务。
+
 ## v0.40.0 — 后台子代理 + Fork 缓存继承 + Worktree 隔离 + 跨会话消息（对标 Claude Code 2.1.x）（2026-08-25）
 
 > 对标最新 Claude Code（v2.1.24x）功能代差：多代理后台化与缓存化委派。六项后端能力 + 桌面 MCP 测试 UI。

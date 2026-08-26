@@ -47,8 +47,8 @@ func TestClaudeStyleRender(t *testing.T) {
 	if !strings.Contains(out, "●") {
 		t.Fatalf("expected opencode-style model dot '●' in output:\n%s", out)
 	}
-	if !strings.Contains(out, "ctx") {
-		t.Fatalf("expected context %%-meter ('ctx') in status bar:\n%s", out)
+	if !strings.Contains(out, "▓") || !strings.Contains(out, "░") {
+		t.Fatalf("expected visual context bar (▓/░) in status bar:\n%s", out)
 	}
 	if !strings.Contains(out, "$0.0123") {
 		t.Fatalf("expected cost in status bar:\n%s", out)
@@ -65,8 +65,8 @@ func TestClaudeStyleRender(t *testing.T) {
 	if !strings.Contains(out, "deepseek-v4-flash") {
 		t.Fatalf("expected model in header/status output:\n%s", out)
 	}
-	if !strings.Contains(out, "11% ctx") {
-		t.Fatalf("expected context %%-meter ('11%% ctx') in status bar:\n%s", out)
+	if !strings.Contains(out, "11%") {
+		t.Fatalf("expected context %%-meter ('11%%') in status bar:\n%s", out)
 	}
 
 	// Case 2: streaming with no tokens yet — should show the sliding thinking bar.

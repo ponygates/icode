@@ -11,6 +11,9 @@ import (
 // never touch the real workspace.
 func newSnapshot(t *testing.T) *FileSnapshot {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("shadow-git integration test; skipped in -short mode")
+	}
 	root := t.TempDir()
 	fs, err := NewFileSnapshot(root)
 	if err != nil {

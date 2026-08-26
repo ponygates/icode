@@ -18,6 +18,27 @@ func WithSessionID(ctx context.Context, sessionID string) context.Context {
 	return context.WithValue(ctx, ctxSessionKey{}, sessionID)
 }
 
+// ctxDepthKey tracks sub-agent spawn nesting. Each task-tool dispatch bumps
+// the counter so runaway fork chains (agent spawning agents spawning…)
+// are capped — Claude Code defaults to 3 levels.
+type ctxDepthKey struct{}
+
+const MaxSpawnDepth = 3
+
+// WithSpawnDepth returns a child context carrying the given spawn depth.
+func WithSpawnDepth(ctx context.Context, depth int) context.Context {
+	return context.WithValue(ctx, ctxDepthKey{}, depth)
+}
+
+// SpawnDepthFromContext returns the current sub-agent nesting depth
+// (0 = dispatched from the main conversation).
+func SpawnDepthFromContext(ctx context.Context) int {
+	if v, ok := ctx.Value(ctxDepthKey{}).(int); ok {
+		return v
+	}
+	return 0
+}
+
 // SessionIDFromContext returns the session ID attached with WithSessionID,
 // or "" if the caller did not supply one (tests, out-of-band tool calls).
 func SessionIDFromContext(ctx context.Context) string {

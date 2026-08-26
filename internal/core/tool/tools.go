@@ -54,6 +54,9 @@ func NewRegistry() *Registry {
 	r.Register(&GitBranchTool{})
 	r.Register(&SearchReplaceTool{})
 	r.Register(NewWebSearchTool())
+	// Monitor: stream background-task output into the conversation live
+	// (Claude Code parity) so the model can tail logs and react early.
+	r.Register(&MonitorTool{})
 	// CodeGraph symbol search (Claude Code parity — definition lookup)
 	r.Register(NewCodeSearchTool())
 	r.Register(&TaskOutputTool{})

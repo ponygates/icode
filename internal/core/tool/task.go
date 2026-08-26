@@ -125,6 +125,18 @@ func (t *TaskTool) Execute(ctx context.Context, args string) (*types.ToolResult,
 		return t.runner.RunSubAgent(ctx, name, prompt)
 	}
 
+	// Nesting cap: a sub-agent dispatching another sub-agent increments the
+	// spawn depth; refuse chains deeper than MaxSpawnDepth so runaway
+	// recursion can't burn tokens (Claude Code default: 3 levels).
+	depth := SpawnDepthFromContext(ctx)
+	if depth >= MaxSpawnDepth {
+		return &types.ToolResult{
+			Success: false,
+			Error:   fmt.Sprintf("sub-agent nesting too deep (depth %d ≥ max %d); report your findings back to the parent instead", depth, MaxSpawnDepth),
+		}, nil
+	}
+	childCtx := WithSpawnDepth(ctx, depth+1)
+
 	brief := in.Prompt
 	if len(brief) > 120 {
 		brief = brief[:120] + "…"
@@ -133,7 +145,7 @@ func (t *TaskTool) Execute(ctx context.Context, args string) (*types.ToolResult,
 	// Background launch: hand off to the detached runner and return the
 	// handle immediately so the main loop keeps working.
 	if in.Background {
-		id, err := launchBackgroundAgent(funcAdapter(run), in.Name, in.Prompt)
+		id, err := launchBackgroundAgentCtx(childCtx, funcAdapter(run), in.Name, in.Prompt)
 		if err != nil {
 			return &types.ToolResult{Success: false, Error: "background launch failed: " + err.Error()}, nil
 		}
@@ -152,7 +164,7 @@ func (t *TaskTool) Execute(ctx context.Context, args string) (*types.ToolResult,
 	if progress := ProgressFromContext(ctx); progress != nil {
 		progress(fmt.Sprintf("🔍 子代理 %s 正在执行：%s\n", in.Name, brief))
 	}
-	result, totalTokens, err := run(ctx, in.Name, in.Prompt)
+	result, totalTokens, err := run(childCtx, in.Name, in.Prompt)
 	if err != nil {
 		return &types.ToolResult{
 			Success: false,

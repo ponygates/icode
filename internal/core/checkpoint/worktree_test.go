@@ -12,6 +12,9 @@ import (
 // initRepo creates a real git repo with one commit and returns its path.
 func initRepo(t *testing.T) string {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("real-git integration test; skipped in -short mode")
+	}
 	dir := t.TempDir()
 	run := func(args ...string) {
 		cmd := exec.Command("git", args...)

@@ -63,6 +63,22 @@ func (t *bgTask) snapshot() (output string, done bool, errMsg string, elapsed ti
 	return t.buf.String(), t.done, t.errMsg, time.Since(t.start)
 }
 
+// newSince returns output appended after the given byte offset plus the new
+// offset, for the monitor tool's incremental polling. Handles the buffer's
+// tail-trimming gracefully (a stale offset beyond the buffer just clamps).
+func (t *bgTask) newSince(pos int) (string, int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	data := t.buf.String()
+	if pos > len(data) {
+		pos = len(data)
+	}
+	if pos < 0 {
+		pos = 0
+	}
+	return data[pos:], len(data)
+}
+
 // bgTaskManager tracks all background tasks for the process lifetime.
 type bgTaskManager struct {
 	mu    sync.Mutex
@@ -84,6 +100,22 @@ func KillAllBgTasks() {
 // ListShellTaskLines renders one status line per background shell command.
 // Exported for the /tasks slash panel.
 func ListShellTaskLines() []string { return bgTasks.List() }
+
+// RunningShellTaskCount reports how many background shell processes are live.
+func RunningShellTaskCount() int {
+	bgTasks.mu.Lock()
+	defer bgTasks.mu.Unlock()
+	n := 0
+	for _, t := range bgTasks.tasks {
+		t.mu.Lock()
+		done := t.done
+		t.mu.Unlock()
+		if !done {
+			n++
+		}
+	}
+	return n
+}
 
 // SetCompleteHook installs a callback invoked when a background task finishes.
 func SetCompleteHook(fn func(id, errMsg string)) {
