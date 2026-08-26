@@ -339,7 +339,8 @@ const Markdown = React.memo(({ text, streaming }: { text: string; streaming?: bo
       continue;
     }
 
-    // Heading (h1-h6)
+    // Heading (h1-h6) — tiered visual hierarchy matching the TUI: h1 keeps
+    // the underline, h2 gains an accent side-bar, deeper levels stay plain.
     const h = /^(#{1,6})\s+(.*)$/.exec(line);
     if (h) {
       const lv = h[1].length;
@@ -349,8 +350,10 @@ const Markdown = React.memo(({ text, streaming }: { text: string; streaming?: bo
         <div key={key++} style={{
           fontSize: sizes[lv - 1], fontWeight: weights[lv - 1],
           margin: '10px 0 4px', color: 'var(--text-primary)',
-          borderBottom: lv <= 2 ? '1px solid var(--border-color)' : undefined,
-          paddingBottom: lv <= 2 ? 4 : 0,
+          borderBottom: lv === 1 ? '1px solid var(--border-color)' : undefined,
+          paddingBottom: lv === 1 ? 4 : 0,
+          borderLeft: lv === 2 ? '3px solid var(--accent)' : undefined,
+          paddingLeft: lv === 2 ? 8 : 0,
         }}>
           {renderInline(h[2], 'h' + key)}
         </div>,
@@ -358,74 +361,77 @@ const Markdown = React.memo(({ text, streaming }: { text: string; streaming?: bo
       i++; continue;
     }
 
-    // Task list item (- [ ] or - [x])
-    const task = /^[-*]\s+\[([ xX])\]\s+(.*)$/.exec(line);
-    if (task) {
-      const checked = task[1] !== ' ';
-      const items: { text: string; checked: boolean }[] = [];
+    // Lists — unified nested handling (Claude Code parity). A leading 2-space
+    // (or tab) indent marks a deeper level; tasks participate in nesting like
+    // any other bullet. Without this, indented sub-items fell through to the
+    // paragraph collector and rendered as plain text.
+    const isTask = /^[-*]\s+\[([ xX])\]\s+(.*)$/.exec(line);
+    const isUl = /^[-*+]\s+(.*)$/.exec(line);
+    const isOl = /^\d+[.)]\s+(.*)$/.exec(line);
+    if (isTask || isUl || isOl) {
+      const indentLevel = (s: string): number => {
+        const m = /^[ \t]*/.exec(s)![0];
+        let n = 0;
+        for (const ch of m) n += ch === '\t' ? 2 : 1;
+        return Math.floor(n / 2);
+      };
+      interface FlatItem { level: number; kind: 'ul' | 'ol'; node: React.ReactNode }
+      const flat: FlatItem[] = [];
       while (i < lines.length) {
-        const tm = /^[-*]\s+\[([ xX])\]\s+(.*)$/.exec(lines[i]);
-        if (!tm) break;
-        items.push({ text: tm[2], checked: tm[1] !== ' ' });
-        i++;
-      }
-      blocks.push(
-        <div key={key++} style={{ margin: '4px 0 4px 8px' }}>
-          {items.map((it, k) => (
-            <div key={k} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, padding: '1px 0' }}>
-              <span style={{
-                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                width: 16, height: 16, borderRadius: 4, flexShrink: 0, marginTop: 2,
-                border: it.checked ? '1px solid var(--success)' : '1px solid var(--border-color)',
-                background: it.checked ? 'var(--success)' : 'transparent',
-                color: it.checked ? '#fff' : 'transparent', fontSize: 10,
-              }}>
-                {it.checked ? '✓' : ''}
+        const ln = lines[i];
+        const tk = /^[-*]\s+\[([ xX])\]\s+(.*)$/.exec(ln);
+        const um = /^([-*+])\s+(.*)$/.exec(ln);
+        const om = /^(\d+)[.)]\s+(.*)$/.exec(ln);
+        if (!tk && !um && !om) break;
+        const lvl = indentLevel(ln);
+        if (tk) {
+          const checked = tk[1] !== ' ';
+          flat.push({
+            level: lvl, kind: 'ul',
+            node: (
+              <span style={{ display: 'inline-flex', alignItems: 'flex-start', gap: 8 }}>
+                <span style={{
+                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                  width: 15, height: 15, borderRadius: 4, flexShrink: 0, marginTop: 2,
+                  border: checked ? '1px solid var(--success)' : '1px solid var(--border-color)',
+                  background: checked ? 'var(--success)' : 'transparent',
+                  color: checked ? '#fff' : 'transparent', fontSize: 10,
+                }}>
+                  {checked ? '✓' : ''}
+                </span>
+                <span style={{
+                  textDecoration: checked ? 'line-through' : 'none',
+                  color: checked ? 'var(--text-muted)' : 'var(--text-secondary)',
+                }}>{renderInline(tk[2], 'tl' + key + i)}</span>
               </span>
-              <span style={{
-                textDecoration: it.checked ? 'line-through' : 'none',
-                color: it.checked ? 'var(--text-muted)' : 'var(--text-secondary)',
-              }}>
-                {renderInline(it.text, 't' + key + k)}
-              </span>
-            </div>
-          ))}
-        </div>,
-      );
-      continue;
-    }
-
-    // Unordered list
-    if (/^[-*+]\s+/.test(line) && !/^[-*]\s+\[/.test(line)) {
-      const items: string[] = [];
-      while (i < lines.length && /^[-*+]\s+/.test(lines[i]) && !/^[-*]\s+\[/.test(lines[i])) {
-        items.push(lines[i].replace(/^[-*+]\s+/, ''));
+            ),
+          });
+        } else if (um) {
+          flat.push({ level: lvl, kind: 'ul', node: renderInline(um[2], 'ul' + key + i) });
+        } else {
+          flat.push({ level: lvl, kind: 'ol', node: renderInline(om![2], 'ol' + key + i) });
+        }
         i++;
       }
-      blocks.push(
-        <ul key={key++} style={{ margin: '4px 0 4px 18px', padding: 0 }}>
-          {items.map((it, k) => (
-            <li key={k} style={{ marginBottom: 2 }}>{renderInline(it, 'ul' + key + k)}</li>
-          ))}
-        </ul>,
-      );
-      continue;
-    }
-
-    // Ordered list
-    if (/^\d+[.)]\s+/.test(line)) {
-      const items: string[] = [];
-      while (i < lines.length && /^\d+[.)]\s+/.test(lines[i])) {
-        items.push(lines[i].replace(/^\d+[.)]\s+/, ''));
-        i++;
-      }
-      blocks.push(
-        <ol key={key++} style={{ margin: '4px 0 4px 18px', padding: 0 }}>
-          {items.map((it, k) => (
-            <li key={k} style={{ marginBottom: 2 }}>{renderInline(it, 'ol' + key + k)}</li>
-          ))}
-        </ol>,
-      );
+      // Assemble the flat items into nested <ul>/<ol> trees.
+      const build = (start: number, level: number): [React.ReactNode, number] => {
+        const kind: 'ul' | 'ol' = flat[start].kind;
+        const children: React.ReactNode[] = [];
+        let j = start;
+        while (j < flat.length && flat[j].level >= level) {
+          if (flat[j].level > level) {
+            const [sub, nj] = build(j, flat[j].level);
+            children.push(sub); j = nj; continue;
+          }
+          children.push(<li key={'li' + key + j} style={{ marginBottom: 2 }}>{flat[j].node}</li>);
+          j++;
+        }
+        const el: React.ReactNode = kind === 'ol'
+          ? <ol key={'L' + key + start} style={{ margin: '2px 0 2px 18px', padding: 0 }}>{children}</ol>
+          : <ul key={'L' + key + start} style={{ margin: '2px 0 2px 18px', padding: 0, listStyleType: 'disc' }}>{children}</ul>;
+        return [el, j];
+      };
+      blocks.push(build(0, flat[0].level)[0]);
       continue;
     }
 
@@ -439,8 +445,10 @@ const Markdown = React.memo(({ text, streaming }: { text: string; streaming?: bo
       !/^(-{3,}|\*{3,}|_{3,})$/.test(lines[i].trim()) &&
       !/^>\s/.test(lines[i]) &&
       !/^(#{1,6})\s+/.test(lines[i]) &&
-      !/^[-*+]\s+/.test(lines[i]) &&
+      !/^[-*+]\s+/.test(lines[i]) &&        // top-level bullet…
+      !/^\s+[-*+]\s+/.test(lines[i]) &&     // …and nested bullets stay in lists
       !/^\d+[.)]\s+/.test(lines[i]) &&
+      !/^\s+\d+[.)]\s+/.test(lines[i]) &&
       !/^\|.+\|$/.test(lines[i].trim())
     ) {
       para.push(lines[i]); i++;
