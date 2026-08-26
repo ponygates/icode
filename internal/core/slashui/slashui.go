@@ -26,6 +26,7 @@ import (
 	"github.com/ponygates/icode/internal/core/slashcmd"
 	"github.com/ponygates/icode/internal/core/todo"
 	"github.com/ponygates/icode/internal/executil"
+	"github.com/ponygates/icode/internal/mesh"
 	"github.com/ponygates/icode/internal/scheduler"
 	"github.com/ponygates/icode/internal/types"
 	"github.com/ponygates/icode/pkg/modelupdate"
@@ -193,6 +194,8 @@ func Execute(ctx context.Context, b *Backend, st *State, text string) Result {
 		return cmdSkillEval(args)
 	case "/plugin":
 		return cmdPlugin(args)
+	case "/mesh":
+		return cmdMesh(args)
 	case "/teams":
 		return cmdTeams()
 	case "/todo":
@@ -2261,4 +2264,55 @@ func formatInt(n int) string {
 		}
 	}
 	return string(b)
+}
+
+// cmdMesh manages cross-machine message peers (server/desktop surface).
+func cmdMesh(args []string) Result {
+	if len(args) == 0 || args[0] == "list" {
+		peers, _ := mesh.LoadPeers()
+		if len(peers) == 0 {
+			tok, _ := mesh.EnsureToken()
+			return ok(fmt.Sprintf("没有已配置的远程机器。\n本机 mesh token:\n%s\n\n添加对端: /mesh add <名称> http://<ip>:<端口> <对端token>", tok))
+		}
+		var b strings.Builder
+		b.WriteString("已配置的远程机器:\n")
+		for _, p := range peers {
+			fmt.Fprintf(&b, "  %-12s %s\n", p.Name, p.URL)
+		}
+		return ok(b.String())
+	}
+	switch strings.ToLower(args[0]) {
+	case "add":
+		if len(args) < 3 {
+			return errf("用法: /mesh add <名称> http://<ip>:<端口> [对端token]")
+		}
+		tok := ""
+		if len(args) >= 4 {
+			tok = args[3]
+		}
+		if err := mesh.UpsertPeer(mesh.Peer{Name: args[1], URL: args[2], Token: tok}); err != nil {
+			return errf("保存失败: %v", err)
+		}
+		return ok("✓ 对端 " + args[1] + " 已保存。发消息 to 写 \"<名称>/<会话ID>\" 即跨机投递。")
+	case "remove":
+		if len(args) < 2 {
+			return errf("用法: /mesh remove <名称>")
+		}
+		found, err := mesh.RemovePeer(args[1])
+		if err != nil {
+			return errf("%v", err)
+		}
+		if !found {
+			return errf("对端 %q 不存在", args[1])
+		}
+		return ok("✓ 对端 " + args[1] + " 已移除。")
+	case "token":
+		tok, err := mesh.EnsureToken()
+		if err != nil {
+			return errf("%v", err)
+		}
+		return ok("本机 mesh token（交给对端配置）:\n" + tok)
+	default:
+		return errf("用法: /mesh [list | add <名> <url> [token] | remove <名> | token]")
+	}
 }

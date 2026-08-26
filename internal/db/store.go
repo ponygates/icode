@@ -850,3 +850,35 @@ func (s *Store) MarkAgentMessagesRead(sessionID string) error {
 		WHERE to_session = ? AND read_at = ''`, rf3339(time.Now()), sessionID)
 	return err
 }
+
+// PendingForwarded returns messages addressed to remote peers — targets of
+// the form "peer/sessionID" (containing a slash). Oldest first, capped.
+func (s *Store) PendingForwarded(limit int) ([]types.AgentMessage, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.Query(`SELECT id, from_session, to_session, body, created_at
+		FROM agent_messages WHERE to_session LIKE '%/%' ORDER BY id ASC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []types.AgentMessage
+	for rows.Next() {
+		var m types.AgentMessage
+		var created string
+		if err := rows.Scan(&m.ID, &m.FromID, &m.ToID, &m.Body, &created); err != nil {
+			return nil, err
+		}
+		m.CreatedAt, _ = time.Parse(time.RFC3339, created)
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// DeleteAgentMessage drops one message row — used by the mesh forwarder once
+// the peer ACKs delivery ("delivered = gone" keeps local SQLite clean).
+func (s *Store) DeleteAgentMessage(id int64) error {
+	_, err := s.db.Exec(`DELETE FROM agent_messages WHERE id = ?`, id)
+	return err
+}

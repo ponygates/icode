@@ -23,6 +23,8 @@ import (
 	"github.com/ponygates/icode/internal/core/session"
 	"github.com/ponygates/icode/internal/core/skills"
 	"github.com/ponygates/icode/internal/core/tool"
+	"github.com/ponygates/icode/internal/mesh"
+	"github.com/ponygates/icode/internal/xgo"
 	"github.com/ponygates/icode/internal/db"
 	"github.com/ponygates/icode/internal/llm/provider"
 	"github.com/ponygates/icode/internal/llm/provider/agnes"
@@ -55,6 +57,9 @@ type App struct {
 	Gate       *permission.Gate
 	Updater    *modelupdate.Service
 	LSPManager *lsp.Manager // nil when LSP disabled
+	// MeshCancel stops the cross-machine message forwarder (nil when the
+	// in-memory store is in use).
+	MeshCancel context.CancelFunc
 	// Knowledge is the local document knowledge base (RAG), nil when no
 	// knowledge.dirs are configured.
 	Knowledge *knowledge.Manager
@@ -97,6 +102,14 @@ func Bootstrap() (*App, error) {
 	} else {
 		app.DB = dbStore
 		app.SessStore = dbStore
+		// Mesh forwarder: push remote-bound messages ("<peer>/<session>")
+		// to peer machines every 3s. No peers configured → drain is a no-op.
+		if msgStore, ok := interface{}(dbStore).(mesh.MessageStore); ok {
+			fwd := &mesh.Forwarder{Store: msgStore}
+			ctx, cancel := context.WithCancel(context.Background())
+			xgo.GoSafe("mesh.forwarder", func() { fwd.Run(ctx, 3*time.Second) })
+			app.MeshCancel = cancel
+		}
 	}
 	log.Printf("[iCode] bootstrap: SQLite ready (t=%dms)", time.Since(t0).Milliseconds())
 
@@ -512,6 +525,9 @@ func hasExternalKeys(cfg *config.Config) bool {
 
 // Close shuts down all subsystems gracefully.
 func (app *App) Close() error {
+	if app.MeshCancel != nil {
+		app.MeshCancel()
+	}
 	tool.KillAllBgTasks()
 	tool.KillAllAgentTasks()
 	// Persist remembered preferences so they survive restarts. flushPrefSave

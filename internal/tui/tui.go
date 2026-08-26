@@ -12,6 +12,7 @@ import (
 	"github.com/ponygates/icode/internal/config"
 	"github.com/ponygates/icode/internal/core/permission"
 	"github.com/ponygates/icode/internal/core/searchreplace"
+	"github.com/ponygates/icode/internal/core/voice"
 	"golang.org/x/term"
 )
 
@@ -195,6 +196,8 @@ type TUI struct {
 	// curTool is the tool currently executing while streaming ("⚙ bash" in
 	// the status bar). Set by AddToolMessage, cleared by AppendToolResult.
 	curTool string
+	// voiceRec is the live CLI microphone capture (/voice toggle).
+	voiceRec *voice.Recorder
 	// gitBranch caches the workspace branch for the status bar; refreshed
 	// lazily (branchChecked) so no git exec happens per frame.
 	gitBranch   string

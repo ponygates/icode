@@ -1,5 +1,20 @@
 # 更新日志
 
+## v0.42.0 — 跨机器消息同步 + CLI 语音转入 + 屏幕识别（2026-08-25）
+
+### 🌍 跨机器消息同步（Mesh）
+- 会话互发不再限单机：`to` 写 `<对端名>/<会话ID>` 即跨机投递，每 3 秒自动转发，送达即清理本地行。
+- 配对模型：本机 `~/.icode/mesh.token`（首次自动生成）+ `~/.icode/peers.yaml` 对端清单；接收端点 `POST /api/mesh/messages` 以 `X-Mesh-Token` 校验。
+- `/mesh list|add|remove|token` 三端可用；入站消息来源标记为 `<机器名>@remote`。
+
+### 🎤 CLI 语音转入
+- TUI 新增 `/voice`：第一次开始录音（状态栏红点提示），第二次停止并经智谱 GLM-ASR 转写，文本自动填入输入框供编辑后发送。
+- 复用桌面端同一 ASR 通道与 zhipu Key；录音/转写全程异步不阻塞 UI。
+
+### 👁 屏幕识别
+- 新工具 `screen_read(question?)`：截图（vision 附带）+ **前台窗口标题与所属进程**上下文——补齐纯 screenshot 缺失的「用户在看什么」语义层。
+- 非 Windows 平台优雅降级为纯截图。
+
 ## v0.41.1 — Skill Evals 技能自测 + 插件打包分发（2026-08-25）
 
 ### 🧪 Skill Evals（四家对标产品均无的差异化功能）

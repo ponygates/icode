@@ -79,6 +79,7 @@ func NewRegistry() *Registry {
 	// Computer-use tools (Claude Code parity): screenshot + desktop mouse /
 	// keyboard control. High-risk surface → gated behind permission approval.
 	r.Register(&ScreenshotTool{})
+	r.Register(&ScreenReadTool{})
 	r.Register(&MouseMoveTool{})
 	r.Register(&MouseClickTool{})
 	r.Register(&MouseScrollTool{})

@@ -161,6 +161,10 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 	mux.HandleFunc("/api/permission/respond", s.handlePermissionRespond)
 	mux.HandleFunc("/api/permission/session-allow", s.handleSessionAllow)
 
+	// Mesh — cross-machine message intake (peer iCode instances POST here;
+	// auth via the shared ~/.icode/mesh.token in X-Mesh-Token).
+	mux.HandleFunc("/api/mesh/messages", s.handleMeshMessages)
+
 	// Checkpoints — Reasonix-style rewind history
 	mux.HandleFunc("/api/checkpoints/", s.handleCheckpoints)
 	mux.HandleFunc("/api/checkpoints/rewind", s.handleRewind)

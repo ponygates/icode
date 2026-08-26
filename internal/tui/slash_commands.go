@@ -23,7 +23,10 @@ import (
 	"github.com/ponygates/icode/internal/core/skills"
 	"github.com/ponygates/icode/internal/core/slashcmd"
 	"github.com/ponygates/icode/internal/core/tool"
+	"github.com/ponygates/icode/internal/core/voice"
 	"github.com/ponygates/icode/internal/executil"
+	"github.com/ponygates/icode/internal/mesh"
+	"github.com/ponygates/icode/internal/xgo"
 )
 
 // ── Slash commands ───────────────────────────────────────────────
@@ -419,6 +422,12 @@ func (t *TUI) handleSlash(text string) {
 
 	case "/plugin":
 		t.pluginCommand(args)
+
+	case "/mesh":
+		t.meshCommand(args)
+
+	case "/voice":
+		t.toggleVoiceRecording()
 
 	case "/teams":
 		var a strings.Builder
@@ -2369,4 +2378,116 @@ func (t *TUI) pluginCommand(args []string) {
 	default:
 		t.add(RoleError, "用法: /plugin [list | install <目录|.zip> [--force] | remove <名称>]")
 	}
+}
+
+// meshCommand manages cross-machine peers: list (default), add <name> <url>
+// [token], remove <name>, token (show local shared secret).
+func (t *TUI) meshCommand(args []string) {
+	if len(args) == 0 || args[0] == "list" {
+		peers, _ := mesh.LoadPeers()
+		if len(peers) == 0 {
+			tok, _ := mesh.EnsureToken()
+			t.add(RoleSystem, fmt.Sprintf("没有已配置的远程机器。\n\n本机 mesh token（复制到对端 /mesh add）:\n%s\n\n添加对端: /mesh add <名称> http://<ip>:<端口> <对端token>\n之后发消息给 \"<名称>/<会话ID>\" 即跨机投递。", tok))
+			return
+		}
+		var b strings.Builder
+		b.WriteString("已配置的远程机器:\n")
+		for _, p := range peers {
+			fmt.Fprintf(&b, "  %-12s %s\n", p.Name, p.URL)
+		}
+		b.WriteString("\n发送: 让模型调用 send_message，to 写 \"<名称>/<会话ID>\"；每 3 秒自动转发。")
+		t.add(RoleSystem, b.String())
+		return
+	}
+
+	switch strings.ToLower(args[0]) {
+	case "add":
+		if len(args) < 3 {
+			t.add(RoleError, "用法: /mesh add <名称> http://<ip>:<端口> [对端token]")
+			return
+		}
+		tok := ""
+		if len(args) >= 4 {
+			tok = args[3]
+		}
+		if err := mesh.UpsertPeer(mesh.Peer{Name: args[1], URL: args[2], Token: tok}); err != nil {
+			t.add(RoleError, "保存失败: "+err.Error())
+			return
+		}
+		t.add(RoleSystem, fmt.Sprintf("✓ 对端 %q 已保存。若其 token 留空，请在对方运行 /mesh token 获取后补填。", args[1]))
+
+	case "remove":
+		if len(args) < 2 {
+			t.add(RoleError, "用法: /mesh remove <名称>")
+			return
+		}
+		ok, err := mesh.RemovePeer(args[1])
+		if err != nil {
+			t.add(RoleError, err.Error())
+			return
+		}
+		if !ok {
+			t.add(RoleError, fmt.Sprintf("对端 %q 不存在", args[1]))
+			return
+		}
+		t.add(RoleSystem, fmt.Sprintf("✓ 对端 %q 已移除。", args[1]))
+
+	case "token":
+		tok, err := mesh.EnsureToken()
+		if err != nil {
+			t.add(RoleError, err.Error())
+			return
+		}
+		t.add(RoleSystem, "本机 mesh token（交给对端配置）:\n"+tok)
+
+	default:
+		t.add(RoleError, "用法: /mesh [list | add <名> <url> [token] | remove <名> | token]")
+	}
+}
+// toggleVoiceRecording starts/stops mic capture from the CLI. First /voice
+// begins recording (status bar shows the live indicator); a second /voice
+// stops, transcribes via Zhipu GLM-ASR in the background, and drops the
+// recognised text into the input buffer for editing before sending.
+func (t *TUI) toggleVoiceRecording() {
+	t.mu.Lock()
+	rec := t.voiceRec
+	if rec == nil {
+		rec = voice.NewRecorder()
+		t.voiceRec = rec
+	}
+	t.mu.Unlock()
+
+	if rec.Recording() {
+		audio, err := rec.Stop()
+		if err != nil {
+			t.add(RoleError, "停止录音失败: "+err.Error())
+			return
+		}
+		t.add(RoleSystem, fmt.Sprintf("⏹ 录音结束（%d KB），正在转写…", len(audio)/1024))
+		xgo.GoSafe("tui.voice.transcribe", func() {
+			cfg, err := config.Load()
+			if err != nil {
+				t.add(RoleError, "配置读取失败: "+err.Error())
+				return
+			}
+			zp := cfg.Providers["zhipu"]
+			text, terr := voice.TranscribeZhipu(context.Background(), zp.APIKey, audio, "icode-voice.wav")
+			if terr != nil {
+				t.add(RoleError, "语音识别失败: "+terr.Error())
+				return
+			}
+			t.mu.Lock()
+			t.inputBuf = strings.TrimRight(t.inputBuf, " ") + text + " "
+			t.cursor = len([]rune(t.inputBuf))
+			t.mu.Unlock()
+			t.add(RoleSystem, "🎤 已转写并填入输入框（可编辑后回车发送）:\n" + text)
+		})
+		return
+	}
+
+	if err := rec.Start(); err != nil {
+		t.add(RoleError, "无法开始录音: "+err.Error()+"（语音输入目前仅 Windows 支持，桌面端麦克风按钮不受限）")
+		return
+	}
+	t.statusNotice = t.paint("red", "● 录音中") + t.paint("dim", " — 再次输入 /voice 结束并转写")
 }
