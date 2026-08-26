@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/ponygates/icode/internal/core/plugins"
 	"gopkg.in/yaml.v3"
 )
 
@@ -258,5 +259,8 @@ func AgentDefaultDirs() []string {
 	if cwd, err := os.Getwd(); err == nil {
 		out = append(out, filepath.Join(cwd, ".icode", "agents"))
 	}
+	// Installed plugins contribute their own agent directories (later dirs
+	// override earlier ones).
+	out = append(out, plugins.SubDirs("agents")...)
 	return out
 }

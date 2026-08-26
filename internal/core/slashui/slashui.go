@@ -18,6 +18,7 @@ import (
 	"github.com/ponygates/icode/internal/core/conversation"
 	"github.com/ponygates/icode/internal/core/knowledge"
 	"github.com/ponygates/icode/internal/core/permission"
+	"github.com/ponygates/icode/internal/core/plugins"
 	"github.com/ponygates/icode/internal/core/prefmem"
 	"github.com/ponygates/icode/internal/core/searchreplace"
 	"github.com/ponygates/icode/internal/core/sessionum"
@@ -188,6 +189,10 @@ func Execute(ctx context.Context, b *Backend, st *State, text string) Result {
 		return cmdAgents()
 	case "/skills":
 		return cmdSkills()
+	case "/skill-eval":
+		return cmdSkillEval(args)
+	case "/plugin":
+		return cmdPlugin(args)
 	case "/teams":
 		return cmdTeams()
 	case "/todo":
@@ -327,6 +332,8 @@ func helpDefs() []helpItem {
 		{"/mcp", "管理 MCP 服务器"}, {"/memory", "查看记忆文件"},
 		{"/hooks", "查看/生成 hooks.yaml"}, {"/init", "创建 ICODE.md"},
 		{"/agents", "列出 agent"}, {"/skills", "列出已安装技能"},
+		{"/skill-eval [名称] [--scaffold]", "技能触发自测"},
+		{"/plugin [list|install|remove]", "插件管理"},
 		{"/teams", "列出团队"}, {"/todo", "查看任务"},
 		{"/tasks", "后台任务面板（子代理 + 命令）"},
 		{"/add-dir <dir>", "添加工作目录"}, {"/update", "刷新模型目录"},
@@ -1679,6 +1686,123 @@ func cmdSkills() Result {
 		}
 	}
 	return ok(b.String())
+}
+
+// cmdSkillEval runs trigger-accuracy evals (desktop/server surface of the
+// TUI /skill-eval command).
+func cmdSkillEval(args []string) Result {
+	reg := skills.Load(skills.DefaultDirs()...)
+	scaffold := false
+	name := ""
+	for _, a := range args {
+		if strings.EqualFold(a, "--scaffold") {
+			scaffold = true
+		} else {
+			name = strings.TrimSpace(a)
+		}
+	}
+	if name == "" {
+		reports := skills.RunAllEvals(reg)
+		if len(reports) == 0 {
+			return ok("没有技能携带 evals.yaml。用 /skill-eval <名称> --scaffold 生成触发测试模板。")
+		}
+		var b strings.Builder
+		b.WriteString("技能触发自测:\n")
+		total, passed := 0, 0
+		for _, rep := range reports {
+			fmt.Fprintf(&b, "  %-16s %d/%d 通过\n", rep.SkillName, rep.Passed, rep.Total)
+			total += rep.Total
+			passed += rep.Passed
+			for _, c := range rep.Cases {
+				if !c.Pass {
+					want := "漏触发"
+					if !c.WantFire {
+						want = "误触发"
+					}
+					fmt.Fprintf(&b, "      ✗ [%s] %q\n", want, c.Prompt)
+				}
+			}
+		}
+		pct := 100.0
+		if total > 0 {
+			pct = float64(passed) * 100 / float64(total)
+		}
+		fmt.Fprintf(&b, "\n总计: %d/%d (%.0f%%)", passed, total, pct)
+		return ok(b.String())
+	}
+
+	s, found := reg.Get(name)
+	if !found {
+		return errf("未找到技能 %q（/skills 查看列表）", name)
+	}
+	if scaffold {
+		if err := skills.ScaffoldEval(s); err != nil {
+			return errf("脚手架失败: %v", err)
+		}
+		return ok("已创建 " + s.EvalPath())
+	}
+	suite, exists := skills.LoadEval(s)
+	if !exists || len(suite.Cases) == 0 {
+		return ok(fmt.Sprintf("技能 %q 还没有 evals.yaml。/skill-eval %s --scaffold 生成模板。", name, name))
+	}
+	rep := skills.RunEval(s, suite)
+	var b strings.Builder
+	fmt.Fprintf(&b, "技能 %q: %d/%d 通过 (%.0f%%)\n", name, rep.Passed, rep.Total, rep.PassRate()*100)
+	for _, c := range rep.Cases {
+		mark := "✓"
+		if !c.Pass {
+			mark = "✗"
+		}
+		fmt.Fprintf(&b, "  %s %q\n", mark, c.Prompt)
+	}
+	return ok(b.String())
+}
+
+// cmdPlugin manages bundled plugins (list/install/remove).
+func cmdPlugin(args []string) Result {
+	if len(args) == 0 || args[0] == "list" {
+		list := plugins.List()
+		if len(list) == 0 {
+			return ok("没有已安装插件。安装：/plugin install <目录或.zip>")
+		}
+		var b strings.Builder
+		b.WriteString("已安装插件:\n")
+		for _, m := range list {
+			v := m.Version
+			if v == "" {
+				v = "-"
+			}
+			fmt.Fprintf(&b, "  %s  v%s  %s\n", m.Name, v, m.Description)
+		}
+		return ok(b.String())
+	}
+	switch strings.ToLower(args[0]) {
+	case "install":
+		if len(args) < 2 {
+			return errf("用法: /plugin install <目录|.zip> [--force]")
+		}
+		force := false
+		for _, a := range args[2:] {
+			if strings.EqualFold(a, "--force") {
+				force = true
+			}
+		}
+		m, err := plugins.Install(args[1], force)
+		if err != nil {
+			return errf("安装失败: %v", err)
+		}
+		return ok(fmt.Sprintf("✓ 插件 %q 已安装，其 skills/commands/agents 立即可用。", m.Name))
+	case "remove", "uninstall":
+		if len(args) < 2 {
+			return errf("用法: /plugin remove <名称>")
+		}
+		if err := plugins.Remove(args[1]); err != nil {
+			return errf("%v", err)
+		}
+		return ok("✓ 插件 " + args[1] + " 已卸载。")
+	default:
+		return errf("用法: /plugin [list | install <路径> | remove <名称>]")
+	}
 }
 
 func cmdTeams() Result {

@@ -18,6 +18,7 @@ import (
 	"github.com/ponygates/icode/internal/core/checkpoint"
 	projectcontext "github.com/ponygates/icode/internal/core/context"
 	"github.com/ponygates/icode/internal/core/permission"
+	"github.com/ponygates/icode/internal/core/plugins"
 	"github.com/ponygates/icode/internal/core/searchreplace"
 	"github.com/ponygates/icode/internal/core/skills"
 	"github.com/ponygates/icode/internal/core/slashcmd"
@@ -412,6 +413,12 @@ func (t *TUI) handleSlash(text string) {
 			}
 		}
 		t.add(RoleSystem, a.String())
+
+	case "/skill-eval":
+		t.skillEvalCommand(args)
+
+	case "/plugin":
+		t.pluginCommand(args)
 
 	case "/teams":
 		var a strings.Builder
@@ -2197,4 +2204,168 @@ func (t *TUI) agentsCommand() {
 		}
 	}
 	t.add(RoleSystem, b.String())
+}
+
+// skillEvalCommand runs trigger-accuracy evals: no args → every skill with
+// evals.yaml; "<name>" → one skill; "<name> --scaffold" → create a starter
+// suite from the skill's triggers.
+func (t *TUI) skillEvalCommand(args []string) {
+	reg := skills.Load(skills.DefaultDirs()...)
+	scaffold := false
+	var name string
+	for _, a := range args {
+		if strings.EqualFold(a, "--scaffold") {
+			scaffold = true
+		} else {
+			name = strings.TrimSpace(a)
+		}
+	}
+
+	if name == "" && scaffold {
+		t.add(RoleSystem, "用法: /skill-eval <技能名> --scaffold")
+		return
+	}
+
+	if name != "" {
+		s, ok := reg.Get(name)
+		if !ok {
+			t.add(RoleError, fmt.Sprintf("未找到技能 %q（/skills 查看列表）", name))
+			return
+		}
+		if scaffold {
+			if err := skills.ScaffoldEval(s); err != nil {
+				t.add(RoleError, "脚手架失败: "+err.Error())
+				return
+			}
+			t.add(RoleSystem, fmt.Sprintf("已创建 %s\n编辑用例后运行 /skill-eval %s 验证。", s.EvalPath(), name))
+			return
+		}
+		suite, exists := skills.LoadEval(s)
+		if !exists || len(suite.Cases) == 0 {
+			t.add(RoleSystem, fmt.Sprintf("技能 %q 还没有 evals.yaml。运行 /skill-eval %s --scaffold 生成模板。", name, name))
+			return
+		}
+		t.add(RoleSystem, renderEvalReport(skills.RunEval(s, suite)))
+		return
+	}
+
+	reports := skills.RunAllEvals(reg)
+	if len(reports) == 0 {
+		t.add(RoleSystem, "没有技能携带 evals.yaml。\n用 /skill-eval <名称> --scaffold 为技能生成触发测试模板。")
+		return
+	}
+	var b strings.Builder
+	b.WriteString("技能触发自测 (Skill Evals):\n\n")
+	totalCases, totalPass := 0, 0
+	for _, rep := range reports {
+		mark := t.paint("green", "✓")
+		if rep.PassRate() < 1 {
+			if rep.PassRate() >= 0.5 {
+				mark = t.paint("yellow", "!")
+			} else {
+				mark = t.paint("red", "✗")
+			}
+		}
+		fmt.Fprintf(&b, "  %s %-16s %d/%d 通过\n", mark, rep.SkillName, rep.Passed, rep.Total)
+		totalCases += rep.Total
+		totalPass += rep.Passed
+		for _, c := range rep.Cases {
+			if !c.Pass {
+				want := "漏触发" // wanted fire, didn't get it
+				if !c.WantFire {
+					want = "误触发" // didn't want fire, got it
+				}
+				fmt.Fprintf(&b, "      ✗ [%s] %q\n", want, c.Prompt)
+			}
+		}
+	}
+	pct := 100.0
+	if totalCases > 0 {
+		pct = float64(totalPass) * 100 / float64(totalCases)
+	}
+	fmt.Fprintf(&b, "\n总计: %d/%d (%.0f%%)\n失败用例旁标注了「应触发/误触发」，据此调整 SKILL.md 的 description 与 triggers 后重跑。", totalPass, totalCases, pct)
+	t.add(RoleSystem, b.String())
+}
+
+// renderEvalReport formats a single-skill eval run for the chat pane.
+func renderEvalReport(rep skills.EvalReport) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "技能 %q 触发自测: %d/%d 通过 (%.0f%%)\n\n", rep.SkillName, rep.Passed, rep.Total, rep.PassRate()*100)
+	for _, c := range rep.Cases {
+		mark := "✓"
+		if !c.Pass {
+			mark = "✗"
+		}
+		want := "应触发"
+		if !c.WantFire {
+			want = "不触发"
+		}
+		got := ""
+		if !c.Pass {
+			if c.GotFire && !c.WantFire {
+				got = " （实际：误触发）"
+			} else if !c.GotFire && c.WantFire {
+				got = " （实际：未触发）"
+			}
+		}
+		fmt.Fprintf(&b, "  %s [%s] %q%s\n", mark, want, c.Prompt, got)
+	}
+	return b.String()
+}
+// pluginCommand manages bundled plugins: list (default), install <dir|.zip>
+// [--force], remove <name>.
+func (t *TUI) pluginCommand(args []string) {
+	if len(args) == 0 || args[0] == "list" {
+		list := plugins.List()
+		if len(list) == 0 {
+			t.add(RoleSystem, "没有已安装插件。安装：/plugin install <目录或.zip>\n插件可捆绑 skills/ commands/ agents/ teams/，一次安装全部生效。")
+			return
+		}
+		var b strings.Builder
+		b.WriteString("已安装插件:\n")
+		for _, m := range list {
+			v := m.Version
+			if v == "" {
+				v = "-"
+			}
+			fmt.Fprintf(&b, "  %s  v%s  %s\n", m.Name, v, m.Description)
+		}
+		b.WriteString("\n卸载：/plugin remove <名称>")
+		t.add(RoleSystem, b.String())
+		return
+	}
+
+	switch strings.ToLower(args[0]) {
+	case "install":
+		if len(args) < 2 {
+			t.add(RoleError, "用法: /plugin install <目录|zip> [--force]")
+			return
+		}
+		force := false
+		for _, a := range args[2:] {
+			if strings.EqualFold(a, "--force") {
+				force = true
+			}
+		}
+		m, err := plugins.Install(args[1], force)
+		if err != nil {
+			t.add(RoleError, "安装失败: "+err.Error())
+			return
+		}
+		t.add(RoleSystem, fmt.Sprintf("✓ 插件 %q 已安装。其 skills/commands/agents 立即可用（新会话加载完整清单）。", m.Name))
+
+	case "remove", "uninstall":
+		if len(args) < 2 {
+			t.add(RoleError, "用法: /plugin remove <名称>")
+			return
+		}
+		if err := plugins.Remove(args[1]); err != nil {
+			t.add(RoleError, err.Error())
+			return
+		}
+		t.add(RoleSystem, fmt.Sprintf("✓ 插件 %q 已卸载。", args[1]))
+
+	default:
+		t.add(RoleError, "用法: /plugin [list | install <目录|.zip> [--force] | remove <名称>]")
+	}
 }

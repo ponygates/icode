@@ -30,6 +30,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/ponygates/icode/internal/core/plugins"
 	"gopkg.in/yaml.v3"
 )
 
@@ -429,7 +430,8 @@ func Import(src string) error {
 func DefaultDirs() []string {
 	var out []string
 	// Order matters: later dirs override earlier ones, so interop dirs come
-	// first and iCode's own dirs win on name conflicts.
+	// first and iCode's own dirs win on name conflicts. Installed plugins
+	// sort last so a plugin can shadow built-in skill names deliberately.
 	if home, err := os.UserHomeDir(); err == nil {
 		out = append(out,
 			filepath.Join(home, ".workbuddy", "skills"), // WorkBuddy user-level skills
@@ -444,5 +446,8 @@ func DefaultDirs() []string {
 			filepath.Join(cwd, ".icode", "skills"),
 		)
 	}
+	// Installed plugins last: plugin skills join the search space and may
+	// override same-named user/built-in entries.
+	out = append(out, plugins.SubDirs("skills")...)
 	return out
 }

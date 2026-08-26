@@ -1,5 +1,17 @@
 # 更新日志
 
+## v0.41.1 — Skill Evals 技能自测 + 插件打包分发（2026-08-25）
+
+### 🧪 Skill Evals（四家对标产品均无的差异化功能）
+- 技能可携带 `evals.yaml` 触发测试用例（正例/误触发例），离线零 token 回归验证。
+- `/skill-eval` 跑全部带用例技能，按 ✓/!/✗ 分级展示通过率；失败用例标注「漏触发/误触发」。
+- `/skill-eval <名称> --scaffold` 从技能自身 triggers 生成模板（含一个反例），永不覆盖已有文件。
+
+### 📦 插件打包（Claude Code plugin parity）
+- 新格式 `plugin.yaml` 清单 + `skills/ commands/ agents/ teams/` 子目录捆绑。
+- `/plugin install <目录|.zip>`（zip 防路径穿越）、`/plugin list`、`/plugin remove <名>`；三端可用。
+- 安装即生效：插件子目录自动加入 skills/commands/agents 加载搜索路径（后置优先，可同名覆写）。
+
 ## v0.41.0 — 状态栏增强 + 思考滑块 + 参数级补全 + 语言体系闭环（2026-08-25）
 
 > UI 精致度对齐 Claude Code / opencode；语言指令全链路打通（界面 ↔ 模型回复/思考/注释）。

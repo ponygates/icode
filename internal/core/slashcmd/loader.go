@@ -37,6 +37,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ponygates/icode/internal/core/plugins"
+
 	executil "github.com/ponygates/icode/internal/executil"
 	"gopkg.in/yaml.v3"
 )
@@ -304,5 +306,8 @@ func DefaultDirs() []string {
 	if cwd, err := os.Getwd(); err == nil {
 		out = append(out, filepath.Join(cwd, ".icode", "commands"))
 	}
+	// Installed plugins contribute their own command directories (later dirs
+	// override earlier ones, so plugins can shadow user commands).
+	out = append(out, plugins.SubDirs("commands")...)
 	return out
 }
