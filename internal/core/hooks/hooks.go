@@ -54,6 +54,13 @@ const (
 	// PreCompact fires right before a conversation is compacted, so external
 	// scripts can snapshot state or log the handoff.
 	PreCompact Event = "PreCompact"
+	// SessionStart fires on the very first user message of a new session.
+	SessionStart Event = "SessionStart"
+	// PermissionRequest fires when a tool call needs user confirmation.
+	PermissionRequest Event = "PermissionRequest"
+	// SubagentStart / SubagentStop bracket a sub-agent run (task tool).
+	SubagentStart Event = "SubagentStart"
+	SubagentStop  Event = "SubagentStop"
 )
 
 // Rule is a single hook definition: a tool-name matcher plus a shell command.

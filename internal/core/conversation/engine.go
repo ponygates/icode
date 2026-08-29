@@ -517,6 +517,17 @@ func (e *Engine) GetToolRules() map[string]string {
 // that runs in an isolated Optimizer context — the main conversation never
 // sees the intermediate tool results, only the final answer.
 func (e *Engine) RunSubAgent(ctx context.Context, name, prompt string) (string, int, error) {
+	// SubagentStart / SubagentStop lifecycle hooks (Claude Code parity).
+	if hr := e.getHooksRunner(); hr != nil {
+		sid := tool.SessionIDFromContext(ctx)
+		fireSub := func(ev hooks.Event) {
+			if hr.HasHooks(ev) {
+				hr.Fire(ctx, ev, hooks.Input{SessionID: sid, ToolName: name, Prompt: truncateStr(prompt, 200)})
+			}
+		}
+		fireSub(hooks.SubagentStart)
+		defer fireSub(hooks.SubagentStop)
+	}
 	e.mu.Lock()
 	runner := e.getAgentRunner()
 	reg := e.agentRegistry
@@ -867,6 +878,11 @@ func (e *Engine) executeTool(
 		}
 		reqID := e.genPermID()
 		req := &types.PermissionReq{RequestID: reqID, Tool: tc.Name, Prompt: res.Prompt, Strikes: strikes, Threshold: threshold}
+		// PermissionRequest lifecycle hook — external scripts can watch
+		// every confirmation prompt (Claude Code parity).
+		if hr := e.getHooksRunner(); hr.HasHooks(hooks.PermissionRequest) {
+			hr.Fire(ctx, hooks.PermissionRequest, hooks.Input{SessionID: sessionID, ToolName: tc.Name, Prompt: res.Prompt})
+		}
 		out <- types.StreamEvent{Type: types.EventPermission, Permission: req}
 		ch := make(chan permission.Decision, 1)
 		e.permMu.Lock()
@@ -1619,6 +1635,14 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 	// A fresh user turn signals intent — clear any computer-use runaway
 	// streak so the model gets a clean slate of desktop interactions.
 	e.resetCUStreak(sessionID)
+
+	// SessionStart lifecycle hook — fires on the very first user message of
+	// a session (empty transcript) so external scripts can initialize state.
+	if len(sess.Messages) == 0 {
+		if hr := e.getHooksRunner(); hr.HasHooks(hooks.SessionStart) {
+			hr.Fire(context.Background(), hooks.SessionStart, hooks.Input{SessionID: sessionID})
+		}
+	}
 
 	// Stash-and-continue audit: if the user pivots to a (different) task while
 	// in-progress work exists in this session, snapshot a checkpoint + refresh

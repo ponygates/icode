@@ -1,5 +1,15 @@
 # 更新日志
 
+## v0.47.1 — hook 事件补全至 10 种（Claude Code parity）（2026-08-29）
+
+> 对标体检 P2 之一：hook 生命周期事件从 4 种补到 10 种，覆盖会话/权限/子代理生命周期，外部脚本可自动化联动更多环节。
+
+- **新增 6 种事件**：`SessionStart`（新会话首条消息）、`PermissionRequest`（工具调用需确认时）、`SubagentStart` / `SubagentStop`（子代理运行前后）、`Notification` / `PreCompact`（v0.46.6 已加）。
+- **触发点**：`Send` 新会话 → SessionStart；权限请求发送处 → PermissionRequest（带 tool/prompt）；`RunSubAgent` → SubagentStart/Stop（带 agent 名 + 提示词）。
+- **单测**：6 个新事件注册/分发 + 载荷字段 + Notification 规则实际执行验证。
+- 事件全集（10）：PreToolUse / PostToolUse / UserPromptSubmit / Stop / Notification / PreCompact / SessionStart / PermissionRequest / SubagentStart / SubagentStop。
+- 验证：hooks/conversation 编译/vet/测试绿；全量测试绿；四份二进制重编 PE 正确。
+
 ## v0.47.0 — auto 模式分类器智能审查（Claude Code parity）（2026-08-29）
 
 > 对标体检 P1：auto 模式从「规则化（读自动/写询问）」升级为「便宜模型智能审查」——安全操作自动放行，只打断用户处理真正有风险的操作。
