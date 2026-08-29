@@ -1,7 +1,9 @@
 package permission
 
 import (
+	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -164,6 +166,42 @@ func TestAutoModeConnectToolsAsk(t *testing.T) {
 	if res := g.Check("s1", Action{Tool: "grep", Path: "."}); res.Decision != DecisionAllow {
 		t.Errorf("Auto mode grep → %s, want allow", res.Decision)
 	}
+}
+
+// TestAutoModeClassifierOverride verifies the auto-mode classifier
+// (Claude Code parity): a Write-tier call the classifier judges safe is
+// auto-approved instead of prompting; a risky one still asks.
+func TestAutoModeClassifierOverride(t *testing.T) {
+	g := NewGate(ModeAuto)
+	calls := 0
+	g.SetClassifier(fakeClassifier(func(tool, input string) (bool, string, error) {
+		calls++
+		if strings.Contains(input, "passwd") {
+			return false, "写入系统敏感文件，风险高", nil
+		}
+		return true, "安全", nil
+	}))
+
+	// Safe write → allow via classifier.
+	if res := g.Check("s1", Action{Tool: "edit", Path: "a.txt", Arguments: `{"path":"a.txt","content":"hi"}`}); res.Decision != DecisionAllow {
+		t.Errorf("classifier-safe write → %s, want allow (%s)", res.Decision, res.Reason)
+	}
+	// Risky write → still ask, reason surfaced.
+	if res := g.Check("s1", Action{Tool: "edit", Path: "/etc/passwd", Arguments: `{"path":"/etc/passwd"}`}); res.Decision != DecisionAsk {
+		t.Errorf("classifier-risky write → %s, want ask", res.Decision)
+	} else if !strings.Contains(res.Reason, "风险") {
+		t.Errorf("risky reason not surfaced: %q", res.Reason)
+	}
+	if calls != 2 {
+		t.Errorf("classifier called %d times, want 2", calls)
+	}
+}
+
+// fakeClassifier adapts a func to the Classifier interface.
+type fakeClassifier func(tool, input string) (bool, string, error)
+
+func (f fakeClassifier) Classify(_ context.Context, tool, input string) (bool, string, error) {
+	return f(tool, input)
 }
 
 // After a user approves a Connect-tier destination once, Auto mode remembers

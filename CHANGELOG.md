@@ -1,5 +1,15 @@
 # 更新日志
 
+## v0.47.0 — auto 模式分类器智能审查（Claude Code parity）（2026-08-29）
+
+> 对标体检 P1：auto 模式从「规则化（读自动/写询问）」升级为「便宜模型智能审查」——安全操作自动放行，只打断用户处理真正有风险的操作。
+
+- **`permission.Classifier` 接口**：`Classify(ctx, tool, input) (allow, reason, err)`；`Gate.SetClassifier` 注入；`Check` 在规则流判 `Ask` 时（auto 模式）调分类器——allow → 自动批准（理由透出），deny → 保持询问（风险理由透出），**分类器出错 → 安全回退询问**（fail-safe）。
+- **`llmClassifier`**（conversation/classifier.go）：用 `provider/model` 指定便宜模型（`Chat` 非流式 + 严格 JSON 输出 `{"allow":…,"reason":…}`，容忍代码围栏），参数截断 800 字。
+- **配置**：`config.yaml` → `permission.classifier_model: "deepseek/deepseek-chat"`（空 = 关闭，保持原规则化 auto）。`app.go` 组装时 `SetClassifierModel`。
+- **单测**：分类器安全写→allow、风险写→ask（理由透出）、调用次数断言。
+- 验证：permission/conversation/config/app 编译/vet/测试绿；全量测试绿；四份二进制重编 PE 正确。
+
 ## v0.46.6 — 深度看齐：Notification/PreCompact hooks + /loop 循环任务（2026-08-29）
 
 > 深度对标体检：hook 事件种类（4 vs Claude Code 31）、/loop 循环任务为剩余差距，本轮补上高价值项。

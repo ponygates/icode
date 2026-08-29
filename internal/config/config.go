@@ -228,6 +228,13 @@ type PermissionCfg struct {
 	// overrides every other path (mode defaults, tool rules, session allows)
 	// so destructive patterns can be hard-blocked regardless of exceptions.
 	Rules []PermRule `yaml:"rules" json:"rules"`
+
+	// ClassifierModel enables the auto-mode classifier (Claude Code parity):
+	// a cheap model (format "provider/model", e.g. "deepseek/deepseek-chat")
+	// that evaluates Write/Execute/Connect tool calls in auto mode and
+	// auto-approves the safe ones, so the user is only interrupted for
+	// genuinely risky operations. Empty = rule-based auto (mutating ops ask).
+	ClassifierModel string `yaml:"classifier_model" json:"classifier_model"`
 }
 
 // PermRule is one parameter-level permission rule (pattern + outcome).

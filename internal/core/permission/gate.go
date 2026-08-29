@@ -21,6 +21,7 @@
 package permission
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -131,6 +132,12 @@ type Gate struct {
 	// "allow" → always allow, "deny" → always deny, "" or "ask" → use normal flow.
 	// Saved to config.yaml and survives restarts.
 	ToolRules map[string]string // toolName → "allow" | "deny" | "ask"
+
+	// classifier, when set, evaluates Write/Execute/Connect calls in auto
+	// mode (Claude Code auto-mode classifier parity): a cheap model judges
+	// whether the call is safe to auto-approve, sparing the user most
+	// prompts. nil = rule-based auto (mutating ops ask).
+	classifier Classifier
 
 	// connectDomains is the Connect-tier silent whitelist (本书 ch.22 静默白名单):
 	// hosts the user has explicitly approved at least once. In Auto mode a
@@ -559,6 +566,22 @@ type CheckResult struct {
 // applies the strike-counter escalation: consecutive ask/deny decisions count
 // up (an allow resets them), and reaching the threshold forces the session
 // into manual mode (every later action must be confirmed by the user).
+// Classifier evaluates whether a tool call is safe to auto-approve in Auto
+// mode (Claude Code's auto-mode classifier parity). Implemented by the engine
+// with a cheap model; nil disables classification (rule-based fallback).
+type Classifier interface {
+	// Classify returns allow=true when the tool call is judged safe. reason
+	// explains the verdict for the user-facing decision.
+	Classify(ctx context.Context, toolName, toolInput string) (allow bool, reason string, err error)
+}
+
+// SetClassifier attaches the auto-mode classifier (see Classifier).
+func (g *Gate) SetClassifier(c Classifier) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.classifier = c
+}
+
 func (g *Gate) Check(sessionID string, action Action) CheckResult {
 	// A session already forced into manual mode: require confirmation for
 	// everything, regardless of mode. Escalated stays false here so the UI
@@ -586,6 +609,28 @@ func (g *Gate) Check(sessionID string, action Action) CheckResult {
 	}
 
 	result := g.check(sessionID, action)
+	// Auto-mode classifier (Claude Code parity): when the rule-based flow
+	// would ask the user, consult the cheap classifier model; if it judges
+	// the call safe, auto-approve instead — far less interruption. Runs
+	// outside the gate lock (classifier does a network call).
+	if result.Decision == DecisionAsk && g.mode == ModeAuto && g.classifier != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		allow, reason, cerr := g.classifier.Classify(ctx, action.Tool, action.Arguments)
+		cancel()
+		if cerr == nil && allow {
+			reason = strings.TrimSpace(reason)
+			if reason == "" {
+				reason = "分类器判定安全"
+			}
+			result = CheckResult{Decision: DecisionAllow, Reason: "Auto classifier: " + reason, Prompt: result.Prompt}
+		} else if cerr == nil && !allow {
+			// Classifier says risky — surface its reason, still ask.
+			if r := strings.TrimSpace(reason); r != "" {
+				result.Reason = "Auto classifier 提示风险: " + r
+			}
+		}
+		// On classifier error we stay with the original ask (fail safe).
+	}
 	g.recordStrike(sessionID, &result)
 	return result
 }

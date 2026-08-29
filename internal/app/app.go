@@ -157,6 +157,9 @@ func Bootstrap() (*App, error) {
 
 	// 5. Initialize conversation engine (with permission gate wired in)
 	app.Engine = conversation.NewEngine(app.Reg, app.SessStore, app.Gate)
+	// Auto-mode classifier (Claude Code parity): a cheap model judges
+	// Write/Execute/Connect calls in auto mode so safe ones auto-approve.
+	app.Engine.SetClassifierModel(cfg.Permission.ClassifierModel)
 	// Cross-session messaging: wire SQLite into send_message / inbox /
 	// list_agents so sessions can address each other (SendMessage parity).
 	if msgStore, ok := interface{}(dbStore).(conversation.MessageStore); ok {
