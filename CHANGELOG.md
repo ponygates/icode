@@ -1,5 +1,16 @@
 # 更新日志
 
+## v0.47.2 — Browser 工具（headless Edge/Chrome，ZCode Browser Use parity）（2026-08-29）
+
+> 对标体检 P2：动态网页读取——fetch（HTTP）拿不到 JS 渲染内容，browser 工具用无头浏览器渲染后提取正文/截图。零新依赖（复用系统已装 Edge/Chrome）。
+
+- **`browser` 工具**（tool/browser.go）：
+  - `dump <url>` —— headless `--dump-dom` 渲染后提取正文文本（复用 `htmlToText`，上限 6000 字），适用于 JS 动态页面/登录后页面。
+  - `screenshot <url> [path]` —— headless 整页截图保存 PNG（1280×800，默认临时目录）。
+  - `findBrowser` 跨平台定位 Edge/Chrome/Chromium（Win 优先 Edge，必装）；临时 profile 隔离并发；45s 超时；非零退出仍保留 stdout DOM。
+- **权限**：`browser` 归 **Connect tier**（与 fetch 同级，网络读不静默放行）。
+- 验证：tool/permission 编译/vet/测试绿；全量测试绿；四份二进制重编 PE 正确。
+
 ## v0.47.1 — hook 事件补全至 10 种（Claude Code parity）（2026-08-29）
 
 > 对标体检 P2 之一：hook 生命周期事件从 4 种补到 10 种，覆盖会话/权限/子代理生命周期，外部脚本可自动化联动更多环节。

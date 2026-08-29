@@ -851,6 +851,7 @@ func AccessLevelOf(toolName string) AccessLevel {
 	// don't mutate local state, they exfiltrate a URL/keyword to a remote
 	// service, so they get their own tier above Read.
 	case "fetch", "web_search", "web_fetch", "search_web",
+		"browser", // headless browser opens a remote URL — same tier as fetch
 		"image_gen", "video_gen", "mcp_call":
 		return AccessConnect
 

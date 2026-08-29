@@ -48,6 +48,7 @@ func NewRegistry() *Registry {
 	r.Register(&GlobTool{})
 	r.Register(&LSTool{})
 	r.Register(&FetchTool{})
+	r.Register(&BrowserTool{})
 	r.Register(&AskUserTool{})
 	r.Register(&GitDiffTool{})
 	r.Register(&GitCommitTool{})
