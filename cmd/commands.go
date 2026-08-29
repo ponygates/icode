@@ -1942,6 +1942,15 @@ func (c *chatCallback) OnSetAskUser(fn func(question string, options []string) (
 	c.app.Engine.AskUser = tool.AskUserFunc(fn)
 }
 
+// OnSetAskUserForm implements tui.Callback — wires the multi-question wizard
+// asker into the engine (opencode AskQuestion parity).
+func (c *chatCallback) OnSetAskUserForm(fn func(questions []tool.FormQuestion) ([]tool.FormAnswer, error)) {
+	if c.app == nil || c.app.Engine == nil {
+		return
+	}
+	c.app.Engine.AskUserForm = tool.AskUserFormFunc(fn)
+}
+
 // OnSetMode implements tui.Callback — switches the permission gate so the
 // TUI's displayed mode and the enforced mode can never drift apart.
 func (c *chatCallback) OnSetMode(mode string) string {

@@ -1,5 +1,17 @@
 # 更新日志
 
+## v0.47.3 — ask_user_form 多问题 wizard（opencode AskQuestion parity）（2026-08-29）
+
+> 对标体检 P2 收官：一次交互问最多 8 个问题，每个问题支持单选 / 多选 / 自由文本——opencode AskQuestion wizard 对齐。
+
+- **工具 `ask_user_form`**（tool/form.go）：`questions` 数组（≤8），每项 `question + options + multi_select + text`；返回结构化答案 JSON；无注入环境优雅降级。
+- **引擎**：`Engine.AskUserForm` + `WithAskUserForm`/`AskUserFormFromContext` ctx 注入（与单问题 asker 并存，互不干扰）。
+- **TUI wizard**：`askForm` 状态机——**1-9 选当前题**（单选立即下一题；多选切换 ✓ 打勾）、**Enter 确认多选/推进**、**Tab 下一题**、**Esc 取消**；`drawAskFormOverlay` 居中表单（问题进度 2/8 + 选项 + 快捷键提示）。
+- **接线**：`Callback.OnSetAskUserForm` → `chatCallback` 设 `engine.AskUserForm`；`testCallback` 同步；`Run()` 注册。
+- **单测**：降级 / 注入选择传递（单选+多选 JSON 断言）/ 超 8 题截断。
+- 验证：tool/tui 编译/vet/测试绿；全量测试绿；四份二进制重编 PE 正确。
+- **对标体检 P0+P1+P2 全部收官**（AskUserQuestion/redo/RRULE/Remote Control/Skill 市场/Notification+PreCompact hooks//loop/分类器/Browser/hook 10 种/wizard）。
+
 ## v0.47.2 — Browser 工具（headless Edge/Chrome，ZCode Browser Use parity）（2026-08-29）
 
 > 对标体检 P2：动态网页读取——fetch（HTTP）拿不到 JS 渲染内容，browser 工具用无头浏览器渲染后提取正文/截图。零新依赖（复用系统已装 Edge/Chrome）。

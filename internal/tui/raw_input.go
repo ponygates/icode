@@ -256,6 +256,27 @@ func (t *TUI) dismissWelcome() bool {
 // handleKey processes a single input rune in raw mode.
 // Returns false to signal the loop should exit.
 func (t *TUI) handleKey(r rune) bool {
+	// Interactive form wizard (opencode AskQuestion parity): digits pick the
+	// current question's option, Enter confirms multi-select/advances, Tab
+	// jumps to the next question, Esc cancels the whole form.
+	if t.askFormActive() {
+		switch {
+		case r >= '1' && r <= '9':
+			t.formPick(int(r - '1'))
+		case r == '\r' || r == '\n':
+			t.formConfirm()
+		case r == 0x09: // Tab — next question
+			t.formAdvance()
+		case r == 0x1b: // Esc — cancel
+			t.mu.Lock()
+			fs := t.askForm
+			t.mu.Unlock()
+			if fs != nil {
+				t.resolveAskForm(fs.Answers)
+			}
+		}
+		return true
+	}
 	// Interactive ask mode (Claude Code AskUserQuestion parity): while the
 	// engine's ask_user_question tool waits, digits 1-9 pick an option,
 	// Enter picks the first, Esc cancels. Everything else is swallowed so it

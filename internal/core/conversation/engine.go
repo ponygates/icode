@@ -48,6 +48,9 @@ type Engine struct {
 	// simpleui / desktop HTTP) degrades the tool to an error instead of
 	// hanging.
 	AskUser tool.AskUserFunc
+	// AskUserForm is the multi-question wizard asker (opencode AskQuestion
+	// parity). Injected by the TUI; nil degrades ask_user_form gracefully.
+	AskUserForm tool.AskUserFormFunc
 
 	mu         sync.Mutex
 	optimizers map[string]*tokenopt.Optimizer
@@ -812,6 +815,10 @@ func (e *Engine) executeTool(
 	// AskUserTool degrades gracefully instead of hanging.
 	if e.AskUser != nil {
 		ctx = tool.WithAskUser(ctx, e.AskUser)
+	}
+	// Multi-question wizard asker (opencode AskQuestion parity).
+	if e.AskUserForm != nil {
+		ctx = tool.WithAskUserForm(ctx, e.AskUserForm)
 	}
 
 	// Doom loop detection: if the same tool+args appears 3+ consecutive

@@ -290,6 +290,13 @@ func (t *TUI) render() {
 		t.scrollOffset = 0
 		sbActive = false
 		heads = nil
+	} else if t.askFormActive() {
+		// Multi-question wizard (opencode AskQuestion parity): render the
+		// whole form (progress + current question + options) centered.
+		conv = t.drawAskFormOverlay(contentW, bodyH)
+		t.scrollOffset = 0
+		sbActive = false
+		heads = nil
 	} else if t.diffBoxOpen {
 		conv = t.diffBoxOverlay(contentW, bodyH)
 		t.scrollOffset = 0
@@ -621,6 +628,66 @@ func (t *TUI) drawAskOverlay(W, H int) []string {
 		inner = append(inner, fmt.Sprintf("   %d. %s", i+1, opt))
 	}
 	inner = append(inner, "", t.paint("dim", "   1-9 选择 · Enter 选第一项 · Esc 取消"))
+
+	// Horizontal centering.
+	lines := make([]string, 0, len(inner)+2)
+	for _, ln := range inner {
+		pad := (W - visibleWidth(ln)) / 2
+		if pad < 0 {
+			pad = 0
+		}
+		lines = append(lines, strings.Repeat(" ", pad)+ln)
+	}
+	// Vertical centering within the body height.
+	top := (H - len(lines)) / 2
+	if top < 0 {
+		top = 0
+	}
+	padded := make([]string, 0, top+len(lines))
+	for i := 0; i < top; i++ {
+		padded = append(padded, "")
+	}
+	return append(padded, lines...)
+}
+
+// drawAskFormOverlay renders the multi-question wizard (opencode AskQuestion
+// parity): progress line + current question + options (multi-select shows ✓
+// picks) + key hints, centered in the body area.
+func (t *TUI) drawAskFormOverlay(W, H int) []string {
+	t.mu.Lock()
+	fs := t.askForm
+	t.mu.Unlock()
+	if fs == nil || fs.Idx >= len(fs.Questions) {
+		return nil
+	}
+	q := fs.Questions[fs.Idx]
+	total := len(fs.Questions)
+	inner := []string{
+		t.paint("yellow", " 🤔 "+fmt.Sprintf("问题 %d/%d", fs.Idx+1, total)) + q.Question,
+		"",
+	}
+	if q.Text {
+		inner = append(inner, t.paint("dim", "   请输入回答（Enter 确认 · Tab 跳过）"))
+	} else {
+		for i, opt := range q.Options {
+			mark := " "
+			if q.Multi && i < len(fs.Picked) && fs.Picked[i] {
+				mark = "✓"
+			}
+			prefix := fmt.Sprintf(" %s %d.", mark, i+1)
+			if q.Multi {
+				inner = append(inner, prefix+" "+opt)
+			} else {
+				inner = append(inner, "    "+fmt.Sprintf("%d.", i+1)+" "+opt)
+			}
+		}
+		inner = append(inner, "")
+		if q.Multi {
+			inner = append(inner, t.paint("dim", "   1-9 切换选择 · Enter 确认本题 · Tab 下一题 · Esc 取消"))
+		} else {
+			inner = append(inner, t.paint("dim", "   1-9 选择 · Tab 下一题 · Esc 取消"))
+		}
+	}
 
 	// Horizontal centering.
 	lines := make([]string, 0, len(inner)+2)

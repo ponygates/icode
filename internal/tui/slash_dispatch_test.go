@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/ponygates/icode/internal/config"
+	"github.com/ponygates/icode/internal/core/tool"
 	"github.com/ponygates/icode/internal/types"
 )
 
@@ -358,6 +359,7 @@ func (c *testCallback) OnUpdateModels() string                                 {
 func (c *testCallback) OnSetMode(mode string) string                           { return "" }
 func (c *testCallback) OnRenameSession(title string) string                    { return "" }
 func (c *testCallback) OnSetAskUser(fn func(string, []string) (int, error))     {}
+func (c *testCallback) OnSetAskUserForm(fn func([]tool.FormQuestion) ([]tool.FormAnswer, error)) {}
 func (c *testCallback) OnAddCustomModel(provider, modelID, name string) string { return "" }
 func (c *testCallback) OnRemoveCustomModel(id string) string                   { return "" }
 func (c *testCallback) LSPQuery(sub string, args []string) string              { return "" }

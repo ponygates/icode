@@ -12,6 +12,7 @@ import (
 	"github.com/ponygates/icode/internal/config"
 	"github.com/ponygates/icode/internal/core/permission"
 	"github.com/ponygates/icode/internal/core/searchreplace"
+	"github.com/ponygates/icode/internal/core/tool"
 	"github.com/ponygates/icode/internal/core/voice"
 	"github.com/ponygates/icode/internal/types"
 	"golang.org/x/term"
@@ -114,6 +115,10 @@ type Callback interface {
 	// ask_user_question tool fires, so the TUI can render options and read
 	// the user's choice.
 	OnSetAskUser(fn func(question string, options []string) (int, error))
+	// OnSetAskUserForm registers the multi-question wizard asker (opencode
+	// AskQuestion parity): the engine calls fn when ask_user_form fires, so
+	// the TUI can render the form and collect all answers.
+	OnSetAskUserForm(fn func(questions []tool.FormQuestion) ([]tool.FormAnswer, error))
 	// OnAddCustomModel persists and live-registers a user-defined model
 	// (/models add <provider> <model_id> [name]). Returns a status line, or an
 	// error message prefixed with "ERROR" on failure.
@@ -276,6 +281,10 @@ type TUI struct {
 	// (Claude Code AskUserQuestion parity): set while the ask_user_question
 	// tool waits; main loop routes 1-9/Enter/Esc into it; render draws it.
 	askPending *askState
+	// askForm is the in-flight multi-question wizard (opencode AskQuestion
+	// parity): set while ask_user_form waits; main loop routes digits/
+	// Enter/Tab/Esc into it; render draws the form overlay.
+	askForm *askFormState
 
 	// Pasted-block folding (Claude Code parity): large clipboard/bracketed
 	// pastes collapse to a "[粘贴 N 行 #k]" placeholder in the input box so a
@@ -557,6 +566,7 @@ func (t *TUI) Run() error {
 	// tests never inject the asker into a shared engine.
 	if t.callback != nil {
 		t.callback.OnSetAskUser(t.askUserInteractive)
+		t.callback.OnSetAskUserForm(t.askUserFormInteractive)
 	}
 
 	// Arm input-history persistence and restore previous prompts so ↑ recalls
