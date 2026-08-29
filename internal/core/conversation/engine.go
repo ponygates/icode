@@ -1945,12 +1945,25 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 					if hr := e.getHooksRunner(); hr.HasHooks(hooks.Stop) {
 						hr.Fire(context.Background(), hooks.Stop, hooks.Input{SessionID: sessionID})
 					}
+					// Notification hook — completion signal for external
+					// scripts (Claude Code parity).
+					if hr := e.getHooksRunner(); hr.HasHooks(hooks.Notification) {
+						hr.Fire(context.Background(), hooks.Notification, hooks.Input{
+							SessionID: sessionID, ToolOutput: "completed",
+						})
+					}
 					out <- types.StreamEvent{
 						Type: types.EventDone,
 						Meta: types.StreamMeta{Model: modelInfo.ID},
 					}
 					return
 				case types.EventError:
+					// Notification hook — failure signal.
+					if hr := e.getHooksRunner(); hr.HasHooks(hooks.Notification) {
+						hr.Fire(context.Background(), hooks.Notification, hooks.Input{
+							SessionID: sessionID, ToolOutput: "error: " + event.Content,
+						})
+					}
 					out <- event
 					return
 				}

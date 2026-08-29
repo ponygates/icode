@@ -167,6 +167,8 @@ func Execute(ctx context.Context, b *Backend, st *State, text string) Result {
 		return cmdKnowledge(b, args)
 	case "/idle":
 		return cmdIdle(b, args)
+	case "/loop":
+		return cmdLoop(b, args)
 	case "/export":
 		return cmdExport(b, st, args)
 	case "/share":
@@ -1238,6 +1240,66 @@ func cmdIdle(b *Backend, args []string) Result {
 		return errf("创建闲时任务失败: %v", err)
 	}
 	return ok(fmt.Sprintf("✓ 已创建闲时任务「%s」（ID: %s）\n将在闲时窗口（低峰时段）自动执行，完成后通知你。", t.Name, t.ID))
+}
+
+// cmdLoop creates a recurring loop task (/loop), 对标 Claude Code 的 /loop：
+// 每 <间隔>（支持秒级，如 30s / 5m / 2h）自动执行一次任务，直到手动停掉。
+func cmdLoop(b *Backend, args []string) Result {
+	if b == nil || b.Scheduler == nil {
+		return errf("调度器不可用（需持久化后端）。")
+	}
+	if len(args) < 3 {
+		return errf("用法: /loop <间隔> <名称> <任务描述>（如 /loop 30s 舆情监控 每半分钟抓一次页面并总结变化；间隔支持 30s/5m/2h）")
+	}
+	interval := args[0]
+	name := args[1]
+	prompt := strings.Join(args[2:], " ")
+	var sched string
+	// Normalize an interval like "30s" into a scheduler schedule: seconds →
+	// RRULE (second-level precision, WorkBuddy parity), minutes/hours/days →
+	// the native every: form.
+	iv := strings.ToLower(strings.TrimSpace(interval))
+	if n, unit, ok := splitDuration(iv); ok {
+		switch unit {
+		case "s":
+			sched = fmt.Sprintf("rrule:FREQ=SECONDLY;INTERVAL=%d", n)
+		case "m":
+			sched = fmt.Sprintf("every:%dm", n)
+		case "h":
+			sched = fmt.Sprintf("every:%dh", n)
+		case "d":
+			sched = fmt.Sprintf("every:%dd", n)
+		}
+	}
+	if sched == "" {
+		return errf("无法解析间隔 %q（用 30s/5m/2h/1d）", interval)
+	}
+	t, err := b.Scheduler.Create(name, prompt, sched)
+	if err != nil {
+		return errf("创建循环任务失败: %v", err)
+	}
+	return ok(fmt.Sprintf("✓ 已创建循环任务「%s」（ID: %s，每 %s）\n将按间隔自动执行，可在任务面板管理/停用。", t.Name, t.ID, interval))
+}
+
+// splitDuration parses "<n><unit>" (e.g. "30s", "5m", "2h", "1d").
+func splitDuration(s string) (int, string, bool) {
+	i := 0
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	if i == 0 || i >= len(s) {
+		return 0, "", false
+	}
+	n := 0
+	for _, c := range s[:i] {
+		n = n*10 + int(c-'0')
+	}
+	u := s[i:]
+	switch u {
+	case "s", "m", "h", "d":
+		return n, u, true
+	}
+	return 0, "", false
 }
 
 // cmdKnowledge searches the local document knowledge base (/kb), 对标

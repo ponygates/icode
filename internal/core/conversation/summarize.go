@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ponygates/icode/internal/core/hooks"
 	"github.com/ponygates/icode/internal/types"
 )
 
@@ -45,6 +46,12 @@ func (e *Engine) SummarizeConversation(ctx context.Context, sessionID, instructi
 	}
 	if turns < 4 {
 		return "", nil // nothing meaningful to summarize yet
+	}
+
+	// PreCompact lifecycle hook — external scripts can snapshot/audit state
+	// before the conversation history is distilled away (Claude Code parity).
+	if hr := e.getHooksRunner(); hr.HasHooks(hooks.PreCompact) {
+		hr.Fire(ctx, hooks.PreCompact, hooks.Input{SessionID: sessionID})
 	}
 
 	// Summarize the older turns; keep the last 4 intact as recent context.

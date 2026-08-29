@@ -47,6 +47,13 @@ const (
 	PostToolUse      Event = "PostToolUse"
 	UserPromptSubmit Event = "UserPromptSubmit"
 	Stop             Event = "Stop"
+	// Notification fires when a turn completes or fails — a lightweight
+	// completion/error signal for external scripts (Claude Code parity).
+	// Input.ToolOutput carries "completed" / "error: …".
+	Notification Event = "Notification"
+	// PreCompact fires right before a conversation is compacted, so external
+	// scripts can snapshot state or log the handoff.
+	PreCompact Event = "PreCompact"
 )
 
 // Rule is a single hook definition: a tool-name matcher plus a shell command.

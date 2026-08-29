@@ -1,5 +1,15 @@
 # 更新日志
 
+## v0.46.6 — 深度看齐：Notification/PreCompact hooks + /loop 循环任务（2026-08-29）
+
+> 深度对标体检：hook 事件种类（4 vs Claude Code 31）、/loop 循环任务为剩余差距，本轮补上高价值项。
+
+- **Notification hook**（Claude Code parity）：回复完成/失败时触发外部脚本——完成 Fire `ToolOutput: "completed"`，失败 Fire `"error: …"`；用于通知/日志/自动化联动。
+- **PreCompact hook**：会话压缩（SummarizeConversation）前触发，外部脚本可快照/审计上下文交接。
+- **`/loop <间隔> <名称> <任务>`**（Claude Code parity）：创建循环自动化任务——`30s` 映射秒级 RRULE（WorkBuddy 精度）、`5m/2h/1d` 映射 `every:`；任务面板可管理。
+- **体检确认已覆盖**：AGENTS.md/CLAUDE.md/ICODE.md 多级加载 ✓；auto 模式为规则化（读自动/写询问）——Claude Code 的分类器智能审查列为 P1。
+- 验证：hooks/conversation/slashui 编译/vet/测试绿；全量测试绿；四份二进制重编 PE 正确。
+
 ## v0.46.5 — 输入光标间隔修复 + CLI 表格竖线对齐（2026-08-29）
 
 > 用户反馈：编辑输入时光标与左边已输入内容有一点间隔；markdown 表格竖线没对齐。
