@@ -86,11 +86,40 @@ func wrapText(text string, width int) []string {
 }
 
 func runeWidthStr(s string) int {
+	rs := []rune(s)
 	w := 0
-	for _, r := range s {
-		w += runeWidth(r)
+	for i, r := range rs {
+		var next rune
+		if i+1 < len(rs) {
+			next = rs[i+1]
+		}
+		w += runeWidthWithNext(r, next)
 	}
 	return w
+}
+
+// runeWidthWithNext is runeWidth plus the variation-selector context: a
+// symbol followed by U+FE0F (e.g. ⚠️) renders as emoji (2 cells) on modern
+// terminals even though the bare symbol is ambiguous-width. A handful of
+// symbols are *default* emoji (✅❌❓❗…) and render 2 cells with no VS16 at
+// all — counting them as 1 was the classic cause of misaligned table pipes.
+func runeWidthWithNext(r, next rune) int {
+	switch r {
+	case 0x2705, 0x274C, 0x274E, 0x2753, 0x2754, 0x2755, 0x2757:
+		return 2 // default-emoji symbols: ✅ ❌ ❎ ❓ ❔ ❕ ❗
+	}
+	if next == 0xFE0F && isSymbolicRune(r) {
+		return 2 // symbol + VS16 → emoji presentation
+	}
+	return runeWidth(r)
+}
+
+// isSymbolicRune reports whether r lives in a symbol block where U+FE0F flips
+// it to emoji presentation (2 cells).
+func isSymbolicRune(r rune) bool {
+	return (r >= 0x2300 && r <= 0x23FF) || // ⏰ ⌚ ⏳ arrows etc.
+		(r >= 0x2600 && r <= 0x27BF) || // ☀ ⚠ ✈ ❤ … misc symbols & dingbats
+		(r >= 0x2B00 && r <= 0x2BFF) // ⭐ ⬤ arrows
 }
 
 func runeWidth(r rune) int {

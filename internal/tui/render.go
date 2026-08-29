@@ -1490,12 +1490,15 @@ func (t *TUI) drawInputBox(W, H int, inputBuf string, cursor int, streaming bool
 	}
 
 	// Multi-line prompt: "❯ <line0>", continuation lines indented to align
-	// with the first content column. The box shows at most inputVisibleLines
-	// rows (tail-anchored scroll, cursor line always visible).
+	// with the first content column. indent == promptW + 1: the first content
+	// column is 3 (❯ at 1, space at 2, content at 3) and continuation lines
+	// use 2 spaces so their content starts at the same column. (promptW + 2
+	// used to misalign the cursor by one column — caret floated with a gap
+	// before the typed text.)
 	maxVis := t.inputVisibleLines(H)
 	prompt := t.paint(modeColor(t.mode), "❯")
 	promptW := visibleWidth(prompt)
-	indent := promptW + 2 // prompt + space == continuation indent
+	indent := promptW + 1 // continuation indent == first content column - 1
 	innerW := W - indent - 1
 	if innerW < 4 {
 		innerW = 4
