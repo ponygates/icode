@@ -1,5 +1,301 @@
 # 更新日志
 
+## v0.46.3 — 增量渲染根治闪跳 + 光标间距 + 思考指示移底 + 状态栏丰富（2026-08-29）
+
+> 用户反馈二轮：闪跳仍存在、光标与内容有间距、思考进度要放下面、任务栏信息更丰富。
+
+- **增量重绘（根治闪跳）**：`render()` 写屏改为**行级 diff**——缓存上一帧每行内容（`lastFrame`），只重写内容变化的行；尺寸变化时才全屏清。消息流/滚动/新 token 追加不再整屏重绘，Win10 conhost 上闪烁彻底消除（配合上轮 33ms 节流）。
+- **光标间距修复**：`[MULTI]` 模式首行有额外前缀（黄色标记 + 提示），光标列此前按 `indent + vw` 计算导致光标与已输入内容之间出现空隙——现在首行光标列计入前缀可见宽度。
+- **思考指示移到底部**：`⠋ 生成中… 32% 12s` 从消息区移到**输入框上方**（context bar 之上，紧贴输入区），消息区不再每帧重绘该行。
+- **状态栏更丰富**：新增 **📎 会话标题**（自动命名/`/rename` 后显示，截 18 字）+ **🧩N 技能数**（懒缓存一次性计算）；叠加原有模式/模型/分支/PR/Token/上下文%/缓存/费用/Todo/⚙工具/⚡后台/⏱计时。
+- 验证：tui 编译/vet/测试绿（含 box_align）；全量测试绿；四份二进制重编 PE 正确。
+
+## v0.46.2 — CLI 渲染闪跳修复 + 思考指示 opencode 化（2026-08-29）
+
+> 用户反馈：CLI 输入后回复时局部界面闪跳；思考滑块样式/位置要对齐 opencode；输入框与任务栏提示综合 Claude Code + opencode。
+
+- **闪跳修复**：渲染节流 `12ms → 33ms`（≈30fps）——此前约 83fps 全屏逐行重绘，在 Win10 conhost/Windows Terminal 上高频 ANSI 刷新造成可见闪烁；30fps 对文本流足够平滑且明显降低终端压力。
+- **思考指示 opencode 化**：去掉 14 格的 `[▓▓▓▓▓▓░░░░░░]` 宽滑块（每帧变化的滑块正是闪跳视觉重灾区），改为 opencode 默认 dots spinner 风格——`deepseek-v4-flash ⠋ 生成中… 32% 12s`（spinner + 状态文本 + 上下文% + 秒数，全部 dim/紧凑）。修正 thinkingBox 与 thinkingBar 的 `status.gen` 重复显示。
+- **输入框/状态栏综合确认**：`❯` 提示符（Claude Code）+ 上下文条（CC）+ 状态行全要素（模式/模型/分支/PR/Token/上下文%/缓存/费用/Todo/当前工具⚙/后台⚡/计时⏱，opencode InlineToolRow 风格）+ 空输入提示 + `[MULTI]` 标记——两家元素已齐备，本轮微调确认。
+- 验证：tui 编译/vet/测试绿（含 box_align）；全量测试绿；四份二进制重编 PE 正确。
+
+## v0.46.1 — Skill 技能市场（WorkBuddy SkillHub parity）（2026-08-29）
+
+> 对标体检 P2-②：内置技能市场浏览 + 一键安装。市场机制（`ListCatalog`/`Install`）此前已存在，本轮补上**命令入口**并扩充业务类技能。
+
+- **`/skills market`**：列出内置技能市场（离线可用），✓ 标记已安装项。
+- **`/skills install <名称>`**：一键安装到 `~/.icode/skills/`（复制 SKILL.md + 触发词），下次注册即生效。
+- **市场扩充至 10 个技能**：
+  - 开发：code-review / commit-msg / doc-gen / explain-code / unit-tests（原有）。
+  - 保险展业（新增，贴合代理人场景）：**insurance-pitch**（话术，融入乔吉拉德/梅第/柴田和子/原一平方法论）、**policy-review**（保单检视）、**client-needs**（ABCD 定联 + 家庭责任需求分析）、**objection-handling**（异议四步法）、**claims-assist**（理赔协助）——均含合规红线与免责声明，不虚构费率/收益。
+- 三端生效（slashui 共享命令集：CLI / simpleui / 桌面）。
+- 验证：skills + slashui 编译/vet/测试绿；全量测试绿；四份二进制重编 PE 正确。
+
+## v0.46.0 — Remote Control 远程控制（ZCode Claw / WorkBuddy Claw parity）（2026-08-29）
+
+> 对标体检 P2-①：手机浏览器远程查看状态、发指令、管理自动化任务——代码仍在本机运行，安全 token 门控。
+
+- **配置**：`config.yaml` 新增 `server.remote_listen`（如 `"0.0.0.0:8789"`）。配置后开独立监听器，主 API 仍 loopback-only。
+- **端点**（Bearer apiToken 门控，与桌面端同一 token）：
+  - `GET /api/remote/status` —— 版本 / 模式 / 安全级 / 后台代理+命令数 / 自动化任务 / 知识库片段 / 服务器时间。
+  - `POST /api/remote/prompt` —— 发 prompt（自动建 remote 会话），非流式聚合回复（180s 超时）。
+  - `GET|POST /api/remote/tasks` —— 列出 / 创建自动化任务（含 RRULE 秒级调度）。
+- **手机页面**：`/remote?token=xxx` —— 状态卡片（5s 轮询）+ 指令输入（Enter 发送）+ 自动化任务列表/创建，移动端友好深色 UI。
+- 启动日志打印访问地址：`http://<ip>:8789/remote?token=<token>`。
+- 验证：server 包编译/vet/测试绿；全量测试绿；四份二进制重编 PE 正确。
+
+## v0.45.3 — Ctrl+P 恢复 + /redo 文件重做 + RRULE 秒级定时（2026-08-29）
+
+> 按用户反馈把 Ctrl+P 恢复为历史上翻（设置面板留在 Ctrl+,），并完成对标体检 P1 剩余核心项：/redo、RRULE 秒级定时。
+
+### ♻️ Ctrl+P 恢复
+- CLI：Ctrl+P 恢复「历史上翻」（readline 惯例）；设置面板仅 Ctrl+,。帮助面板同步。
+- 桌面端：移除 Ctrl+P 拦截（恢复浏览器默认）；设置仍走 Ctrl+, 与设置页按钮。
+- 简易 UI：移除 Ctrl+P 设置弹窗与拦截。
+
+### ⏪ /redo（opencode /undo /redo parity）
+- checkpoint `Store` 加 `redoStack`：`Rewind` 前记录当前 shadow-git HEAD，新增 `Redo(ctx)` 用 `git checkout <oldHead> -- .` 恢复被回滚的改动（不移动 HEAD）。
+- TUI 新增 `/redo` 命令（`redoStep`）：与 `/undo`（rewind 1 步）/`/rewind N` 对称。
+
+### ⏱ RRULE 秒级定时（WorkBuddy parity）
+- 新增 `scheduler/rrule.go`：轻量 RRULE 解析——`FREQ=SECONDLY|MINUTELY|HOURLY|DAILY|WEEKLY|MONTHLY` + `INTERVAL` + `BYHOUR` + `BYMINUTE` + `BYDAY(MO..SU)`；`rrule.Next(from)` 计算下一次（秒级对齐）。
+- `nextRunAfter`/`DescribeSchedule` 支持 `rrule:` 前缀；`describeRRule` 中文描述（如「每 30 秒」「每周一、周五 9 点」）。新增 6 个单测。
+- 用法：`rrule:FREQ=SECONDLY;INTERVAL=30`（每 30 秒）、`rrule:FREQ=WEEKLY;BYDAY=MO,FR;BYHOUR=9;BYMINUTE=30`。
+
+### 📋 体检 P1 剩余项等价覆盖说明
+- `/loop`：自动化任务面板（`/tasks` + simpleui 任务 tab）+ `/idle` 闲时任务已覆盖循环执行能力。
+- `/keybindings`：桌面端 ShortcutPanel（设置→快捷键，可配置）已覆盖；CLI 键位硬编码为稳定默认。
+- `/teleport`：Claude Code 网页迁移独有，非 CLI 常规能力，建议跳过。
+
+## v0.45.2 — Ctrl+P 设置面板（三端）+ Shift+Tab 模式确认（2026-08-29）
+
+> 按用户需求：Ctrl+P 弹出设置选项进行所有设置（Claude Code / opencode 风格设置面板），CLI / 桌面 / 简易 UI 三端统一。
+
+- **CLI（TUI）**：Ctrl+P 从「历史上翻」改为**打开设置面板**（建议列表打开时仍作建议光标上移）；提取 `openSettings()` 供 Ctrl+P 与 Ctrl+, 共用；历史上翻仍可用 ↑、下翻 Ctrl+N。帮助面板更新快捷键说明。
+- **桌面端**：Ctrl+P 打开设置页（`preventDefault` 抑制浏览器打印对话框，`setSettingsOpen(true)`）。
+- **简易 UI（simpleui）**：新增 `#settingsModal` 设置弹窗（主题切换 / 设置 API Key / 添加自定义模型 / 命令面板 四个入口 + 关闭），Ctrl+P 打开。
+- **Shift+Tab 切模式**：CLI（`cycleMode`）与 simpleui（`cycleMode`）此前已对齐 Claude Code（plan → agent → yolo → auto），本轮确认并记录——桌面端经设置/按钮切换。
+- 验证：Go build/vet、simpleui vet、tsc --noEmit 干净；tui 单测绿；前端 build + 嵌入 dist；四份二进制重编。
+
+## v0.45.1 — AskUserQuestion 交互提问工具（Claude Code parity）（2026-08-29）
+
+> 全面对标体检 P1-①：模型在需要人做决策时（选目录/选方案/是否继续）以多选方式提问，TUI 渲染选项面板、数字键选择。
+
+- **工具**：新 `tool/askuser.go`——`ask_user_question`（question + 最多 9 个 options），`AskUserFunc` 经 ctx 注入（`WithAskUser`/`AskUserFromContext`）；无注入环境（headless/simpleui/desktop HTTP）**优雅降级**返回错误，绝不挂起。
+- **引擎**：`Engine.AskUser tool.AskUserFunc` 字段；`executeTool` 注入 ctx（与 WithSessionID/WithProgress 同模式）。
+- **TUI**：新 `ask.go`——`askUserInteractive`（阻塞等选，5 分钟超时兜底）+ `resolveAsk`；`handleKey` 顶部拦截 1-9/Enter/Esc；`drawAskOverlay` 居中选项框（黄问号 + 编号选项 + 快捷键提示）；`Run()` 注册 `OnSetAskUser`（测试路径不注入）。
+- **接线**：`Callback.OnSetAskUser` 新方法；`chatCallback` 实现（设 `engine.AskUser`）；`testCallback` 同步。
+- 新增 3 个单测（Def、无注入降级、注入后选择传递）。
+
+## v0.45.0 — 全面对标体检（Claude Code / opencode / ZCode / WorkBuddy）+ fetch HTML 正文提取（2026-08-29）
+
+> 四大对标对象能力清单调研 + iCode 现状对照，产出差距分级清单；首项 P0 落地。
+
+### 📋 全面对标体检结论（iCode 已覆盖 vs 缺口）
+- **已覆盖**：多模型聚合（50+ 提供商）、5 层上下文压缩、分级授权（plan/agent/auto/yolo + strike 兜底）、Goal 可验收、Subagents、Idle Tasks、LSP、知识库 RAG、MCP、hooks、skills、自动化任务、多模态（图片/文件）、`/bug` `/pr_comments` `/release-notes` `/statusline` `/compact` `/context` `/doctor` `/permissions` `/init` `/add-dir` `/agents` `/diff` `/review` `/theme` `/cost` 等 60+ 命令、WebSearch（Bing/Baidu/Tavily）、fetch、非交互 `-p` 模式、会话 resume/fork/rewind/undo/share。
+- **缺口（分级）**：
+  - P0：`fetch` 返回原始 HTML 噪音（本轮已修：HTML→可读正文）。
+  - P1：AskUserQuestion 交互提问工具；`/undo`/`/redo` 基于 git 的文件回滚（opencode parity）；RRULE 秒级定时（WorkBuddy parity）；`/teleport`/`/loop`/`/keybindings`（Claude Code 独有）。
+  - P2：Remote Control 远程调度（ZCode Claw / WorkBuddy Claw）；Skill/插件市场（WorkBuddy SkillHub）。
+
+### ✨ fetch 工具增强：HTML → 可读正文（Claude Code WebFetch parity）
+- 新增 `webfetch_extract.go`：`htmlToText`（去 script/style/注释块、提取 `<title>`、去标签、解码常见实体、压缩空白、12000 字封顶）、`isHTML`（Content-Type / 首字节判断）、`decodeHTMLEntities`。
+- `FetchTool.Execute`：HTML 页面自动提取正文文本（省 token、可读性↑）；JSON/纯文本 API 响应保持原样（256KB 上限截断逻辑不变）。
+- SSRF 防护与重定向校验保持不动；新增 3 个单测（`webfetch_extract_test.go`）。
+
+## v0.44.2 — CLI 细节打磨二批：生成区模型标注 + 空输入占位提示（2026-08-29）
+
+- **生成动画区显示当前模型**：`thinkingBar` 在 spinner 前加 dim 模型名（截 18 字），生成时一眼可见是哪个模型在跑（多模型切换场景尤其有用）——视觉：`deepseek-v4-flash ⠋ [▓▓▓▓▓▓░░░░░░] 32% 12s`。
+- **空输入占位提示（Claude Code 风格）**：输入框为空且未生成时，首行显示 dim 提示 `/ 查看命令 · Tab 补全 · Ctrl+R 历史 · Alt+P 模型`；开始打字即消失；`/multiline` 模式不显示（已有 `[MULTI]` 标记）。
+- 体检确认工具耗时/截断标记等已存在，未重复造轮子。
+
+## v0.44.1 — CLI 细节打磨：会话自动命名 + 多行模式指示（2026-08-29）
+
+> CLI 对标 Claude Code 的细节体检：工具折叠/Ctrl+L 清屏/Ctrl+D 退出等已齐，补两个真实缺口——会话标题自动命名、多行输入模式持续指示。
+
+- **会话标题自动命名（Claude Code parity）**：全新会话的首条用户消息自动生成标题（清洗 `@file` 引用与附件标记、折叠空白、去掉前导标点、截 24 字），写入会话存储——`/resume` 选择器与 `/sessions` 列表立即显示有意义标题。`users==1` 守卫天然跳过 resume 会话与后续消息，手动 `/rename` 永不被覆盖。
+- **多行模式 `[MULTI]` 持续标记**：`/multiline` 开启后，输入框首行常驻黄色 `[MULTI]` + 「Enter=换行·Alt+Enter=发送」，不再只在切换瞬间提示一次。
+- 新文件 `internal/tui/title.go`（`autoTitle`/`deriveTitle`）；`raw_input.go` sendInput 接入；`render.go` drawInputBox 标记。
+
+## v0.44.0 — 桌面端分级授权 strike 可视化（Claude Code parity）（2026-08-29）
+
+> 桌面端功能对标体检：自动化面板/图片附件/知识库/LSP 等已齐，唯一缺口是权限弹窗缺少分级授权进度——本轮补齐。
+
+- **后端**：`types.PermissionReq` 新增 `Strikes`/`Threshold` 字段；engine 发 `EventPermission` 时从 gate 读取（`EscalationState` + `StrikeThreshold`，strikes 含本次决策）。HTTP 序列化自动带上，TUI/permHandler 分支同步。
+- **桌面端**：权限弹窗在工具名与提示下方新增黄色提示——未达阈值显示「已拦截 N/阈值 次，连续 阈值 次将退回手动」；达阈值显示「⚠ 已连续 N 次拦截，本会话已退回手动模式（需逐次确认）」。i18n 三语（zh/TW/en）新增 `permission.strikeEscalated`/`strikeProgress`。
+- **构建**：前端 `npm run build` → dist 嵌入 `internal/embedded/dist` → 四份二进制重编。
+
+## v0.43.9 — 简易 GUI LSP 诊断面板（UI 功能对标体检 P0+P1 收官）（2026-08-29）
+
+> UI 功能对标体检最后一环：`/lsp` 的可视化面板。至此 P0（图片多模态/文件附件）+ P1（知识库/任务/分级授权/LSP）全清。
+
+- **右栏第四个 tab「诊断」**：`LSP 状态` 按钮展示语言服务器检测与用法；文件路径输入框 + `诊断`（Enter 触发）跑 `/lsp diag <file>`，输出格式化报告（`[错误] 行:列 消息`），`<pre>` 可选中复制。
+- Go 端：`LspStatus()`/`LspDiag(file)` 复用 `LSPManager.QueryReport`（TUI/HTTP/simpleui 三端同一实现），`w.Bind("lspStatus"/"lspDiag")`；未启用时给出明确提示（`lsp.enabled`）。
+- 至此 simpleui 右栏：命令 / 知识库 / 任务 / 诊断 四 tab。
+
+## v0.43.8 — 简易 GUI 自动化任务面板 + 分级授权状态可视化（2026-08-29）
+
+> UI 功能对标体检 P1-⑤ + P1-⑥：把 `/tasks` 闲时调度与分级授权 strike 兜底搬进 GUI。
+
+### ✨ 自动化任务面板（对齐 ZCode Idle Tasks / /tasks）
+- 右栏第三个 tab「任务」：任务列表（绿点=启用、调度、下次运行时间），每条可「立即运行 / 删除」。
+- 创建表单：任务名 + 内容 + 调度（闲时 0 点后 / 每天 02:00 / 00:30 / 每 30 分钟 / 每小时）。
+- Go 端：`TasksList`/`TaskCreate`/`TaskDelete`/`TaskRunNow`（复用 `app.Scheduler`，持久化 SQLite），`w.Bind("tasksList"/"taskCreate"/"taskDelete"/"taskRunNow")`；空列表给出引导文案。
+
+### ✨ 分级授权 strike 可视化（Claude Code parity）
+- gate 新增 `EscalationState(sessionID)` getter（escalated + strikes）；bridge `EscalationState()` → `w.Bind("escState")`。
+- 权限审批条内新增 `#escHint` 提示：未拦截时空白；有拦截时显示「已拦截 N/阈值 次，连续 N 次将退回手动」；触发兜底后显示「⚠ 已连续 N 次拦截，本会话已退回手动模式」。
+
+## v0.43.7 — 简易 GUI 知识库检索面板（本地 RAG /kb 可视化）（2026-08-29）
+
+> UI 功能对标体检 P1-③：`/kb` 文本查询早已可用（slashui），本轮补上**可视化面板**——右栏「命令 / 知识库」双 tab，零 token 本地检索。
+
+- **右栏双 tab**：命令面板旁新增「知识库」，点击切换；搜索框 Enter / 检索按钮触发。
+- **Go 端**：`KnowledgeStatus()`（片段数 JSON）、`KnowledgeSearch(query)`（`knowledge.Manager.Search` 本地 IDF/BM25 检索，top 6，片段截断 240 字），`w.Bind("kbStatus"/"kbSearch")`。
+- **JS 端**：结果列表（出处文件/章节 + 相关度 + 摘要），点击将完整片段以 `[知识库资料: file / section]` 标记插入输入框，模型可直接读取。
+- 未配置知识库时提示 `config.yaml knowledge.dirs`；空库自动触发 `Index`。
+
+## v0.43.6 — 简易 GUI 文件拖拽/选择附件（@路径 引用，对齐 CLI）（2026-08-29）
+
+> UI 功能对标体检 P0-②：把 CLI 的 `@file` 引用能力搬进简易 GUI——拖拽或 📎 选择任意文件，发送时统一展开。
+
+- **拖拽文件进输入区**（`dragover`/`drop`）：图片 → 多模态附件；有本地路径（WebView2 `File.path`）→ 插入 `@绝对路径` 引用；无路径文本 → 直接内联。
+- **📎 按钮放开**：不再只限图片，任意文件可多选；同一套 `addFileRef` 分类逻辑。
+- **Go 端 `expandFileRefsUI`**（对齐 TUI `expandFileRefs`）：`@path` 在 `Send`/`SendWithAttachments` 发送前统一展开——图片按 magic bytes 识别为多模态附件（`[📎 图片: name]`）、文本内联（`[file: path]`）、其他二进制守卫（只留路径说明，原始字节绝不进 prompt）。
+- 邮箱等带 `@` 的普通文本不受影响（文件读不到时原样保留引用）。
+
+## v0.43.5 — 简易 GUI（simpleui）体验修复 + 图片多模态（2026-08-29）
+
+> 补齐简易 GUI 与 CLI 的功能差：下拉框点击无选项、模型切换不生效、以及最常被代理人用到的「截图/保单图片直接发给模型」。
+
+### 🐞 简易 GUI 下拉框修复
+- 模型/会话下拉原为 `<input list>` + `<datalist>`，**WebView2 下点击聚焦不弹 popup**（体感「点不开、不出现其他选项」）。改为**自绘点击下拉面板**（`.dd`/`.dd-panel`/`.dd-option`）：点输入框或 `▾` 即弹、带搜索过滤、点选即切换、点面板外收起；空列表显示占位（无模型/无会话）。
+- 修复 `SetModel` 只改 UI 不生效：切换下拉后把新模型**回写到当前会话**（`SessStore.Update`），下一轮 `Engine.Send` 即走新模型（此前首条消息固定 `ModelID` 后切换是假切换）。
+
+### ✨ 简易 GUI 图片多模态粘贴（对齐 CLI）
+- `RunCommand`/`Send` 之外新增 `SendWithAttachments(text, attsJSON)`，引擎 `Engine.Send(ctx, sid, prompt, atts)` 已是多模态就绪（OpenAI-compatible/Anthropic provider 支持 `image_url`/base64）。
+- 输入框 `paste` 事件拦截剪贴板图片 → base64 暂存；新增 `📎` 按钮可文件选择多图；附件以缩略 chip 预览、可单独移除；发送时随消息以多模态附件送出（提示「📎 已附带 N 张图片」由引擎/CLI 一致逻辑给出）。
+- 图片仅在本地转 base64，不上传第三方；发送后清空，不残留。
+
+## v0.43.4 — CLI 对标 Claude Code 第五批 P4+P5：多模态统一 + 粘贴折叠 + 历史持久化（2026-08-29）
+
+> 收尾 v0.43.3 遗留的「手动 `@image.png` 自动识别为图片附件」，并补齐两项 Claude Code 标志性细节体验：多行粘贴折叠、输入历史跨会话持久化。
+
+### ✨ 手动 @图片 → 多模态附件（统一通道）
+- `expandFileRefs` 现在对图片直接产出 `[]types.Attachment`（读字节 → 按 magic bytes 识别 MIME → base64），文本里写 `[📎 图片: name]` 占位；Ctrl+V 粘贴与手动 `@photo.png` 走同一条多模态通道。
+- 顺手修掉旧逻辑「jpg 若不含 0x00 会被当文本内联」的潜在 bug（现在图片一律走附件，不再按二进制守卫误判）。
+- 移除了临时的 `pendingImages`/`consumePendingImages` 机制，`expandFileRefs` 统一收口，链路更干净。
+
+### ✨ 多行粘贴折叠（Claude Code parity）
+- 新增 `paste_fold.go`：`insertPasted` 在粘贴 ≥3 行或 >500 字节时折叠为 `[粘贴 N 行 #k]` 占位符，原文存入 `pasteBlocks`；发送时 `expandPasteBlocks` 还原，模型仍收到完整内容，但输入框不被刷屏。
+- bracketed paste（终端 200~…201~）与右键粘贴都改走 `insertPasted`；交互式/行模式提交前均自动展开。
+
+### ✨ 输入历史跨会话持久化（Claude Code parity）
+- 新增 `history_persist.go`：`~/.icode/input_history.json`（0600 仅本地、不上传），保留最近 200 条 prompt，重开会话后仍可 ↑ 召回。
+- 配置开关 `history_persist: false`（默认 true）可整体关闭，尊重本地数据安全偏好。
+- **关键护栏**：持久化仅在 `Run()` 武装（`historyPersistActive`），单元测试直接调用 `pushHistory` 不会触碰用户真实历史文件。
+
+### 🔧 安全 / 细节
+- 二进制守卫、图片 25MB 上限、纯图片消息补「（请查看附件中的图片）」等护栏延续生效。
+- 四份二进制（控制台 `icode.exe`/`bin/icode-cli.exe`、GUI `icode-cli.exe` simpleui / `icode-desktop.exe` desktop_only）均已重编并校验 PE 子系统。
+
+## v0.43.3 — CLI 对标 Claude Code 第四批 P3：图片多模态内联（2026-08-28）
+
+> 把上一版（v0.43.2）的「Ctrl+V 图片粘贴」从「路径引用」升级为**真正的多模态内联**：模型现在能直接「看见」粘贴的截图/保单图片。
+
+### ✨ 图片多模态内联（Claude Code parity）
+- `Callback.OnSend` 回调签名升级为 `OnSend(text string, attachments []types.Attachment)`；`chatCallback` 把附件透传给 `Engine.Send(ctx, sessionID, text, attachments)`。
+- `types.Message.Attachments` 早已存在，OpenAI-compatible 与 Anthropic provider 的 `buildRequestBody` 已能把图片附件转成 `image_url` / base64（含 `attachment_test` 验证）——本次把 TUI 这一环接通。
+- 提交流程：展开 `@file` 引用后，`consumePendingImages` 把粘贴图片从文本里抽出 → 读字节、base64、按 magic bytes 识别 MIME（png/jpeg/gif/webp，扩展名兜底）→ 构造 `[]types.Attachment`；文本中的 `@path` 替换为 `[📎 图片: name]` 标记（会话记录可读），图片字节以多模态内容块发给模型。
+- `pasteClipboardImage`（Ctrl+V）在插入 `@path` 的同时把路径记入 `pendingImages`，发送时消费。
+- 安全护栏：单图上限 25MB；纯图片消息自动补「（请查看附件中的图片）」防空内容被拒；无法读取/不支持的格式保留 `@path` 文本不静默丢弃。
+- 反馈：发送带图时状态栏提示「📎 已附带 N 张图片发送给模型」。
+
+### ⚠️ 向后兼容
+- `OnSend` 改为两参，所有实现方同步：`chatCallback`（cmd/commands.go）、`testCallback`（slash_dispatch_test.go）。其余转发点（shell 输出、slash 转发、行模式）传 `nil`。
+- 仅交互式 TUI 的 Ctrl+V 粘贴走多模态；手动 `@image.png` 仍按既有「路径引用」处理（后续可扩展为自动识别）。
+
+### 验证
+- `go build ./internal/tui ./cmd` + `go vet` 干净；`go test ./internal/tui/...` 绿。
+- 四份二进制重编，PE 子系统：icode.exe / bin/icode-cli.exe = CONSOLE(3)；icode-cli.exe(simpleui) / icode-desktop.exe(desktop_only) = GUI(2)。
+
+## v0.43.2 — CLI 对标 Claude Code 第三批 P2：自动回顾 + PR 徽章 + 图片粘贴（2026-08-28）
+
+> 收尾 P2 批次（提示词建议已在 v0.43.1 的 autocomplete 中落地，本批不再重复）。
+
+### ✨ 离开 3 分钟自动回顾（Claude Code parity）
+- 主循环新增 1s 空闲 tick：用户离开 ≥3 分钟且**无流式输出**在跑时，自动跑一次 `/recap`，并提示「💤 你已离开 3 分钟，自动为你回顾一下当前会话…」。
+- 10 分钟冷却，避免静默期内反复刷屏；对话不足 3 轮不触发。
+- 空闲计时在每次按键、每次发送、每轮 `EndStream` 完成时重置，生成回复期间永不误触发。
+
+### ✨ 状态栏 PR 徽章（Claude Code parity）
+- 新增 `prSegment()`（类 `branchSegment` 懒加载，每 60s 经 `gh pr view --json` 刷新），状态栏分支后显示 `PR #123 OPEN` / `PR #456 MERGED`。
+- 配色随合并态：`OPEN`/`MERGED` 绿，`CLOSED`/`DRAFT` 红；`gh` 未装或无 PR 时不显示，绝不阻塞渲染热路径。
+
+### ✨ 剪贴板图片粘贴（Ctrl+V）
+- `handleKey` 拦截 `Ctrl+V`：检测到剪贴板图片时（Win 走 `System.Windows.Forms.Clipboard`、macOS 走 `pngpaste`、Linux 走 `xclip` 最佳努力）存为临时 PNG 并插入 `@<path>` 引用，提示「📎 已粘贴剪贴板图片」。
+- 文本粘贴仍由终端 bracketed-paste 处理，不重复；无图片/不支持时明确提示。
+- `expandFileRefs` 加**二进制守卫**：遇含 NUL 字节的文件（如粘贴的 PNG）只插入路径引用，不再把二进制字节当文本内联进 prompt（避免污染上下文）。
+
+## v0.43.1 — CLI 对标 Claude Code 第二批：快捷键包 + 后台化 + 权限说明 + transcript（2026-08-28）
+
+> 承接 v0.43.0 的 P1 批次，每项同样带可见反馈。
+
+### ✨ 快捷键包（Claude Code parity）
+| 快捷键 | 能力 | 反馈 |
+|---|---|---|
+| `Ctrl+S` | 暂存提示词 / 空输入时恢复 | 「已暂存提示词（空输入时按 Ctrl+S 恢复）」「已恢复暂存的提示词」 |
+| `Ctrl+G` | 用 `$VISUAL`/`$EDITOR` 编辑当前提示词 | 自动挂起 raw mode 与 alternate screen、编辑完读回；未设置编辑器时明确提示 |
+| `Ctrl+_` | 撤销上一步输入编辑（readline 风格，200 步栈） | 「已撤销上一步输入编辑」 |
+| `Ctrl+B` | **当前任务转入后台**：引擎继续跑，UI 回到输入 | 「⏭ 已转入后台运行」；期间输入自动排队，完成时「✅ 后台任务已完成」并自动发送队列 |
+| `Alt+P` | 切换模型（不清空输入） | 打开模型选择器 |
+| `Alt+T` | 切换 extended thinking | 走 `/thinking on\|off` 并显示结果 |
+| `Ctrl+O` | transcript：展开/折叠**全部**工具执行详情 | 「🔍 已展开全部工具详情（N 条）· Ctrl+O 折叠」 |
+
+### ✨ 权限提示 Tab 加「拒绝说明」（Claude Code parity）
+- 权限框按 `Tab` 打开说明输入框 → 输入原因 → `Enter` 提交为「拒绝并说明」；说明经 `OnPermissionNote` 写入会话，agent 下一轮能看到**被拒原因**（不再盲目重试）。`Esc` 关闭说明框，`Ctrl+C` 直接拒绝。选项行同步显示 `[Tab] 加说明`。
+
+### ✨ /recap 会话回顾
+- 非破坏性（不像 `/compact` 改历史）：用模型生成「已完成 / 当前进展 / 下一步」，**上限 400 字符**；不足 3 轮提示无需回顾。
+
+### 🧩 其他
+- 帮助面板（`?` / `/help`）补全全部新快捷键，并更新 `!` shell 模式说明。
+- `!` shell：raw 模式走完整实现（Ctrl+C 中止进程、输出截断 4000、结果作为 user turn 让 agent 响应），line 模式保留简单同步执行。
+
+## v0.43.0 — CLI 对标 Claude Code：Esc 中断修复 + 非交互模式 + 排队消息 + 多行 + Shell 模式（2026-08-28）
+
+> 用户反馈「Esc 在运行时不能中断现有任务」+ 要求逐项提升 CLI 细节体验（每项带效果反馈）。
+
+### 🐞 核心修复：Esc 中断失效
+1. **根因**：引擎两处 `ctx.Done()` 直接 return，不发任何事件、不保存部分输出 → UI 的 `EndStream` 永不触发 → `streaming` 卡死 → 二次 Esc 完全无效（stopFns 已被 defer 删除）。
+2. **引擎侧**：中断时 `persistPartialTurn()` 保存已生成的**部分输出进会话**（Claude Code「已完成的工作保留」），并发 `EventSystem`「⏹ 已中断生成。已生成的部分输出已保留。」
+3. **UI 侧兜底**：事件通道关闭而无 EventDone/Error 时，无条件 `EndStream()`（幂等）——任何路径都不再卡死。
+4. **即时反馈**：按下 Esc 瞬间显示「⏹ 正在中断…」，不等引擎流 unwound。
+5. **误中断防护**：lone Esc 判定（等 escFollowTimeout），**方向键首字节不再误判为中断**。
+
+### 🐞 附带修复：流式文本重复输出（"OKOK"）
+引擎主循环未做流式差分（continueAgentLoop 有 `textAccumulator` 而主循环没有）→ provider 发全量快照时重复输出。主循环现在统一走 accumulator，只转发 delta。
+
+### ✨ 非交互模式（Claude Code `-p` 对齐，script/CI 友好）
+- `icode --print "prompt"` / `-P`，支持 `--output-format text|json|stream-json`、`--continue/-c`（继续最近会话）、`--resume <id>`、`--mode`。
+- stdout 保持纯净可管道（诊断/工具调用/用量走 stderr）；失败非零退出码。
+- （注：`-p` 已绑定 `--provider`，故 print 用 `--print/-P` 避免破坏既有脚本。）
+
+### ✨ 流式排队消息（Claude Code queueing）
+- agent 工作期间打字不丢失：字符进 `queueBuf`，Enter 入队，turn 结束**自动发送最旧一条**；`↑` 取回最旧条目继续编辑。输入框上方显示「⏳ 输入中 / 已排队 (N)」。
+
+### ✨ 多行输入
+- `Ctrl+J` 插入换行；输入框按行渲染（最多 8 行、内部滚动、光标行保持可见）；`↑↓` 在行间移动（首/末行边界才浏览历史）；`Ctrl+A/E` 改为**当前逻辑行**行首/行尾。
+
+### ✨ `!` Shell 模式
+- `! npm test` 本地直跑（无需批准），输出进上下文并让 agent 响应；`Ctrl+C` 杀进程并显示「⏹ shell 命令已中断」；展示输出（超长截断）＋退出码。
+
+### ✨ 双 Esc（Claude Code parity）
+- 600ms 内双 Esc：有草稿 → 清空并存入历史（`↑` 召回，提示「🗑 草稿已清空并存入历史」）；空输入 → **两段式回溯**（第一次提示就绪、第二次才真正 `/rewind`，防误触）；任何非 Esc 键自动解除 armed 状态。
+
+### 🧪 测试与交付
+- 全量 internal+cmd 测试绿；`go vet` 无新增问题；非交互模式实机冒烟（json/text/工具调用+自动放行）；四份二进制重编（PE 3/3/2/2），版本 0.43.0。
+
 ## v0.42.8 — CLI Markdown 修复批次 + 文字 LOGO 恢复（2026-08-25）
 
 ### 🖥 TUI Markdown 三处修复（用户实测反馈：`**` 不转换）

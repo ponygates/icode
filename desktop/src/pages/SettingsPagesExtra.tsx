@@ -37,6 +37,60 @@ export function PageTools({ store }: { store: StoreState }) {
   const [rules, setRules] = useState<Record<string,string>>({});
   const backendUrl = useAppStore((s) => s.backendUrl);
 
+  // Knowledge base (local RAG) import state — D5 parity with WorkBuddy's
+  // 资料库: report index status and accept a file path or pasted text.
+  const [kbStatus, setKbStatus] = useState<'loading' | 'ok' | 'error'>('loading');
+  const [kbChunks, setKbChunks] = useState(0);
+  const [kbPath, setKbPath] = useState('');
+  const [kbName, setKbName] = useState('');
+  const [kbContent, setKbContent] = useState('');
+  const [kbMsg, setKbMsg] = useState('');
+  const [kbMsgOk, setKbMsgOk] = useState(true);
+  const [kbBusy, setKbBusy] = useState(false);
+
+  useEffect(() => {
+    if (!backendUrl) return;
+    fetch(`${backendUrl}/api/knowledge`)
+      .then(r => r.json())
+      .then(d => {
+        setKbStatus(d.configured ? 'ok' : 'error');
+        setKbChunks(d.chunks || 0);
+      })
+      .catch(() => setKbStatus('error'));
+  }, [backendUrl]);
+
+  const kbImportPath = async () => {
+    if (!backendUrl || !kbPath.trim()) return;
+    setKbBusy(true); setKbMsg('');
+    try {
+      const r = await fetch(`${backendUrl}/api/knowledge/import`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: kbPath.trim() }),
+      });
+      const d = await r.json().catch(() => ({} as Record<string, unknown>));
+      setKbMsgOk(r.ok);
+      setKbMsg(r.ok ? t('tools.knowledgeImported', { chunks: Number(d.chunks || 0) }) : String(d.error || 'failed'));
+      if (r.ok) setKbPath('');
+    } catch { setKbMsgOk(false); setKbMsg('failed'); }
+    setKbBusy(false);
+  };
+
+  const kbImportPaste = async () => {
+    if (!backendUrl || !kbContent.trim()) return;
+    setKbBusy(true); setKbMsg('');
+    try {
+      const r = await fetch(`${backendUrl}/api/knowledge/import`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: kbName.trim() || 'pasted.md', content: kbContent }),
+      });
+      const d = await r.json().catch(() => ({} as Record<string, unknown>));
+      setKbMsgOk(r.ok);
+      setKbMsg(r.ok ? t('tools.knowledgeImported', { chunks: Number(d.chunks || 0) }) : String(d.error || 'failed'));
+      if (r.ok) { setKbContent(''); setKbName(''); }
+    } catch { setKbMsgOk(false); setKbMsg('failed'); }
+    setKbBusy(false);
+  };
+
   const saveConfig = async (patch: ConfigPatch) => {
     if (!store.backendUrl) return;
     try { await fetch(`${store.backendUrl}/api/config`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) }); } catch {}
@@ -149,6 +203,48 @@ export function PageTools({ store }: { store: StoreState }) {
             {t('tools.editableScope')}
           </div>
         </div>
+      </Section>
+      <Section title={t('tools.knowledgeTitle')}>
+        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 10, lineHeight: 1.6 }}>
+          {t('tools.knowledgeDesc')}
+        </div>
+        <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 10 }}>
+          {kbStatus === 'ok'
+            ? t('tools.knowledgeStatus', { chunks: kbChunks })
+            : kbStatus === 'error'
+              ? t('tools.knowledgeNotConfigured')
+              : t('tools.loading')}
+        </div>
+        {/* Import from a local file path */}
+        <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+          <input
+            value={kbPath}
+            onChange={(e) => setKbPath(e.target.value)}
+            placeholder={t('tools.knowledgePathPlaceholder')}
+            style={{ ...selectStyle, flex: 1 }}
+          />
+          <button onClick={kbImportPath} disabled={!!kbBusy} style={btnGhost}>{t('tools.knowledgeImportBtn')}</button>
+        </div>
+        {/* Import by pasting text */}
+        <div style={{ display: 'flex', gap: 8 }}>
+          <input
+            value={kbName}
+            onChange={(e) => setKbName(e.target.value)}
+            placeholder={t('tools.knowledgeNamePlaceholder')}
+            style={{ ...selectStyle, width: 180 }}
+          />
+          <textarea
+            value={kbContent}
+            onChange={(e) => setKbContent(e.target.value)}
+            placeholder={t('tools.knowledgePastePlaceholder')}
+            rows={3}
+            style={{ ...selectStyle, flex: 1, resize: 'vertical', fontFamily: 'var(--font-mono)', fontSize: 11 }}
+          />
+          <button onClick={kbImportPaste} disabled={!!kbBusy} style={btnGhost}>{t('tools.knowledgePasteBtn')}</button>
+        </div>
+        {kbMsg && (
+          <div style={{ fontSize: 11, color: kbMsgOk ? 'var(--success)' : 'var(--error)', marginTop: 8 }}>{kbMsg}</div>
+        )}
       </Section>
     </div>
   );

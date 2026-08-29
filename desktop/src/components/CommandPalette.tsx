@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useAppStore, Model, Session } from '../stores/appStore';
 import { slashCommands, fuzzyScore, noteRecentSlash } from '../lib/slashCommands';
+import { loadShortcuts, matchesBinding } from '../lib/shortcuts';
 
 interface Action {
   id: string;
@@ -193,13 +194,14 @@ const CommandPalette: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   );
 };
 
-// Global Ctrl+K listener hook
+// Global Ctrl+K listener hook (binding from the user-configurable shortcut
+// map — see Settings → Shortcuts).
 export function useCommandPalette() {
   const [open, setOpen] = useState(false);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+      if (matchesBinding(e, loadShortcuts().commandPalette)) {
         e.preventDefault();
         setOpen(o => !o);
       }

@@ -525,6 +525,10 @@ var configCmd = &cobra.Command{
   icode config diff <d>        set diff mode (unified|split)
   icode config syntax <s>      set syntax highlight (on|off)
   icode config key <p> <key>   set API key for a provider
+  icode config voice provider <name>     set voice provider (zhipu|baidu|xfyun)
+  icode config voice baidu <key> <secret>   set Baidu voice API credentials
+  icode config voice xfyun <appid> <key> <secret>  set iFlytek voice API credentials
+  icode config voice            show current voice settings
   icode config model           list custom models
   icode config model add <p> <id> [name]   add a custom model
   icode config model rm <id>   remove a custom model
@@ -547,6 +551,8 @@ var configCmd = &cobra.Command{
 			return runConfigModel(cfg, args[1:])
 		case len(args) >= 1 && strings.ToLower(args[0]) == "key":
 			return runConfigKey(cfg, args[1:])
+		case len(args) >= 1 && strings.ToLower(args[0]) == "voice":
+			return runConfigVoice(cfg, args[1:])
 		case len(args) >= 2:
 			return runConfigSet(cmd, cfg, args[0], strings.Join(args[1:], " "))
 		default:
@@ -599,8 +605,15 @@ func runConfigSet(cmd *cobra.Command, cfg *config.Config, key, value string) err
 		default:
 			return fmt.Errorf("syntax must be one of: on, off")
 		}
+	case "voice.provider":
+		switch strings.ToLower(value) {
+		case "zhipu", "baidu", "xfyun":
+			cfg.Voice.Provider = strings.ToLower(value)
+		default:
+			return fmt.Errorf("voice.provider must be one of: zhipu, baidu, xfyun")
+		}
 	default:
-		return fmt.Errorf("unknown setting: %s (try: model, provider, mode, lang, theme, diff, syntax)", key)
+		return fmt.Errorf("unknown setting: %s (try: model, provider, mode, lang, theme, diff, syntax, voice.provider)", key)
 	}
 
 	if err := cfg.Save(config.DefaultPath()); err != nil {
@@ -725,6 +738,75 @@ func runConfigKey(cfg *config.Config, args []string) error {
 	}
 	fmt.Printf("✓ Saved API key for %s  →  %s\n", provider, config.DefaultPath())
 	return nil
+}
+
+// runConfigVoice handles `icode config voice ...` commands.
+func runConfigVoice(cfg *config.Config, args []string) error {
+	if len(args) == 0 {
+		// Show current voice settings
+		fmt.Println()
+		fmt.Println("  语音输入设置")
+		fmt.Println("  " + strings.Repeat("─", 50))
+		fmt.Printf("  提供商     : %s\n", cfg.Voice.Provider)
+		fmt.Printf("  百度 API Key: %s\n", maskString(cfg.Voice.BaiduAPIKey))
+		fmt.Printf("  百度 Secret : %s\n", maskString(cfg.Voice.BaiduSecretKey))
+		fmt.Printf("  讯飞 App ID : %s\n", cfg.Voice.IFlytekAppID)
+		fmt.Printf("  讯飞 API Key: %s\n", maskString(cfg.Voice.IFlytekAPIKey))
+		fmt.Printf("  讯飞 Secret : %s\n", maskString(cfg.Voice.IFlytekAPISecret))
+		fmt.Println()
+		fmt.Println("  用法:")
+		fmt.Println("    icode config voice provider <name>         设置提供商 (zhipu|baidu|xfyun)")
+		fmt.Println("    icode config voice baidu <key> <secret>    设置百度语音 API 凭证")
+		fmt.Println("    icode config voice xfyun <appid> <key> <secret>  设置讯飞语音 API 凭证")
+		fmt.Println()
+		return nil
+	}
+
+	subcmd := strings.ToLower(args[0])
+	switch subcmd {
+	case "provider":
+		if len(args) < 2 {
+			return fmt.Errorf("用法: icode config voice provider <name> (zhipu|baidu|xfyun)")
+		}
+		provider := strings.ToLower(args[1])
+		switch provider {
+		case "zhipu", "baidu", "xfyun":
+			cfg.Voice.Provider = provider
+		default:
+			return fmt.Errorf("提供商必须是: zhipu, baidu, xfyun")
+		}
+	case "baidu":
+		if len(args) < 3 {
+			return fmt.Errorf("用法: icode config voice baidu <api_key> <secret_key>")
+		}
+		cfg.Voice.BaiduAPIKey = args[1]
+		cfg.Voice.BaiduSecretKey = args[2]
+	case "xfyun":
+		if len(args) < 4 {
+			return fmt.Errorf("用法: icode config voice xfyun <app_id> <api_key> <api_secret>")
+		}
+		cfg.Voice.IFlytekAppID = args[1]
+		cfg.Voice.IFlytekAPIKey = args[2]
+		cfg.Voice.IFlytekAPISecret = args[3]
+	default:
+		return fmt.Errorf("未知命令: %s (可用: provider, baidu, xfyun)", subcmd)
+	}
+
+	if err := cfg.Save(config.DefaultPath()); err != nil {
+		return fmt.Errorf("保存配置失败: %w", err)
+	}
+	fmt.Printf("✓ 语音设置已保存  →  %s\n", config.DefaultPath())
+	return nil
+}
+
+func maskString(s string) string {
+	if s == "" {
+		return "(未设置)"
+	}
+	if len(s) <= 8 {
+		return "****"
+	}
+	return s[:4] + "****" + s[len(s)-4:]
 }
 func runConfigMCP(cmd *cobra.Command, cfg *config.Config, args []string) error {
 	if len(args) == 0 {
@@ -989,7 +1071,7 @@ type chatCallback struct {
 	voiceRec  *voice.Recorder // active /voice recorder (nil when idle)
 }
 
-func (c *chatCallback) OnSend(text string) {
+func (c *chatCallback) OnSend(text string, attachments []types.Attachment) {
 	if c.app == nil || c.app.Engine == nil {
 		c.tui.AddMessage(tui.RoleSystem, "[Engine not available. Configure an API key with 'icode auth set']")
 		return
@@ -1028,7 +1110,7 @@ func (c *chatCallback) OnSend(text string) {
 
 	c.lastTool = ""
 	ctx := context.Background()
-	eventCh, err := c.app.Engine.Send(ctx, c.sessionID, text)
+	eventCh, err := c.app.Engine.Send(ctx, c.sessionID, text, attachments)
 	if err != nil {
 		c.tui.AddMessage(tui.RoleError, fmt.Sprintf("Engine error: %v", err))
 		return
@@ -1095,6 +1177,11 @@ func (c *chatCallback) OnSend(text string) {
 			return
 		}
 	}
+	// The event channel closed without an explicit EventDone/EventError
+	// (e.g. the user hit Esc and the engine stopped the stream). Reset the
+	// streaming state unconditionally — EndStream is idempotent — so the UI
+	// can never get stuck in "generating…" with a dead Esc key.
+	c.tui.EndStream()
 }
 
 // OnListSessions returns a formatted list of saved sessions.
@@ -1103,7 +1190,7 @@ func (c *chatCallback) OnPlanConfirm() {
 		c.app.Gate.SetMode(permission.ModeAuto)
 	}
 	c.tui.SetPlanPending(false)
-	c.OnSend("计划已确认。请按上述计划立即开始执行，不要再重复或重新规划，直接动手。")
+	c.OnSend("计划已确认。请按上述计划立即开始执行，不要再重复或重新规划，直接动手。", nil)
 }
 
 func (c *chatCallback) OnListSessions() string {
@@ -1744,7 +1831,8 @@ func (c *chatCallback) OnSlashCommand(cmd string, args []string) {
 
 	case "/voice":
 		// Toggle mic capture: first call starts recording, second stops and
-		// transcribes via Zhipu GLM-ASR, then submits the text as a message.
+		// transcribes via the configured ASR provider, then submits the text
+		// as a message.
 		if c.app == nil {
 			c.tui.AddMessage(tui.RoleSystem, "语音输入暂不可用。")
 			break
@@ -1766,15 +1854,38 @@ func (c *chatCallback) OnSlashCommand(cmd string, args []string) {
 			break
 		}
 		c.tui.AddMessage(tui.RoleSystem, "⏳ 正在识别语音…")
-		apiKey := c.app.Cfg.APIKey("zhipu")
-		text, terr := voice.TranscribeZhipu(context.Background(), apiKey, wav, "voice.wav")
+
+		// Determine provider from config
+		provider := c.app.Cfg.Voice.Provider
+		if provider == "" {
+			provider = voice.ProviderZhipu
+		}
+
+		var text string
+		var terr error
+
+		switch provider {
+		case voice.ProviderBaidu:
+			apiKey := c.app.Cfg.Voice.BaiduAPIKey
+			secretKey := c.app.Cfg.Voice.BaiduSecretKey
+			text, terr = voice.TranscribeBaidu(context.Background(), apiKey, secretKey, wav)
+		case voice.ProvideriFlytek:
+			appID := c.app.Cfg.Voice.IFlytekAppID
+			apiKey := c.app.Cfg.Voice.IFlytekAPIKey
+			apiSecret := c.app.Cfg.Voice.IFlytekAPISecret
+			text, terr = voice.TranscribeiFlytek(context.Background(), appID, apiKey, apiSecret, wav)
+		default: // zhipu
+			apiKey := c.app.Cfg.APIKey("zhipu")
+			text, terr = voice.TranscribeZhipu(context.Background(), apiKey, wav, "voice.wav")
+		}
+
 		if terr != nil {
 			c.tui.AddMessage(tui.RoleSystem, "识别失败: "+terr.Error())
 			break
 		}
 		c.tui.AddMessage(tui.RoleSystem, "✅ 已识别:「"+text+"」")
 		// Send immediately so the recognised text flows through the normal path.
-		c.OnSend(text)
+		c.OnSend(text, nil)
 
 	case "/config":
 		if cfg, cerr := config.LoadOrCreate(); cerr == nil {
@@ -1817,6 +1928,18 @@ func (c *chatCallback) OnRenameSession(title string) string {
 		return "保存标题失败: " + err.Error()
 	}
 	return ""
+}
+
+// OnSetAskUser implements tui.Callback — wires the TUI's interactive
+// multiple-choice asker into the engine so the ask_user_question tool can
+// render options and read the user's choice (Claude Code AskUserQuestion
+// parity). Headless / simpleui / desktop leave the engine's AskUser nil and
+// the tool degrades gracefully.
+func (c *chatCallback) OnSetAskUser(fn func(question string, options []string) (int, error)) {
+	if c.app == nil || c.app.Engine == nil {
+		return
+	}
+	c.app.Engine.AskUser = tool.AskUserFunc(fn)
 }
 
 // OnSetMode implements tui.Callback — switches the permission gate so the
@@ -2131,6 +2254,26 @@ func (c *chatCallback) CreateIdleTask(name, prompt string) string {
 		return "创建闲时任务失败: " + err.Error()
 	}
 	return fmt.Sprintf("✓ 已创建闲时任务「%s」（ID: %s）\n将在闲时窗口（低峰时段）自动执行，完成后通知你。", t.Name, t.ID)
+}
+
+// OnPermissionNote implements tui.Callback — records the reason the user gave
+// when rejecting a tool call (Tab note on the permission prompt), so the agent
+// sees it on the next turn instead of retrying blindly.
+func (c *chatCallback) OnPermissionNote(toolPrompt, note string) {
+	if c.app == nil || c.app.SessStore == nil || c.sessionID == "" {
+		return
+	}
+	sess, err := c.app.SessStore.Get(c.sessionID)
+	if err != nil {
+		return
+	}
+	sess.Messages = append(sess.Messages, types.Message{
+		Role:      types.RoleSystem,
+		Content:   fmt.Sprintf("用户拒绝了这次操作，原因：%s", note),
+		Timestamp: time.Now(),
+	})
+	_ = c.app.SessStore.Update(sess)
+	c.tui.AddMessage(tui.RoleSystem, "已拒绝并说明："+note)
 }
 
 // formatInt renders an integer with thousands separators.

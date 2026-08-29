@@ -160,12 +160,16 @@ func TestArrowNavigatesHistory(t *testing.T) {
 	tu.pushHistory("second command")
 
 	// sendArrow feeds a full CSI arrow sequence (ESC [ A/B) into handleKey,
-	// mimicking what the terminal delivers on each key press.
+	// mimicking what the key pump delivers on each key press: the follow-up
+	// bytes land on keyCh and handleKey is handed the leading ESC.
 	sendArrow := func(seq string) {
-		rd := bufio.NewReader(strings.NewReader(seq))
-		tu.reader = rd
-		r, _, _ := rd.ReadRune() // leading ESC
-		if !tu.handleKey(r) {
+		if tu.keyCh == nil {
+			tu.keyCh = make(chan rune, 8)
+		}
+		for _, r := range seq[1:] {
+			tu.keyCh <- r
+		}
+		if !tu.handleKey('\x1b') {
 			t.Fatalf("handleKey(%q) returned false", seq)
 		}
 	}

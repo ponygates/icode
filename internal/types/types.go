@@ -174,10 +174,14 @@ const (
 // PermissionReq is emitted when the engine needs interactive approval for a
 // tool call (agent mode). The desktop client renders a dialog and POSTs the
 // decision back via /api/permission/respond; the CLI resolves it in-process.
+// Strikes/Threshold surface the graded-auth escalation progress (Claude Code
+// parity): the dialog shows "已拦截 N/阈值 次" and the manual-mode fallback.
 type PermissionReq struct {
 	RequestID string `json:"request_id,omitempty"`
 	Tool      string `json:"tool"`
 	Prompt    string `json:"prompt"`
+	Strikes   int    `json:"strikes,omitempty"`   // consecutive ask/deny count (incl. this one)
+	Threshold int    `json:"threshold,omitempty"` // escalation threshold (0 = disabled)
 }
 
 type LiveToolCall struct {

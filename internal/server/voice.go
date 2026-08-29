@@ -1,7 +1,7 @@
 // Voice transcription endpoint backing the desktop / simpleui voice buttons.
 // The browser captures a short WAV with the MediaRecorder API and POSTs it
-// here; the handler runs it through the same Zhipu GLM-ASR model the rest of
-// the app already uses, so no extra API key is required.
+// here; the handler runs it through the configured ASR provider (zhipu, baidu,
+// or xfyun) based on the user's voice config settings.
 package server
 
 import (
@@ -21,6 +21,7 @@ type voiceErrorResponse struct {
 }
 
 // handleVoice accepts a multipart audio upload and returns recognised text.
+// The voice provider is determined by the voice config setting.
 func (s *Server) handleVoice(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -41,8 +42,31 @@ func (s *Server) handleVoice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	apiKey := s.cfg.APIKey("zhipu")
-	text, err := voice.TranscribeZhipu(r.Context(), apiKey, audio, "voice.wav")
+	// Get the voice provider from config
+	provider := s.cfg.Voice.Provider
+	if provider == "" {
+		provider = voice.ProviderZhipu
+	}
+
+	var text string
+
+	switch provider {
+	case voice.ProviderBaidu:
+		apiKey := s.cfg.Voice.BaiduAPIKey
+		secretKey := s.cfg.Voice.BaiduSecretKey
+		text, err = voice.TranscribeBaidu(r.Context(), apiKey, secretKey, audio)
+
+	case voice.ProvideriFlytek:
+		appID := s.cfg.Voice.IFlytekAppID
+		apiKey := s.cfg.Voice.IFlytekAPIKey
+		apiSecret := s.cfg.Voice.IFlytekAPISecret
+		text, err = voice.TranscribeiFlytek(r.Context(), appID, apiKey, apiSecret, audio)
+
+	default: // zhipu
+		apiKey := s.cfg.APIKey("zhipu")
+		text, err = voice.TranscribeZhipu(r.Context(), apiKey, audio, "voice.wav")
+	}
+
 	if err != nil {
 		writeVoiceError(w, err.Error())
 		return

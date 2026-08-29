@@ -9,6 +9,7 @@ package knowledge
 
 import (
 	"context"
+	"fmt"
 	"hash/fnv"
 	"math"
 	"os"
@@ -45,6 +46,69 @@ type Manager struct {
 // New creates a knowledge manager over the given directories.
 func New(dirs []string) *Manager {
 	return &Manager{dirs: dirs}
+}
+
+// ImportFile reads a single document (.md/.txt/.markdown) and adds it to the
+// knowledge base, re-weighting IDF over the enlarged corpus. This is the
+// "import a document" entry point (WorkBuddy 资料库 parity) on top of the
+// directory-scanning Index().
+func (m *Manager) ImportFile(path string) (int, error) {
+	ext := strings.ToLower(filepath.Ext(path))
+	if ext != ".md" && ext != ".txt" && ext != ".markdown" {
+		return 0, fmt.Errorf("unsupported file type: %s", ext)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	return m.AddContent(path, string(data))
+}
+
+// AddContent indexes an in-memory document (name is used as the source label)
+// and re-weights IDF over the enlarged corpus. Returns the number of new
+// chunks; zero for empty input.
+func (m *Manager) AddContent(name, content string) (int, error) {
+	if strings.TrimSpace(content) == "" {
+		return 0, nil
+	}
+	newChunks := splitDoc(name, content)
+	if len(newChunks) == 0 {
+		return 0, nil
+	}
+	m.mu.RLock()
+	existing := m.chunks
+	m.mu.RUnlock()
+	chunks := make([]Chunk, 0, len(existing)+len(newChunks))
+	chunks = append(chunks, existing...)
+	chunks = append(chunks, newChunks...)
+	m.reweight(chunks)
+	return len(newChunks), nil
+}
+
+// reweight computes IDF weights and feature vectors for the given chunks and
+// atomically swaps them into the manager. Returns the new chunk count.
+func (m *Manager) reweight(chunks []Chunk) int {
+	df := make(map[uint64]int)
+	for i := range chunks {
+		for k := range tokenize(chunks[i].Text) {
+			df[k]++
+		}
+	}
+	n := len(chunks)
+	idf := make(map[uint64]float64, len(df))
+	if n > 0 {
+		for k, d := range df {
+			idf[k] = math.Log(float64(n+1)/float64(d+1)) + 1
+		}
+	}
+	for i := range chunks {
+		chunks[i].vec = featurizeIDF(chunks[i].Text, idf)
+	}
+	m.mu.Lock()
+	m.chunks = chunks
+	m.idf = idf
+	m.mu.Unlock()
+	return len(chunks)
 }
 
 // Index scans the configured directories for .md/.txt files, splits them into
@@ -87,27 +151,7 @@ func (m *Manager) Index(ctx context.Context) (int, error) {
 	// IDF-weighted vectors. Rare discriminative words get boosted, common
 	// stopword-ish words get damped — a local BM25-style ranking that stays
 	// fully offline (no embedding API, no tokens spent).
-	df := make(map[uint64]int)
-	for i := range chunks {
-		for k := range tokenize(chunks[i].Text) {
-			df[k]++
-		}
-	}
-	n := len(chunks)
-	idf := make(map[uint64]float64, len(df))
-	if n > 0 {
-		for k, d := range df {
-			idf[k] = math.Log(float64(n+1)/float64(d+1)) + 1
-		}
-	}
-	for i := range chunks {
-		chunks[i].vec = featurizeIDF(chunks[i].Text, idf)
-	}
-	m.mu.Lock()
-	m.chunks = chunks
-	m.idf = idf
-	m.mu.Unlock()
-	return len(chunks), nil
+	return m.reweight(chunks), nil
 }
 
 // ChunkCount returns the number of currently indexed passages.

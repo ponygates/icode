@@ -28,6 +28,10 @@ interface PermissionRequest {
   tool: string;
   prompt?: string;
   sid?: string;
+  // Graded-auth escalation progress (Claude Code parity) surfaced by the
+  // engine: consecutive ask/deny count and the threshold that forces manual.
+  strikes?: number;
+  threshold?: number;
 }
 
 // Token usage as reported by the backend (snake_case) or a provider (PascalCase).
@@ -418,6 +422,11 @@ const ChatPage: React.FC = () => {
   // distinguish "user stopped" from "request timed out" in the AbortError
   // catch. Reset after each stream ends.
   const userStoppedRef = useRef(false);
+  // S5: last wall-clock time we wrote a live token/cost estimate into the
+  // store while streaming. The backend only reports usage on 'done', so the
+  // input-bar counters would otherwise sit frozen during generation; we tick
+  // them at most once per second from streamed chars instead.
+  const lastUsageTickRef = useRef(0);
   const activeSession = sessions.find((s) => s.id === activeSessionId);
 
   // Latest handleSend, kept in a ref so handleRegenerate can trigger a resend
@@ -700,10 +709,9 @@ const ChatPage: React.FC = () => {
     return () => clearInterval(interval);
   }, [backendUrl]);
 
-  // Voice input toggling. Collects microphone audio with the MediaRecorder
-  // API then POSTs the WAV to the backend /api/voice, which runs it through
-  // Zhipu GLM-ASR. The recognised text is appended to the input so it can be
-  // edited before sending.
+  // Voice input toggling. Collects microphone audio with the Web Audio API
+  // (PCM → WAV) then POSTs to the backend /api/voice, which runs it through
+  // the configured ASR provider (zhipu, baidu, or xfyun).
   const toggleVoice = useCallback(async () => {
     const rec = mediaRecorderRef.current;
     // Stop an in-progress recording → onstop fires → transcribe.
@@ -716,7 +724,14 @@ const ChatPage: React.FC = () => {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       mediaStreamRef.current = stream;
       voiceChunksRef.current = [];
-      const mr = new MediaRecorder(stream);
+
+      // Try to use MediaRecorder with WAV if supported, otherwise fallback to webm.
+      // WAV is preferred for Baidu/iFlytek providers which require PCM format.
+      const wavSupported = typeof MediaRecorder !== 'undefined' &&
+        MediaRecorder.isTypeSupported('audio/wav');
+      const mimeType = wavSupported ? 'audio/wav' : 'audio/webm';
+
+      const mr = new MediaRecorder(stream, { mimeType });
       mr.ondataavailable = (e) => { if (e.data.size > 0) voiceChunksRef.current.push(e.data); };
       mr.onstop = async () => {
         setVoiceActive(false);
@@ -724,9 +739,10 @@ const ChatPage: React.FC = () => {
         try {
           stream.getTracks().forEach(t => t.stop());
           mediaStreamRef.current = null;
-          const blob = new Blob(voiceChunksRef.current, { type: 'audio/webm' });
+          const ext = wavSupported ? 'wav' : 'webm';
+          const blob = new Blob(voiceChunksRef.current, { type: mimeType });
           const form = new FormData();
-          form.append('file', blob, 'voice.webm');
+          form.append('file', blob, `voice.${ext}`);
           const res = await fetch(`${backendUrl}/api/voice`, { method: 'POST', body: form });
           const data = await res.json().catch(() => ({}));
           if (!res.ok) {
@@ -752,7 +768,9 @@ const ChatPage: React.FC = () => {
 
   const handleSend = useCallback(async (override?: string) => {
     const text = (override ?? input).trim();
-    if (!text || isStreaming) return;
+    // Allow image-only sends: a pasted screenshot with no caption is valid.
+    // (The caption check used to block it — Ctrl+V → Enter did nothing.)
+    if ((!text && attachedImages.length === 0) || isStreaming) return;
 
     // Record the submitted text in the input history (↑/↓ browser).
     historyRef.current.push(text);
@@ -911,6 +929,23 @@ const ChatPage: React.FC = () => {
           }
         } else {
           accumulated += contentStr;
+        }
+        // S5 live tick: usage only arrives on 'done', so estimate from
+        // streamed chars (~4 chars/token) and write to the store at most
+        // once per second — keeps the input-bar counters moving while
+        // generating without a store write per chunk.
+        const now = Date.now();
+        if (now - lastUsageTickRef.current >= 1000) {
+          lastUsageTickRef.current = now;
+          const estOut = Math.round(accumulated.length / 4);
+          const live = useAppStore.getState().tokenUsage;
+          updateTokenUsage({
+            output: Math.max(live.output, estOut),
+            cost: estimateCost(
+              { PromptTokens: live.input, CompletionTokens: estOut } as UsageInfo,
+              currentModel,
+            ),
+          });
         }
         scheduleFlush();
       } else if (ty === 'tool_use') {
@@ -2201,6 +2236,16 @@ const ChatPage: React.FC = () => {
                 {t('permission.tool')}: <span style={{ color: 'var(--accent)' }}>{pendingPermission.tool}</span>
               </div>
               <div>{pendingPermission.prompt || t('permission.confirm')}</div>
+              {!!pendingPermission.strikes && (
+                <div style={{ color: 'var(--warning)', fontSize: 11, marginTop: 8 }}>
+                  {pendingPermission.strikes >= (pendingPermission.threshold || 3)
+                    ? `⚠ ${t('permission.strikeEscalated', { n: pendingPermission.strikes })}`
+                    : t('permission.strikeProgress', {
+                        n: pendingPermission.strikes,
+                        t: pendingPermission.threshold || 3,
+                      })}
+                </div>
+              )}
             </div>
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
               <button

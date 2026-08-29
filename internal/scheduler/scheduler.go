@@ -456,6 +456,13 @@ func nextRunAfter(schedule string, from time.Time, idleStart string) (time.Time,
 	if sched == "idle" {
 		return nextIdleStart(from, idleStart), nil
 	}
+	if strings.HasPrefix(sched, "rrule:") {
+		r, err := parseRRule(strings.TrimSpace(sched[len("rrule:"):]))
+		if err != nil {
+			return time.Time{}, err
+		}
+		return r.next(from), nil
+	}
 	if m := durRe.FindStringSubmatch(sched); m != nil {
 		var unit time.Duration
 		switch m[2] {
@@ -493,6 +500,12 @@ func DescribeSchedule(schedule string) string {
 	sched := strings.ToLower(strings.TrimSpace(schedule))
 	if sched == "idle" {
 		return "闲时（低峰窗口）"
+	}
+	if strings.HasPrefix(sched, "rrule:") {
+		if r, err := parseRRule(strings.TrimSpace(sched[len("rrule:"):])); err == nil {
+			return describeRRule(r)
+		}
+		return schedule
 	}
 	if m := durRe.FindStringSubmatch(sched); m != nil {
 		return "每 " + m[1] + " " + map[string]string{"s": "秒", "m": "分钟", "h": "小时", "d": "天"}[m[2]]

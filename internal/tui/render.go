@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/ponygates/icode/internal/config"
 	"github.com/ponygates/icode/internal/core/permission"
+	"github.com/ponygates/icode/internal/core/skills"
 	"github.com/ponygates/icode/internal/core/tool"
 	"github.com/ponygates/icode/internal/xgo"
 )
@@ -136,13 +138,21 @@ func (t *TUI) render() {
 	}
 
 	// ── Layout ───────────────────────────────────────────────────
-	// Bottom chrome is one prompt row (`❯ input`) plus a single compact status
+	// Bottom chrome is the multi-line prompt box (`❯ input`, grows with
+	// content up to a cap and scrolls internally) plus a single compact status
 	// bar underneath it (hidden entirely when /statusline is toggled off).
 	// Everything else (header, conversation, overlays) lives above those rows.
-	inputRows := 1
-	if t.statusVisible {
-		inputRows = 2
+	inputRows := t.inputVisibleLines(H)
+	if n := t.inputLineCount(); n < inputRows {
+		inputRows = n
 	}
+	// Claude Code-style context bar sits directly above the input box, so it
+	// needs its own reserved row whenever context usage is known.
+	if t.contextWindow > 0 && t.contextTokens >= 0 {
+		inputRows++
+	}
+	// Streaming-time queue indicator ("⏳ queued / typing") above the box.
+	inputRows += t.queueRows()
 	contentRows := H - inputRows
 	if contentRows < 4 {
 		contentRows = 4
@@ -161,14 +171,63 @@ func (t *TUI) render() {
 		if boxW > W-4 {
 			boxW = W - 4
 		}
-		// Truncate the prompt to the inner width by *visible* columns so a
-		// long CJK command can't push the right │ out of line.
-		prompt := truncVisible(permPrompt, boxW-2)
-		opts := "[1] 允许   [2] 全部允许   [3] 拒绝"
+		// buildPrompt may return a multi-line summary (e.g. write_file shows
+		// the content excerpt, edit shows old→new). Render each line inside the
+		// box, wrapping long lines so the argument preview stays readable.
+		// The prompt is plain text (colours are applied at render time), so
+		// wrapping by runes is safe and never splits a UTF-8 sequence.
+		innerW := boxW - 2
+		var wrapped []string
+		for _, pl := range strings.Split(permPrompt, "\n") {
+			runes := []rune(pl)
+			for len(runes) > 0 {
+				w := 0
+				n := 0
+				for n < len(runes) {
+					cw := runeWidth(runes[n])
+					if w+cw > innerW {
+						break
+					}
+					w += cw
+					n++
+				}
+				if n == 0 {
+					n = 1 // guard: a single rune wider than the box
+				}
+				wrapped = append(wrapped, string(runes[:n]))
+				runes = runes[n:]
+			}
+		}
+		if len(wrapped) == 0 {
+			wrapped = []string{""}
+		}
+		opts := "[1] 允许   [2] 全部允许   [3] 拒绝   [Tab] 加说明"
 		permLines = append(permLines,
 			t.paint("yellow", "  ╭"+repeat("─", boxW)+"╮"),
 			t.paint("yellow", "  │ ")+t.paint("bold", title)+padVisible("", boxW-visibleWidth(title)-2)+t.paint("yellow", " │"),
-			t.paint("dim", "  │ ")+prompt+padVisible("", boxW-visibleWidth(prompt)-2)+t.paint("dim", " │"),
+		)
+		for _, pl := range wrapped {
+			permLines = append(permLines,
+				t.paint("dim", "  │ ")+pl+padVisible("", boxW-visibleWidth(pl)-2)+t.paint("dim", " │"),
+			)
+		}
+		// Tab opens an inline note field (Claude Code parity): the typed
+		// reason is handed to the agent with the decision, so it knows WHY an
+		// action was rejected instead of guessing.
+		if t.permNoteOpen {
+			noteLabel := "说明: "
+			shown := t.permNoteBuf
+			if visibleWidth(noteLabel+shown) > innerW {
+				shown = truncVisible(shown, innerW-visibleWidth(noteLabel)-1)
+			}
+			noteLine := noteLabel + shown + "▌"
+			permLines = append(permLines,
+				t.paint("yellow", "  │ ")+t.paint("cyan", "├"+repeat("─", boxW-2)+"┤"),
+				t.paint("yellow", "  │ ")+noteLine+padVisible("", boxW-visibleWidth(noteLine)-2)+t.paint("yellow", " │"),
+				t.paint("yellow", "  │ ")+t.paint("dim", "Enter 提交「拒绝并说明」· Esc 取消说明")+padVisible("", boxW-visibleWidth("Enter 提交「拒绝并说明」· Esc 取消说明")-2)+t.paint("yellow", " │"),
+			)
+		}
+		permLines = append(permLines,
 			t.paint("yellow", "  │ ")+t.paint("dim", opts)+padVisible("", boxW-visibleWidth(opts)-2)+t.paint("yellow", " │"),
 			t.paint("yellow", "  ╰"+repeat("─", boxW)+"╯"),
 		)
@@ -188,7 +247,7 @@ func (t *TUI) render() {
 	// gets a clean gutter column. Help/welcome/permission/autocomplete overlays
 	// suppress the scrollbar to avoid visual overlap.
 	isWelcome := welcomeVisible && len(msgs) == 0 && !streaming
-	convFull := t.conversationLines(msgs, streaming, streamContent, W)
+	convFull, headsFull := t.conversationLines(msgs, streaming, streamContent, W)
 	sbActive := !t.helpVisible && !isWelcome && !permPending && !t.acOpen && W >= 24 && len(convFull) > bodyH
 
 	contentW := W
@@ -196,17 +255,23 @@ func (t *TUI) render() {
 		contentW = W - 1
 	}
 
-	conv := convFull
+	conv, heads := convFull, headsFull
 	convTotal := len(conv)
 	if sbActive {
-		conv = t.conversationLines(msgs, streaming, streamContent, contentW)
+		conv, heads = t.conversationLines(msgs, streaming, streamContent, contentW)
 		convTotal = len(conv)
 	}
+
+	// convBase tracks the index (into the full conversationLines result) of the
+	// first line of the FINAL conv slice, so tool card header rows can be mapped
+	// back to screen rows for click-to-fold (see toolHeadRows below).
+	convBase := 0
 
 	if t.resumePickerOpen {
 		conv = t.resumePickerOverlay(W, bodyH)
 		t.scrollOffset = 0
 		sbActive = false
+		heads = nil
 	} else if t.modelPickerOpen {
 		// Fixed overlay: always fully visible. The panel scrolls its own
 		// internal window (modelPickerTop) to keep the highlighted row on
@@ -216,14 +281,25 @@ func (t *TUI) render() {
 		conv = t.modelPickerOverlay(W, bodyH)
 		t.scrollOffset = 0
 		sbActive = false
+		heads = nil
+	} else if t.askPendingVisible() {
+		// Interactive multiple-choice question (Claude Code AskUserQuestion
+		// parity): render the question + numbered options centered in the
+		// body until the user picks (1-9/Enter/Esc).
+		conv = t.drawAskOverlay(contentW, bodyH)
+		t.scrollOffset = 0
+		sbActive = false
+		heads = nil
 	} else if t.diffBoxOpen {
 		conv = t.diffBoxOverlay(contentW, bodyH)
 		t.scrollOffset = 0
 		sbActive = false
+		heads = nil
 	} else if t.helpVisible {
 		conv = t.helpBox(contentW, bodyH)
 		t.scrollOffset = 0
 		sbActive = false
+		heads = nil
 	} else if isWelcome {
 		// Start the welcome at row 1 (right after the hrule). No extra
 		// topMargin — that was pushing the logo partially off-screen
@@ -232,6 +308,7 @@ func (t *TUI) render() {
 		// Welcome mode always shows the latest — reset scroll.
 		t.scrollOffset = 0
 		sbActive = false
+		heads = nil
 	} else if convTotal > bodyH && t.scrollOffset > 0 {
 		// User has scrolled up: show N lines above the bottom.
 		total := convTotal
@@ -248,10 +325,15 @@ func (t *TUI) render() {
 		if len(conv) > bodyH {
 			conv = conv[:bodyH]
 		}
+		// The indicator+blank pushed the window by 2 rows; convBase must track
+		// the FULL index of the first content line so head-row mapping stays
+		// correct for click-to-fold while scrolled.
+		convBase = start - 2
 	} else if convTotal > bodyH {
 		// Auto-follow: always show the latest content.
 		t.scrollOffset = 0
 		conv = conv[convTotal-bodyH:]
+		convBase = convTotal - bodyH
 	}
 	if !sbActive {
 		contentW = W
@@ -292,6 +374,21 @@ func (t *TUI) render() {
 		bodyBottom = bodyTop
 	}
 
+	// Map tool-card header rows to their messages for click-to-fold. heads is
+	// keyed by index into the FULL conversationLines result; convBase is the
+	// index of the first line of the final conv window, so the screen row is
+	// convStart + (fullIdx - convBase), minus whatever trimOff dropped from the
+	// top. Rows scrolled out of view are simply not mapped.
+	t.mu.Lock()
+	t.toolHeadRows = make(map[int]int, len(heads))
+	for fullIdx, msgIdx := range heads {
+		outIdx := convStart + (fullIdx - convBase) - trimOff
+		if outIdx >= 0 && outIdx < len(out) {
+			t.toolHeadRows[outIdx] = msgIdx
+		}
+	}
+	t.mu.Unlock()
+
 	// Scrollbar thumb position derived from the cached scroll offset.
 	thumbRow := bodyBottom
 	if sbActive {
@@ -319,7 +416,7 @@ func (t *TUI) render() {
 		t.mu.Unlock()
 	}
 
-	// ── Write frame (absolute rows, in-place clear) ──────────────
+	// ── Write frame (incremental: only changed rows, absolute positioning) ──
 	t.renderMu.Lock()
 	defer t.renderMu.Unlock()
 
@@ -328,36 +425,52 @@ func (t *TUI) render() {
 	if W != t.lastRenderW || H != t.lastRenderH {
 		fmt.Fprint(t.writer, "\x1b[2J\x1b[H")
 		t.lastRenderW, t.lastRenderH = W, H
+		t.lastFrame = nil // force a full repaint at the new size
+	}
+	if len(t.lastFrame) != contentRows {
+		t.lastFrame = make([]string, contentRows)
 	}
 
 	var buf strings.Builder
 	buf.WriteString("\x1b[?25l") // hide cursor while repainting
-	for i, ln := range out {
+	n := len(out)
+	if n > contentRows {
+		n = contentRows
+	}
+	for i := 0; i < n; i++ {
 		row := i + 1
-		if row > contentRows {
-			break
-		}
-		buf.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", row))
-		buf.WriteString(ln)
-		// Overlay the scrollbar gutter over the conversation body rows.
+		ln := out[i]
+		changed := ln != t.lastFrame[i]
+		var glyph string
 		if sbActive && row >= bodyTop && row <= bodyBottom {
-			var glyph string
 			if row == thumbRow {
 				glyph = t.paint("cyan", "█")
 			} else {
 				glyph = t.paint("dim", "│")
 			}
+		}
+		if changed {
+			t.lastFrame[i] = ln
+			buf.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", row))
+			buf.WriteString(ln)
+		}
+		// Overlay the scrollbar gutter over the conversation body rows.
+		if glyph != "" {
 			buf.WriteString(fmt.Sprintf("\x1b[%d;%dH", row, W))
 			buf.WriteString(glyph)
 		}
 	}
-	// Clear any rows left between the content block and the input box so old
-	// text from a taller previous frame never lingers.
-	for row := len(out) + 1; row <= contentRows; row++ {
-		buf.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", row))
+	// Clear rows that shrank out of the previous frame (taller → shorter).
+	for i := n; i < contentRows; i++ {
+		if t.lastFrame[i] != "" {
+			t.lastFrame[i] = ""
+			buf.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", i+1))
+		}
 	}
 	fmt.Fprint(t.writer, buf.String())
-	if searchMode {
+	if t.settingsOpen {
+		t.renderSettingsPanel()
+	} else if searchMode {
 		t.drawSearchBox(contentW, H, searchBuf, searchCur, streaming)
 	} else {
 		t.drawInputBox(contentW, H, inputBuf, cursor, streaming, status)
@@ -490,6 +603,46 @@ func (t *TUI) welcomeBoxes(width int) []string {
 // helpBox renders the keyboard-shortcut help overlay (opened with `?` on an
 // empty input). It mirrors the bordered-box style used by the permission
 // prompt and is capped to the available body height.
+// drawAskOverlay renders the interactive multiple-choice question box
+// (Claude Code AskUserQuestion parity): question + numbered options + key
+// hint, centered in the body area. Returns content lines (no positioning).
+func (t *TUI) drawAskOverlay(W, H int) []string {
+	t.mu.Lock()
+	ask := t.askPending
+	t.mu.Unlock()
+	if ask == nil {
+		return nil
+	}
+	inner := []string{
+		t.paint("yellow", " 🤔 ") + ask.Question,
+		"",
+	}
+	for i, opt := range ask.Options {
+		inner = append(inner, fmt.Sprintf("   %d. %s", i+1, opt))
+	}
+	inner = append(inner, "", t.paint("dim", "   1-9 选择 · Enter 选第一项 · Esc 取消"))
+
+	// Horizontal centering.
+	lines := make([]string, 0, len(inner)+2)
+	for _, ln := range inner {
+		pad := (W - visibleWidth(ln)) / 2
+		if pad < 0 {
+			pad = 0
+		}
+		lines = append(lines, strings.Repeat(" ", pad)+ln)
+	}
+	// Vertical centering within the body height.
+	top := (H - len(lines)) / 2
+	if top < 0 {
+		top = 0
+	}
+	padded := make([]string, 0, top+len(lines))
+	for i := 0; i < top; i++ {
+		padded = append(padded, "")
+	}
+	return append(padded, lines...)
+}
+
 func (t *TUI) helpBox(W, bodyH int) []string {
 	type row struct{ k, d string }
 	rows := []row{
@@ -502,6 +655,7 @@ func (t *TUI) helpBox(W, bodyH int) []string {
 		{"Ctrl+W / Ctrl+U", "删除前一个词 / 删除到行首"},
 		{"Ctrl+L", "清屏并重绘"},
 		{"Ctrl+K", "清空输入"},
+		{"Ctrl+,", "打开设置面板"},
 		{"Ctrl+C / Ctrl+D", "中断 / 退出"},
 		{"Ctrl+P / Ctrl+N", "历史记录上 / 下"},
 		{"PgUp / PgDn", "会话上 / 下翻页"},
@@ -723,6 +877,9 @@ func boxWidth(topLine string) int {
 	return visibleWidth(topLine)
 }
 
+// maxToolLines caps the excerpt shown for a folded tool card.
+const maxToolLines = 8
+
 func (t *TUI) messageLinesW(m Message, width int) []string {
 	switch m.Role {
 	case RoleThinking:
@@ -743,8 +900,13 @@ func (t *TUI) messageLinesW(m Message, width int) []string {
 		return wrapPrefixed(t.paint("red", "× ")+"  ", "    ", m.Content, width)
 	case RoleTool:
 		var out []string
-		pre := t.paint("cyan", "⏺ ") + " "
-		head := pre + m.Tool
+		// opencode-style fold indicator: ▸ collapsed / ▾ expanded. Clicking the
+		// header row toggles this block (see handleMouse → toolHeadRows).
+		marker := t.paint("yellow", "▸")
+		if !m.Folded {
+			marker = t.paint("yellow", "▾")
+		}
+		head := marker + " " + t.paint("cyan", "⏺ "+m.Tool)
 		// Hide empty/no-op parameter objects like "{}" so the tool line
 		// shows "* git_status" instead of "* git_status {}".
 		args := strings.TrimSpace(m.ToolArgs)
@@ -754,16 +916,16 @@ func (t *TUI) messageLinesW(m Message, width int) []string {
 		if args != "" {
 			head += " " + truncate(args, 60)
 		}
-		out = append(out, t.paint("cyan", head))
+		out = append(out, head)
 		if m.Content != "" {
+			// Per-block folding (Claude Code / opencode style): a folded card
+			// shows the header plus a short excerpt; expanded shows everything.
 			toolOutput := m.Content
-			// Claude Code-style: fold long tool output with a summary line
-			const maxLines = 8
-			if !t.toolFolded {
+			if m.Folded {
 				fold := strings.Split(toolOutput, "\n")
-				if len(fold) > maxLines {
-					toolOutput = strings.Join(fold[:maxLines], "\n") + "\n" +
-						t.paint("dim", fmt.Sprintf("    ⎿  ... %d more lines (use /expand to show all)", len(fold)-maxLines))
+				if len(fold) > maxToolLines {
+					toolOutput = strings.Join(fold[:maxToolLines], "\n") + "\n" +
+						t.paint("dim", fmt.Sprintf("    ⎿  ... %d more lines (click ▸ to expand)", len(fold)-maxToolLines))
 				}
 			}
 			for _, l := range wrapPrefixed("    ⎿ ", "      ", toolOutput, width) {
@@ -781,8 +943,13 @@ func (t *TUI) messageLinesW(m Message, width int) []string {
 // stays quiet. Tool messages belong to the assistant turn that invoked them,
 // so they get no rule above. While the model is "thinking" (stream started but
 // no tokens yet) a single animated spinner + gradient bar is shown.
-func (t *TUI) conversationLines(msgs []Message, streaming bool, streamContent string, width int) []string {
+//
+// The returned map records, for every tool card, the display-line index of its
+// header row → index into msgs. render() uses it to map a mouse click on a card
+// header back to the message for per-block fold toggling.
+func (t *TUI) conversationLines(msgs []Message, streaming bool, streamContent string, width int) ([]string, map[int]int) {
 	var lines []string
+	heads := map[int]int{}
 	all := append([]Message{}, msgs...)
 	if streaming {
 		all = append(all, Message{Role: RoleAssistant, Content: streamContent})
@@ -797,19 +964,23 @@ func (t *TUI) conversationLines(msgs []Message, streaming bool, streamContent st
 		if i > 0 && m.Role != RoleTool {
 			lines = append(lines, t.paint("dim", repeat("─", width)))
 		}
+		if m.Role == RoleTool {
+			heads[len(lines)] = i // header row of this tool card
+		}
 		lines = append(lines, t.messageLinesW(m, width)...)
 	}
 	if streaming && strings.TrimSpace(streamContent) == "" {
 		lines = append(lines, "")
-		lines = append(lines, t.thinkingBox(width)...)
+		// The thinking indicator lives at the bottom (drawInputBox), not
+		// here — keeps the message area from repainting every frame.
 	}
-	return lines
+	return lines, heads
 }
 
 // thinkingBox renders the streaming "thinking" indicator — a single bare line
-// (spinner + gradient bar + elapsed), deliberately box-less and minimal.
+// (spinner + status text + elapsed, opencode style), deliberately box-less.
 func (t *TUI) thinkingBox(width int) []string {
-	return []string{"  " + t.paint("dim", t.tstr("status.gen")) + " " + t.thinkingBar()}
+	return []string{"  " + t.thinkingBar()}
 }
 
 // padVisible pads s with spaces to reach the given display width, accounting
@@ -822,49 +993,25 @@ func padVisible(s string, w int) string {
 	return s + strings.Repeat(" ", w-vw)
 }
 
-// thinkingBar is an animated "thinking" indicator in opencode's minimal
-// style: a braille spinner, a thin context slider, and an elapsed clock. The
-// heavy ▓▒░ gradient of the earlier glimmer bar is dropped — opencode's
-// chrome stays quiet, so the fill is uniform and the chrome is one dim line.
+// thinkingBar is the animated "thinking" indicator in opencode's exact style:
+// a braille spinner + dim status text + elapsed clock (+ context % when
+// known). No wide ▓▒░ slider — opencode keeps the chrome quiet, so the frame
+// has far less changing surface (also eliminates the flicker the old 14-cell
+// slider caused on Win10 conhost).
 //
-// Visual:  ⠋ [▓▓▓▓▓▓░░░░░░░░] 32% 12s
+// Visual:  ⠋ 正在生成… 32% 12s
 func (t *TUI) thinkingBar() string {
-	const trackLen = 14
 	elapsed := time.Since(t.turnStart)
 	frame := int(elapsed.Milliseconds() / 100)
 	if frame < 0 {
 		frame = 0
 	}
 
-	// ── Spinner ── braille cycle (the opencode / CLI-native activity glyph).
+	// ── Spinner ── braille cycle (opencode's default "dots" spinner).
 	spinners := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 	spinner := spinners[frame%len(spinners)]
 
-	// ── Context slider ──
-	// Use actual context usage when available, otherwise animate a growing
-	// sweep so the indicator always moves while the model works.
-	var filled int
-	if t.contextWindow > 0 && t.contextTokens > 0 {
-		filled = t.contextTokens * trackLen / t.contextWindow
-		if filled > trackLen {
-			filled = trackLen
-		}
-	} else {
-		filled = frame % (trackLen + 1)
-	}
-
-	var b strings.Builder
-	b.WriteString("[")
-	for i := 0; i < trackLen; i++ {
-		if i < filled {
-			b.WriteString("▓")
-		} else {
-			b.WriteString("░")
-		}
-	}
-	b.WriteString("]")
-
-	// Context percentage + elapsed clock.
+	// Context percentage when known.
 	var pctStr string
 	if t.contextWindow > 0 && t.contextTokens > 0 {
 		pct := t.contextTokens * 100 / t.contextWindow
@@ -878,7 +1025,16 @@ func (t *TUI) thinkingBar() string {
 		secs = 0
 	}
 
-	return t.paint("cyan", spinner) + " " + b.String() + t.paint("dim", pctStr) + t.paint("dim", fmt.Sprintf(" %ds", secs))
+	// Lead with the active model (dim, truncated) so it is obvious which
+	// model is generating — especially when switching models mid-session.
+	modelTag := ""
+	if m := strings.TrimSpace(t.model); m != "" {
+		modelTag = t.paint("dim", truncate(m, 18)+" ")
+	}
+
+	return modelTag + t.paint("cyan", spinner) + " " +
+		t.paint("dim", t.tstr("status.gen")) +
+		t.paint("dim", pctStr) + t.paint("dim", fmt.Sprintf(" %ds", secs))
 }
 
 // fit returns s padded (or truncated with an ellipsis) to exactly w *visible*
@@ -1019,7 +1175,7 @@ func (t *TUI) ensureAnim() {
 			}
 			t.mu.Unlock()
 			t.scheduleRender()
-			time.Sleep(110 * time.Millisecond)
+			time.Sleep(50 * time.Millisecond)
 		}
 		t.mu.Lock()
 		t.streaming = false
@@ -1074,15 +1230,39 @@ func listCwd() []string {
 func (t *TUI) statusLine() string {
 	d := func(s string) string { return t.paint("dim", s) }
 	var parts []string
+	// Session title — set by autoTitle (first message) or /rename, so the
+	// status line always says which conversation is active.
+	if st := strings.TrimSpace(t.sessionTitle); st != "" {
+		parts = append(parts, d("📎 "+truncate(st, 18)))
+	}
 	// Mode badge — always visible so the user knows what approvals to
 	// expect (Claude Code parity: plan/agent/auto/yolo are first-class).
 	if t.mode != "" {
 		parts = append(parts, t.paint(modeColor(t.mode), "["+string(t.mode)+"]"))
 	}
 	parts = append(parts, t.paint("green", "●")+" "+t.model)
+	// Installed skill count — cached lazily, never hit the disk per frame.
+	if !t.skillCountLoaded {
+		t.skillCountLoaded = true
+		if reg := skills.Load(skills.DefaultDirs()...); reg != nil {
+			t.skillCount = len(reg.List())
+		}
+	}
+	if t.skillCount > 0 {
+		parts = append(parts, d(fmt.Sprintf("🧩%d", t.skillCount)))
+	}
 	// Git branch — lazily refreshed, never on the render hot path.
 	if b := t.branchSegment(); b != "" {
 		parts = append(parts, d("⎇ ")+b)
+	}
+	// PR status badge — lazily refreshed (gh pr view), never on the render hot
+	// path. Coloured by mergeable state (OPEN/MERGED green; CLOSED/DRAFT red).
+	if pr := t.prSegment(); pr != "" {
+		color := "green"
+		if strings.Contains(pr, "CLOSED") || strings.Contains(pr, "DRAFT") {
+			color = "red"
+		}
+		parts = append(parts, t.paint(color, "PR "+pr))
 	}
 	// Security level badge — always visible so the user knows their privacy
 	// boundary. Unlike Claude Code, no hidden telemetry or phone-home.
@@ -1095,7 +1275,7 @@ func (t *TUI) statusLine() string {
 			d("▸"+formatTokens(t.promptTokens)+" ▸"+formatTokens(t.completionTokens)))
 	}
 	if t.contextWindow > 0 && t.contextTokens > 0 {
-		parts = append(parts, t.contextBar())
+		parts = append(parts, d(fmt.Sprintf("%d%%", t.contextTokens*100/t.contextWindow)))
 	}
 	if t.cacheHitRate > 0 {
 		parts = append(parts, d(fmt.Sprintf("%.0f%% cache", t.cacheHitRate*100)))
@@ -1142,8 +1322,11 @@ func (t *TUI) statusLine() string {
 
 // contextBar renders a mini progress bar for context usage with threshold
 // colouring: green <60%, yellow <85%, red at/above. Example: ctx ▓▓▓░░░░░ 42%
-func (t *TUI) contextBar() string {
-	pct := t.contextTokens * 100 / t.contextWindow
+func (t *TUI) contextBar(tokens, window int) string {
+	if window <= 0 {
+		return ""
+	}
+	pct := tokens * 100 / window
 	if pct > 100 {
 		pct = 100
 	}
@@ -1194,6 +1377,54 @@ func (t *TUI) runningBgCount() int {
 	return tool.RunningAgentTaskCount() + tool.RunningShellTaskCount()
 }
 
+// prSegment returns the cached GitHub PR status badge for the current branch,
+// e.g. "#123 OPEN" or "#456 MERGED". Mirrors branchSegment: refreshed lazily
+// (every 60s) via `gh pr view`, never on the render hot path. Empty when there
+// is no PR for the branch, `gh` is missing, or the call fails. The JSON result
+// carries the review/merge state so the badge can be coloured meaningfully.
+func (t *TUI) prSegment() string {
+	if time.Since(t.prCheck) >= 60*time.Second {
+		t.prCheck = time.Now()
+		branch := t.gitBranch
+		xgo.GoSafe("tui.pr", func() {
+			if branch == "" {
+				t.mu.Lock()
+				t.prBadge = ""
+				t.mu.Unlock()
+				return
+			}
+			if _, err := exec.LookPath("gh"); err != nil {
+				return // gh not installed — leave the (empty) badge as-is
+			}
+			out, err := exec.Command("gh", "pr", "view", "--json",
+				"number,state,title,url").Output()
+			if err != nil {
+				t.mu.Lock()
+				t.prBadge = ""
+				t.mu.Unlock()
+				return
+			}
+			var pr struct {
+				Number int    `json:"number"`
+				State  string `json:"state"`
+				Title  string `json:"title"`
+				URL    string `json:"url"`
+			}
+			if e := json.Unmarshal(out, &pr); e != nil || pr.Number == 0 {
+				t.mu.Lock()
+				t.prBadge = ""
+				t.mu.Unlock()
+				return
+			}
+			badge := fmt.Sprintf("#%d %s", pr.Number, strings.ToUpper(pr.State))
+			t.mu.Lock()
+			t.prBadge = badge
+			t.mu.Unlock()
+		})
+	}
+	return t.prBadge
+}
+
 // formatDuration renders a duration compactly: "3.2s" or "1m04s".
 func formatDuration(d time.Duration) string {
 	d = d.Round(time.Millisecond)
@@ -1227,82 +1458,174 @@ func modeColor(m Mode) string {
 // rows are gone — all live info now lives on the single status line passed in.
 //
 //	❯ <input>                              row topRow
-//	● model · ▸1.2k ▸3.4k · 42% ctx        row topRow+1 (when /statusline on)
+//	ctx ▓▓▓░░░░░ 42%                        row topRow-1 (when context known)
+//	● model · ▸1.2k ▸3.4k · 42%             row topRow+1 (when /statusline on)
 func (t *TUI) drawInputBox(W, H int, inputBuf string, cursor int, streaming bool, status string) {
-	bottomRows := 1
+	statusRows := 0
 	if t.statusVisible {
-		bottomRows = 2
+		statusRows = 1
 	}
-	topRow := H - bottomRows + 1
+	// Claude Code-style context bar sits directly above the input box. render()
+	// reserves the row via inputRows; mirror that here so topRow accounts for it.
+	t.mu.Lock()
+	ctxTokens, ctxWindow := t.contextTokens, t.contextWindow
+	t.mu.Unlock()
+	hasCtx := ctxWindow > 0 && ctxTokens >= 0
+	ctxRows := 0
+	if hasCtx {
+		ctxRows = 1
+	}
+	// Streaming-time queue line (typing buffer / queued count).
+	qRows := t.queueRows()
+	qText := ""
+	if qRows > 0 {
+		qText = t.queueLine()
+	}
+	// Thinking indicator row (opencode-style spinner) shown above the context
+	// bar while generating — the "思考进度" lives at the bottom, next to the
+	// input, not inside the message area.
+	thinkRows := 0
+	if streaming {
+		thinkRows = 1
+	}
+
+	// Multi-line prompt: "❯ <line0>", continuation lines indented to align
+	// with the first content column. The box shows at most inputVisibleLines
+	// rows (tail-anchored scroll, cursor line always visible).
+	maxVis := t.inputVisibleLines(H)
+	prompt := t.paint(modeColor(t.mode), "❯")
+	promptW := visibleWidth(prompt)
+	indent := promptW + 2 // prompt + space == continuation indent
+	innerW := W - indent - 1
+	if innerW < 4 {
+		innerW = 4
+	}
+
+	lines := strings.Split(inputBuf, "\n")
+	lineIdx, colIdx := inputCursorPos(inputBuf, cursor)
+
+	// Visible window: tail-anchored, but pulled back so the cursor line stays
+	// visible while navigating upwards inside a long input.
+	visStart := 0
+	if len(lines) > maxVis {
+		visStart = len(lines) - maxVis
+		if lineIdx-2 < visStart {
+			visStart = lineIdx - 2
+			if visStart < 0 {
+				visStart = 0
+			}
+		}
+	}
+	visEnd := visStart + maxVis
+	if visEnd > len(lines) {
+		visEnd = len(lines)
+	}
+	visLines := lines[visStart:visEnd]
+
+	topRow := H - statusRows - ctxRows - qRows - thinkRows - len(visLines) + 1
 	if topRow < 1 {
 		topRow = 1
 	}
 
-	// Prompt line: "❯ <input>" (mode-colored prompt).
-	prompt := t.paint(modeColor(t.mode), "❯")
-	// Content must fit after the prompt + space, with a 1-char margin.
-	innerW := W - visibleWidth(prompt) - 2
-	if innerW < 4 {
-		innerW = 4
+	var b strings.Builder
+	// Thinking indicator (opencode-style spinner + elapsed) directly above
+	// the context bar while generating.
+	if thinkRows > 0 && topRow-thinkRows-ctxRows-qRows >= 1 {
+		tb := t.thinkingBar()
+		if visibleWidth(tb) > W {
+			tb = truncVisible(tb, W)
+		}
+		b.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", topRow-thinkRows-ctxRows-qRows))
+		b.WriteString(tb)
 	}
-	content := inputBuf
-	if visibleWidth(content) > innerW {
-		content = truncVisible(content, innerW)
+	if hasCtx && topRow-thinkRows-ctxRows-qRows-1 >= 1 {
+		cb := t.contextBar(ctxTokens, ctxWindow)
+		if visibleWidth(cb) > W {
+			cb = truncVisible(cb, W)
+		}
+		b.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", topRow-thinkRows-ctxRows-qRows-1))
+		b.WriteString(cb)
 	}
-	line := prompt + " " + content
-	if visibleWidth(line) > W {
-		line = truncVisible(line, W)
+	// Queue indicator line, directly above the first input line.
+	if qRows > 0 && topRow-1 >= 1 {
+		if visibleWidth(qText) > W {
+			qText = truncVisible(qText, W)
+		}
+		b.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", topRow-1))
+		b.WriteString(qText)
 	}
 
-	var b strings.Builder
-	b.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", topRow))
-	b.WriteString(line)
+	// Cursor position within the visible window.
+	curVisRow := -1
+	curVisCol := 0
+	if lineIdx >= visStart && lineIdx < visEnd {
+		curVisRow = lineIdx - visStart
+		curVisCol = colIdx
+	}
+
+	for i, ln := range visLines {
+		row := topRow + i
+		b.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", row))
+		var line string
+		if i == 0 {
+			line = prompt + " " + ln
+			if t.multiline {
+				// Persistent multi-line indicator so Enter=newline never
+				// surprises the user (Alt+Enter submits).
+				line = prompt + " " + t.paint("yellow", "[MULTI]") + " " +
+					t.paint("dim", "Enter=换行·Alt+Enter=发送 ") + ln
+			} else if ln == "" && !streaming {
+				// Empty input: quiet Claude Code-style placeholder hint.
+				line = prompt + " " + t.paint("dim", "/ 查看命令 · Tab 补全 · Ctrl+R 历史 · Alt+P 模型")
+			}
+		} else {
+			line = strings.Repeat(" ", indent) + ln
+		}
+		if visibleWidth(line) > W {
+			line = truncVisible(line, W)
+		}
+		b.WriteString(line)
+	}
 
 	if t.statusVisible {
-		// Status bar row: the pre-rendered compact strip, truncated so it stays
-		// a single line even in a narrow terminal.
 		st := status
 		if visibleWidth(st) > W {
 			st = truncVisible(st, W)
 		}
-		b.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", topRow+1))
+		b.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", topRow+len(visLines)))
 		b.WriteString(st)
-	} else if H >= 1 {
-		// Status bar hidden — clear the row it used to occupy so stale text
-		// from a previous frame never lingers after /statusline.
+	} else {
 		b.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", H))
 	}
 
-	// Position the cursor on the input line, just after the typed prefix.
-	// The prefix is "❯ " = prompt + space. Use visibleWidth instead of a
-	// hardcoded column so CJK terminals (and our own runeWidth extension that
-	// counts dingbats/misc-symbols like ❯ as 2) always land the cursor at the
-	// right display column. Without this, full-width characters typed after a
-	// mis-measured prompt would render on top of each other ("重叠显示").
-	runes := []rune(inputBuf)
-	if cursor > len(runes) {
-		cursor = len(runes)
+	// Position the cursor: prompt + space (line 0) or indent (later lines),
+	// plus content up to the cursor column. Use visibleWidth so CJK width
+	// handling stays correct (see the single-line version's history).
+	if curVisRow >= 0 {
+		vw := visibleWidth(string([]rune(lines[visStart+curVisRow])[:curVisCol]))
+		col := indent + vw + 1 // 1-based ANSI column
+		// The first line can carry extra prefixes ([MULTI] marker + hint) that
+		// push the content right — the cursor must track them or it floats
+		// with a visible gap between caret and typed text.
+		if curVisRow == 0 && t.multiline {
+			col += visibleWidth("[MULTI] Enter=换行·Alt+Enter=发送 ")
+		}
+		if col > W {
+			col = W
+		}
+		if col < 1 {
+			col = 1
+		}
+		b.WriteString(fmt.Sprintf("\x1b[%d;%dH", topRow+curVisRow, col))
 	}
-	vw := visibleWidth(string(runes[:cursor]))
-	if vw > innerW {
-		vw = innerW
-	}
-	if vw < 0 {
-		vw = 0
-	}
-	col := visibleWidth(prompt+" ") + vw + 1 // prompt+space width + content up to cursor + 1-based ANSI
-	if col > W {
-		col = W
-	}
-	if col < 1 {
-		col = 1
-	}
-	b.WriteString(fmt.Sprintf("\x1b[%d;%dH", topRow, col))
+	// Hide the caret while streaming, show it otherwise (single-line version's
+	// behaviour preserved for the multi-line box).
 	if streaming {
 		b.WriteString("\x1b[?25l")
 	} else {
 		b.WriteString("\x1b[?25h")
 	}
+
 	fmt.Fprint(t.writer, b.String())
 }
 
@@ -1312,6 +1635,15 @@ func (t *TUI) drawSearchBox(W, H int, searchBuf, current string, streaming bool)
 	bottomRows := 1
 	if t.statusVisible {
 		bottomRows = 2
+	}
+	// Mirror the context-bar row reservation from drawInputBox so the search
+	// overlay lands at the same height as the normal input box.
+	t.mu.Lock()
+	ctxTokens, ctxWindow := t.contextTokens, t.contextWindow
+	t.mu.Unlock()
+	hasCtx := ctxWindow > 0 && ctxTokens >= 0
+	if hasCtx {
+		bottomRows++
 	}
 	topRow := H - bottomRows + 1
 	if topRow < 1 {
@@ -1335,6 +1667,14 @@ func (t *TUI) drawSearchBox(W, H int, searchBuf, current string, streaming bool)
 	query := t.paint("dim", "  i-search: "+searchBuf)
 
 	var b strings.Builder
+	if hasCtx && topRow-1 >= 1 {
+		cb := t.contextBar(ctxTokens, ctxWindow)
+		if visibleWidth(cb) > W {
+			cb = truncVisible(cb, W)
+		}
+		b.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", topRow-1))
+		b.WriteString(cb)
+	}
 	b.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", topRow))
 	b.WriteString(line)
 	if t.statusVisible {
@@ -1350,12 +1690,18 @@ func (t *TUI) drawSearchBox(W, H int, searchBuf, current string, streaming bool)
 
 // convHeight returns the number of rows available for conversation content.
 func (t *TUI) convHeight() int {
-	return t.height - 4 // header(1) + footer hrule(1) + prompt(1) + status(1)
+	h := t.height - 4 // header(1) + footer hrule(1) + prompt(1) + status(1)
+	// The Claude Code-style context bar above the input box claims one row.
+	if t.contextWindow > 0 && t.contextTokens >= 0 {
+		h--
+	}
+	return h
 }
 
 // totalConvLines counts all display lines for the current conversation.
 func (t *TUI) totalConvLines(msgs []Message, streaming bool, streamContent string, width int) int {
-	return len(t.conversationLines(msgs, streaming, streamContent, width))
+	lines, _ := t.conversationLines(msgs, streaming, streamContent, width)
+	return len(lines)
 }
 
 func (t *TUI) scrollPgUp() {
@@ -1389,7 +1735,8 @@ func (t *TUI) scrollPgDn() {
 func (t *TUI) scrollToTop() {
 	t.mu.Lock()
 	msgs := append([]Message{}, t.messages...)
-	total := len(t.conversationLines(msgs, t.streaming, t.streamBuf.String(), t.width))
+	lines, _ := t.conversationLines(msgs, t.streaming, t.streamBuf.String(), t.width)
+	total := len(lines)
 	bodyH := t.convHeight()
 	if total > bodyH {
 		t.scrollOffset = total - bodyH
@@ -1471,4 +1818,170 @@ func (t *TUI) scrollDown(n int) {
 		t.scrollOffset = 0
 	}
 	t.scheduleRender()
+}
+
+// settingItem is one row of the settings overlay panel.
+type settingItem struct {
+	label string
+	value string
+}
+
+// settingsPanelItems builds the settings-panel rows. Labels go through the
+// TUI i18n table (t.tstr) so /lang applies to the overlay; the row COUNT is
+// derived from this single list, and handleSettingsKey clamps navigation to
+// len(settingsPanelItems(...)) so the drawn rows and the keyboard bounds can
+// never drift apart.
+func (t *TUI) settingsPanelItems(cfg *config.Config) []settingItem {
+	return []settingItem{
+		{label: t.tstr("settings.model"), value: cfg.Defaults.Model},
+		{label: t.tstr("settings.provider"), value: cfg.Defaults.Provider},
+		{label: t.tstr("settings.mode"), value: cfg.Defaults.Mode},
+		{label: t.tstr("settings.lang"), value: cfg.Language},
+		{label: t.tstr("settings.theme"), value: cfg.TUI.Theme},
+		{label: t.tstr("settings.voiceProv"), value: cfg.Voice.Provider},
+		{label: t.tstr("settings.baiduKey"), value: maskStringTUI(cfg.Voice.BaiduAPIKey)},
+		{label: t.tstr("settings.xfyunAppID"), value: cfg.Voice.IFlytekAppID},
+	}
+}
+
+// renderSettingsPanel draws the settings overlay panel.
+func (t *TUI) renderSettingsPanel() {
+	t.mu.Lock()
+	W := t.width
+	H := t.height
+	t.mu.Unlock()
+
+	if W < 40 || H < 15 {
+		return
+	}
+
+	// Use the snapshot loaded when the panel opened (see the Ctrl+, handler);
+	// fall back to a one-off load so render() itself never hits the disk.
+	t.mu.Lock()
+	cfg := t.settingsCfg
+	t.mu.Unlock()
+	if cfg == nil {
+		var err error
+		cfg, err = config.Load()
+		if err != nil {
+			cfg = config.Default()
+		}
+	}
+
+	// Panel dimensions
+	panelW := W - 8
+	if panelW > 70 {
+		panelW = 70
+	}
+	panelH := H - 6
+	if panelH > 30 {
+		panelH = 30
+	}
+	startX := (W - panelW) / 2
+	startY := (H - panelH) / 2
+
+	// Build settings items (labels via the TUI i18n table, so /lang applies
+	// to the overlay too). settingsPanelItems keeps the row list in ONE place:
+	// renderSettingsPanel draws it and handleSettingsKey clamps navigation to
+	// its length, so the two can never drift apart.
+	items := t.settingsPanelItems(cfg)
+
+	var b strings.Builder
+	// Move cursor to panel position
+	b.WriteString(fmt.Sprintf("\x1b[%d;%dH", startY+1, startX+1))
+
+	// Draw panel border
+	borderH := panelH
+	borderW := panelW
+
+	// Top border
+	b.WriteString("\x1b(0") // Enter line drawing mode
+	b.WriteString("l")
+	b.WriteString(strings.Repeat("q", borderW-2))
+	b.WriteString("k")
+	b.WriteString("\x1b(B") // Exit line drawing mode
+
+	// Title
+	title := t.tstr("settings.title")
+	titlePad := (borderW - 2 - len(title)) / 2
+	b.WriteString(fmt.Sprintf("\x1b[%d;%dH", startY+1, startX+1))
+	b.WriteString("\x1b(0l")
+	b.WriteString(strings.Repeat("q", titlePad))
+	b.WriteString("\x1b(B")
+	b.WriteString("\x1b[1m" + title + "\x1b[0m")
+	b.WriteString("\x1b(0")
+	b.WriteString(strings.Repeat("q", borderW-2-titlePad-len(title)))
+	b.WriteString("k")
+	b.WriteString("\x1b(B")
+
+	// Content rows
+	for i, item := range items {
+		rowY := startY + 2 + i
+		if rowY >= startY+borderH-1 {
+			break
+		}
+		b.WriteString(fmt.Sprintf("\x1b[%d;%dH", rowY, startX+1))
+		b.WriteString("\x1b(0x\x1b(B") // Left border
+
+		// Highlight current row
+		if i == t.settingsCursor {
+			b.WriteString("\x1b[7m") // Reverse video
+		}
+
+		// Format: label + padding + value
+		label := item.label + ": "
+		padding := borderW - 2 - len(label) - len(item.value)
+		if padding < 0 {
+			padding = 0
+		}
+		b.WriteString(" " + label + strings.Repeat(" ", padding) + item.value)
+
+		if i == t.settingsCursor {
+			b.WriteString("\x1b[0m") // Reset
+		}
+
+		// Pad remaining width and right border
+		remaining := borderW - 2 - len(" "+label+strings.Repeat(" ", padding)+item.value)
+		if remaining > 0 {
+			b.WriteString(strings.Repeat(" ", remaining))
+		}
+		b.WriteString("\x1b(0\x1b(B") // Right border
+	}
+
+	// Empty rows
+	for i := len(items); i < panelH-2; i++ {
+		rowY := startY + 2 + i
+		if rowY >= startY+borderH-1 {
+			break
+		}
+		b.WriteString(fmt.Sprintf("\x1b[%d;%dH", rowY, startX+1))
+		b.WriteString("\x1b(0x")
+		b.WriteString(strings.Repeat(" ", borderW-2))
+		b.WriteString("x\x1b(B")
+	}
+
+	// Bottom border
+	b.WriteString(fmt.Sprintf("\x1b[%d;%dH", startY+borderH-1, startX+1))
+	b.WriteString("\x1b(0m")
+	b.WriteString(strings.Repeat("q", borderW-2))
+	b.WriteString("j")
+	b.WriteString("\x1b(B")
+
+	// Hint line
+	hintY := startY + borderH
+	hint := "↑↓ 移动 | Enter 修改 | Esc 关闭"
+	hintX := startX + (panelW-len(hint))/2
+	b.WriteString(fmt.Sprintf("\x1b[%d;%dH%s", hintY, hintX, hint))
+
+	fmt.Fprint(t.writer, b.String())
+}
+
+func maskStringTUI(s string) string {
+	if s == "" {
+		return "(未设置)"
+	}
+	if len(s) <= 8 {
+		return "****"
+	}
+	return s[:4] + "****" + s[len(s)-4:]
 }

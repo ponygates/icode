@@ -19,6 +19,11 @@ type Store struct {
 	root      string
 	gitDir    string
 	workDir   string
+
+	// redoStack remembers the shadow-git HEAD before each Rewind so /redo can
+	// re-apply the rolled-back changes (opencode /undo /redo parity).
+	// In-memory: a fresh process cannot redo a previous session's rewinds.
+	redoStack []string
 }
 
 func Open(sessionID string) (*Store, error) {
@@ -93,6 +98,10 @@ func (s *Store) Rewind(ctx context.Context, steps int) ([]string, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Remember the current HEAD so /redo can restore it.
+	if headOut, _ := s.gitCmd(ctx, "rev-parse", "HEAD"); strings.TrimSpace(headOut) != "" {
+		s.redoStack = append(s.redoStack, strings.TrimSpace(headOut))
+	}
 	countOut, err := s.gitCmd(ctx, "rev-list", "--count", "HEAD")
 	if err != nil {
 		return nil, fmt.Errorf("checkpoint count: %w", err)
@@ -115,6 +124,33 @@ func (s *Store) Rewind(ctx context.Context, steps int) ([]string, error) {
 	}
 	if _, err := s.gitCmd(ctx, "checkout", "--", "."); err != nil {
 		return nil, fmt.Errorf("checkpoint checkout: %w", err)
+	}
+	return restored, nil
+}
+
+// Redo re-applies the most recently rewinded state (opencode /redo parity):
+// restores the shadow-git HEAD that /rewind (or /undo) had rolled back from,
+// without moving HEAD. No-op with an error when nothing was rewound in this
+// process.
+func (s *Store) Redo(ctx context.Context) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := len(s.redoStack)
+	if n == 0 {
+		return nil, fmt.Errorf("没有可重做的改动（先 /undo 或 /rewind 再 /redo）")
+	}
+	head := s.redoStack[n-1]
+	s.redoStack = s.redoStack[:n-1]
+	filesOut, err := s.gitCmd(ctx, "diff", "--name-only", "HEAD", head)
+	if err != nil {
+		return nil, fmt.Errorf("redo diff: %w", err)
+	}
+	if _, err := s.gitCmd(ctx, "checkout", head, "--", "."); err != nil {
+		return nil, fmt.Errorf("redo checkout: %w", err)
+	}
+	restored := strings.Fields(filesOut)
+	if len(restored) == 0 {
+		return []string{"(工作区已是最新)"}, nil
 	}
 	return restored, nil
 }

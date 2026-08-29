@@ -70,3 +70,6 @@ build-desktop-backend.js
 
 # Dev tooling.deveco/
 
+
+# Temp
+.freebuff/

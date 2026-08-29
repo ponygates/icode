@@ -50,6 +50,25 @@ func TestRankSuggestionsRecencyFirst(t *testing.T) {
 	}
 }
 
+func TestRankSuggestionsUsageFirst(t *testing.T) {
+	// C8: persisted usage history outranks session recency. /help was used
+	// 3× total but not recently; /model was used once just now.
+	tr := &TUI{}
+	tr.cmdUsage = map[string]int{"/help": 3, "/model": 1}
+	tr.noteRecentCmd("/model")
+
+	items := []acItem{
+		{Name: "/help"}, {Name: "/model"}, {Name: "/token"},
+	}
+	tr.rankSuggestions(items)
+	if items[0].Name != "/help" {
+		t.Errorf("items[0] = %s, want /help (3 uses beats 1)", items[0].Name)
+	}
+	if items[1].Name != "/model" {
+		t.Errorf("items[1] = %s, want /model (recent, 1 use)", items[1].Name)
+	}
+}
+
 func TestUsageHint(t *testing.T) {
 	if usageHint("/lang") == "" {
 		t.Error("/lang should carry an argument hint")

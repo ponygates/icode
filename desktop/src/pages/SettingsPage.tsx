@@ -3,6 +3,10 @@ import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../stores/appStore';
 import { PageTools, PageUpdates, PageAbout, PageNetwork, PageAutomations } from './SettingsPagesExtra';
 import {
+  loadShortcuts, saveShortcuts, resetShortcuts, matchesBinding, recordBinding, bindingLabel,
+  SHORTCUT_ACTIONS, type ShortcutAction, type ShortcutBinding,
+} from '../lib/shortcuts';
+import {
   Settings, X, Key, Globe, Shield, Cpu, Moon, Sun, Monitor, Laptop,
   Zap, Wrench, Boxes, DollarSign, ChevronDown, Check, Plus, Trash2,
   Thermometer, Hash, Layers, RefreshCw, Info, ExternalLink, Star, AlertCircle,
@@ -225,6 +229,9 @@ function PageGeneral({ store }: { store: ReturnType<typeof useAppStore.getState>
           })}
         </div>
       </Section>
+
+      {/* Voice Input Provider */}
+      <VoiceSettings store={store} />
     </div>
   );
 }
@@ -1104,28 +1111,88 @@ function PageBilling({ store }: { store: ReturnType<typeof useAppStore.getState>
 
 function PageShortcuts() {
   const { t } = useTranslation();
-  const keys = [
-    ['Ctrl+K',t('shortcuts.commandPalette')],
-    ['Ctrl+N',t('shortcuts.newSession')],
-    ['Ctrl+L',t('shortcuts.focusInput')],
-    ['Esc',t('shortcuts.stopGeneration')],
-    ['↑↓',t('shortcuts.browseHistory')],
-    ['Tab',t('shortcuts.completeCommand')],
-    ['Ctrl+C / Ctrl+V',t('shortcuts.copyPaste')],
-    ['Ctrl+X',t('shortcuts.cut')],
-    ['Ctrl+A',t('shortcuts.selectAll')],
-    ['↻',t('shortcuts.refreshModels')],
-    ['/, @',t('shortcuts.cmdFileComplete')],
-  ];
+  const [bindings, setBindings] = useState<Record<ShortcutAction, ShortcutBinding>>(loadShortcuts);
+  // Which action is currently waiting for a new key combo, or null.
+  const [recording, setRecording] = useState<ShortcutAction | null>(null);
+  const [notice, setNotice] = useState('');
+
+  // While recording, capture the next keydown anywhere and save it. The
+  // capture-phase listener runs before the app's own global handlers, so the
+  // newly-bound combo can't fire its action during recording.
+  useEffect(() => {
+    if (!recording) return;
+    const onKey = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const b = recordBinding(e);
+      if (b === null) { // Esc → cancel recording
+        setRecording(null);
+        return;
+      }
+      // Reject a combo already used by another action to avoid dead bindings.
+      const clash = SHORTCUT_ACTIONS.find(
+        (a) => a !== recording && matchesBinding(e as unknown as KeyboardEvent, bindings[a]),
+      );
+      if (clash) {
+        setNotice(t('shortcuts.clash', '该组合键已被「{{action}}」使用', { action: t(`shortcuts.${clash}`) }));
+        setRecording(null);
+        return;
+      }
+      const next = { ...bindings, [recording]: b };
+      setBindings(next);
+      saveShortcuts(next);
+      setRecording(null);
+      setNotice('');
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [recording, bindings, t]);
+
+  const resetAll = () => {
+    resetShortcuts();
+    setBindings(loadShortcuts());
+    setRecording(null);
+    setNotice(t('shortcuts.resetDone'));
+  };
+
   return (
-    <Section title={t('settings.pageShortcuts')}>
-      <div style={{display:'flex',flexDirection:'column',gap:2}}>
-        {keys.map(([key, desc]) => (
-          <div key={key} style={{display:'flex',justifyContent:'space-between',padding:'6px 10px',borderRadius:6,fontSize:12,color:'var(--text-secondary)'}}>
-            <span>{desc}</span>
-            <kbd style={{fontSize:10,background:'var(--bg-primary)',padding:'2px 7px',borderRadius:4,border:'1px solid var(--border-color)',color:'var(--text-muted)',fontFamily:'var(--font-mono)',}}>{key}</kbd>
-          </div>
+    <Section title={t('settings.pageShortcuts')} desc={t('shortcuts.editHint', '点击右侧按键，按下新的组合键即可修改；Esc 取消。')}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+        {SHORTCUT_ACTIONS.map((action) => (
+          <button
+            key={action}
+            onClick={() => setRecording(recording === action ? null : action)}
+            style={{
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+              padding: '6px 10px', borderRadius: 6, fontSize: 12,
+              color: 'var(--text-secondary)', background: 'transparent', border: 'none',
+              cursor: 'pointer', width: '100%', textAlign: 'left',
+            }}
+          >
+            <span>{t(`shortcuts.${action}`)}</span>
+            <kbd style={{
+              fontSize: 10, background: 'var(--bg-primary)', padding: '2px 7px', borderRadius: 4,
+              border: recording === action ? '1px solid var(--accent)' : '1px solid var(--border-color)',
+              color: recording === action ? 'var(--accent)' : 'var(--text-muted)',
+              fontFamily: 'var(--font-mono)', whiteSpace: 'nowrap',
+            }}>
+              {recording === action ? t('shortcuts.recording') : bindingLabel(bindings[action])}
+            </kbd>
+          </button>
         ))}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>
+        <button
+          onClick={resetAll}
+          style={{
+            padding: '4px 12px', borderRadius: 6, fontSize: 11, cursor: 'pointer',
+            background: 'var(--bg-primary)', border: '1px solid var(--border-color)',
+            color: 'var(--text-secondary)',
+          }}
+        >
+          {t('shortcuts.reset')}
+        </button>
+        {notice && <span style={{ fontSize: 11, color: 'var(--warning)' }}>{notice}</span>}
       </div>
     </Section>
   );
@@ -1396,5 +1463,165 @@ function PageDesktop({ store }: { store: ReturnType<typeof useAppStore.getState>
     </div>
   );
 }
+
+// ═══════════════════════════════════════════════════════════════
+// Voice Input Settings Component
+// ═══════════════════════════════════════════════════════════════
+
+function VoiceSettings({ store }: { store: ReturnType<typeof useAppStore.getState> }) {
+  const { t } = useTranslation();
+  const [provider, setProvider] = useState<string>('zhipu');
+  const [baiduApiKey, setBaiduApiKey] = useState('');
+  const [baiduSecretKey, setBaiduSecretKey] = useState('');
+  const [xfyunAppId, setXfyunAppId] = useState('');
+  const [xfyunApiKey, setXfyunApiKey] = useState('');
+  const [xfyunApiSecret, setXfyunApiSecret] = useState('');
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState('');
+
+  // Load the current provider from the backend config on mount. Credentials
+  // are deliberately NOT stored in localStorage (XSS-exfiltratable and a
+  // second source of truth that drifts from the CLI's config.yaml): the
+  // backend never echoes secrets back, so the key fields start empty and
+  // blank inputs mean "keep the existing value".
+  useEffect(() => {
+    if (!store.backendUrl) return;
+    fetch(`${store.backendUrl}/api/config`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((cfg) => {
+        if (cfg?.voice?.provider) setProvider(cfg.voice.provider);
+      })
+      .catch(() => {});
+  }, [store.backendUrl]);
+
+  const doSave = async () => {
+    setError('');
+    if (!store.backendUrl) {
+      setError(t('settings.voiceSaveError'));
+      return;
+    }
+    try {
+      const res = await fetch(`${store.backendUrl}/api/config`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          voice: {
+            provider,
+            baidu_api_key: baiduApiKey,
+            baidu_secret_key: baiduSecretKey,
+            xfyun_app_id: xfyunAppId,
+            xfyun_api_key: xfyunApiKey,
+            xfyun_api_secret: xfyunApiSecret,
+          },
+        }),
+      });
+      if (!res.ok) {
+        // Surface the real failure instead of pretending the save succeeded.
+        let detail = '';
+        try {
+          const body = await res.json();
+          detail = body?.error || '';
+        } catch {}
+        setError(detail ? `${t('settings.voiceSaveError')}: ${detail}` : t('settings.voiceSaveError'));
+        return;
+      }
+      setSaved(true);
+      setTimeout(() => setSaved(false), 1500);
+    } catch {
+      setError(t('settings.voiceSaveError'));
+    }
+  };
+
+  return (
+    <Section title={t('settings.voiceInput')} desc={t('settings.voiceInputDesc')}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {/* Provider selector */}
+        <div>
+          <label style={labelStyle}>{t('settings.voiceProvider')}</label>
+          <select style={selectStyle} value={provider} onChange={(e) => setProvider(e.target.value)}>
+            <option value="zhipu">智谱 GLM-ASR（默认）</option>
+            <option value="baidu">百度短语音识别</option>
+            <option value="xfyun">科大讯飞语音识别</option>
+          </select>
+        </div>
+
+        {/* Baidu settings */}
+        {provider === 'baidu' && (
+          <>
+            <div>
+              <label style={labelStyle}>{t('settings.voiceBaiduApiKey')}</label>
+              <input style={inputStyle} type="password" placeholder="百度 API Key"
+                value={baiduApiKey} onChange={(e) => setBaiduApiKey(e.target.value)} />
+            </div>
+            <div>
+              <label style={labelStyle}>{t('settings.voiceBaiduSecretKey')}</label>
+              <input style={inputStyle} type="password" placeholder="百度 Secret Key"
+                value={baiduSecretKey} onChange={(e) => setBaiduSecretKey(e.target.value)} />
+            </div>
+          </>
+        )}
+
+        {/* iFlytek settings */}
+        {provider === 'xfyun' && (
+          <>
+            <div>
+              <label style={labelStyle}>{t('settings.voiceXfyunAppId')}</label>
+              <input style={inputStyle} type="password" placeholder="讯飞 App ID"
+                value={xfyunAppId} onChange={(e) => setXfyunAppId(e.target.value)} />
+            </div>
+            <div>
+              <label style={labelStyle}>{t('settings.voiceXfyunApiKey')}</label>
+              <input style={inputStyle} type="password" placeholder="讯飞 API Key"
+                value={xfyunApiKey} onChange={(e) => setXfyunApiKey(e.target.value)} />
+            </div>
+            <div>
+              <label style={labelStyle}>{t('settings.voiceXfyunApiSecret')}</label>
+              <input style={inputStyle} type="password" placeholder="讯飞 API Secret"
+                value={xfyunApiSecret} onChange={(e) => setXfyunApiSecret(e.target.value)} />
+            </div>
+          </>
+        )}
+
+        {/* Save button */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
+          <button onClick={doSave} style={{
+            padding: '7px 18px', borderRadius: 6, fontSize: 12, fontWeight: 500,
+            background: saved ? '#22c55e' : 'var(--accent)',
+            color: '#fff', border: 'none', cursor: 'pointer',
+            transition: 'all 0.15s',
+          }}>
+            {saved ? <><Check size={12} style={{ marginRight: 4 }} />{t('settings.saved')}</> : t('settings.saveVoice')}
+          </button>
+          {error && (
+            <span style={{ fontSize: 11, color: '#ef4444', display: 'flex', alignItems: 'center', gap: 4 }}>
+              <AlertCircle size={12} />{error}
+            </span>
+          )}
+        </div>
+
+        {/* Info */}
+        <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.6 }}>
+          {provider === 'zhipu' && t('settings.voiceZhipuInfo')}
+          {provider === 'baidu' && t('settings.voiceBaiduInfo')}
+          {provider === 'xfyun' && t('settings.voiceXfyunInfo')}
+        </div>
+        <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.6 }}>
+          {t('settings.voiceBlankHint')}
+        </div>
+      </div>
+    </Section>
+  );
+}
+
+// Input styles used by VoiceSettings
+const inputStyle: React.CSSProperties = {
+  width: '100%', padding: '8px 12px', borderRadius: 6, fontSize: 12,
+  background: 'var(--bg-primary)', border: '1px solid var(--border-color)',
+  color: 'var(--text-primary)', outline: 'none', boxSizing: 'border-box',
+};
+const labelStyle: React.CSSProperties = {
+  display: 'block', fontSize: 11, fontWeight: 500, color: 'var(--text-secondary)',
+  marginBottom: 4,
+};
 
 export default React.memo(SettingsPage);

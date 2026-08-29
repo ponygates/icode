@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/ponygates/icode/internal/config"
+	"github.com/ponygates/icode/internal/types"
 )
 
 func newTestTUI() *TUI {
@@ -336,7 +336,7 @@ type testCallback struct {
 	onInterrupt func()
 }
 
-func (c *testCallback) OnSend(text string)                       {}
+func (c *testCallback) OnSend(text string, _ []types.Attachment) {}
 func (c *testCallback) OnSlashCommand(cmd string, args []string) {}
 func (c *testCallback) OnPermissionResponse(decision string)     {}
 func (c *testCallback) OnPlanConfirm()                           {}
@@ -357,42 +357,38 @@ func (c *testCallback) OnAddDir(dir string) string                             {
 func (c *testCallback) OnUpdateModels() string                                 { return "" }
 func (c *testCallback) OnSetMode(mode string) string                           { return "" }
 func (c *testCallback) OnRenameSession(title string) string                    { return "" }
+func (c *testCallback) OnSetAskUser(fn func(string, []string) (int, error))     {}
 func (c *testCallback) OnAddCustomModel(provider, modelID, name string) string { return "" }
 func (c *testCallback) OnRemoveCustomModel(id string) string                   { return "" }
 func (c *testCallback) LSPQuery(sub string, args []string) string              { return "" }
 func (c *testCallback) KnowledgeQuery(query string) string                     { return "" }
 func (c *testCallback) CreateIdleTask(name, prompt string) string              { return "" }
+func (c *testCallback) OnPermissionNote(toolPrompt, note string)               {}
 func (c *testCallback) OnListSessionsStructured(limit int) []SessionInfo       { return nil }
 
-// feedEsc sets the reader to an ESC sequence (leading 0x1b + follow-up bytes)
-// and dispatches it exactly as the raw-mode main loop does: read the first
-// rune through bufio (which fills the internal buffer with any already-arrived
-// follow-up bytes — that is what the Lone-Esc vs CSI distinction relies on),
-// then hand it to handleKey.
+// feedEsc pushes an ESC sequence (leading 0x1b + follow-up bytes) into the
+// key channel — the same path the key pump uses in production — then dispatches
+// ESC exactly as the raw-mode main loop does. handleKey reads the follow-up
+// bytes from keyCh, matching the live input path.
 func feedEsc(t *testing.T, tu *TUI, seq string) {
 	if len(seq) == 0 || seq[0] != 0x1b {
 		t.Fatalf("feedEsc expects a sequence starting with ESC, got %q", seq)
 	}
-	tu.reader = bufio.NewReader(strings.NewReader(seq))
-	rr, _, err := tu.reader.(*bufio.Reader).ReadRune()
-	if err != nil {
-		t.Fatalf("feedEsc ReadRune: %v", err)
+	// Push only the follow-up bytes: ESC itself is handed to handleKey, just
+	// like the main loop passes the rune it received.
+	for _, r := range seq[1:] {
+		tu.keyCh <- r
 	}
-	if !tu.handleKey(rr) {
+	if !tu.handleKey('\x1b') {
 		t.Fatalf("handleKey(ESC %q) signalled exit", seq)
 	}
 }
 
-// feedEscLone dispatches a plain Esc whose follow-up buffer is empty — the
-// real-terminal shape of a lone Esc keypress (the ESC-interrupt fix routes
-// through br.Buffered()==0).
+// feedEscLone dispatches a plain Esc with no follow-up bytes — keyCh stays
+// empty so handleKey's ESC branch hits the escFollowTimeout window and treats
+// it as a standalone Esc (the real-terminal shape of a lone Esc keypress).
 func feedEscLone(t *testing.T, tu *TUI) {
-	tu.reader = bufio.NewReader(strings.NewReader("\x1b"))
-	rr, _, err := tu.reader.(*bufio.Reader).ReadRune()
-	if err != nil {
-		t.Fatalf("feedEscLone ReadRune: %v", err)
-	}
-	if !tu.handleKey(rr) {
+	if !tu.handleKey('\x1b') {
 		t.Fatalf("handleKey(ESC lone) signalled exit")
 	}
 }

@@ -42,6 +42,12 @@ type Engine struct {
 	sessionSt   types.SessionStore
 	gate        *permission.Gate
 	permHandler PermissionHandler
+	// AskUser is the interactive multiple-choice asker (Claude Code
+	// AskUserQuestion parity). Injected by the TUI so ask_user_question tool
+	// calls can render options and read the user's choice; nil (headless /
+	// simpleui / desktop HTTP) degrades the tool to an error instead of
+	// hanging.
+	AskUser tool.AskUserFunc
 
 	mu         sync.Mutex
 	optimizers map[string]*tokenopt.Optimizer
@@ -583,9 +589,15 @@ func forkPrefix(msgs []types.Message) []types.Message {
 // + same message bytes → provider prompt-cache hits → delegation costs only
 // cache-read tokens. Falls back to a plain run when no session is loaded.
 func (e *Engine) RunForkedSubAgent(ctx context.Context, name, prompt string) (string, int, error) {
-	e.mu.Lock()
-	sessionID := e.curSessionID
-	e.mu.Unlock()
+	// The ctx carries this turn's sessionID (injected in executeTool via
+	// tool.WithSessionID). Reading the shared curSessionID field here would
+	// race: concurrent streams for different desktop tabs would make a fork
+	// replay the WRONG session's message prefix. Fall back to the field only
+	// for out-of-band calls that never went through a tool ctx.
+	sessionID := tool.SessionIDFromContext(ctx)
+	if sessionID == "" {
+		sessionID = e.currentSessionID()
+	}
 
 	var prefix []types.Message
 	if e.sessionSt != nil && sessionID != "" {
@@ -597,6 +609,11 @@ func (e *Engine) RunForkedSubAgent(ctx context.Context, name, prompt string) (st
 	e.mu.Lock()
 	runner := e.getAgentRunner()
 	reg := e.agentRegistry
+	if runner != nil {
+		// Re-sync the runner's session ID right before use so a concurrent
+		// Send() for another tab cannot stamp ours between Get and Run.
+		runner.SetSessionID(sessionID)
+	}
 	e.mu.Unlock()
 
 	var def *agent.AgentDef
@@ -779,6 +796,13 @@ func (e *Engine) executeTool(
 	}
 	ctx = tool.WithProgress(ctx, relay)
 
+	// Interactive ask (Claude Code AskUserQuestion parity): the TUI injects
+	// its asker via Engine.AskUser; headless/simpleui leave it nil and the
+	// AskUserTool degrades gracefully instead of hanging.
+	if e.AskUser != nil {
+		ctx = tool.WithAskUser(ctx, e.AskUser)
+	}
+
 	// Doom loop detection: if the same tool+args appears 3+ consecutive
 	// times, emit a warning and return a failure to break the loop.
 	if e.doomLoop.RecordCall(tc.Name, tc.Arguments) {
@@ -830,12 +854,19 @@ func (e *Engine) executeTool(
 			// Strike counter tripped: surface a one-time "已退回手动" notice.
 			out <- types.StreamEvent{Type: types.EventSystem, Content: "⚠ " + res.Reason}
 		}
+		strikes, threshold := 0, 0
+		if e.gate != nil {
+			if _, s := e.gate.EscalationState(sessionID); s > 0 {
+				strikes = s
+			}
+			threshold = e.gate.StrikeThreshold()
+		}
 		if e.permHandler != nil {
-			req := &types.PermissionReq{Tool: tc.Name, Prompt: res.Prompt}
+			req := &types.PermissionReq{Tool: tc.Name, Prompt: res.Prompt, Strikes: strikes, Threshold: threshold}
 			return e.applyDecision(ctx, sessionID, tc, e.permHandler(sessionID, req, res))
 		}
 		reqID := e.genPermID()
-		req := &types.PermissionReq{RequestID: reqID, Tool: tc.Name, Prompt: res.Prompt}
+		req := &types.PermissionReq{RequestID: reqID, Tool: tc.Name, Prompt: res.Prompt, Strikes: strikes, Threshold: threshold}
 		out <- types.StreamEvent{Type: types.EventPermission, Permission: req}
 		ch := make(chan permission.Decision, 1)
 		e.permMu.Lock()
@@ -885,8 +916,11 @@ func (e *Engine) rememberConnectDomain(tc types.ToolCall) {
 func (e *Engine) runTool(ctx context.Context, tc types.ToolCall) *types.ToolResult {
 	// Computer-use runaway guard: cap consecutive desktop-input operations so
 	// a confused model cannot keep clicking the user's real screen forever.
+	// sessionID comes from the ctx injected in executeTool (WithSessionID),
+	// NOT from the shared curSessionID field — concurrent streams for different
+	// desktop tabs would otherwise stamp on each other's per-session counters.
+	sessionID := tool.SessionIDFromContext(ctx)
 	if isCUTool(tc.Name) {
-		sessionID := e.currentSessionID()
 		if blocked, n := e.bumpCUGuard(sessionID, tc.Name); blocked {
 			return &types.ToolResult{
 				Success: false,
@@ -895,7 +929,6 @@ func (e *Engine) runTool(ctx context.Context, tc types.ToolCall) *types.ToolResu
 			}
 		}
 	} else {
-		sessionID := e.currentSessionID()
 		e.resetCUStreak(sessionID)
 	}
 
@@ -1743,6 +1776,11 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 	startTime := time.Now()
 
 	// Build fallback chain: primary + configured fallback models.
+	// The primary entry MUST use the routed modelID (see the smart-router
+	// block above): when routing engaged (session model ""/auto) it differs
+	// from sess.ModelID, and sending the raw sess.ModelID would hit the
+	// provider with an empty/"auto" model id and fail. modelInfo was resolved
+	// for modelID, so they are consistent.
 	type modelTry struct {
 		modelID      string
 		providerName string
@@ -1751,10 +1789,10 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 		isFallback   bool
 	}
 	modelsToTry := []modelTry{
-		{modelID: sess.ModelID, providerName: sess.ProviderName, modelInfo: modelInfo},
+		{modelID: modelID, providerName: modelInfo.Provider, modelInfo: modelInfo},
 	}
 	for _, fb := range e.fallbackModels {
-		if fb == sess.ModelID {
+		if fb == modelID {
 			continue
 		}
 		p, mi, err := e.providerReg.ResolveModel(fb)
@@ -1768,9 +1806,14 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 
 	var eventCh <-chan types.StreamEvent
 	var lastErr error
+	var fallbackMsg string
 	for _, mt := range modelsToTry {
 		if mt.isFallback && lastErr != nil {
-			fmt.Printf("[iCode] fallback to model %s (previous: %v)\n", mt.modelID, lastErr)
+			// Route the fallback notice through the event stream instead of
+			// printing to stdout: a raw-mode TUI owns stdout, and the desktop /
+			// simpleui surfaces can only show the switch if it arrives as an
+			// event. The message is emitted on `out` after the channel exists.
+			fallbackMsg = fmt.Sprintf("⚠️ 主模型不可用，已切换备用模型 %s（原因：%s）", mt.modelID, friendlyModelError(lastErr))
 		}
 		p := mt.provider
 		if p == nil {
@@ -1802,6 +1845,9 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 	}
 
 	out := make(chan types.StreamEvent, 64)
+	if fallbackMsg != "" {
+		out <- types.StreamEvent{Type: types.EventSystem, Content: fallbackMsg}
+	}
 	if trimmed {
 		out <- types.StreamEvent{Type: types.EventSystem, Content: "ⓘ [预算护栏] 会话上下文超出预算，已自动压缩为摘要 + 最近消息（≤ 预算）。"}
 	} else if warnMsg != "" {
@@ -1812,6 +1858,14 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 	go func() {
 		defer close(out)
 		defer cancel()
+		// Remove the per-session cancel func once this turn ends (Stop or
+		// natural completion) so long-running desktop sessions don't leak one
+		// entry per message. Delete is idempotent with Stop's own delete.
+		defer func() {
+			e.mu.Lock()
+			delete(e.stopFns, sessionID)
+			e.mu.Unlock()
+		}()
 		// A panic in streaming/tool execution must never kill the whole CLI
 		// process (the classic silent "flash close" / 闪退). Recover here, log
 		// the stack, and surface a user-visible error event so the session
@@ -1830,23 +1884,43 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 		assistantMsg.Role = types.RoleAssistant
 		assistantMsg.Timestamp = time.Now()
 		var toolCalls []types.ToolCall
+		// Some providers emit the FULL text so far on every chunk instead of
+		// an incremental delta. Feed everything through a textAccumulator so
+		// only the delta is forwarded — without this the first turn prints
+		// duplicated text ("OKOK") while later turns (continueAgentLoop,
+		// which already used an accumulator) don't.
+		acc := &textAccumulator{}
 
-		for {
+	for {
+		select {
+		case <-ctx.Done():
+			// User interrupted (Esc / stop button): keep whatever partial
+			// output already streamed (Claude Code parity — "已完成的工作保留"),
+			// persist it into the session, and tell the UI explicitly so it
+			// can reset its streaming state and show a confirmation.
+			e.persistPartialTurn(sessionID, opt, assistantMsg)
+			msg := "⏹ 已中断生成。"
+			if assistantMsg.Content != "" {
+				msg += " 已生成的部分输出已保留。"
+			}
 			select {
-			case <-ctx.Done():
-				// User interrupted (Esc / stop button): drop the provider
-				// stream immediately even if the provider's readStream hasn't
-				// noticed the cancellation yet. The tool call loop below must
-				// not start a new turn on a dead context.
-				return
+			case out <- types.StreamEvent{Type: types.EventSystem, Content: msg}:
+			default:
+			}
+			return
 			case event, ok := <-eventCh:
 				if !ok {
 					return
 				}
 				switch event.Type {
 				case types.EventText:
-					assistantMsg.Content += event.Content
-					out <- event
+					full, delta := acc.feed(event.Content)
+					assistantMsg.Content = full
+					if delta == "" {
+						// Nothing new (duplicate snapshot) — don't emit.
+						continue
+					}
+					out <- types.StreamEvent{Type: types.EventText, Content: delta}
 				case types.EventThinking:
 					// Pass through thinking events to the UI for display
 					out <- event
@@ -1884,6 +1958,17 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 		}
 	}()
 	return out, nil
+}
+
+// persistPartialTurn saves an interrupted turn's partial assistant output
+// into the optimizer and the session store so the user keeps what they
+// already saw on screen (Claude Code parity: "已完成的工作保留").
+func (e *Engine) persistPartialTurn(sessionID string, opt *tokenopt.Optimizer, assistantMsg types.Message) {
+	if assistantMsg.Content == "" {
+		return
+	}
+	opt.AddMessage(assistantMsg)
+	e.sessionSt.AppendMessage(sessionID, assistantMsg)
 }
 
 func (e *Engine) continueAgentLoop(
@@ -1938,8 +2023,17 @@ func (e *Engine) continueAgentLoop(
 		select {
 		case <-ctx.Done():
 			// User interrupted (Esc / stop) during a continuation round —
-			// stop consuming the provider stream; runToolTurn above already
-			// checks ctx.Done() before dispatching tools.
+			// keep the partial output of this round the same way the first
+			// stream does, so nothing the user already saw is silently lost.
+			e.persistPartialTurn(sessionID, opt, assistantMsg)
+			msg := "⏹ 已中断生成。"
+			if assistantMsg.Content != "" {
+				msg += " 已生成的部分输出已保留。"
+			}
+			select {
+			case out <- types.StreamEvent{Type: types.EventSystem, Content: msg}:
+			default:
+			}
 			return
 		case event, ok := <-eventCh:
 			if !ok {

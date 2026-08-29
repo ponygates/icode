@@ -192,7 +192,7 @@ func Execute(ctx context.Context, b *Backend, st *State, text string) Result {
 	case "/tasks":
 		return cmdTasks()
 	case "/skills":
-		return cmdSkills()
+		return cmdSkills(args)
 	case "/skill-eval":
 		return cmdSkillEval(args)
 	case "/plugin":
@@ -1742,12 +1742,26 @@ func cmdTasks() Result {
 	return ok(b.String())
 }
 
-func cmdSkills() Result {
+func cmdSkills(args []string) Result {
+	if len(args) > 0 {
+		switch strings.ToLower(args[0]) {
+		case "market", "browse", "list-market":
+			return marketList()
+		case "install":
+			if len(args) < 2 {
+				return errf("用法: /skills install <名称>（先 /skills market 查看可安装项）")
+			}
+			if err := skills.Install(args[1]); err != nil {
+				return errf("安装失败: %s", err.Error())
+			}
+			return ok("✓ 已安装技能「" + args[1] + "」。在对话中提及它的描述或触发词即可使用。")
+		}
+	}
 	reg := skills.Load(skills.DefaultDirs()...)
 	var b strings.Builder
 	b.WriteString("已安装技能 (SKILL.md):\n")
 	if list := reg.List(); len(list) == 0 {
-		b.WriteString("  无。在 ~/.icode/skills/ 或 .icode/skills/ 下放置 SKILL.md 即可启用。\n")
+		b.WriteString("  无。用 /skills market 浏览内置市场，或直接在 ~/.icode/skills/ 或 .icode/skills/ 放置 SKILL.md。\n")
 	} else {
 		for _, s := range list {
 			trig := ""
@@ -1757,6 +1771,26 @@ func cmdSkills() Result {
 			b.WriteString(fmt.Sprintf("  %s — %s%s\n", s.Name, s.Description, trig))
 		}
 	}
+	return ok(b.String())
+}
+
+// marketList renders the built-in skill market (WorkBuddy SkillHub parity,
+// offline-first): bundled skills annotated with install state.
+func marketList() Result {
+	cats := skills.ListCatalog()
+	if len(cats) == 0 {
+		return ok("技能市场当前为空。")
+	}
+	var b strings.Builder
+	b.WriteString("技能市场（内置精选 · 离线可用）:\n")
+	for _, c := range cats {
+		mark := "  "
+		if c.Installed {
+			mark = "✓ "
+		}
+		b.WriteString(fmt.Sprintf(" %s%s — %s\n", mark, c.Name, c.Description))
+	}
+	b.WriteString("\n安装: /skills install <名称>")
 	return ok(b.String())
 }
 

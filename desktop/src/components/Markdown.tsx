@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useAppStore } from '../stores/appStore';
 // Import only the highlighter core plus the languages actually used, instead
 // of the full 900KB grammar bundle. highlightAuto scans whatever is registered
 // here, so the common languages below keep both bundle size and scan cost low.
@@ -196,6 +197,33 @@ const CodeBlock = React.memo(({ code, lang, streaming }: { code: string; lang: s
     }).catch(() => {});
   };
 
+  // Download the snippet as a plain-text file (D3: code-block toolbar parity).
+  const handleDownload = () => {
+    const ext = lang && lang !== 'text' ? lang.split(' ')[0].toLowerCase() : 'txt';
+    const blob = new Blob([code], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `icode-snippet.${ext}`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  // Open the snippet in the OS default editor via the backend (writes a temp
+  // file + launches the editor), mirroring the TUI's open-in-editor action.
+  const handleOpenInEditor = () => {
+    const backendUrl = useAppStore.getState().backendUrl;
+    if (!backendUrl) return;
+    const ext = lang && lang !== 'text' ? lang.split(' ')[0].toLowerCase() : 'txt';
+    fetch(`${backendUrl}/api/codeblock/open`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename: `icode-snippet.${ext}`, content: code }),
+    }).catch(() => {});
+  };
+
   // Bound the input for pathological sizes: a multi-MB paste shouldn't blow up
   // the DOM or the highlighter. The copy action still uses the full `code`.
   const safeCode = code.length > 300000
@@ -235,7 +263,15 @@ const CodeBlock = React.memo(({ code, lang, streaming }: { code: string; lang: s
     <div style={{ margin: '8px 0' }}>
       <div style={codeHead}>
         <span>{lang || highlighted.language || 'code'}</span>
-        <button onClick={handleCopy} style={copyBtn}>{copied ? `✓ ${t('markdown.copied')}` : t('markdown.copy')}</button>
+        <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+          <button onClick={handleOpenInEditor} style={copyBtn} title={t('markdown.openInEditorTitle')}>
+            {t('markdown.openInEditor')}
+          </button>
+          <button onClick={handleDownload} style={copyBtn} title={t('markdown.downloadTitle')}>
+            {t('markdown.download')}
+          </button>
+          <button onClick={handleCopy} style={copyBtn}>{copied ? `✓ ${t('markdown.copied')}` : t('markdown.copy')}</button>
+        </span>
       </div>
       <pre style={{ ...codeBlock, borderRadius: lang ? '0 0 6px 6px' : 6 }}>
         {lang === 'diff' ? <code>{colorizeDiffLines(safeCode)}</code> :

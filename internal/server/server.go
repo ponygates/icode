@@ -143,6 +143,7 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 	mux.HandleFunc("/api/chat/stop", s.handleChatStop)
 	mux.HandleFunc("/api/slash", s.handleSlash)
 	mux.HandleFunc("/api/shell", s.handleShell)
+	mux.HandleFunc("/api/codeblock/open", s.handleCodeBlockOpen)
 
 	// Config
 	mux.HandleFunc("/api/config", s.handleConfig)
@@ -173,6 +174,10 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 	// Memory
 	mux.HandleFunc("/api/memory/icode", s.handleMemory)
 	mux.HandleFunc("/api/memory", s.handleMemory) // alias used by the desktop `#` command
+
+	// Knowledge base (local RAG) — status + single-document import
+	mux.HandleFunc("/api/knowledge", s.handleKnowledge)
+	mux.HandleFunc("/api/knowledge/import", s.handleKnowledgeImport)
 
 	// Skills & Teams (Claude-Code-parity surfaces)
 	mux.HandleFunc("/api/skills", s.handleSkills)
@@ -252,6 +257,31 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 			log.Printf("[mesh] inbound listener on %s (token-gated)", ml)
 			if err := http.ListenAndServe(ml, meshMux); err != nil {
 				log.Printf("[mesh] listener stopped: %v", err)
+			}
+		}()
+	}
+
+	// Optional remote-control listener (手机远程查看/发指令 — Claw parity).
+	// Off by default; when server.remote_listen is set (e.g. "0.0.0.0:8789")
+	// a minimal mux serves the phone-friendly /remote page and /api/remote/*
+	// endpoints, gated by the same Bearer apiToken as the main API.
+	if rl := strings.TrimSpace(s.cfg.Server.RemoteListen); rl != "" {
+		remoteMux := http.NewServeMux()
+		remoteMux.HandleFunc("/remote", s.handleRemotePage)
+		remoteMux.HandleFunc("/remote/", s.handleRemotePage)
+		remoteMux.HandleFunc("/api/remote/status", s.requireAPIToken(s.handleRemoteStatus))
+		remoteMux.HandleFunc("/api/remote/prompt", s.requireAPIToken(s.handleRemotePrompt))
+		remoteMux.HandleFunc("/api/remote/tasks", s.requireAPIToken(s.handleRemoteTasks))
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[remote] listener panic: %v", r)
+				}
+			}()
+			log.Printf("[remote] control listener on %s (token-gated) — 手机浏览器访问 http://<ip>:%s/remote?token=%s",
+				rl, remotePort(rl), s.apiToken)
+			if err := http.ListenAndServe(rl, remoteMux); err != nil {
+				log.Printf("[remote] listener stopped: %v", err)
 			}
 		}()
 	}

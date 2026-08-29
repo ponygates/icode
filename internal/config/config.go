@@ -69,8 +69,12 @@ type Config struct {
 	// Knowledge configures the local document knowledge base (RAG).
 	Knowledge KnowledgeCfg `yaml:"knowledge" json:"knowledge"`
 	// Notify configures system-level desktop notifications.
-	Notify NotifyCfg      `yaml:"notify" json:"notify"`
-	MCP    []MCPServerCfg `yaml:"mcp" json:"mcp"`
+	Notify NotifyCfg `yaml:"notify" json:"notify"`
+	// HistoryPersist controls whether typed prompts are saved to
+	// ~/.icode/input_history.json so ↑ can recall them across sessions.
+	// Local-only (0600), never uploaded. Default: true; set false to opt out.
+	HistoryPersist *bool          `yaml:"history_persist,omitempty" json:"history_persist,omitempty"`
+	MCP            []MCPServerCfg `yaml:"mcp" json:"mcp"`
 	// MCPImportWorkBuddy controls whether MCP servers configured in
 	// WorkBuddy's ~/.workbuddy/mcp.json are auto-imported at startup
 	// (explicit iCode entries always win on name conflicts). Default: true.
@@ -80,6 +84,8 @@ type Config struct {
 	// Multimodal configures the image/video generation backend used by the
 	// image_gen and video_gen tools.
 	Multimodal MultimodalCfg `yaml:"multimodal" json:"multimodal"`
+	// Voice configures the speech-to-text (ASR) provider for the /voice feature.
+	Voice VoiceCfg `yaml:"voice" json:"voice"`
 	// Hooks maps lifecycle event names (PreToolUse/PostToolUse/
 	// UserPromptSubmit/Stop) to hook rules — external commands fired during
 	// the agent loop.
@@ -240,6 +246,13 @@ type ServerCfg struct {
 	// and the main API stays loopback-only. The endpoint is token-gated
 	// (X-Mesh-Token), so exposure is limited to authenticated peers.
 	MeshListen string `yaml:"mesh_listen" json:"mesh_listen"`
+
+	// RemoteListen is the optional remote-control listener (WorkBuddy Claw /
+	// ZCode Remote Control parity), e.g. "0.0.0.0:8789". When set, a
+	// phone-friendly /remote page plus /api/remote/* endpoints are served,
+	// gated by the same Bearer apiToken — so a phone on the LAN can watch
+	// status and send prompts while the main API stays loopback-only.
+	RemoteListen string `yaml:"remote_listen" json:"remote_listen"`
 }
 
 // SchedulerCfg configures the automation scheduler, including the off-peak
@@ -321,6 +334,39 @@ type MultimodalCfg struct {
 	APIKeyEnc string `yaml:"api_key_enc,omitempty" json:"-"`
 	// OutputDir is where generated media is saved. Defaults to ./.icode/generated.
 	OutputDir string `yaml:"output_dir,omitempty" json:"output_dir,omitempty"`
+}
+
+// VoiceCfg configures the speech-to-text (ASR) provider for the /voice feature.
+type VoiceCfg struct {
+	// Provider selects the ASR backend: "zhipu" (default), "baidu", or "xfyun".
+	Provider string `yaml:"provider,omitempty" json:"provider,omitempty"`
+	// Baidu-specific credentials (required when provider=baidu). The JSON tags
+	// let the desktop settings page PUT them; MarshalJSON below hides them from
+	// GET responses so secrets never echo back to the frontend.
+	BaiduAPIKey    string `yaml:"baidu_api_key,omitempty" json:"baidu_api_key,omitempty"`
+	BaiduSecretKey string `yaml:"baidu_secret_key,omitempty" json:"baidu_secret_key,omitempty"`
+	// BaiduEnc holds DPAPI-encrypted forms for disk persistence.
+	BaiduAPIKeyEnc    string `yaml:"baidu_api_key_enc,omitempty" json:"-"`
+	BaiduSecretKeyEnc string `yaml:"baidu_secret_key_enc,omitempty" json:"-"`
+	// iFlytek-specific credentials (required when provider=xfyun).
+	IFlytekAppID     string `yaml:"xfyun_app_id,omitempty" json:"xfyun_app_id,omitempty"`
+	IFlytekAPIKey    string `yaml:"xfyun_api_key,omitempty" json:"xfyun_api_key,omitempty"`
+	IFlytekAPISecret string `yaml:"xfyun_api_secret,omitempty" json:"xfyun_api_secret,omitempty"`
+	// iFlytekEnc holds DPAPI-encrypted forms for disk persistence.
+	IFlytekAppIDEnc     string `yaml:"xfyun_app_id_enc,omitempty" json:"-"`
+	IFlytekAPIKeyEnc    string `yaml:"xfyun_api_key_enc,omitempty" json:"-"`
+	IFlytekAPISecretEnc string `yaml:"xfyun_api_secret_enc,omitempty" json:"-"`
+}
+
+// MarshalJSON serialises VoiceCfg for API responses WITHOUT the credential
+// plaintext: the desktop frontend can read the provider selection (and send
+// credentials on PUT), but secrets are never echoed back over HTTP. The
+// encrypted *_enc forms stay internal to the YAML disk format too.
+func (v VoiceCfg) MarshalJSON() ([]byte, error) {
+	type wire struct {
+		Provider string `json:"provider,omitempty"`
+	}
+	return json.Marshal(wire{Provider: v.Provider})
 }
 
 // Default returns a Config populated with sensible defaults.
@@ -500,6 +546,9 @@ func Default() *Config {
 		},
 		Notify: NotifyCfg{
 			Enabled: true,
+		},
+		Voice: VoiceCfg{
+			Provider: "zhipu", // default to zhipu (GLM-ASR), reuses existing key
 		},
 	}
 }
@@ -682,6 +731,19 @@ func encryptSecretFields(data []byte) ([]byte, error) {
 			}
 		}
 	}
+	if voice, ok := root["voice"].(map[string]any); ok {
+		// ASR credentials are secrets too: encrypt the plaintext fields into
+		// their *_enc forms before they reach disk, mirroring providers.
+		for _, k := range []string{"baidu_api_key", "baidu_secret_key", "xfyun_app_id", "xfyun_api_key", "xfyun_api_secret"} {
+			encKey := k + "_enc"
+			if val, ok := voice[k].(string); ok && val != "" {
+				if enc, err := secure.Encrypt(val); err == nil {
+					voice[encKey] = enc
+					delete(voice, k)
+				}
+			}
+		}
+	}
 	return yaml.Marshal(root)
 }
 
@@ -742,6 +804,34 @@ func decryptConfigKeys(cfg *Config) {
 					mc.Headers = h
 				}
 			}
+		}
+	}
+	// Restore plaintext ASR credentials from their encrypted disk forms so the
+	// /voice command can use them without re-entering keys after a restart.
+	v := &cfg.Voice
+	if v.BaiduAPIKey == "" && v.BaiduAPIKeyEnc != "" {
+		if dec, err := secure.Decrypt(v.BaiduAPIKeyEnc); err == nil {
+			v.BaiduAPIKey = dec
+		}
+	}
+	if v.BaiduSecretKey == "" && v.BaiduSecretKeyEnc != "" {
+		if dec, err := secure.Decrypt(v.BaiduSecretKeyEnc); err == nil {
+			v.BaiduSecretKey = dec
+		}
+	}
+	if v.IFlytekAppID == "" && v.IFlytekAppIDEnc != "" {
+		if dec, err := secure.Decrypt(v.IFlytekAppIDEnc); err == nil {
+			v.IFlytekAppID = dec
+		}
+	}
+	if v.IFlytekAPIKey == "" && v.IFlytekAPIKeyEnc != "" {
+		if dec, err := secure.Decrypt(v.IFlytekAPIKeyEnc); err == nil {
+			v.IFlytekAPIKey = dec
+		}
+	}
+	if v.IFlytekAPISecret == "" && v.IFlytekAPISecretEnc != "" {
+		if dec, err := secure.Decrypt(v.IFlytekAPISecretEnc); err == nil {
+			v.IFlytekAPISecret = dec
 		}
 	}
 }

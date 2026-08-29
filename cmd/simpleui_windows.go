@@ -3,7 +3,9 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -19,6 +21,7 @@ import (
 	"github.com/ponygates/icode/internal/app"
 	"github.com/ponygates/icode/internal/config"
 	projectcontext "github.com/ponygates/icode/internal/core/context"
+	"github.com/ponygates/icode/internal/core/knowledge"
 	"github.com/ponygates/icode/internal/core/permission"
 	"github.com/ponygates/icode/internal/core/sessionum"
 	"github.com/ponygates/icode/internal/core/slashui"
@@ -50,6 +53,22 @@ type simpleUIBridge struct {
 	// curAssistant is the index of the in-progress assistant message in
 	// messages, or -1 when no assistant turn is active.
 	curAssistant int
+
+	// lastStatsAt is the wall-clock of the last throttled stats push while
+	// streaming (at most one per second). Keeps the bottom status bar live
+	// during generation without a WebView JS round-trip per token.
+	lastStatsAt time.Time
+	// liveCompletion is an ESTIMATE of completion tokens for the in-flight
+	// turn (~4 chars/token), so the status bar counter moves while generating;
+	// the engine's real usage overwrites it on the final pushStats.
+	liveCompletion int
+
+	// activeStreams tracks sessions with an in-flight engine generation
+	// (sessionID → true). C7 multi-session parallelism: switching sessions
+	// does NOT cancel the background turn — its events are consumed silently
+	// and the final transcript persists to the store, so switching back shows
+	// the completed result (see runPrompt / OpenSession).
+	activeStreams map[string]bool
 }
 
 // simpleMsg is a lightweight conversation record used by the simple UI.
@@ -83,7 +102,20 @@ func (b *simpleUIBridge) SetModel(id string) {
 	if i := strings.Index(id, "/"); i > 0 {
 		b.provider = id[:i]
 	}
+	provider := b.provider
+	sid := b.sessionID
 	b.mu.Unlock()
+	// Re-point the live session at the new model. The engine reads
+	// ModelID/ProviderName from the session on every Send, so without this the
+	// dropdown looks like it switched but the next turn still uses the model
+	// the session was created with — making the selector appear "stuck".
+	if sid != "" && b.app != nil && b.app.SessStore != nil {
+		if sess, err := b.app.SessStore.Get(sid); err == nil && sess != nil {
+			sess.ModelID = id
+			sess.ProviderName = provider
+			_ = b.app.SessStore.Update(sess)
+		}
+	}
 	b.push(fmt.Sprintf("uiStatus('model', %s)", jsStr(id)))
 }
 
@@ -193,7 +225,307 @@ func (b *simpleUIBridge) Send(text string) {
 	if !b.ensureSession() {
 		return
 	}
-	b.runPrompt(text)
+	expanded, atts := b.expandFileRefsUI(text)
+	b.runPrompt(expanded, atts)
+}
+
+// SendWithAttachments sends a prompt together with inline multimodal
+// attachments (e.g. images pasted from the clipboard or picked via the file
+// chooser). The UI passes attachments as a JSON array of
+// {mime, data(base64)}; we map them onto types.Attachment for the engine,
+// which already streams image_url / base64 content to OpenAI-compatible and
+// Anthropic providers (mirrors the TUI's Ctrl+V multimodal path). Any "@path"
+// references in the text are also expanded first (expandFileRefsUI).
+func (b *simpleUIBridge) SendWithAttachments(text, attsJSON string) {
+	text = strings.TrimSpace(text)
+	if text == "" && strings.TrimSpace(attsJSON) == "" {
+		return
+	}
+	if !b.ensureSession() {
+		return
+	}
+	expanded, atts := b.expandFileRefsUI(text)
+	if strings.TrimSpace(attsJSON) != "" {
+		var raw []struct {
+			MIME string `json:"mime"`
+			Data string `json:"data"` // base64, with or without a "data:<mime>;base64," prefix
+		}
+		if err := json.Unmarshal([]byte(attsJSON), &raw); err != nil {
+			b.sys("附件解析失败: " + err.Error())
+			return
+		}
+		for _, r := range raw {
+			if r.MIME == "" || r.Data == "" {
+				continue
+			}
+			data := r.Data
+			// Strip a leading "data:<mime>;base64," prefix if the UI sent a full data URL.
+			if i := strings.Index(data, ","); i > 0 && strings.HasPrefix(data, "data:") {
+				data = data[i+1:]
+			}
+			atts = append(atts, types.Attachment{Type: "image", MIMEType: r.MIME, Data: data})
+		}
+	}
+	if strings.TrimSpace(expanded) == "" && len(atts) == 0 {
+		return
+	}
+	b.runPrompt(expanded, atts)
+}
+
+// expandFileRefsUI expands "@path" references in the input text exactly like
+// the CLI's expandFileRefs: images become inline multimodal attachments, text
+// files are inlined verbatim, and other binaries are reduced to a path note so
+// raw bytes never pollute the prompt. Returns the rewritten text plus any
+// attachments. The WebView2 front end inserts "@<absolute path> " for files
+// dragged in or picked with the 📎 button, so this is the single entry point.
+func (b *simpleUIBridge) expandFileRefsUI(text string) (string, []types.Attachment) {
+	var result strings.Builder
+	var atts []types.Attachment
+	remaining := text
+	for {
+		idx := strings.Index(remaining, "@")
+		if idx < 0 {
+			result.WriteString(remaining)
+			break
+		}
+		result.WriteString(remaining[:idx])
+		rest := remaining[idx+1:]
+		end := len(rest)
+		for i, r := range rest {
+			if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+				end = i
+				break
+			}
+		}
+		path := strings.TrimSpace(rest[:end])
+		remaining = rest[end:]
+		if path == "" {
+			result.WriteString("@")
+			continue
+		}
+		full := path
+		if !filepath.IsAbs(full) {
+			if cwd, err := os.Getwd(); err == nil {
+				full = filepath.Join(cwd, path)
+			}
+		}
+		data, err := os.ReadFile(full)
+		if err != nil {
+			// Unreadable — keep the reference visible so the user notices.
+			result.WriteString("@" + path)
+			continue
+		}
+		if mime, ok := sniffImage(data); ok {
+			atts = append(atts, types.Attachment{Type: "image", MIMEType: mime, Data: base64.StdEncoding.EncodeToString(data)})
+			result.WriteString("[📎 图片: " + filepath.Base(path) + "]")
+		} else if !bytes.Contains(data, []byte{0}) {
+			result.WriteString(fmt.Sprintf("[file: %s]\n%s\n", path, strings.TrimSpace(string(data))))
+		} else {
+			result.WriteString(fmt.Sprintf("[file: %s] (二进制文件，未内联内容)\n", path))
+		}
+	}
+	return strings.TrimSpace(result.String()), atts
+}
+
+// sniffImage detects common raster image formats from their magic bytes.
+func sniffImage(data []byte) (string, bool) {
+	if len(data) >= 8 && string(data[:8]) == "\x89PNG\r\n\x1a\n" {
+		return "image/png", true
+	}
+	if len(data) >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF {
+		return "image/jpeg", true
+	}
+	if len(data) >= 6 && (string(data[:6]) == "GIF87a" || string(data[:6]) == "GIF89a") {
+		return "image/gif", true
+	}
+	if len(data) >= 12 && string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP" {
+		return "image/webp", true
+	}
+	return "", false
+}
+
+// Regenerate re-runs the most recent user message as a fresh turn (opencode /
+// desktop-style "重新生成" on an assistant message). It reads the last user
+// message from the bridge transcript so the UI button needs no extra state.
+func (b *simpleUIBridge) Regenerate() {
+	b.mu.Lock()
+	var lastUser string
+	for i := len(b.messages) - 1; i >= 0; i-- {
+		if b.messages[i].Role == "user" {
+			lastUser = b.messages[i].Content
+			break
+		}
+	}
+	b.mu.Unlock()
+	if strings.TrimSpace(lastUser) == "" {
+		return
+	}
+	b.Send(lastUser)
+}
+
+// kbResult is the trimmed JSON shape served to the knowledge panel.
+type kbResult struct {
+	File    string  `json:"file"`
+	Section string  `json:"section"`
+	Snippet string  `json:"snippet"`
+	Score   float64 `json:"score"`
+}
+
+// knowledgeManager returns the engine's knowledge manager (local RAG).
+func (b *simpleUIBridge) knowledgeManager() *knowledge.Manager {
+	if b.app == nil || b.app.Engine == nil {
+		return nil
+	}
+	return b.app.Engine.KnowledgeManager()
+}
+
+// KnowledgeStatus reports the knowledge base index size as JSON
+// ({"chunks":N}, chunks=-1 when not configured / engine missing).
+func (b *simpleUIBridge) KnowledgeStatus() string {
+	mgr := b.knowledgeManager()
+	if mgr == nil {
+		return `{"chunks":-1}`
+	}
+	return fmt.Sprintf(`{"chunks":%d}`, mgr.ChunkCount())
+}
+
+// KnowledgeSearch queries the local knowledge base (zero-API RAG, mirrors
+// /kb) and returns the top results as a JSON array for the UI panel.
+func (b *simpleUIBridge) KnowledgeSearch(query string) string {
+	mgr := b.knowledgeManager()
+	if mgr == nil {
+		return `[]`
+	}
+	if mgr.ChunkCount() == 0 {
+		if _, err := mgr.Index(context.Background()); err != nil {
+			return `[]`
+		}
+	}
+	res := mgr.Search(query, 6)
+	out := make([]kbResult, 0, len(res))
+	for _, c := range res {
+		runes := []rune(c.Text)
+		snippet := string(runes)
+		if len(runes) > 240 {
+			snippet = string(runes[:240]) + "…"
+		}
+		out = append(out, kbResult{File: c.File, Section: c.Section, Snippet: snippet, Score: c.Score})
+	}
+	data, _ := json.Marshal(out)
+	return string(data)
+}
+
+// taskItem is the trimmed JSON shape for the automation panel.
+type taskItem struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Schedule string `json:"schedule"`
+	Enabled  bool   `json:"enabled"`
+	NextRun  string `json:"next_run"`
+}
+
+// TasksList returns the persisted automations as JSON for the panel (mirrors
+// /tasks, zero-API local).
+func (b *simpleUIBridge) TasksList() string {
+	if b.app == nil || b.app.Scheduler == nil {
+		return `[]`
+	}
+	ts := b.app.Scheduler.List()
+	out := make([]taskItem, 0, len(ts))
+	for _, t := range ts {
+		next := ""
+		if !t.NextRun.IsZero() {
+			next = t.NextRun.Format("01-02 15:04")
+		}
+		out = append(out, taskItem{ID: t.ID, Name: t.Name, Schedule: t.Schedule, Enabled: t.Enabled, NextRun: next})
+	}
+	data, _ := json.Marshal(out)
+	return string(data)
+}
+
+// TaskCreate registers a new automation (schedule: every:30m | daily:09:00 | idle).
+func (b *simpleUIBridge) TaskCreate(name, prompt, schedule string) string {
+	if b.app == nil || b.app.Scheduler == nil {
+		return "调度器不可用（需在配置中启用 scheduler）"
+	}
+	name = strings.TrimSpace(name)
+	prompt = strings.TrimSpace(prompt)
+	if name == "" || prompt == "" {
+		return "任务名与内容不能为空"
+	}
+	if schedule == "" {
+		schedule = "idle"
+	}
+	if _, err := b.app.Scheduler.Create(name, prompt, schedule); err != nil {
+		return "创建失败: " + err.Error()
+	}
+	return "✓ 已创建自动化任务"
+}
+
+// TaskDelete removes an automation.
+func (b *simpleUIBridge) TaskDelete(id string) string {
+	if b.app == nil || b.app.Scheduler == nil {
+		return "调度器不可用"
+	}
+	if err := b.app.Scheduler.Delete(id); err != nil {
+		return "删除失败: " + err.Error()
+	}
+	return "✓ 已删除任务"
+}
+
+// TaskRunNow triggers an automation immediately in the background.
+func (b *simpleUIBridge) TaskRunNow(id string) string {
+	if b.app == nil || b.app.Scheduler == nil {
+		return "调度器不可用"
+	}
+	if _, err := b.app.Scheduler.RunNow(id); err != nil {
+		return "触发失败: " + err.Error()
+	}
+	return "✓ 已触发立即执行（后台）"
+}
+
+// EscalationState exposes the graded-auth strike state for the permission bar
+// (Claude Code parity: "连续 N 次拦截后自动退回手动").
+func (b *simpleUIBridge) EscalationState() string {
+	if b.app == nil || b.app.Gate == nil {
+		return `{"escalated":false,"strikes":0,"threshold":0}`
+	}
+	esc, strikes := b.app.Gate.EscalationState(b.sessionID)
+	th := b.app.Gate.StrikeThreshold()
+	return fmt.Sprintf(`{"escalated":%v,"strikes":%d,"threshold":%d}`, esc, strikes, th)
+}
+
+// lspReady reports whether the LSP manager is available.
+func (b *simpleUIBridge) lspReady() bool {
+	return b.app != nil && b.app.Engine != nil && b.app.Engine.LSPManager() != nil
+}
+
+// LspStatus returns the /lsp status report text for the diagnostics panel.
+func (b *simpleUIBridge) LspStatus() string {
+	if !b.lspReady() {
+		return "LSP 未启用（需在配置中开启 lsp.enabled）"
+	}
+	out, err := b.app.Engine.LSPManager().QueryReport("status", nil)
+	if err != nil {
+		return "LSP 状态查询失败: " + err.Error()
+	}
+	return out
+}
+
+// LspDiag returns the diagnostic report for a file (/lsp diag <file>).
+func (b *simpleUIBridge) LspDiag(file string) string {
+	if !b.lspReady() {
+		return "LSP 未启用（需在配置中开启 lsp.enabled）"
+	}
+	file = strings.TrimSpace(file)
+	if file == "" {
+		return "请输入文件路径，如：internal/core/conversation/engine.go"
+	}
+	out, err := b.app.Engine.LSPManager().QueryReport("diag", []string{file})
+	if err != nil {
+		return "诊断失败: " + err.Error()
+	}
+	return out
 }
 
 // RunCommand is the single input entry point (mirrors the CLI submit prefix
@@ -408,22 +740,41 @@ func (b *simpleUIBridge) appendAssistantText(text string) {
 
 // runPrompt streams a prompt through the engine into the UI and the local
 // transcript. Shared by Send and slash commands that need a model turn.
-func (b *simpleUIBridge) runPrompt(prompt string) {
+// atts carries inline multimodal attachments (images) when present.
+func (b *simpleUIBridge) runPrompt(prompt string, atts []types.Attachment) {
 	b.appendMsg("user", prompt)
 	b.push(fmt.Sprintf("uiAppend('user', %s)", jsStr(prompt)))
+
+	// Fresh turn: reset the live token estimate so statsJSON never mixes the
+	// previous turn's in-flight approximation into this one.
+	b.mu.Lock()
+	b.liveCompletion = 0
+	b.lastStatsAt = time.Time{}
+	b.mu.Unlock()
 
 	if b.app == nil || b.app.Engine == nil {
 		b.push(fmt.Sprintf("uiAppend('system', %s)", jsStr("引擎未初始化，请先配置 API Key。")))
 		return
 	}
 
+	// C7 multi-session parallelism: capture the session this turn belongs to.
+	// The user may switch to another session while it streams — the events
+	// keep being consumed (engine persists the transcript to the store) but
+	// are only pushed to the UI while that session is still active.
+	b.mu.Lock()
+	sid := b.sessionID
+	b.mu.Unlock()
+
 	ctx := context.Background()
-	eventCh, err := b.app.Engine.Send(ctx, b.sessionID, prompt)
+	eventCh, err := b.app.Engine.Send(ctx, sid, prompt, atts)
 	if err != nil {
 		b.push(fmt.Sprintf("uiAppend('error', %s)", jsStr(fmt.Sprintf("引擎错误: %v", err))))
 		b.push("uiBusy(false)")
 		return
 	}
+	b.mu.Lock()
+	b.activeStreams[sid] = true
+	b.mu.Unlock()
 	b.push("uiBusy(true)")
 
 	go func() {
@@ -432,8 +783,23 @@ func (b *simpleUIBridge) runPrompt(prompt string) {
 				b.push(fmt.Sprintf("uiAppend('error', %s)", jsStr(fmt.Sprintf("内部错误: %v", r))))
 				b.push("uiBusy(false)")
 			}
+			// The turn ended (done/error/cancel) — drop the background marker
+			// regardless of which session is now active.
+			b.mu.Lock()
+			delete(b.activeStreams, sid)
+			b.mu.Unlock()
 		}()
 		for event := range eventCh {
+			// Session switched away mid-turn: swallow the remaining events so
+			// another conversation's stream never bleeds into the visible UI.
+			// The transcript is still saved by the engine; switching back
+			// (OpenSession) reloads it from the store.
+			b.mu.Lock()
+			active := b.sessionID == sid
+			b.mu.Unlock()
+			if !active {
+				continue
+			}
 			switch event.Type {
 			case types.EventThinking:
 				b.mu.Lock()
@@ -446,6 +812,8 @@ func (b *simpleUIBridge) runPrompt(prompt string) {
 				b.mu.Lock()
 				lt := b.lastTool
 				th := b.thinkingBuf
+				// Live token estimate for the status bar (~4 chars/token).
+				b.liveCompletion += len([]rune(event.Content)) / 4
 				b.mu.Unlock()
 				if th != "" {
 					b.push(fmt.Sprintf("uiThinking(%s)", jsStr(th)))
@@ -462,6 +830,10 @@ func (b *simpleUIBridge) runPrompt(prompt string) {
 					b.appendAssistantText(event.Content)
 					b.push(fmt.Sprintf("uiDelta(%s)", jsStr(event.Content)))
 				}
+				// Throttled stats refresh (≤1/s) so the bottom bar's token
+				// counter moves while generating instead of freezing until
+				// the turn completes.
+				b.pushStatsThrottled()
 			case types.EventSystem:
 				b.push(fmt.Sprintf("uiAppend('system', %s)", jsStr(strings.TrimSpace(event.Content))))
 			case types.EventPlanProposal:
@@ -499,6 +871,9 @@ func (b *simpleUIBridge) runPrompt(prompt string) {
 				b.mu.Lock()
 				th := b.thinkingBuf
 				b.thinkingBuf = ""
+				// Drop the live estimate — the final pushStats carries the
+				// engine's exact usage for the completed turn.
+				b.liveCompletion = 0
 				b.mu.Unlock()
 				if th != "" {
 					b.push(fmt.Sprintf("uiThinking(%s)", jsStr(th)))
@@ -511,6 +886,7 @@ func (b *simpleUIBridge) runPrompt(prompt string) {
 				b.mu.Lock()
 				th := b.thinkingBuf
 				b.thinkingBuf = ""
+				b.liveCompletion = 0
 				b.mu.Unlock()
 				if th != "" {
 					b.push(fmt.Sprintf("uiThinking(%s)", jsStr(th)))
@@ -646,6 +1022,14 @@ func (b *simpleUIBridge) OpenSession(id string) {
 	if sess.ModelID != "" {
 		b.push(fmt.Sprintf("uiStatus('model', %s)", jsStr(sess.ModelID)))
 	}
+	// If the session we just opened still has an in-flight background turn
+	// (C7), restore the busy/stop state so the UI matches reality.
+	b.mu.Lock()
+	streaming := b.activeStreams[sess.ID]
+	b.mu.Unlock()
+	if streaming {
+		b.push("uiBusy(true)")
+	}
 	b.push("refreshSessions()")
 	b.push(fmt.Sprintf("uiSetSession(%s)", jsStr(sess.ID)))
 	b.pushStats()
@@ -700,6 +1084,9 @@ func (b *simpleUIBridge) runSlash(text string) {
 			} else {
 				b.sys("用法: /logout <provider>（清除该提供商的 API Key）")
 			}
+			return
+		case strings.EqualFold(parts[0], "/voice"):
+			b.sys(b.handleVoiceCommand(parts[1:]))
 			return
 		}
 	}
@@ -811,12 +1198,86 @@ func (b *simpleUIBridge) setKey(provider, key string) string {
 	return "已设置 " + provider + " 的 API Key，可用 /doctor 验证连通性。"
 }
 
+// handleVoiceCommand processes /voice subcommands for voice settings.
+func (b *simpleUIBridge) handleVoiceCommand(args []string) string {
+	if len(args) == 0 {
+		cfg, err := config.Load()
+		if err != nil {
+			return "读取配置失败: " + err.Error()
+		}
+		mask := func(s string) string {
+			if s == "" { return "(未设置)" }
+			if len(s) <= 8 { return "****" }
+			return s[:4] + "****" + s[len(s)-4:]
+		}
+		return fmt.Sprintf(
+			"语音输入设置:\n"+
+			"  提供商: %s\n"+
+			"  百度 API Key: %s\n"+
+			"  百度 Secret: %s\n"+
+			"  讯飞 App ID: %s\n"+
+			"  讯飞 API Key: %s\n"+
+			"  讯飞 Secret: %s\n\n"+
+			"用法:\n"+
+			"  /voice provider <name>     设置提供商 (zhipu|baidu|xfyun)\n"+
+			"  /voice baidu <key> <secret> 设置百度语音 API 凭证\n"+
+			"  /voice xfyun <appid> <key> <secret> 设置讯飞语音 API 凭证",
+			cfg.Voice.Provider,
+			mask(cfg.Voice.BaiduAPIKey),
+			mask(cfg.Voice.BaiduSecretKey),
+			cfg.Voice.IFlytekAppID,
+			mask(cfg.Voice.IFlytekAPIKey),
+			mask(cfg.Voice.IFlytekAPISecret),
+		)
+	}
+
+	subcmd := strings.ToLower(args[0])
+	cfg, err := config.Load()
+	if err != nil {
+		return "读取配置失败: " + err.Error()
+	}
+
+	switch subcmd {
+	case "provider":
+		if len(args) < 2 {
+			return "用法: /voice provider <name> (zhipu|baidu|xfyun)"
+		}
+		provider := strings.ToLower(args[1])
+		switch provider {
+		case "zhipu", "baidu", "xfyun":
+			cfg.Voice.Provider = provider
+		default:
+			return "提供商必须是: zhipu, baidu, xfyun"
+		}
+	case "baidu":
+		if len(args) < 3 {
+			return "用法: /voice baidu <api_key> <secret_key>"
+		}
+		cfg.Voice.BaiduAPIKey = args[1]
+		cfg.Voice.BaiduSecretKey = args[2]
+	case "xfyun":
+		if len(args) < 4 {
+			return "用法: /voice xfyun <app_id> <api_key> <api_secret>"
+		}
+		cfg.Voice.IFlytekAppID = args[1]
+		cfg.Voice.IFlytekAPIKey = args[2]
+		cfg.Voice.IFlytekAPISecret = args[3]
+	default:
+		return "未知命令: " + subcmd + " (可用: provider, baidu, xfyun)"
+	}
+
+	if err := cfg.Save(config.DefaultPath()); err != nil {
+		return "保存配置失败: " + err.Error()
+	}
+	return "语音设置已保存"
+}
+
 // chatTurn runs a prompt that needs a model response.
 func (b *simpleUIBridge) chatTurn(prompt string) {
 	if !b.ensureSession() {
 		return
 	}
-	b.runPrompt(prompt)
+	b.runPrompt(prompt, nil)
 }
 
 func (b *simpleUIBridge) sys(s string) {
@@ -850,6 +1311,7 @@ func (b *simpleUIBridge) statsJSON() string {
 	if b.app != nil && b.app.Engine != nil {
 		b.mu.Lock()
 		sid := b.sessionID
+		live := b.liveCompletion
 		b.mu.Unlock()
 		if sid != "" {
 			if s := b.app.Engine.SessionStats(sid); s != nil {
@@ -859,6 +1321,13 @@ func (b *simpleUIBridge) statsJSON() string {
 				p.CacheHitRate = s.CacheHitRate
 				p.Cost = s.EstimatedCost
 			}
+		}
+		// While streaming, the engine's real usage hasn't landed yet — surface
+		// the live estimate so the status bar counter moves (~4 chars/token).
+		// The final pushStats() after the turn carries exact numbers.
+		if live > p.Completion {
+			p.Completion = live
+			p.Total = p.PromptTokens + p.Completion
 		}
 	}
 	v, err := json.Marshal(&p)
@@ -870,6 +1339,20 @@ func (b *simpleUIBridge) statsJSON() string {
 
 // pushStats refreshes the bottom status bar after a turn completes.
 func (b *simpleUIBridge) pushStats() {
+	b.push("uiStats(" + b.statsJSON() + ")")
+}
+
+// pushStatsThrottled refreshes the status bar at most once per second — the
+// live token counter during generation. The final pushStats() (unthrottled)
+// after the turn always carries the engine's exact usage.
+func (b *simpleUIBridge) pushStatsThrottled() {
+	b.mu.Lock()
+	if !b.lastStatsAt.IsZero() && time.Since(b.lastStatsAt) < time.Second {
+		b.mu.Unlock()
+		return
+	}
+	b.lastStatsAt = time.Now()
+	b.mu.Unlock()
 	b.push("uiStats(" + b.statsJSON() + ")")
 }
 
@@ -1022,7 +1505,7 @@ func runSimpleUI() error {
 		return fmt.Errorf("webview2 init failed")
 	}
 
-	b := &simpleUIBridge{app: a, w: w, model: model, provider: provider, curAssistant: -1}
+	b := &simpleUIBridge{app: a, w: w, model: model, provider: provider, curAssistant: -1, activeStreams: make(map[string]bool)}
 
 	// Notify in the simple UI when a background task completes.
 	tool.SetCompleteHook(func(id, errMsg string) {
@@ -1034,6 +1517,8 @@ func runSimpleUI() error {
 	})
 
 	w.Bind("send", func(text string) { b.Send(text) })
+	w.Bind("sendWithAttachments", func(text, attsJSON string) { b.SendWithAttachments(text, attsJSON) })
+	w.Bind("regenerate", func() { b.Regenerate() })
 	w.Bind("models", func() []string { return b.Models() })
 	w.Bind("setModel", func(id string) { b.SetModel(id) })
 	w.Bind("addCustomModel", func(provider, modelID, name string) string {
@@ -1100,6 +1585,15 @@ func runSimpleUI() error {
 	w.Bind("stats", func() string { return b.statsJSON() })
 	w.Bind("refreshModels", func() string { return b.RefreshModelsUI() })
 	w.Bind("sessions", func() []SessionEntry { return b.Sessions() })
+	w.Bind("kbStatus", func() string { return b.KnowledgeStatus() })
+	w.Bind("kbSearch", func(query string) string { return b.KnowledgeSearch(query) })
+	w.Bind("tasksList", func() string { return b.TasksList() })
+	w.Bind("taskCreate", func(name, prompt, schedule string) string { return b.TaskCreate(name, prompt, schedule) })
+	w.Bind("taskDelete", func(id string) string { return b.TaskDelete(id) })
+	w.Bind("taskRunNow", func(id string) string { return b.TaskRunNow(id) })
+	w.Bind("escState", func() string { return b.EscalationState() })
+	w.Bind("lspStatus", func() string { return b.LspStatus() })
+	w.Bind("lspDiag", func(file string) string { return b.LspDiag(file) })
 	w.Bind("openSession", func(id string) { b.OpenSession(id) })
 	w.Bind("newSession", func() { b.NewSession() })
 	w.Bind("setKey", b.setKey)
@@ -1249,6 +1743,31 @@ func simpleUIHTML(model, provider string) string {
     height: 100%;
   }
   #side .side-head { padding: 11px 14px; font-weight: 700; color: var(--accent); border-bottom: 1px solid #232a3a; flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; }
+  .side-tabs { display: flex; gap: 4px; margin-right: auto; }
+  .side-tab { background: transparent; border: none; color: #8a93a6; padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+  .side-tab.active { background: #2d5a88; color: #fff; }
+  .side-kb { padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; overflow: hidden; flex: 1; min-height: 0; }
+  .kb-search-row { display: flex; gap: 6px; flex: 0 0 auto; }
+  .kb-search-row input { flex: 1; padding: 7px 9px; border-radius: 6px; border: 1px solid #2a2e3a; background: #0f1115; color: #e6e6e6; font-size: 12px; }
+  .kb-search-row button { padding: 7px 12px; border-radius: 6px; border: 1px solid #2d5a88; background: #2d5a88; color: #fff; cursor: pointer; font-size: 12px; }
+  #kbStats { color: #8a93a6; font-size: 11px; flex: 0 0 auto; }
+  #kbResults { flex: 1; overflow: auto; min-height: 0; }
+  .kb-item { background: #0f1115; border: 1px solid #2a2e3a; border-radius: 8px; padding: 8px 10px; cursor: pointer; margin-bottom: 6px; }
+  .kb-item:hover { border-color: #4c9adf; }
+  .kb-item-head { color: #7fc3ff; font-size: 12px; font-weight: 600; margin-bottom: 4px; word-break: break-all; }
+  .kb-item-body { color: #c9c9c9; font-size: 12px; line-height: 1.5; max-height: 140px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
+  .task-create { display: flex; flex-direction: column; gap: 6px; flex: 0 0 auto; }
+  .task-create input, .task-create select { padding: 6px 9px; border-radius: 6px; border: 1px solid #2a2e3a; background: #0f1115; color: #e6e6e6; font-size: 12px; }
+  .task-create button { padding: 7px 12px; border-radius: 6px; border: 1px solid #2d5a88; background: #2d5a88; color: #fff; cursor: pointer; font-size: 12px; }
+  #taskList { flex: 1; overflow: auto; min-height: 0; }
+  .task-item { background: #0f1115; border: 1px solid #2a2e3a; border-radius: 8px; padding: 8px 10px; margin-bottom: 6px; }
+  .task-item-head { display: flex; align-items: center; gap: 6px; color: #e6e6e6; font-size: 12px; font-weight: 600; }
+  .task-item-head .dot { width: 8px; height: 8px; border-radius: 50%; background: #4caf50; flex: 0 0 auto; }
+  .task-item-head .dot.off { background: #666; }
+  .task-item-meta { color: #8a93a6; font-size: 11px; margin: 3px 0 6px; }
+  .task-item-actions { display: flex; gap: 6px; }
+  .task-item-actions button { padding: 3px 10px; border-radius: 5px; border: 1px solid #2a2e3a; background: #1a1f2a; color: #c9c9c9; cursor: pointer; font-size: 11px; }
+  .task-item-actions button:hover { border-color: #4c9adf; }
   #side .side-list { overflow-y: auto; padding: 8px; scrollbar-width: thin; scrollbar-color: #39425c transparent; flex: 1 1 auto; }
   #side .side-list::-webkit-scrollbar { width: 10px; }
   #side .side-list::-webkit-scrollbar-thumb { background: #39425c; border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
@@ -1278,10 +1797,19 @@ func simpleUIHTML(model, provider string) string {
   .hl-s { color: #98c379; }
   .hl-c { color: #6b7280; font-style: italic; }
   .hl-n { color: #d19a66; }
+  /* Unified-diff line colouring (parity with the desktop colorizeDiffLines) */
+  .hl-diff-add { color: #4cd26a; }
+  .hl-diff-del { color: #ff6b6b; }
+  .hl-diff-hunk { color: #5ec8ff; }
+  .hl-diff-head { font-weight: 700; }
   html.light .hl-k { color: #a626a4; }
   html.light .hl-s { color: #40782f; }
   html.light .hl-c { color: #9a9aa5; }
   html.light .hl-n { color: #b76b01; }
+  html.light .hl-diff-add { color: #1a7f37; }
+  html.light .hl-diff-del { color: #cf222e; }
+  html.light .hl-diff-hunk { color: #0b62c4; }
+  html.light .hl-diff-head { font-weight: 700; }
   /* Nested list indentation */
   .md-ul .md-ul, .md-ol .md-ul, .md-ul .md-ol, .md-ol .md-ol { margin: 2px 0; }
   li > .md-ul, li > .md-ol { padding-left: 18px; }
@@ -1359,16 +1887,56 @@ func simpleUIHTML(model, provider string) string {
   html.light .msg-copy:hover { background: #e0e0e5; }
   html.light .md-copy { background: #eee; border-color: #d0d0da; color: #666; }
   html.light .md-copy:hover { background: #e0e0e5; }
+  /* Custom click-to-open dropdowns — reliable in WebView2 where native
+     <datalist> popups don't appear on click. */
+  .dd { position: relative; display: inline-flex; align-items: center; }
+  .dd-arrow { cursor: pointer; color: #888; padding: 0 6px; font-size: 11px; user-select: none; }
+  .dd-arrow:hover { color: #ccc; }
+  .dd-panel {
+    position: absolute; top: 100%; left: 0; margin-top: 4px; z-index: 500;
+    background: #171a21; border: 1px solid #2a2e3a; border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.5); min-width: 240px; max-width: 360px;
+    overflow: hidden;
+  }
+  .dd-search {
+    width: 100%; box-sizing: border-box; padding: 7px 9px; border: none;
+    border-bottom: 1px solid #2a2e3a; background: #0f1115; color: #e6e6e6;
+    font-size: 13px; outline: none;
+  }
+  .dd-list { max-height: 280px; overflow-y: auto; padding: 4px; }
+  .dd-option {
+    padding: 7px 10px; border-radius: 6px; cursor: pointer; font-size: 13px;
+    color: #e6e6e6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .dd-option:hover { background: #243049; }
+  .dd-option.sel { background: #1d3a5f; }
+  .dd-empty { padding: 10px; color: #777; font-size: 12px; text-align: center; }
+  html.light .dd-panel { background: #fff; border-color: #d0d0da; }
+  html.light .dd-search { background: #f5f5f8; border-color: #d0d0da; color: #222; }
+  html.light .dd-option:hover { background: #eef1fb; }
+  html.light .dd-option.sel { background: #dbe7ff; }
 </style></head>
 <body>
   <div id="main">
     <div id="bar">
       <span class="logo">iCODE</span>
-      <input id="session" class="listbar" list="sessionList" autocomplete="off" title="搜索/切换会话" placeholder="会话…" />
-      <datalist id="sessionList"></datalist>
+      <div class="dd">
+        <input id="session" class="listbar" autocomplete="off" title="搜索/切换会话" placeholder="会话…" />
+        <span class="dd-arrow" id="sessionArrow" title="展开会话列表">▾</span>
+        <div class="dd-panel" id="sessionPanel" style="display:none;">
+          <input id="sessionSearch" class="dd-search" placeholder="搜索会话…" autocomplete="off" />
+          <div class="dd-list" id="sessionOptions"></div>
+        </div>
+      </div>
       <button id="newBtn" title="开启新会话（旧会话保留在下拉列表中）">新会话</button>
-      <input id="model" class="listbar" list="modelList" autocomplete="off" title="搜索/切换模型" placeholder="模型…" />
-      <datalist id="modelList"></datalist>
+      <div class="dd">
+        <input id="model" class="listbar" autocomplete="off" title="搜索/切换模型" placeholder="模型…" />
+        <span class="dd-arrow" id="modelArrow" title="展开模型列表">▾</span>
+        <div class="dd-panel" id="modelPanel" style="display:none;">
+          <input id="modelSearch" class="dd-search" placeholder="搜索模型…" autocomplete="off" />
+          <div class="dd-list" id="modelOptions"></div>
+        </div>
+      </div>
       <button id="addModelBtn" title="添加自定义模型" class="theme-btn" style="font-size:13px;">＋模型</button>
       <button id="updateBtn" title="一键刷新所有提供商模型列表" class="theme-btn" style="font-size:13px;">↻</button>
       <span class="spacer"></span>
@@ -1393,17 +1961,63 @@ func simpleUIHTML(model, provider string) string {
         <button id="permDeny" style="background:#b0413e; border:none; color:#fff; padding:4px 12px; border-radius:6px; cursor:pointer;">拒绝</button>
       </div>
       <div id="permPrompt" style="width:100%; color:#c9c9c9; font-size:12px; word-break:break-all; max-height:72px; overflow:auto;"></div>
+      <div id="escHint" style="width:100%; color:#eab308; font-size:11px;"></div>
     </div>
     <div id="inputbar">
-      <textarea id="inp" placeholder="输入消息或 /命令，Enter 发送，Shift+Enter 换行…"></textarea>
-      <button id="stopBtn" title="停止生成" style="display:none;">■ 停止</button>
-      <button id="send">发送</button>
+      <div id="attZone" style="display:none; flex-wrap:wrap; gap:6px; margin-bottom:6px;"></div>
+      <div style="display:flex; align-items:flex-end; gap:8px;">
+        <button id="attachBtn" title="附加文件（图片走多模态，其他走 @路径 引用；也可直接拖拽文件进来）" style="flex:0 0 auto; padding:8px 10px; border-radius:8px; border:1px solid #2a2e3a; background:#0f1115; color:#e6e6e6; cursor:pointer;">📎</button>
+        <textarea id="inp" placeholder="输入消息或 /命令，Enter 发送，Shift+Enter 换行…（可 Ctrl+V 粘贴图片、拖拽文件）"></textarea>
+        <button id="stopBtn" title="停止生成" style="display:none;">■ 停止</button>
+        <button id="send">发送</button>
+      </div>
+      <input type="file" id="fileInput" multiple style="display:none" />
     </div>
   </div>
   <div id="grip" title="拖动调整命令面板宽度"></div>
   <div id="side">
-    <div class="side-head">命令面板 <button class="collapse" id="collapseBtn" title="折叠/展开">⟨</button></div>
+    <div class="side-head">
+      <span class="side-tabs">
+        <button id="tabCmd" class="side-tab active" title="命令列表">命令</button>
+        <button id="tabKb" class="side-tab" title="本地知识库检索（/kb）">知识库</button>
+        <button id="tabTasks" class="side-tab" title="自动化任务（/tasks）">任务</button>
+        <button id="tabLsp" class="side-tab" title="LSP 代码诊断（/lsp）">诊断</button>
+      </span>
+      <button class="collapse" id="collapseBtn" title="折叠/展开">⟨</button>
+    </div>
     <div class="side-list" id="sideList"></div>
+    <div class="side-kb" id="sideKb" style="display:none;">
+      <div class="kb-search-row">
+        <input id="kbInput" placeholder="搜索知识库…（如：犹豫期退保）" autocomplete="off" />
+        <button id="kbGo">检索</button>
+      </div>
+      <div id="kbStats"></div>
+      <div id="kbResults"></div>
+    </div>
+    <div class="side-kb" id="sideTasks" style="display:none;">
+      <div id="taskMsg" style="color:#8a93a6;font-size:11px;min-height:14px;"></div>
+      <div class="task-create">
+        <input id="taskName" placeholder="任务名（如：深夜知识库体检）" autocomplete="off" />
+        <input id="taskPrompt" placeholder="要执行的内容…" autocomplete="off" />
+        <select id="taskSched">
+          <option value="idle">闲时（0 点后自动跑）</option>
+          <option value="daily:02:00">每天 02:00</option>
+          <option value="daily:00:30">每天 00:30</option>
+          <option value="every:30m">每 30 分钟</option>
+          <option value="every:1h">每小时</option>
+        </select>
+        <button id="taskCreateBtn">创建任务</button>
+      </div>
+      <div id="taskList"></div>
+    </div>
+    <div class="side-kb" id="sideLsp" style="display:none;">
+      <div style="display:flex; gap:6px; flex:0 0 auto;">
+        <button id="lspStatusBtn" style="flex:0 0 auto; padding:6px 10px; border-radius:6px; border:1px solid #2d5a88; background:#2d5a88; color:#fff; cursor:pointer; font-size:12px;">LSP 状态</button>
+        <input id="lspFile" placeholder="文件路径，如 internal/…/engine.go" autocomplete="off" style="flex:1; padding:6px 9px; border-radius:6px; border:1px solid #2a2e3a; background:#0f1115; color:#e6e6e6; font-size:12px;" />
+        <button id="lspGo" style="flex:0 0 auto; padding:6px 10px; border-radius:6px; border:1px solid #2d5a88; background:#2d5a88; color:#fff; cursor:pointer; font-size:12px;">诊断</button>
+      </div>
+      <pre id="lspOut" style="flex:1; overflow:auto; min-height:0; margin:0; padding:8px; background:#0f1115; border:1px solid #2a2e3a; border-radius:8px; color:#c9c9c9; font-size:12px; line-height:1.5; white-space:pre-wrap; word-break:break-all;"></pre>
+    </div>
   </div>
   <div id="keyModal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:999; align-items:center; justify-content:center;">
     <div style="background:#171a21; border:1px solid #2a2e3a; border-radius:10px; padding:18px; width:360px;">
@@ -1478,6 +2092,17 @@ func simpleUIHTML(model, provider string) string {
     return 'js';
   }
   function hlCode(lang, code) {
+    // Unified-diff blocks get line-level colouring (parity with the desktop
+    // colorizeDiffLines): +++/--- headers bold, + green, - red, @@ hunk cyan.
+    if ((lang || '').toLowerCase() === 'diff') {
+      return code.split('\n').map(function (ln) {
+        if (ln.indexOf('+++') === 0 || ln.indexOf('---') === 0) return '<span class="hl-diff-head">' + ln + '</span>';
+        if (ln.indexOf('+') === 0) return '<span class="hl-diff-add">' + ln + '</span>';
+        if (ln.indexOf('-') === 0) return '<span class="hl-diff-del">' + ln + '</span>';
+        if (ln.indexOf('@@') === 0) return '<span class="hl-diff-hunk">' + ln + '</span>';
+        return ln;
+      }).join('\n');
+    }
     var fam = hlFamily(lang);
     var kw = HL_KW[fam] || '';
     var hashComment = (fam === 'py' || fam === 'sh');
@@ -1606,6 +2231,14 @@ func simpleUIHTML(model, provider string) string {
         navigator.clipboard.writeText(raw).then(function() { cp.textContent = '✓ 已复制'; setTimeout(function() { cp.textContent = '复制'; }, 1500); }).catch(function(){});
       });
       d.appendChild(cp);
+      // Regenerate: re-run the last user message as a fresh turn (opencode /
+      // desktop parity). The Go side reads the transcript, so no state here.
+      var rg = document.createElement('button'); rg.className = 'msg-resend'; rg.type = 'button'; rg.textContent = '↻';
+      rg.title = '重新生成';
+      rg.addEventListener('click', function() {
+        if (window.regenerate) window.regenerate();
+      });
+      d.appendChild(rg);
     }
     if (role === 'user') {
       var r = document.createElement('div'); r.className = 'role'; r.textContent = '你';
@@ -1644,10 +2277,19 @@ func simpleUIHTML(model, provider string) string {
   function uiThinking(text) {
     current = null;
     var d = document.createElement('div'); d.className = 'msg thinking';
+    // NOTE: <summary> MUST stay the first child of <details> per the HTML spec
+    // (a wrapping div breaks the collapse toggle), so the copy button is
+    // appended to the .msg block instead — the same absolute-positioned
+    // top-right placement the assistant messages use.
     var s = document.createElement('summary'); s.textContent = '🧠 推理过程';
     var p = document.createElement('pre'); p.textContent = text;
     var details = document.createElement('details'); details.appendChild(s); details.appendChild(p);
     d.appendChild(details);
+    var cp = document.createElement('button'); cp.className = 'msg-copy'; cp.type = 'button'; cp.textContent = '复制';
+    cp.addEventListener('click', function() {
+      navigator.clipboard.writeText(text).then(function() { cp.textContent = '✓ 已复制'; setTimeout(function() { cp.textContent = '复制'; }, 1500); }).catch(function(){});
+    });
+    d.appendChild(cp);
     log.appendChild(d); stick();
   }
   function uiTool(name, args) {
@@ -1714,10 +2356,114 @@ func simpleUIHTML(model, provider string) string {
     el.textContent = parts.join('  ·  ');
   }
 
+  // Multimodal image attachments — mirrors the CLI's Ctrl+V path. Images are
+  // held client-side as base64 until send; nothing is uploaded anywhere else.
+  var pendingAttachments = []; // [{mime, data(base64)}]
+  var attZone = document.getElementById('attZone');
+  var fileInput = document.getElementById('fileInput');
+
+  function renderAtts() {
+    if (!attZone) return;
+    if (!pendingAttachments.length) { attZone.style.display = 'none'; attZone.innerHTML = ''; return; }
+    attZone.style.display = 'flex';
+    attZone.innerHTML = '';
+    pendingAttachments.forEach(function(a, i){
+      var chip = document.createElement('div');
+      chip.style.cssText = 'position:relative;width:56px;height:56px;border-radius:8px;overflow:hidden;border:1px solid #2a2e3a;';
+      var img = document.createElement('img');
+      img.src = 'data:' + a.mime + ';base64,' + a.data;
+      img.style.cssText = 'width:100%;height:100%;object-fit:cover;';
+      var x = document.createElement('span');
+      x.textContent = '✕'; x.title = '移除';
+      x.style.cssText = 'position:absolute;top:1px;right:2px;cursor:pointer;color:#fff;background:rgba(0,0,0,.55);border-radius:50%;width:16px;height:16px;line-height:16px;text-align:center;font-size:11px;';
+      x.addEventListener('click', function(){ pendingAttachments.splice(i,1); renderAtts(); });
+      chip.appendChild(img); chip.appendChild(x);
+      attZone.appendChild(chip);
+    });
+  }
+
+  function addImageFile(file) {
+    if (!file || !file.type || !file.type.startsWith('image/')) return;
+    var reader = new FileReader();
+    reader.onload = function(e){
+      var dataURL = e.target.result; // data:<mime>;base64,xxxxx
+      var idx = dataURL.indexOf(',');
+      if (idx < 0) return;
+      pendingAttachments.push({ mime: file.type, data: dataURL.substring(idx + 1) });
+      renderAtts();
+    };
+    reader.readAsDataURL(file);
+  }
+
+  // Paste screenshots straight from the clipboard into attachments.
+  inp.addEventListener('paste', function(e){
+    var dt = e.clipboardData || window.clipboardData;
+    if (!dt || !dt.items) return;
+    var had = false;
+    for (var i = 0; i < dt.items.length; i++) {
+      if (dt.items[i].kind === 'file' && dt.items[i].type && dt.items[i].type.indexOf('image/') === 0) {
+        var f = dt.items[i].getAsFile();
+        if (f) { addImageFile(f); had = true; }
+      }
+    }
+    if (had) e.preventDefault();
+  });
+
+  // addFileRef handles any dropped / picked file the way the CLI does:
+  //   - images          → inline multimodal attachment (paste path)
+  //   - anything with a local path (WebView2 exposes File.path) → "@<path> "
+  //     reference, expanded server-side by expandFileRefsUI
+  //   - text without a path → inlined directly into the input
+  function addFileRef(f) {
+    if (!f) return;
+    if (f.type && f.type.indexOf('image/') === 0) { addImageFile(f); return; }
+    if (f.path) {
+      if (inp.value.length && !/\s$/.test(inp.value)) inp.value += ' ';
+      inp.value += '@' + f.path + ' ';
+      inp.focus();
+      return;
+    }
+    var r = new FileReader();
+    r.onload = function(ev){
+      var t = String(ev.target.result || '');
+      if (inp.value.length && !/\s$/.test(inp.value)) inp.value += ' ';
+      inp.value += t + '\n';
+      inp.focus();
+    };
+    r.readAsText(f);
+  }
+
+  var attachBtn = document.getElementById('attachBtn');
+  if (attachBtn) attachBtn.addEventListener('click', function(){ if (fileInput) fileInput.click(); });
+  if (fileInput) fileInput.addEventListener('change', function(e){
+    Array.prototype.forEach.call(e.target.files || [], addFileRef);
+    fileInput.value = '';
+    inp.focus();
+  });
+
+  // Drag & drop files straight into the input bar.
+  window.addEventListener('dragover', function(e){ e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'; });
+  window.addEventListener('drop', function(e){
+    e.preventDefault();
+    var files = e.dataTransfer && e.dataTransfer.files;
+    if (!files || !files.length) return;
+    var before = inp.value;
+    Array.prototype.forEach.call(files, addFileRef);
+    if (inp.value !== before) inp.focus();
+  });
+
   function doSend() {
-    var t = inp.value.trim(); if (!t) return;
+    var t = inp.value.trim();
+    if (!t && !pendingAttachments.length) return;
     inp.value = '';
-    if (window.runCommand) window.runCommand(t);
+    if (pendingAttachments.length) {
+      var atts = pendingAttachments.slice();
+      pendingAttachments = [];
+      renderAtts();
+      if (window.sendWithAttachments) window.sendWithAttachments(t, JSON.stringify(atts));
+    } else {
+      if (window.runCommand) window.runCommand(t);
+    }
   }
 
   // Plan-mode confirmation bar: accept switches to auto mode and starts
@@ -1730,6 +2476,23 @@ func simpleUIHTML(model, provider string) string {
   // EventPermission pause. The engine blocks the tool until respondPermission
   // answers, exactly like the desktop modal and the TUI's [1]/[2]/[3] keys.
   var permRequestId = null;
+  // Graded-auth escalation hint (Claude Code parity): shows strike progress /
+  // "已退回手动" in the permission bar.
+  function refreshEsc() {
+    var el = document.getElementById('escHint');
+    if (!el) return;
+    if (!window.escState) { el.textContent = ''; return; }
+    try {
+      var s = JSON.parse(window.escState() || '{}');
+      if (s.escalated) {
+        el.textContent = '⚠ 已连续 ' + s.strikes + ' 次拦截，本会话已退回手动模式（需逐次确认）';
+      } else if (s.strikes > 0) {
+        el.textContent = '已拦截 ' + s.strikes + '/' + (s.threshold || 3) + ' 次，连续 ' + (s.threshold || 3) + ' 次将退回手动';
+      } else {
+        el.textContent = '';
+      }
+    } catch(e) {}
+  }
   function uiPermission(id, tool, prompt) {
     permRequestId = id;
     var bar = document.getElementById('permBar');
@@ -1737,6 +2500,7 @@ func simpleUIHTML(model, provider string) string {
     document.getElementById('permTool').textContent = tool;
     document.getElementById('permPrompt').textContent = prompt || '';
     bar.style.display = 'flex';
+    refreshEsc();
   }
   function answerPermission(decision) {
     var bar = document.getElementById('permBar');
@@ -1792,11 +2556,11 @@ func simpleUIHTML(model, provider string) string {
   // actually work in this UI (CLI-terminal-only commands like /vim /history
   // are excluded).
   var CATALOG = [
-    {g:'会话', c:['/clear','/new','/sessions','/resume','/fork','/goal','/budget','/compact','/export','/share','/diff','/review','/summarize','/undo']},
-    {g:'模型', c:['/model','/provider','/models','/keys','/update']},
-    {g:'配置', c:['/config','/theme','/lang','/security','/permissions','/mcp','/output-style']},
-    {g:'工具', c:['/init','/add-dir','/agents','/skills','/teams','/hooks','/todo']},
-    {g:'信息', c:['/help','/whoami','/status','/cost','/doctor','/memory','/context','/feedback']},
+    {g:'会话', c:['/clear','/new','/sessions','/resume','/fork','/branch','/rename','/goal','/budget','/compact','/export','/share','/diff','/review','/summarize','/undo','/rewind','/checkpoint','/restore','/search','/wipe','/apply','/reject']},
+    {g:'模型', c:['/model','/provider','/models','/keys','/update','/thinking']},
+    {g:'配置', c:['/config','/theme','/lang','/security','/permissions','/mcp','/output-style','/mode','/plan','/ask','/debug']},
+    {g:'工具', c:['/init','/add-dir','/agents','/skills','/skill-eval','/plugin','/teams','/hooks','/todo','/lsp','/kb','/idle','/tasks','/mesh','/admin']},
+    {g:'信息', c:['/help','/whoami','/status','/cost','/token','/usage','/stats','/doctor','/memory','/context','/feedback','/copy']},
     {g:'系统', c:['/login','/logout','/release-notes','/bug']}
   ];
   var sideList = document.getElementById('sideList');
@@ -1809,6 +2573,161 @@ func simpleUIHTML(model, provider string) string {
       d.addEventListener('click', function(){ if (window.runCommand) window.runCommand(name); });
       sideList.appendChild(d);
     });
+  });
+
+  // ── Side panel tabs: 命令 / 知识库 ──────────────────────────────
+  var tabCmd = document.getElementById('tabCmd');
+  var tabKb = document.getElementById('tabKb');
+  var sideKb = document.getElementById('sideKb');
+  var kbInput = document.getElementById('kbInput');
+  var kbGo = document.getElementById('kbGo');
+  var kbStats = document.getElementById('kbStats');
+  var kbResults = document.getElementById('kbResults');
+
+  function showSideTab(which) {
+    var kb = which === 'kb', tk = which === 'tasks', lp = which === 'lsp';
+    var non = (kb || tk || lp);
+    sideList.style.display = non ? 'none' : '';
+    if (sideKb) sideKb.style.display = kb ? 'flex' : 'none';
+    if (sideTasks) sideTasks.style.display = tk ? 'flex' : 'none';
+    if (sideLsp) sideLsp.style.display = lp ? 'flex' : 'none';
+    if (tabCmd) tabCmd.className = 'side-tab' + (non ? '' : ' active');
+    if (tabKb) tabKb.className = 'side-tab' + (kb ? ' active' : '');
+    if (tabTasks) tabTasks.className = 'side-tab' + (tk ? ' active' : '');
+    if (tabLsp) tabLsp.className = 'side-tab' + (lp ? ' active' : '');
+    if (kb && kbInput) { kbInput.focus(); refreshKbStats(); }
+    if (tk) refreshTasks();
+    if (lp) lspShowStatus();
+  }
+  if (tabCmd) tabCmd.addEventListener('click', function(){ showSideTab('cmd'); });
+  if (tabKb) tabKb.addEventListener('click', function(){ showSideTab('kb'); });
+
+  // ── 任务（自动化 / 闲时调度）面板 ─────────────────────────────
+  var tabTasks = document.getElementById('tabTasks');
+  var sideTasks = document.getElementById('sideTasks');
+  var taskName = document.getElementById('taskName');
+  var taskPrompt = document.getElementById('taskPrompt');
+  var taskSched = document.getElementById('taskSched');
+  var taskCreateBtn = document.getElementById('taskCreateBtn');
+  var taskList = document.getElementById('taskList');
+  var taskMsg = document.getElementById('taskMsg');
+
+  function alertMsg(s) {
+    if (!taskMsg || !s) return;
+    taskMsg.textContent = s;
+    clearTimeout(alertMsg._t);
+    alertMsg._t = setTimeout(function(){ taskMsg.textContent = ''; }, 4000);
+  }
+
+  function refreshTasks() {
+    if (!taskList) return;
+    if (!window.tasksList) { taskList.innerHTML = '<div style="color:#8a93a6;font-size:12px;">调度器不可用</div>'; return; }
+    var items = [];
+    try { items = JSON.parse(window.tasksList() || '[]'); } catch(e) {}
+    taskList.innerHTML = '';
+    if (!items.length) {
+      var empty = document.createElement('div');
+      empty.style.cssText = 'color:#8a93a6;font-size:12px;line-height:1.6;';
+      empty.textContent = '暂无自动化任务。把重活（批量处理、知识库索引、跑测试）挂到闲时窗口自动执行。';
+      taskList.appendChild(empty);
+      return;
+    }
+    items.forEach(function(t){
+      var d = document.createElement('div'); d.className = 'task-item';
+      var h = document.createElement('div'); h.className = 'task-item-head';
+      var dot = document.createElement('span'); dot.className = 'dot' + (t.enabled ? '' : ' off');
+      var nm = document.createElement('span'); nm.textContent = t.name;
+      h.appendChild(dot); h.appendChild(nm);
+      var m = document.createElement('div'); m.className = 'task-item-meta';
+      m.textContent = (t.schedule || '') + (t.next_run ? ' · 下次 ' + t.next_run : '');
+      var act = document.createElement('div'); act.className = 'task-item-actions';
+      var run = document.createElement('button'); run.textContent = '立即运行';
+      run.addEventListener('click', function(){
+        if (window.taskRunNow) { var r = window.taskRunNow(t.id); if (r) alertMsg(r); refreshTasks(); }
+      });
+      var del = document.createElement('button'); del.textContent = '删除';
+      del.addEventListener('click', function(){
+        if (window.taskDelete) { var r = window.taskDelete(t.id); if (r) alertMsg(r); refreshTasks(); }
+      });
+      act.appendChild(run); act.appendChild(del);
+      d.appendChild(h); d.appendChild(m); d.appendChild(act);
+      taskList.appendChild(d);
+    });
+  }
+
+  if (tabTasks) tabTasks.addEventListener('click', function(){ showSideTab('tasks'); });
+  if (taskCreateBtn) taskCreateBtn.addEventListener('click', function(){
+    if (!window.taskCreate) return;
+    var n = (taskName.value || '').trim(), p = (taskPrompt.value || '').trim();
+    if (!n || !p) { alertMsg('任务名与内容不能为空'); return; }
+    var r = window.taskCreate(n, p, (taskSched && taskSched.value) || 'idle');
+    alertMsg(r);
+    if (r && r.indexOf('✓') === 0) { taskName.value = ''; taskPrompt.value = ''; refreshTasks(); }
+  });
+
+  // ── LSP 诊断面板（/lsp 可视化） ──────────────────────────────
+  var tabLsp = document.getElementById('tabLsp');
+  var sideLsp = document.getElementById('sideLsp');
+  var lspFile = document.getElementById('lspFile');
+  var lspOut = document.getElementById('lspOut');
+
+  function lspShowStatus() {
+    if (!lspOut) return;
+    if (!window.lspStatus) { lspOut.textContent = 'LSP 不可用'; return; }
+    lspOut.textContent = window.lspStatus();
+  }
+  function lspRunDiag() {
+    if (!lspOut || !window.lspDiag) return;
+    lspOut.textContent = window.lspDiag((lspFile && lspFile.value) || '');
+  }
+  if (tabLsp) tabLsp.addEventListener('click', function(){ showSideTab('lsp'); });
+  var lspStatusBtn = document.getElementById('lspStatusBtn');
+  var lspGo = document.getElementById('lspGo');
+  if (lspStatusBtn) lspStatusBtn.addEventListener('click', lspShowStatus);
+  if (lspGo) lspGo.addEventListener('click', lspRunDiag);
+  if (lspFile) lspFile.addEventListener('keydown', function(e){
+    if (e.key === 'Enter') { e.preventDefault(); lspRunDiag(); }
+  });
+
+  function refreshKbStats() {
+    if (!kbStats) return;
+    if (!window.kbStatus) { kbStats.textContent = '知识库不可用'; return; }
+    try {
+      var o = JSON.parse(window.kbStatus() || '{}');
+      kbStats.textContent = o.chunks >= 0 ? ('已索引 ' + o.chunks + ' 个片段，输入关键词检索（本地 RAG，零 token）') : '知识库未配置（config.yaml knowledge.dirs）';
+    } catch(e) { kbStats.textContent = ''; }
+  }
+
+  function doKbSearch() {
+    if (!kbInput || !kbResults || !window.kbSearch) return;
+    var q = kbInput.value.trim();
+    if (!q) { kbResults.innerHTML = ''; refreshKbStats(); return; }
+    if (kbStats) kbStats.textContent = '检索中…';
+    var list = [];
+    try { list = JSON.parse(window.kbSearch(q) || '[]'); } catch(e) { list = []; }
+    kbResults.innerHTML = '';
+    if (!list.length) { if (kbStats) kbStats.textContent = '未命中，换个关键词试试（先确认知识库已配置并索引）'; return; }
+    if (kbStats) kbStats.textContent = '命中 ' + list.length + ' 条 · 点击插入输入框';
+    list.forEach(function(r){
+      var d = document.createElement('div'); d.className = 'kb-item';
+      d.title = r.file;
+      var h = document.createElement('div'); h.className = 'kb-item-head';
+      h.textContent = (r.section || r.file || '片段') + '  ·  ' + Math.round((r.score || 0) * 100) + '%';
+      var b = document.createElement('div'); b.className = 'kb-item-body'; b.textContent = r.snippet || '';
+      d.appendChild(h); d.appendChild(b);
+      d.addEventListener('click', function(){
+        // Insert the full snippet with its source note so the model can read it.
+        var block = '[知识库资料: ' + (r.file || '') + (r.section ? ' / ' + r.section : '') + ']\n' + (r.snippet || '') + '\n';
+        if (inp.value.length && !/\s$/.test(inp.value)) inp.value += '\n';
+        inp.value += block;
+        inp.focus();
+      });
+      kbResults.appendChild(d);
+    });
+  }
+  if (kbGo) kbGo.addEventListener('click', doKbSearch);
+  if (kbInput) kbInput.addEventListener('keydown', function(e){
+    if (e.key === 'Enter') { e.preventDefault(); doKbSearch(); }
   });
 
   // Draggable resize slider for the command panel.
@@ -1836,14 +2755,26 @@ func simpleUIHTML(model, provider string) string {
   document.getElementById('collapseBtn').addEventListener('click', togglePanel);
   document.getElementById('panelBtn').addEventListener('click', togglePanel);
 
-  // Populate the model input from the engine. The input is a text box backed
-  // by a <datalist>, so typing filters the candidate list as you go.
+  // Populate the model dropdown. A custom panel (#modelOptions) is used
+  // instead of a native <datalist> because WebView2 does not reliably show
+  // datalist popups on click — the user reported the model list "won't open".
   function fillModelList(list, cur) {
-    var dl = document.getElementById('modelList');
-    dl.innerHTML = '';
+    var box = document.getElementById('modelOptions');
+    box.innerHTML = '';
     (list || []).forEach(function(id){
-      var o = document.createElement('option'); o.value = id; dl.appendChild(o);
+      var o = document.createElement('div');
+      o.className = 'dd-option' + (id === cur ? ' sel' : '');
+      o.textContent = id;
+      o.addEventListener('click', function(){
+        document.getElementById('model').value = id;
+        if (window.setModel) window.setModel(id);
+        closeAllDD();
+      });
+      box.appendChild(o);
     });
+    if (!box.querySelector('.dd-option')) {
+      var e = document.createElement('div'); e.className = 'dd-empty'; e.textContent = '无可用的模型'; box.appendChild(e);
+    }
     if (cur !== undefined && cur !== null) document.getElementById('model').value = cur;
   }
   if (window.models) {
@@ -1860,6 +2791,44 @@ func simpleUIHTML(model, provider string) string {
       e.preventDefault(); window.setModel(e.target.value);
     }
   });
+
+  // ── Custom click-to-open dropdown helpers (model + session) ──
+  function closeAllDD() {
+    document.getElementById('modelPanel').style.display = 'none';
+    document.getElementById('sessionPanel').style.display = 'none';
+  }
+  function openDD(panelId, searchId) {
+    var wasOpen = document.getElementById(panelId).style.display === 'block';
+    closeAllDD();
+    if (wasOpen) return; // toggle off when already open
+    var p = document.getElementById(panelId);
+    p.style.display = 'block';
+    var s = document.getElementById(searchId);
+    if (s) { s.value = ''; filterDD(panelId); s.focus(); }
+  }
+  function filterDD(panelId) {
+    var p = document.getElementById(panelId);
+    var s = p.querySelector('.dd-search');
+    var q = (s ? s.value : '').toLowerCase();
+    var shown = 0;
+    p.querySelectorAll('.dd-option').forEach(function(o){
+      var hit = o.textContent.toLowerCase().indexOf(q) >= 0;
+      o.style.display = hit ? '' : 'none';
+      if (hit) shown++;
+    });
+    var empty = p.querySelector('.dd-empty');
+    if (empty) empty.style.display = shown ? 'none' : '';
+  }
+  // Close any open panel when clicking outside a .dd widget.
+  document.addEventListener('click', function(e){
+    if (!e.target.closest || !e.target.closest('.dd')) closeAllDD();
+  });
+  document.getElementById('modelArrow').addEventListener('click', function(e){ e.stopPropagation(); openDD('modelPanel','modelSearch'); });
+  document.getElementById('model').addEventListener('click', function(e){ e.stopPropagation(); openDD('modelPanel','modelSearch'); });
+  document.getElementById('modelSearch').addEventListener('input', function(){ filterDD('modelPanel'); });
+  document.getElementById('sessionArrow').addEventListener('click', function(e){ e.stopPropagation(); openDD('sessionPanel','sessionSearch'); });
+  document.getElementById('session').addEventListener('click', function(e){ e.stopPropagation(); openDD('sessionPanel','sessionSearch'); });
+  document.getElementById('sessionSearch').addEventListener('input', function(){ filterDD('sessionPanel'); });
 
   // Refresh all provider model catalogs.
   document.getElementById('updateBtn').addEventListener('click', function(){
@@ -1895,16 +2864,24 @@ func simpleUIHTML(model, provider string) string {
     return '更早';
   }
   function fillSessions(list) {
-    var dl = document.getElementById('sessionList');
+    var box = document.getElementById('sessionOptions');
     var cur = document.getElementById('session').value;
-    dl.innerHTML = '';
-    (list || []).forEach(function(e){
-      var o = document.createElement('option');
-      o.value = e.id;
-      var g = e.updated_at ? timeGroup(e.updated_at) : '';
-      o.label = g ? (g + ' · ' + e.title) : e.title;
-      dl.appendChild(o);
+    box.innerHTML = '';
+    (list || []).forEach(function(e2){
+      var o = document.createElement('div');
+      o.className = 'dd-option';
+      var g = e2.updated_at ? timeGroup(e2.updated_at) : '';
+      o.textContent = (g ? (g + ' · ') : '') + (e2.title || e2.id);
+      o.addEventListener('click', function(){
+        document.getElementById('session').value = e2.id;
+        if (window.openSession) window.openSession(e2.id);
+        closeAllDD();
+      });
+      box.appendChild(o);
     });
+    if (!box.querySelector('.dd-option')) {
+      var em = document.createElement('div'); em.className = 'dd-empty'; em.textContent = '暂无会话'; box.appendChild(em);
+    }
     if (cur) document.getElementById('session').value = cur;
   }
   function refreshSessions() {

@@ -1,17 +1,18 @@
 import React, { useState, useEffect } from 'react';
-import PlumBlossom from './PlumBlossom';
 
-// BootSplash is a lightweight startup prompt shown the moment the desktop app
-// mounts. It stays up for a fixed ~3 seconds then fades out and unmounts, so
-// the user always gets clear "the app is starting" feedback during the
-// (backend boot + WebView2 JS load) window instead of staring at a blank frame.
-//
-// It is intentionally independent of the backend: it never waits on
-// /api/health, so even if the backend is slow or unreachable the splash still
-// auto-closes and the (offline-capable) UI is revealed.
-//
-// Brand: the plum blossom mark stays (desktop identity), paired with an
-// opencode-style indeterminate progress bar below the wordmark.
+/**
+ * BootSplash is a lightweight startup prompt shown the moment the desktop app
+ * mounts. It stays up for a fixed ~3 seconds then fades out and unmounts, so
+ * the user always gets clear "the app is starting" feedback during the
+ * (backend boot + WebView2 JS load) window instead of staring at a blank frame.
+ *
+ * It is intentionally independent of the backend: it never waits on
+ * /api/health, so even if the backend is slow or unreachable the splash still
+ * auto-closes and the (offline-capable) UI is revealed.
+ *
+ * Brand: switched to opencode-style circular logo with "iCode" wordmark,
+ * paired with opencode-style indeterminate progress bar below.
+ */
 const BootSplash: React.FC = () => {
   const [show, setShow] = useState(true);
   const [fade, setFade] = useState(false);
@@ -38,7 +39,7 @@ const BootSplash: React.FC = () => {
         flexDirection: 'column',
         alignItems: 'center',
         justifyContent: 'center',
-        gap: 22,
+        gap: 18,
         background: 'var(--bg-app)',
         color: 'var(--text-primary)',
         opacity: fade ? 0 : 1,
@@ -46,9 +47,25 @@ const BootSplash: React.FC = () => {
         pointerEvents: fade ? 'none' : 'auto',
       }}
     >
-      <PlumBlossom size={64} />
-      <div style={{ fontSize: 22, fontWeight: 700, letterSpacing: '-0.02em', color: 'var(--text-primary)' }}>
-        iCODE
+      {/* Opencode-style logo: circular badge with "iCode" */}
+      <div style={{
+        width: 48,
+        height: 48,
+        borderRadius: '50%',
+        background: 'linear-gradient(135deg, #58a6ff 0%, #8b6cff 100%)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        color: 'white',
+        fontWeight: 600,
+        fontSize: 16,
+        letterSpacing: '-0.5px',
+      }}>
+        iCode
+      </div>
+      
+      <div style={{ fontSize: 20, fontWeight: 600, letterSpacing: '-0.02em', color: 'var(--text-primary)' }}>
+        iCode
       </div>
       <div className="boot-bar" />
       <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>正在启动…</div>

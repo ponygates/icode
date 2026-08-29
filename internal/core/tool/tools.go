@@ -48,6 +48,7 @@ func NewRegistry() *Registry {
 	r.Register(&GlobTool{})
 	r.Register(&LSTool{})
 	r.Register(&FetchTool{})
+	r.Register(&AskUserTool{})
 	r.Register(&GitDiffTool{})
 	r.Register(&GitCommitTool{})
 	r.Register(&GitStatusTool{})
@@ -1417,7 +1418,12 @@ func (t *FetchTool) Execute(ctx context.Context, args string) (*types.ToolResult
 	}
 
 	content := string(body)
-	if int64(len(body)) >= maxSize {
+	// HTML pages → readable plain text (Claude Code WebFetch parity): raw
+	// markup would burn tokens and hurt comprehension. JSON/plain responses
+	// stay untouched.
+	if isHTML(content, resp.Header.Get("Content-Type")) {
+		content = htmlToText(content, 12000)
+	} else if int64(len(body)) >= maxSize {
 		content += "\n\n[Response truncated at 256KB]"
 	}
 

@@ -75,12 +75,23 @@ func (t *TUI) handleSlash(text string) {
 
 		b.WriteString("\n特殊语法:\n")
 		b.WriteString("  # <内容>          追加到 ~/.icode/CLAUDE.md\n")
-		b.WriteString("  ! <shell>         运行 shell 命令\n")
+		b.WriteString("  ! <shell>         运行 shell 命令（输出进上下文，AI 自动响应）\n")
 		b.WriteString("\n" + t.tstr("sc.title") + ":\n")
 		b.WriteString("  Ctrl+C           " + t.tstr("sc.ctrlc") + "\n")
 		b.WriteString("  Ctrl+L           " + t.tstr("sc.ctrll") + "\n")
 		b.WriteString("  Ctrl+P / Ctrl+N  " + t.tstr("sc.history") + "\n")
 		b.WriteString("  Ctrl+Y           复制最近助手回复到剪贴板\n")
+		b.WriteString("  Ctrl+J           多行输入换行（Enter 发送）\n")
+		b.WriteString("  Ctrl+S           暂存提示词 / 空输入时恢复\n")
+		b.WriteString("  Ctrl+G           用 $EDITOR 编辑当前提示词\n")
+		b.WriteString("  Ctrl+_           撤销上一步输入编辑\n")
+		b.WriteString("  Ctrl+B           当前任务转入后台（可继续输入，消息排队）\n")
+		b.WriteString("  Ctrl+R           反向历史搜索\n")
+		b.WriteString("  Ctrl+O           展开/折叠全部工具执行详情（transcript）\n")
+		b.WriteString("  Alt+P            切换模型（不清空输入）\n")
+		b.WriteString("  Alt+T            切换扩展思考（extended thinking）\n")
+		b.WriteString("  Tab              接受补全建议 / 权限框内加「拒绝说明」\n")
+		b.WriteString("  Esc              中断生成 · 双 Esc 清空草稿或回溯\n")
 		b.WriteString("  " + t.tstr("cmd.ac"))
 		t.add(RoleSystem, b.String())
 
@@ -95,10 +106,20 @@ func (t *TUI) handleSlash(text string) {
 
 	case "/expand":
 		t.toolFolded = !t.toolFolded
+		// Global fold preference now drives every existing tool card too, so
+		// /expand still works as the all-or-nothing switch while individual
+		// cards keep their own state after a click.
+		t.mu.Lock()
+		for i := range t.messages {
+			if t.messages[i].Role == RoleTool {
+				t.messages[i].Folded = !t.toolFolded
+			}
+		}
+		t.mu.Unlock()
 		if t.toolFolded {
-			t.add(RoleSystem, "工具输出已折叠（只显示前 8 行），再运行 /expand 展开全部")
+			t.add(RoleSystem, "工具输出已全部展开（点击卡片头 ▾ 可单独折叠）")
 		} else {
-			t.add(RoleSystem, "工具输出已全部展开")
+			t.add(RoleSystem, "工具输出已折叠（只显示前 8 行），点击卡片头 ▸ 展开单个")
 		}
 
 	case "/model":
@@ -246,6 +267,9 @@ func (t *TUI) handleSlash(text string) {
 	case "/compact":
 		t.compactCommand(args)
 
+	case "/recap":
+		t.recapCommand()
+
 	case "/export":
 		t.exportMarkdown(args)
 
@@ -342,6 +366,9 @@ func (t *TUI) handleSlash(text string) {
 
 	case "/undo":
 		t.rewindSteps(1)
+
+	case "/redo":
+		t.redoStep()
 
 	case "/apply":
 		if t.callback != nil {
@@ -854,7 +881,7 @@ func (t *TUI) tryCustomSlash(cmd, argStr string) bool {
 					t.add(RoleError, fmt.Sprintf("内部错误: %v", r))
 				}
 			}()
-			t.callback.OnSend(expanded)
+			t.callback.OnSend(expanded, nil)
 		}()
 	}
 	t.ensureAnim()
@@ -1087,7 +1114,7 @@ func (t *TUI) reviewCommand(args []string) {
 					t.add(RoleError, fmt.Sprintf("内部错误: %v", r))
 				}
 			}()
-			t.callback.OnSend(target)
+			t.callback.OnSend(target, nil)
 		}()
 	}
 	t.ensureAnim()
@@ -1360,6 +1387,79 @@ func (t *TUI) execShell(cmdStr string) {
 // (目标/已完成/关键决策/文件改动/待办/下一步), cached into the session metadata
 // so a later /resume --compact reuses it without a second model call. When the
 // model is unavailable or fails, it falls back to the free local line dump.
+// recapCommand implements /recap (Claude Code parity): generate a short,
+// non-destructive session recap — what's done, where it stands, what's next.
+// Unlike /compact it never rewrites the conversation history.
+func (t *TUI) recapCommand() {
+	t.autoRecap("⏳ 正在生成会话回顾…")
+}
+
+// autoRecap runs a non-destructive session recap. caption is shown while the
+// model summarises; reused by both the /recap command and the idle auto-recap.
+// Returns false (and reports the too-short reason only when caption is set, i.e.
+// a manual /recap) when the conversation has fewer than 3 turns.
+func (t *TUI) autoRecap(caption string) bool {
+	t.mu.Lock()
+	turns := 0
+	for _, m := range t.messages {
+		if m.Role == RoleUser || m.Role == RoleAssistant {
+			turns++
+		}
+	}
+	t.mu.Unlock()
+	if turns < 3 {
+		if caption != "" {
+			t.add(RoleSystem, "对话还太短，暂无可回顾的内容（至少 3 轮）。")
+		}
+		return false
+	}
+	t.add(RoleSystem, caption)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.add(RoleError, fmt.Sprintf("生成回顾失败: %v", r))
+			}
+		}()
+		sum := ""
+		if t.callback != nil {
+			sum = t.callback.OnCompactSummarize("生成简短的会话回顾：已完成什么、当前进展、下一步建议")
+		}
+		if strings.TrimSpace(sum) == "" {
+			t.add(RoleSystem, "（模型不可用，无法生成回顾）")
+			return
+		}
+		// Cap at 400 characters, same as Claude Code's recap limit.
+		runes := []rune(strings.TrimSpace(sum))
+		if len(runes) > 400 {
+			sum = string(runes[:400]) + "…"
+		}
+		t.add(RoleSystem, "📋 会话回顾：\n"+sum)
+	}()
+	return true
+}
+
+// checkAutoRecap fires a one-shot session recap when the user has been idle for
+// ≥3 minutes with no streaming in flight (Claude Code parity: "auto-recap after
+// you walk away"). It is cooled down (10 min) so it never spams, and is skipped
+// entirely while a turn is generating. Called from the main loop's idle tick.
+func (t *TUI) checkAutoRecap() {
+	t.mu.Lock()
+	streaming := t.streaming
+	idle := time.Since(t.lastActivity)
+	last := t.lastAutoRecap
+	t.mu.Unlock()
+	if streaming || idle < 3*time.Minute {
+		return
+	}
+	if !last.IsZero() && time.Since(last) < 10*time.Minute {
+		return
+	}
+	t.mu.Lock()
+	t.lastAutoRecap = time.Now()
+	t.mu.Unlock()
+	t.autoRecap("💤 你已离开 3 分钟，自动为你回顾一下当前会话…")
+}
+
 func (t *TUI) compactCommand(args []string) {
 	instruction := strings.Join(args, " ")
 	t.mu.Lock()
@@ -1458,6 +1558,34 @@ func (t *TUI) rewindSteps(n int) {
 		return
 	}
 	msg := fmt.Sprintf("✓ 已回滚 %d 步。影响文件:\n", n)
+	for _, f := range files {
+		msg += "  " + f + "\n"
+	}
+	t.add(RoleSystem, msg)
+}
+
+// redoStep re-applies the most recent /undo or /rewind via the checkpoint
+// store (opencode /redo parity).
+func (t *TUI) redoStep() {
+	sessionID := ""
+	if t.callback != nil {
+		sessionID = t.callback.SessionID()
+	}
+	if sessionID == "" {
+		t.add(RoleSystem, "没有活跃会话。")
+		return
+	}
+	store, err := checkpoint.GetOrOpen(sessionID)
+	if err != nil {
+		t.add(RoleError, "打开检查点失败: "+err.Error())
+		return
+	}
+	files, err := store.Redo(context.Background())
+	if err != nil {
+		t.add(RoleError, "重做失败: "+err.Error())
+		return
+	}
+	msg := "✓ 已重做。影响文件:\n"
 	for _, f := range files {
 		msg += "  " + f + "\n"
 	}
@@ -2149,7 +2277,11 @@ func (t *TUI) renameSession(args []string) {
 			t.add(RoleError, msg)
 			return
 		}
+		t.mu.Lock()
+		t.sessionTitle = title
+		t.mu.Unlock()
 		t.add(RoleSystem, "✓ 会话已重命名为: "+title)
+		t.scheduleRender()
 		return
 	}
 	t.add(RoleSystem, "引擎未初始化，无法重命名。")

@@ -68,10 +68,29 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			s.cfg.Update.AutoUpdate = cfg.Update.AutoUpdate
 			s.cfg.Update.Channel = cfg.Update.Channel
 			s.cfg.Update.IntervalH = cfg.Update.IntervalH
-			// Desktop settings: launch-on-login + fixed backend port.
-			s.cfg.Autostart = cfg.Autostart
-			s.cfg.Server.Port = cfg.Server.Port
-			s.cfg.Proxy = cfg.Proxy
+		// Desktop settings: launch-on-login + fixed backend port.
+		s.cfg.Autostart = cfg.Autostart
+		s.cfg.Server.Port = cfg.Server.Port
+		s.cfg.Proxy = cfg.Proxy
+		// Voice input provider settings. Credentials are only overwritten when
+		// the incoming value is non-empty, so the desktop frontend can update
+		// the provider alone (or one credential) without wiping the others.
+		s.cfg.Voice.Provider = cfg.Voice.Provider
+		if cfg.Voice.BaiduAPIKey != "" {
+			s.cfg.Voice.BaiduAPIKey = cfg.Voice.BaiduAPIKey
+		}
+		if cfg.Voice.BaiduSecretKey != "" {
+			s.cfg.Voice.BaiduSecretKey = cfg.Voice.BaiduSecretKey
+		}
+		if cfg.Voice.IFlytekAppID != "" {
+			s.cfg.Voice.IFlytekAppID = cfg.Voice.IFlytekAppID
+		}
+		if cfg.Voice.IFlytekAPIKey != "" {
+			s.cfg.Voice.IFlytekAPIKey = cfg.Voice.IFlytekAPIKey
+		}
+		if cfg.Voice.IFlytekAPISecret != "" {
+			s.cfg.Voice.IFlytekAPISecret = cfg.Voice.IFlytekAPISecret
+		}
 			return s.cfg.SaveLocked(config.DefaultPath())
 		}); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})

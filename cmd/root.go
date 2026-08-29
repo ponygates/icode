@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/ponygates/icode/internal/config/i18n"
 	"github.com/ponygates/icode/internal/update"
@@ -112,6 +113,16 @@ commands.
 	RunE: func(cmd *cobra.Command, args []string) error {
 		provider, _ := cmd.Flags().GetString("provider")
 		model, _ := cmd.Flags().GetString("model")
+		// Non-interactive print mode (Claude Code `-p` parity): run a single
+		// prompt to completion, print the result, exit. Scripts/CI friendly.
+		prompt, _ := cmd.Flags().GetString("print")
+		if strings.TrimSpace(prompt) != "" {
+			outFmt, _ := cmd.Flags().GetString("output-format")
+			cont, _ := cmd.Flags().GetBool("continue")
+			resumeID, _ := cmd.Flags().GetString("resume")
+			mode, _ := cmd.Flags().GetString("mode")
+			return runPrintMode(prompt, outFmt, cont, resumeID, provider, model, mode)
+		}
 		return startChat(provider, model, "")
 	},
 }
@@ -136,4 +147,12 @@ func init() {
 	rootCmd.PersistentFlags().StringP("provider", "p", "", "Default LLM provider")
 	rootCmd.PersistentFlags().StringP("model", "m", "", "Default model ID")
 	rootCmd.PersistentFlags().BoolP("verbose", "v", false, "Enable verbose logging")
+	// Print (non-interactive) mode — Claude Code `-p` parity. Note: -p is
+	// already bound to --provider, so print uses -P / --print to avoid
+	// breaking existing scripts.
+	rootCmd.PersistentFlags().StringP("print", "P", "", "Print mode: run one prompt non-interactively, print the result and exit")
+	rootCmd.PersistentFlags().String("output-format", "text", "Output format in print mode: text | json | stream-json")
+	rootCmd.PersistentFlags().BoolP("continue", "c", false, "In print mode, continue the most recent session")
+	rootCmd.PersistentFlags().String("resume", "", "In print mode, resume the given session ID")
+	rootCmd.PersistentFlags().String("mode", "", "Permission mode: plan | agent | auto | yolo")
 }

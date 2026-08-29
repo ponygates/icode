@@ -36,7 +36,9 @@ func (t *TUI) AddMessage(role Role, content string) {
 // AddToolMessage records a tool invocation.
 func (t *TUI) AddToolMessage(tool, toolArgs, content string) {
 	t.mu.Lock()
-	t.messages = append(t.messages, Message{Role: RoleTool, Tool: tool, ToolArgs: toolArgs, Content: content})
+	// New cards follow the global fold preference (/expand); individual clicks
+	// override per block afterwards.
+	t.messages = append(t.messages, Message{Role: RoleTool, Tool: tool, ToolArgs: toolArgs, Content: content, Folded: !t.toolFolded})
 	idx := len(t.messages) - 1
 	// While streaming this invocation is the "current work" shown in the
 	// status bar; the result append clears it.
@@ -90,7 +92,7 @@ func (t *TUI) AppendToolProgress(content string) {
 	if last.Role != RoleTool {
 		// Progress arrived before the tool card (race with the tool_use
 		// event) — surface it on a fresh tool message with the tool name.
-		t.messages = append(t.messages, Message{Role: RoleTool, Tool: "…", ToolArgs: "", Content: content})
+		t.messages = append(t.messages, Message{Role: RoleTool, Tool: "…", ToolArgs: "", Content: content, Folded: !t.toolFolded})
 	} else if t.messages[len(t.messages)-1].Content != "" {
 		t.messages[len(t.messages)-1].Content += content
 	} else {
@@ -174,8 +176,10 @@ func (t *TUI) AppendStream(text string) {
 }
 
 // scheduleRender coalesces full-screen redraws: rapid token bursts collapse
-// into at most one repaint per ~25ms window instead of one per chunk. A direct
-// t.render() call (e.g. at end-of-stream) bypasses the throttle.
+// into at most one repaint per ~33ms window instead of one per chunk. A
+// direct t.render() call (e.g. at end-of-stream) bypasses the throttle.
+// 33ms ≈ 30fps — smooth enough for text streaming while keeping Win10
+// conhost/Windows Terminal from visibly flickering on full-screen repaints.
 func (t *TUI) scheduleRender() {
 	if !t.rawMode {
 		return
@@ -188,7 +192,7 @@ func (t *TUI) scheduleRender() {
 	t.renderPending = true
 	t.mu.Unlock()
 
-	t.renderTimer = time.AfterFunc(25*time.Millisecond, func() {
+	t.renderTimer = time.AfterFunc(33*time.Millisecond, func() {
 		t.mu.Lock()
 		t.renderPending = false
 		t.mu.Unlock()
@@ -201,6 +205,10 @@ func (t *TUI) EndStream() {
 	t.mu.Lock()
 	final := strings.TrimSpace(sanitizeFullText(t.streamBuf.String()))
 	t.ansiPending = ""
+	bged := t.backgrounded
+	// A turn just finished = recent user activity, so reset the idle clock
+	// (used by the 3-minute auto-recap) instead of firing it right after a reply.
+	t.lastActivity = time.Now()
 	t.mu.Unlock()
 	if final != "" {
 		t.messages = append(t.messages, Message{Role: RoleAssistant, Content: final})
@@ -209,6 +217,22 @@ func (t *TUI) EndStream() {
 	select {
 	case t.streamDone <- struct{}{}:
 	default:
+	}
+	if bged {
+		// A Ctrl+B turn finished while the UI was free-running (this runs on
+		// the engine's goroutine, so never call submit()/drainStream() here —
+		// that would steal keys from the main loop). Announce and let the main
+		// loop flush any queued message on its next iteration.
+		t.mu.Lock()
+		t.backgrounded = false
+		t.streaming = false
+		t.pendingQueueFlush = true
+		t.mu.Unlock()
+		t.add(RoleSystem, "✅ 后台任务已完成")
+		if t.rawMode {
+			t.render()
+		}
+		return
 	}
 	if t.rawMode {
 		t.render()

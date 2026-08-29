@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/ponygates/icode/internal/config"
 	"github.com/ponygates/icode/internal/core/slashcmd"
+	"github.com/ponygates/icode/internal/types"
 )
 
 // 鈹€鈹€ Helpers 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
@@ -274,8 +276,9 @@ func formatFileSize(n int64) string {
 // a word character) and replaces them with [file: path]\n<content>\n. This
 // lets users quickly attach file context in the TUI. For desktop/clients
 // that handle file attachment natively, this is a no-op fallback.
-func (t *TUI) expandFileRefs(text string) string {
+func (t *TUI) expandFileRefs(text string) (string, []types.Attachment) {
 	var result strings.Builder
+	var atts []types.Attachment
 	remaining := text
 	for {
 		idx := strings.Index(remaining, "@")
@@ -315,10 +318,27 @@ func (t *TUI) expandFileRefs(text string) string {
 			remaining = rest
 			continue
 		}
+		// Images are inlined as true multimodal attachments (Claude Code
+		// parity) so the model can actually see them — both for Ctrl+V pastes
+		// and manual `@photo.png` references. readImageFile validates magic
+		// bytes, size (≤25MB) and MIME, so a JPEG lacking NUL bytes is still
+		// recognised (the old 0x00-only guard would have inlined it as junk).
+		if b64, mime, ok := readImageFile(fullPath); ok {
+			atts = append(atts, types.Attachment{Type: "image", MIMEType: mime, Data: b64})
+			result.WriteString(fmt.Sprintf("[📎 图片: %s]\n", filepath.Base(fullPath)))
+			remaining = rest
+			continue
+		}
+		// Other binary files (e.g. .exe, .zip): never inline as text.
+		if bytes.Contains(data, []byte{0}) {
+			result.WriteString(fmt.Sprintf("[file: %s] (二进制文件，未内联内容，路径: %s)\n", path, fullPath))
+			remaining = rest
+			continue
+		}
 		result.WriteString(fmt.Sprintf("[file: %s]\n%s\n", path, strings.TrimSpace(string(data))))
 		remaining = rest
 	}
-	return result.String()
+	return result.String(), atts
 }
 
 func isWordChar(b byte) bool {
@@ -372,31 +392,49 @@ func usageHint(name string) string {
 	return hints[name]
 }
 
-// rankSuggestions orders the completion list: recently used commands first
-// (recency), then built-in definition order. Custom commands keep their
-// relative order after matching built-ins.
+// rankSuggestions orders the completion list: frequently-used commands first
+// (persisted usage history, C8), then recently used (session recency), then
+// built-in definition order. Custom commands keep their relative order after
+// matching built-ins.
 func (t *TUI) rankSuggestions(items []acItem) {
 	t.mu.Lock()
 	recent := append([]string(nil), t.recentCmds...)
+	usage := make(map[string]int, len(t.cmdUsage))
+	for k, v := range t.cmdUsage {
+		usage[k] = v
+	}
 	t.mu.Unlock()
-	if len(recent) == 0 {
+	if len(recent) == 0 && len(usage) == 0 {
 		return
 	}
 	pos := map[string]int{}
 	for i, name := range recent {
 		pos[name] = len(recent) - i // higher = more recent
 	}
-	stableSortedByRecency(items, pos)
+	stableSortByUsage(items, usage, pos)
 }
 
-// stableSortedByRecency is an insertion sort keyed on recency rank (0 =
-// never used). Stable, and the lists are tiny (<90 entries).
-func stableSortedByRecency(items []acItem, pos map[string]int) {
+// stableSortByUsage is an insertion sort keyed on (usage count, recency rank)
+// — most-used first, ties broken by recency, definition order as the stable
+// fallback. Lists are tiny (<90 entries) so insertion sort is fine.
+func stableSortByUsage(items []acItem, usage map[string]int, pos map[string]int) {
 	for i := 1; i < len(items); i++ {
-		for j := i; j > 0 && pos[items[j].Name] > pos[items[j-1].Name]; j-- {
+		for j := i; j > 0 && usageRank(items[j].Name, usage, pos) > usageRank(items[j-1].Name, usage, pos); j-- {
 			items[j], items[j-1] = items[j-1], items[j]
 		}
 	}
+}
+
+// usageRank combines a command's persisted usage count (primary) with its
+// session recency (secondary) into a single sort key. Commands never used
+// score 0 and keep definition order among themselves.
+func usageRank(name string, usage map[string]int, pos map[string]int) int {
+	u := usage[name]
+	if u > 0 {
+		// usage dominates; add recency as a tiny secondary component.
+		return u*1000 + pos[name]
+	}
+	return pos[name] // never-used but recently typed still floats up a bit
 }
 
 // fuzzyScore scores name against a typed prefix using Claude Code-style

@@ -1,8 +1,8 @@
 package tui
 
 import (
-	"bufio"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 )
@@ -28,9 +28,9 @@ func (t *TUI) disableMouse() {
 }
 
 // handleMouse parses and acts on one SGR mouse report whose leading "ESC[<"
-// has already been consumed. br is positioned at the first byte after '<'.
-func (t *TUI) handleMouse(br *bufio.Reader) {
-	button, x, y, released, ok := parseSGRMouse(br)
+// has already been consumed. r is positioned at the first byte after '<'.
+func (t *TUI) handleMouse(r io.RuneReader) {
+	button, x, y, released, ok := parseSGRMouse(r)
 	if !ok {
 		return
 	}
@@ -79,27 +79,45 @@ func (t *TUI) handleMouse(br *bufio.Reader) {
 		return
 	}
 
+	// Tool card header rows are click targets: a left click on the header row
+	// toggles that block's fold state (opencode-style). Only the press is used
+	// — the terminal also sends a release event, and we don't want a double
+	// toggle from one physical click.
+	if button&3 == 0 && !released {
+		t.mu.Lock()
+		msgIdx, isTool := t.toolHeadRows[row]
+		t.mu.Unlock()
+		if isTool && msgIdx >= 0 && msgIdx < len(t.messages) && t.messages[msgIdx].Role == RoleTool {
+			t.mu.Lock()
+			t.messages[msgIdx].Folded = !t.messages[msgIdx].Folded
+			t.mu.Unlock()
+			t.scheduleRender()
+			return
+		}
+	}
+
 	// Anywhere else in the body → click/drag to jump the scroll position.
 	t.scrollToRow(row)
 }
 
-// parseSGRMouse reads a single SGR-encoded mouse report from br (the bytes
+// parseSGRMouse reads a single SGR-encoded mouse report from r (the bytes
 // after "ESC[<") and decodes it into button code, 1-based x/y, and whether it
 // was a release ('m') rather than a press/move ('M'). It is pure and exported
-// so it can be unit-tested without a real terminal.
-func parseSGRMouse(br *bufio.Reader) (button, x, y int, released, ok bool) {
+// so it can be unit-tested without a real terminal. r may be a bufio.Reader
+// (tests) or a keyRuneReader (live input) — anything with ReadRune works.
+func parseSGRMouse(r io.RuneReader) (button, x, y int, released, ok bool) {
 	var seq strings.Builder
 	var end byte
 	for {
-		r, _, err := br.ReadRune()
+		rr, _, err := r.ReadRune()
 		if err != nil {
 			return 0, 0, 0, false, false
 		}
-		if r == 'M' || r == 'm' {
-			end = byte(r)
+		if rr == 'M' || rr == 'm' {
+			end = byte(rr)
 			break
 		}
-		seq.WriteRune(r)
+		seq.WriteRune(rr)
 	}
 	parts := strings.Split(seq.String(), ";")
 	if len(parts) != 3 {
@@ -157,7 +175,7 @@ func (t *TUI) pasteFromClipboard() {
 		return
 	}
 	t.dismissWelcome()
-	t.insertAtCursor(text)
+	t.insertPasted(text)
 	t.updateSuggestions()
 	t.scheduleRender()
 }

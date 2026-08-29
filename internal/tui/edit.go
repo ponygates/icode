@@ -1,16 +1,41 @@
 package tui
 
 import (
-	"bufio"
+	"io"
 	"strings"
 )
 
 // insertAtCursor inserts s at the current cursor position. Used by bracketed
 // paste and Alt+key insertion.
+// pushUndo snapshots the current input state so Ctrl+_ (readline-style undo)
+// can restore it. The stack is capped to keep long sessions bounded.
+func (t *TUI) pushUndo() {
+	t.undoStack = append(t.undoStack, struct {
+		buf    string
+		cursor int
+	}{t.inputBuf, t.cursor})
+	if len(t.undoStack) > 200 {
+		t.undoStack = t.undoStack[len(t.undoStack)-200:]
+	}
+}
+
+// undoInput restores the most recent pre-edit snapshot (Ctrl+_ / Ctrl+Shift+-).
+func (t *TUI) undoInput() bool {
+	if len(t.undoStack) == 0 {
+		return false
+	}
+	last := t.undoStack[len(t.undoStack)-1]
+	t.undoStack = t.undoStack[:len(t.undoStack)-1]
+	t.inputBuf = last.buf
+	t.cursor = last.cursor
+	return true
+}
+
 func (t *TUI) insertAtCursor(s string) {
 	if s == "" {
 		return
 	}
+	t.pushUndo()
 	runes := []rune(t.inputBuf)
 	if t.cursor >= len(runes) {
 		t.inputBuf += s
@@ -27,6 +52,7 @@ func (t *TUI) deleteWordBackward() {
 	if t.cursor == 0 {
 		return
 	}
+	t.pushUndo()
 	i := t.cursor - 1
 	for i >= 0 && runes[i] == ' ' {
 		i--
@@ -46,6 +72,7 @@ func (t *TUI) deleteToLineStart() {
 	if t.cursor == 0 {
 		return
 	}
+	t.pushUndo()
 	t.inputBuf = string(runes[t.cursor:])
 	t.cursor = 0
 }
@@ -79,16 +106,16 @@ func (t *TUI) cycleMode() {
 // readPaste reads the body of a bracketed paste (everything up to the
 // terminating "ESC[201~"). It is resilient to stray ESC bytes so a paste that
 // itself contains escape sequences is not truncated.
-func (t *TUI) readPaste(br *bufio.Reader) string {
+func (t *TUI) readPaste(r io.RuneReader) string {
 	var buf strings.Builder
 	for {
-		r, _, err := br.ReadRune()
+		rr, _, err := r.ReadRune()
 		if err != nil {
 			return buf.String()
 		}
-		if r == 0x1b {
+		if rr == 0x1b {
 			// Possible terminator: ESC [ 2 0 1 ~
-			n1, _, e1 := br.ReadRune()
+			n1, _, e1 := r.ReadRune()
 			if e1 != nil || n1 != '[' {
 				if n1 != 0 {
 					buf.WriteRune(0x1b)
@@ -96,7 +123,7 @@ func (t *TUI) readPaste(br *bufio.Reader) string {
 				}
 				continue
 			}
-			n2, _, e2 := br.ReadRune()
+			n2, _, e2 := r.ReadRune()
 			if e2 != nil || n2 != '2' {
 				buf.WriteRune(0x1b)
 				buf.WriteRune('[')
@@ -105,7 +132,7 @@ func (t *TUI) readPaste(br *bufio.Reader) string {
 				}
 				continue
 			}
-			n3, _, e3 := br.ReadRune()
+			n3, _, e3 := r.ReadRune()
 			if e3 != nil || n3 != '0' {
 				buf.WriteRune(0x1b)
 				buf.WriteRune('[')
@@ -115,7 +142,7 @@ func (t *TUI) readPaste(br *bufio.Reader) string {
 				}
 				continue
 			}
-			n4, _, e4 := br.ReadRune()
+			n4, _, e4 := r.ReadRune()
 			if e4 != nil || n4 != '1' {
 				buf.WriteRune(0x1b)
 				buf.WriteRune('[')
@@ -126,7 +153,7 @@ func (t *TUI) readPaste(br *bufio.Reader) string {
 				}
 				continue
 			}
-			n5, _, e5 := br.ReadRune()
+			n5, _, e5 := r.ReadRune()
 			if e5 == nil && n5 == '~' {
 				return buf.String() // paste complete
 			}
@@ -140,6 +167,6 @@ func (t *TUI) readPaste(br *bufio.Reader) string {
 			}
 			continue
 		}
-		buf.WriteRune(r)
+		buf.WriteRune(rr)
 	}
 }

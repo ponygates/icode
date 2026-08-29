@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useAppStore, type Session } from '../stores/appStore';
-import { MessageSquare, Cpu, Settings, BarChart, ArrowLeftRight, PanelLeftClose, Github, Plus, Server, Pencil, RotateCcw, Trash2, Search } from 'lucide-react';
+import { MessageSquare, Cpu, Settings, BarChart, ArrowLeftRight, PanelLeftClose, Github, Plus, Server, Pencil, RotateCcw, Trash2, Search, Store } from 'lucide-react';
 import PlumBlossom from './PlumBlossom';
 import WorkspaceSidebar from './WorkspaceSidebar';
 
@@ -113,6 +113,7 @@ const Sidebar: React.FC<Props> = ({ onToggle }) => {
   const navItems = [
     { path: '/', icon: MessageSquare, label: t('sidebar.chat') },
     { path: '/models', icon: Cpu, label: t('sidebar.models') },
+    { path: '/market', icon: Store, label: t('sidebar.market') },
     { path: '/analytics', icon: BarChart, label: t('sidebar.analytics') },
     { path: '/compare', icon: ArrowLeftRight, label: t('sidebar.compare') },
     { action: 'settings', icon: Settings, label: t('sidebar.settings') },

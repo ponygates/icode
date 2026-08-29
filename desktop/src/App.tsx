@@ -8,12 +8,14 @@ import BootSplash from './components/BootSplash';
 import ShortcutPanel from './components/ShortcutPanel';
 import { useAppStore } from './stores/appStore';
 import ErrorBoundary from './components/ErrorBoundary';
+import { loadShortcuts, matchesBinding } from './lib/shortcuts';
 
 // Non-initial pages load lazily so the first paint only ships ChatPage plus
 // shared vendor code. ChatPage stays eager because it is the landing route.
 const ModelsPage = React.lazy(() => import('./pages/ModelsPage'));
 const AnalyticsPage = React.lazy(() => import('./pages/AnalyticsPage'));
 const ModelCompare = React.lazy(() => import('./pages/ModelCompare'));
+const SkillMarketPage = React.lazy(() => import('./pages/SkillMarketPage'));
 const SettingsModal = React.lazy(() => import('./pages/SettingsPage'));
 
 function hasAnyKey(): boolean {
@@ -100,33 +102,35 @@ const App: React.FC = () => {
       }
     };
     init();
-    // Listen for settings shortcut
+    // Listen for settings shortcut (bindings read from the user-configurable
+    // shortcut map — see Settings → Shortcuts).
     const handler = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === ',') {
+      const s = loadShortcuts();
+      if (matchesBinding(e, s.openSettings)) {
         e.preventDefault();
         setSettingsOpen(v => !v);
         return;
       }
       // Ctrl+N — new chat session (mirrors the sidebar "+" button).
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'n') {
+      if (matchesBinding(e, s.newSession)) {
         e.preventDefault();
         window.dispatchEvent(new CustomEvent('icode:new-session'));
         return;
       }
       // Ctrl+L — focus the chat input bar.
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'l') {
+      if (matchesBinding(e, s.focusInput)) {
         e.preventDefault();
         window.dispatchEvent(new CustomEvent('icode:focus-input'));
         return;
       }
       // Esc — interrupt streaming generation (no-op when idle).
-      if (e.key === 'Escape') {
+      if (matchesBinding(e, s.stopGeneration)) {
         window.dispatchEvent(new CustomEvent('icode:stop-chat'));
         return;
       }
       // "?" toggles the shortcut panel — but never while the user is typing in
       // an input / textarea / contentEditable (where "?" is legitimate text).
-      if (e.key === '?' || e.key === '？') {
+      if (matchesBinding(e, s.shortcutPanel)) {
         const el = e.target as HTMLElement | null;
         const tag = el?.tagName;
         const editable = tag === 'INPUT' || tag === 'TEXTAREA' || el?.isContentEditable;
@@ -210,6 +214,7 @@ const App: React.FC = () => {
             <Route path="/models" element={<ModelsPage />} />
             <Route path="/analytics" element={<AnalyticsPage />} />
             <Route path="/compare" element={<ModelCompare />} />
+            <Route path="/market" element={<SkillMarketPage />} />
             <Route path="/settings" element={<Navigate to="/" replace />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

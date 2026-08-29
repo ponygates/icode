@@ -22,7 +22,9 @@ func (t *TUI) asciiLogo(width int, paint logoPainter) []string {
 
 	if width < wordW {
 		// Too narrow for the big wordmark — fall back to a single line.
-		return []string{paint("yellow", "●") + paint("white", "i") + paint("dim", "Code") + "  " + paint("dim", "多模型 AI 编程助手")}
+		// Use "bold" instead of "white" to avoid the "LOGO 空白" bug on
+		// light themes (where white maps to black/invisible).
+		return []string{paint("yellow", "●") + paint("bold", "i") + paint("dim", "CODE") + "  " + paint("dim", "多模型 AI 编程助手")}
 	}
 
 	out := make([]string, 0, len(wordRows)+1)
@@ -49,80 +51,69 @@ func Logo() []string {
 	return lines
 }
 
-// textWordRows renders the enlarged wordmark "iCode" out of solid block glyphs
-// (█ ▀ ▄). Each letter is a 4-cell box (a cell = filled block "██" = 2 columns,
-// or two spaces), so every letter is a uniform 8 columns. The wordmark is 7 rows
-// tall: a dot row, a spacer row that visibly separates the "i" dot from its
-// stem, and five rows of letterforms.
+// textWordRows renders the enlarged wordmark "iCODE" in opencode's
+// half-block lettering style (█ ▀ ▄, rounded corners). The wordmark is split
+// into two halves — the left half "iC" is dim and the right half "ODE" is
+// normal/bold — matching opencode's own logo layout.
 //
-// Colouring matches the request: every letter is plain block (white), and the
-// only coloured element is the yellow dot (██) above the "i".
+// Each letter is 3 columns wide, drawn with half-block characters so
+// "round" shapes (C, O, D, E) get curved corners instead of a hard square.
+// The lowercase "i" has a yellow dot above its stem.
 func textWordRows(paint logoPainter) []string {
+	// Yellow dot above the lowercase "i" — only coloured element.
 	dot := paint("yellow", "●")
 
-	const cell = "  " // one empty 2-column cell (2 spaces)
-	const fill = "█"  // one filled 2-column block (█ = East Asian Wide, renders 2 cols)
-	const blank = cell + cell + cell + cell
+	// Half-block letterforms in opencode style.
+	// Layout (5 rows total):
+	//
+	//              ●   █▀▀▀
+	//                  █
+	//              █   █
+	//              █   █▄▄▄
+	//
+	// Then right half (4 rows): "O" "D" "E" — appended on the same baseline.
 
-	// iCODE: lowercase "i" (stem in cell 1, 4 rows + 1 blank top), uppercase "CODE" (full block).
-	iRows := []string{
-		cell + cell + cell + cell, // blank row — makes i visually shorter
-		cell + fill + cell + cell, // stem in cell 1
-		cell + fill + cell + cell,
-		cell + fill + cell + cell,
-		cell + fill + cell + cell,
-	}
-	cRows := []string{
-		fill + fill + fill + fill, // top bar
-		fill + cell + cell + cell, // left vertical
-		fill + cell + cell + cell,
-		fill + cell + cell + cell,
-		fill + fill + fill + fill, // bottom bar
-	}
-	oRows := []string{
-		fill + fill + fill + fill, // top bar
-		fill + cell + cell + fill, // left + right verticals
-		fill + cell + cell + fill,
-		fill + cell + cell + fill,
-		fill + fill + fill + fill, // bottom bar
-	}
-	dRows := []string{
-		fill + fill + fill + cell, // top bar
-		fill + cell + cell + fill, // left + right
-		fill + cell + cell + fill,
-		fill + cell + cell + fill,
-		fill + fill + fill + cell, // bottom bar
-	}
-	eRows := []string{
-		fill + fill + fill + fill, // top bar
-		fill + fill + fill + cell, // middle bar (right open)
-		fill + cell + cell + cell, // left vertical
-		fill + fill + fill + cell, // bottom bar (right open)
-		fill + fill + fill + fill, // base bar
+	// Left half (dim): "i" (dot + 3 stem rows) + "C" (3 rows).
+	// 4 rows: dot, stem+top, stem+left, stem+bottom. Dot is immediately
+	// above the stem (no blank row).
+	// "i"在第1列, "C"在第3列 (1空格间距, 与O/D/E间距一致), 宽度5字符。
+	left := []string{
+		dot + "   " + " ",       // row 0: ● + 3空格 + 1空格 = 5字符
+		"█" + " " + "█▀▀▀",      // row 1: █ + 1空格 + █▀▀▀ = 5字符
+		"█" + " " + "█   ",      // row 2: █ + 1空格 + █ + 3空格 = 5字符
+		"█" + " " + "█▄▄▄",      // row 3: █ + 1空格 + █▄▄▄ = 5字符
 	}
 
-	// Letters stay UNPAINTED (terminal default foreground). Colouring them
-	// "white" backfired: the light theme maps white → \x1b[30m (black), so on
-	// any theme/background mismatch the whole wordmark rendered invisible —
-	// the "LOGO 空白" bug. Plain blocks are visible everywhere; only the dot
-	// keeps its yellow accent.
-	i := iRows
-	c := cRows
-	o := oRows
-	d := dRows
-	e := eRows
+	// Right half (bold): "O" + "D" + "E" — 3 rows tall (rows 1–3 of left).
+	right := []string{
+		"█▀▀█" + " " + "█▀▀▄" + " " + "█▀▀▀", // top bars (O: ▀▀, D: ▀▀▄ right-open, E: ▀▀▀ solid)
+		"█  █" + " " + "█  █" + " " + "█▀▀ ", // middle row (E closes top half)
+		"█▄▄█" + " " + "█▄▄▀" + " " + "█▄▄▄", // bottom bars
+	}
 
-	rows := make([]string, 7)
-
-	// Row 0: the yellow dot above "i" stem (cell 1).
-	rows[0] = cell + dot + cell + cell + " " + blank + " " + blank + " " + blank + " " + blank
-
-	// Row 1: spacer row so the dot does not touch the stem.
-	rows[1] = blank + " " + blank + " " + blank + " " + blank + " " + blank
-
-	// Rows 2–6: the letterforms, one space apart.
-	for r := 0; r < 5; r++ {
-		rows[r+2] = i[r] + " " + c[r] + " " + o[r] + " " + d[r] + " " + e[r]
+	rows := make([]string, len(left))
+	dim := "dim"
+	bold := "bold"
+	for i, l := range left {
+		var r string
+		if i == 0 {
+			// Dot row — only the left half has content.
+			r = l
+		} else {
+			// Pair left[i] with right[i-1] (right is 1 row shorter).
+			r = l + " " + right[i-1]
+		}
+		// Paint the left half dim, right half bold, mirroring opencode.
+		if i == 0 {
+			rows[i] = paint(dim, r)
+		} else {
+			parts := strings.SplitN(r, " ", 2)
+			if len(parts) == 2 {
+				rows[i] = paint(dim, parts[0]) + " " + paint(bold, parts[1])
+			} else {
+				rows[i] = paint(dim, r)
+			}
+		}
 	}
 	return rows
 }

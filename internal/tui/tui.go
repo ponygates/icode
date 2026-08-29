@@ -13,6 +13,7 @@ import (
 	"github.com/ponygates/icode/internal/core/permission"
 	"github.com/ponygates/icode/internal/core/searchreplace"
 	"github.com/ponygates/icode/internal/core/voice"
+	"github.com/ponygates/icode/internal/types"
 	"golang.org/x/term"
 )
 
@@ -42,6 +43,10 @@ type Message struct {
 	Content  string
 	Tool     string
 	ToolArgs string
+	// Folded is the per-block collapse state for tool messages (opencode
+	// style): a folded card shows the status line plus a short excerpt, an
+	// expanded card shows the full output. Non-tool messages ignore it.
+	Folded bool
 }
 
 // SessionInfo is a lightweight session descriptor for the /resume picker.
@@ -54,7 +59,7 @@ type SessionInfo struct {
 
 // Callback bridges user input / slash commands back to the backend.
 type Callback interface {
-	OnSend(text string)
+	OnSend(text string, attachments []types.Attachment)
 	OnSlashCommand(cmd string, args []string)
 	OnPermissionResponse(decision string)
 	// OnPlanConfirm is called when the user accepts a plan-mode proposal:
@@ -104,6 +109,11 @@ type Callback interface {
 	// OnRenameSession retitles the active session (/rename) in the backend
 	// store. Returns an error message, or "" on success.
 	OnRenameSession(title string) string
+	// OnSetAskUser registers the interactive multiple-choice asker (Claude
+	// Code AskUserQuestion parity): the backend engine calls fn when the
+	// ask_user_question tool fires, so the TUI can render options and read
+	// the user's choice.
+	OnSetAskUser(fn func(question string, options []string) (int, error))
 	// OnAddCustomModel persists and live-registers a user-defined model
 	// (/models add <provider> <model_id> [name]). Returns a status line, or an
 	// error message prefixed with "ERROR" on failure.
@@ -121,6 +131,9 @@ type Callback interface {
 	// CreateIdleTask creates an off-peak task (/idle <name> <prompt>) that runs
 	// in the idle window. Returns a status/error message.
 	CreateIdleTask(name, prompt string) string
+	// OnPermissionNote delivers the reason the user attached to a rejected
+	// permission prompt (Tab note). The agent sees it on the next turn.
+	OnPermissionNote(toolPrompt, note string)
 }
 
 // StreamWriter is the surface the backend uses to push data into the UI.
@@ -156,7 +169,8 @@ func (t *TUI) SetOnConfigChanged(fn func(*config.Config)) {
 }
 
 // noteRecentCmd records a dispatched slash command for recency-ranked
-// autocomplete. Keeps at most 8 entries, most recent first.
+// autocomplete. Keeps at most 8 entries, most recent first. Also bumps the
+// persisted usage counter (C8) so frequently-used commands rank first.
 func (t *TUI) noteRecentCmd(name string) {
 	if !strings.HasPrefix(name, "/") {
 		return
@@ -174,6 +188,11 @@ func (t *TUI) noteRecentCmd(name string) {
 		out = out[:8]
 	}
 	t.recentCmds = out
+	if t.cmdUsage == nil {
+		t.cmdUsage = map[string]int{}
+	}
+	t.cmdUsage[name]++
+	saveCmdUsage(t.cmdUsage)
 }
 
 type TUI struct {
@@ -193,6 +212,10 @@ type TUI struct {
 	onConfigChanged func(*config.Config)
 	// recentCmds tracks slash-command usage for recency-ranked autocomplete.
 	recentCmds []string
+	// cmdUsage persists slash-command usage counts across sessions
+	// (~/.icode/command_usage.json). Autocomplete ranks frequently-used
+	// commands first — Claude Code style history-based recommendation (C8).
+	cmdUsage map[string]int
 	// curTool is the tool currently executing while streaming ("⚙ bash" in
 	// the status bar). Set by AddToolMessage, cleared by AppendToolResult.
 	curTool string
@@ -203,6 +226,21 @@ type TUI struct {
 	gitBranch   string
 	branchCheck time.Time
 
+	// prBadge caches the current GitHub PR status for the status bar, e.g.
+	// "#123 OPEN". Refreshed lazily (prCheck) via `gh pr view` so no gh exec
+	// happens on the render hot path. Empty when there is no PR for the branch
+	// or `gh` is unavailable.
+	prBadge  string
+	prCheck  time.Time
+
+	// lastActivity / lastAutoRecap power the "auto-recommend after 3 min away"
+	// feature (Claude Code parity): when the user has been idle for 3 minutes
+	// with no streaming in flight, iCode runs a lightweight /recap automatically
+	// (cooled down so it never spams). lastActivity is bumped on every key
+	// event, on submit, and when a turn finishes (EndStream).
+	lastActivity  time.Time
+	lastAutoRecap time.Time
+
 	// input autocomplete state (raw mode)
 	acOpen  bool
 	acItems []acItem
@@ -210,6 +248,12 @@ type TUI struct {
 
 	// tool output folding (Claude Code-style)
 	toolFolded bool
+
+	// toolHeadRows maps the last-rendered screen row (0-based, row of the
+	// header line) → index into t.messages for each tool card. Filled by
+	// render(), consumed by handleMouse() so a click on a card header toggles
+	// that block's fold state.
+	toolHeadRows map[int]int
 
 	// planPending is set when a plan-mode reply finished and awaits the user's
 	// go/no-go: Enter confirms and executes, Esc cancels.
@@ -221,6 +265,69 @@ type TUI struct {
 	streaming  bool
 	streamBuf  strings.Builder
 	streamDone chan struct{}
+
+	// Streaming-time message queue (Claude Code parity): typed-ahead input
+	// lands in queueBuf; Enter moves it to queue; the oldest entry auto-sends
+	// as the next turn when the current one finishes. ↑ recalls the oldest.
+	queue    []string
+	queueBuf string
+
+	// askPending is the in-flight interactive multiple-choice question
+	// (Claude Code AskUserQuestion parity): set while the ask_user_question
+	// tool waits; main loop routes 1-9/Enter/Esc into it; render draws it.
+	askPending *askState
+
+	// Pasted-block folding (Claude Code parity): large clipboard/bracketed
+	// pastes collapse to a "[粘贴 N 行 #k]" placeholder in the input box so a
+	// 200-line dump doesn't spam the one-line prompt; the real content lives in
+	// pasteBlocks and is expanded back at submit time (so the model still gets
+	// the full text). pasteSeq numbers each folded block uniquely.
+	pasteBlocks map[string]string
+	pasteSeq    int
+
+	// Double-Esc state (Claude Code parity): lastEscAt timestamps the previous
+	// lone Esc; rewindArmed arms the rewind on the first double-tap so a
+	// second double-tap is required to actually roll back (防误触).
+	lastEscAt   time.Time
+	rewindArmed bool
+
+	// stashBuf holds the Ctrl+S-stashed prompt (Claude Code parity): with text
+	// in the box Ctrl+S stashes it and clears the input; with an empty box it
+	// restores the stashed text back into the input.
+	stashBuf string
+
+	// backgrounded is set by Ctrl+B: the agent keeps running while the UI
+	// returns to the prompt (Claude Code parity). Messages typed meanwhile are
+	// queued and auto-sent when the background turn finishes.
+	backgrounded bool
+	// rawState remembers the cooked-mode terminal state so Ctrl+G ($EDITOR)
+	// can suspend raw mode and restore it afterwards.
+	rawState *term.State
+
+	// thinkingOn tracks the Alt+T extended-thinking toggle so the shortcut
+	// flips state instead of only reporting it (Claude Code parity).
+	thinkingOn bool
+
+	// transcriptVerbose tracks Ctrl+O: when true every tool block is expanded
+	// to its full arguments/output (Claude Code's transcript viewer).
+	transcriptVerbose bool
+
+	// permNoteOpen / permNoteBuf power the Tab "explain why" field on the
+	// permission prompt (Claude Code parity): the note is delivered with the
+	// decision so the agent learns the reason it was rejected.
+	permNoteOpen bool
+	permNoteBuf  string
+	// pendingQueueFlush asks the MAIN loop to send the oldest queued message
+	// once a backgrounded turn has completed (never sent from the engine
+	// goroutine, which must not touch keyCh).
+	pendingQueueFlush bool
+
+	// undoStack snapshots (inputBuf, cursor) before each edit so Ctrl+_ can
+	// restore the previous input state (readline-style undo).
+	undoStack []struct {
+		buf    string
+		cursor int
+	}
 
 	// ansiPending holds a trailing incomplete ANSI escape from the previous
 	// streamed chunk (one escape can be split across two chunks); it is
@@ -248,6 +355,15 @@ type TUI struct {
 	running bool
 	reader  io.Reader // raw mode: *bufio.Reader
 	writer  io.Writer
+
+	// keyCh receives every rune the single key-pump goroutine reads from the
+	// terminal in raw mode. The main loop, drainStream and — via permKeyCh —
+	// the permission prompt consume from these channels, so exactly one
+	// goroutine ever touches t.reader (no concurrent reads, no stolen keys).
+	keyCh         chan rune
+	permKeyCh     chan rune
+	keyStop       chan struct{} // close to stop the key pump on session exit
+	keyReaderDone chan struct{} // closed when the key pump exits (EOF/error)
 
 	// raw-mode state
 	rawMode  bool
@@ -347,10 +463,33 @@ type TUI struct {
 	diffEdits   []searchreplace.StagedEdit // staged edits to review
 	diffIdx     int                        // highlighted row in the box
 
+	// settingsOpen shows the settings overlay panel.
+	settingsOpen   bool
+	settingsCursor int // highlighted row in the settings panel
+	// settingsCfg caches the config snapshot shown in the settings panel. It
+	// is (re)loaded once when the panel opens — render() runs many times per
+	// second while the panel is open (typing, animations, resize), and calling
+	// config.Load() (disk read + YAML parse) on every frame is wasteful.
+	settingsCfg *config.Config
+
 	// lastRenderW, lastRenderH track the dimensions used in the last frame
 	// so render() can detect a size change and issue a full clear.
 	lastRenderW int
 	lastRenderH int
+	// lastFrame caches the previously written conversation rows so render()
+	// can do incremental repaints (only rows whose content changed are
+	// rewritten) — this is what eliminates the visible flicker on Win10
+	// conhost when streaming tokens repaint the whole screen every frame.
+	lastFrame []string
+
+	// sessionTitle is the active session's title, shown in the status line
+	// (set by autoTitle and /rename).
+	sessionTitle string
+
+	// skillCount caches the number of installed skills (lazily computed once,
+	// never on the render hot path).
+	skillCount        int
+	skillCountLoaded  bool
 }
 
 // New creates a TUI instance. Security level defaults to "local" (safest).
@@ -386,12 +525,18 @@ func New(cfg Config) *TUI {
 		reader:        os.Stdin,
 		writer:        os.Stdout,
 		streamDone:    make(chan struct{}, 1),
+		keyCh:         make(chan rune, 32),
+		permKeyCh:     make(chan rune, 8),
+		keyStop:       make(chan struct{}),
+		keyReaderDone: make(chan struct{}),
 		width:         80,
 		height:        24,
 		lastRenderW:   80,
 		lastRenderH:   24,
 		histIdx:       -1,
 		dirEntries:    listCwd(),
+		cmdUsage:      loadCmdUsage(),
+		lastActivity:  time.Now(),
 
 		welcomeVisible: true, // show the startup banner on a fresh session
 		vimMode:        vimMode,
@@ -406,10 +551,30 @@ func New(cfg Config) *TUI {
 func (t *TUI) Run() error {
 	t.running = true
 
+	// Register the interactive multiple-choice asker so the engine's
+	// ask_user_question tool can render options and read the user's choice
+	// (Claude Code AskUserQuestion parity). Armed here — not NewTUI — so unit
+	// tests never inject the asker into a shared engine.
+	if t.callback != nil {
+		t.callback.OnSetAskUser(t.askUserInteractive)
+	}
+
+	// Arm input-history persistence and restore previous prompts so ↑ recalls
+	// them across sessions (Claude Code parity). Armed here rather than in
+	// NewTUI so unit tests — which build a TUI and call pushHistory directly —
+	// never touch ~/.icode/input_history.json.
+	historyPersistActive = historyPersistEnabled()
+	if h := loadInputHistory(); len(h) > 0 {
+		t.history = h
+	}
+
 	fd := int(os.Stdin.Fd())
 	if term.IsTerminal(fd) {
 		if state, err := term.MakeRaw(fd); err == nil {
 			defer term.Restore(fd, state)
+			// Remember the cooked-mode state so Ctrl+G can hand the terminal
+			// to $EDITOR and take it back afterwards (suspendRaw/resumeRaw).
+			t.rawState = state
 			t.rawMode = true
 			t.color = true
 			// OSC 8 hyperlinks need a modern terminal; Windows conhost's legacy
@@ -476,6 +641,7 @@ func (t *TUI) runLine() error {
 			t.handleSlash(text)
 			continue
 		}
+		text = t.expandPasteBlocks(text)
 		t.printUser(text)
 		t.pushHistory(text)
 		if t.callback != nil {
@@ -490,9 +656,10 @@ func (t *TUI) runLine() error {
 						t.add(RoleError, fmt.Sprintf("内部错误: %v", r))
 					}
 				}()
-				t.callback.OnSend(text)
-			}()
-			t.drainStream()
+			sentText, atts := t.expandFileRefs(text)
+			t.callback.OnSend(sentText, atts)
+		}()
+		t.drainStream()
 		}
 	}
 	return nil
@@ -579,9 +746,27 @@ func (t *TUI) LoadSession(msgs []Message) {
 // user answers. It is invoked from the engine's permission handler, which runs
 // on the streaming goroutine while the main loop is parked in drainStream — so
 // we read the decision key directly from the terminal.
+// submitPermNote finalises a permission decision that carries a reason. The
+// note is handed to the agent through the callback so it sees WHY the action
+// was rejected; an empty note behaves as a plain deny.
+func (t *TUI) submitPermNote() permission.Decision {
+	t.mu.Lock()
+	note := strings.TrimSpace(t.permNoteBuf)
+	permPrompt := t.permPrompt
+	t.mu.Unlock()
+	t.clearPerm()
+	if note != "" && t.callback != nil {
+		t.callback.OnPermissionNote(permPrompt, note)
+	}
+	return permission.DecisionDeny
+}
+
 func (t *TUI) PromptPermission(prompt string) permission.Decision {
 	if !t.rawMode {
-		// Non-interactive (piped) — auto-approve to avoid a hang.
+		// Non-interactive (piped) — auto-approve to avoid a hang. This is a
+		// silent security footgun (Claude Code refuses or needs an explicit
+		// flag), so at least surface a warning to the user's terminal.
+		fmt.Fprintln(t.writer, "[iCode] 非交互模式下自动批准工具权限请求（如需限制请用 /mode 或 --dangerously-skip-permissions 类似机制）")
 		return permission.DecisionAllow
 	}
 
@@ -591,21 +776,77 @@ func (t *TUI) PromptPermission(prompt string) permission.Decision {
 	t.mu.Unlock()
 	t.render()
 
-	reader := bufio.NewReader(t.reader)
+	// Decision keys come from permKeyCh, which the single key-pump goroutine
+	// fills while permPending is set. Reading here (instead of from t.reader
+	// directly, as the old code did) guarantees the pump is the only reader of
+	// the terminal, so a streaming drainStream goroutine can never steal the
+	// decision keys.
 	for {
-		r, _, err := reader.ReadRune()
-		if err != nil {
-			t.clearPerm()
-			return permission.DecisionDeny
-		}
-		switch r {
-		case '1', 'y', 'Y', '\r', '\n':
-			t.clearPerm()
-			return permission.DecisionAllow
-		case '2', 'a', 'A':
-			t.clearPerm()
-			return permission.DecisionAllowAll
-		case '3', 'n', 'N', 0x03: // '3', 'n', or Ctrl+C → deny
+		select {
+		case r, ok := <-t.permKeyCh:
+			if !ok {
+				// Key pump exited (stdin EOF) — deny rather than hang.
+				t.clearPerm()
+				return permission.DecisionDeny
+			}
+			switch r {
+			case 0x09: // Tab — open the "explain why" note field (Claude Code)
+				if !t.permNoteOpen {
+					t.permNoteOpen = true
+					t.permNoteBuf = ""
+					t.render()
+					continue
+				}
+				// Second Tab closes the field without a note.
+				t.permNoteOpen = false
+				t.permNoteBuf = ""
+				t.render()
+				continue
+			case '1', 'y', 'Y', '\r', '\n':
+				// With the note field open, Enter submits "deny + reason".
+				if t.permNoteOpen {
+					return t.submitPermNote()
+				}
+				t.clearPerm()
+				return permission.DecisionAllow
+			case '2', 'a', 'A':
+				if t.permNoteOpen {
+					return t.submitPermNote()
+				}
+				t.clearPerm()
+				return permission.DecisionAllowAll
+			case '3', 'n', 'N': // '3' or 'n' → deny (with note when open)
+				return t.submitPermNote()
+			case 0x03, 0x1b: // Ctrl+C or Esc → deny
+				if t.permNoteOpen {
+					// Esc closes the note field first (Claude Code behaviour);
+					// Ctrl+C still denies outright.
+					if r == 0x1b {
+						t.permNoteOpen = false
+						t.permNoteBuf = ""
+						t.render()
+						continue
+					}
+				}
+				t.clearPerm()
+				return permission.DecisionDeny
+			default:
+				// Printable characters go into the note while it's open.
+				if t.permNoteOpen && r >= 0x20 && r != 0x7f {
+					t.permNoteBuf += string(r)
+					t.render()
+					continue
+				}
+				if t.permNoteOpen && (r == 0x7f || r == 0x08) {
+					if rs := []rune(t.permNoteBuf); len(rs) > 0 {
+						t.permNoteBuf = string(rs[:len(rs)-1])
+						t.render()
+					}
+					continue
+				}
+			}
+		case <-t.keyReaderDone:
+			// Terminal closed while waiting — deny instead of blocking forever.
 			t.clearPerm()
 			return permission.DecisionDeny
 		}
@@ -665,6 +906,110 @@ func (t *TUI) resizeTerminal() {
 
 	// 2. Windows API fallback (in resize_windows.go, compiled only on Windows).
 	resizeTerminalWindows(w, h)
+}
+
+// ── Multi-line input support (Claude Code parity) ─────────────────────────
+
+// inputLineCount returns how many display lines the input buffer occupies
+// (content is split on "\n" — Ctrl+J inserts new lines).
+func (t *TUI) inputLineCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return strings.Count(t.inputBuf, "\n") + 1
+}
+
+// queueRows is 1 when the streaming-time queue indicator should show (typed
+// buffer or queued messages present), 0 otherwise.
+func (t *TUI) queueRows() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.queue) > 0 || t.queueBuf != "" {
+		return 1
+	}
+	return 0
+}
+
+// queueLine renders the queue indicator line shown above the input box while
+// the agent is streaming and the user has typed ahead.
+func (t *TUI) queueLine() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.queueBuf != "" {
+		return t.paint("dim", "⏳ 输入中: "+t.queueBuf+" （Enter 排队 · ↑ 取回）")
+	}
+	if len(t.queue) > 0 {
+		return t.paint("dim", fmt.Sprintf("⏳ 已排队 (%d): %s", len(t.queue), t.queue[0]))
+	}
+	return ""
+}
+
+// inputVisibleLines is the max number of input-box rows shown at once. The
+// box grows with content up to this cap and scrolls internally afterwards
+// (tail-anchored, cursor kept visible) — same feel as Claude Code.
+func (t *TUI) inputVisibleLines(H int) int {
+	rows := 1 // prompt area margin
+	if t.statusVisible {
+		rows++
+	}
+	t.mu.Lock()
+	hasCtx := t.contextWindow > 0 && t.contextTokens >= 0
+	t.mu.Unlock()
+	if hasCtx {
+		rows++
+	}
+	v := H - rows - 1
+	if v > 8 {
+		v = 8
+	}
+	if v < 1 {
+		v = 1
+	}
+	return v
+}
+
+// inputCursorPos maps an absolute rune cursor to (lineIndex, colIndex) within
+// the input buffer's lines.
+func inputCursorPos(inputBuf string, cursor int) (int, int) {
+	lines := strings.Split(inputBuf, "\n")
+	if cursor < 0 {
+		cursor = 0
+	}
+	pos := 0
+	lineIdx, colIdx := 0, 0
+	for i, ln := range lines {
+		rl := len([]rune(ln))
+		if cursor <= pos+rl {
+			lineIdx, colIdx = i, cursor-pos
+			return lineIdx, colIdx
+		}
+		pos += rl + 1 // +1 for the newline itself
+		lineIdx, colIdx = i, rl
+	}
+	return lineIdx, colIdx
+}
+
+// inputAbsCursor converts (lineIndex, colIndex) back to an absolute rune
+// offset, clamped to the target line's length.
+func inputAbsCursor(inputBuf string, lineIdx, colIdx int) int {
+	lines := strings.Split(inputBuf, "\n")
+	if lineIdx < 0 {
+		lineIdx = 0
+	}
+	if lineIdx >= len(lines) {
+		lineIdx = len(lines) - 1
+	}
+	pos := 0
+	for i := 0; i < lineIdx; i++ {
+		pos += len([]rune(lines[i])) + 1
+	}
+	rl := len([]rune(lines[lineIdx]))
+	if colIdx < 0 {
+		colIdx = 0
+	}
+	if colIdx > rl {
+		colIdx = rl
+	}
+	return pos + colIdx
 }
 
 // resizeTerminalWindows is defined in resize_windows.go (Windows) and

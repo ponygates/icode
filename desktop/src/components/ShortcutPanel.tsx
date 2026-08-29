@@ -1,5 +1,6 @@
 import React, { useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
+import { loadShortcuts, bindingParts } from '../lib/shortcuts';
 
 // Keyboard chip — matches the Reasonix design system (hairline border, no shadow).
 const kbd: React.CSSProperties = {
@@ -47,14 +48,18 @@ export default function ShortcutPanel({ visible, onClose }: { visible: boolean; 
 
   if (!visible) return null;
 
+  // Resolve the four rebindable global shortcuts from the user's own map so
+  // the panel shows what actually works (Settings → Shortcuts), not the
+  // hardcoded defaults.
+  const s = loadShortcuts();
   const groups: ShortcutGroup[] = [
     {
       title: t('shortcuts.global'),
       items: [
-        { keys: ['Ctrl', ','], label: t('shortcuts.openSettings') },
-        { keys: ['Ctrl', 'K'], label: t('shortcuts.commandPalette') },
-        { keys: ['?'], label: t('shortcuts.shortcutPanel') },
-        { keys: ['Esc'], label: t('shortcuts.closeOrInterrupt') },
+        { keys: bindingParts(s.openSettings), label: t('shortcuts.openSettings') },
+        { keys: bindingParts(s.commandPalette), label: t('shortcuts.commandPalette') },
+        { keys: bindingParts(s.shortcutPanel), label: t('shortcuts.shortcutPanel') },
+        { keys: bindingParts(s.stopGeneration), label: t('shortcuts.closeOrInterrupt') },
       ],
     },
     {

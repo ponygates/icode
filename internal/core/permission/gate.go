@@ -647,6 +647,16 @@ func (g *Gate) StrikeThreshold() int {
 	return g.strikeThreshold
 }
 
+// EscalationState reports whether the session has been force-escalated to
+// manual mode after consecutive blocks, plus its current strike count
+// (surfaced in the UI's permission bar so the user sees the "N 次后退回手动"
+// progress, Claude Code parity).
+func (g *Gate) EscalationState(sessionID string) (escalated bool, strikes int) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.escalated[sessionID], g.strikes[sessionID]
+}
+
 // check is the core permission evaluator (the original Check logic).
 func (g *Gate) check(sessionID string, action Action) CheckResult {
 	g.mu.RLock()
@@ -1251,13 +1261,44 @@ func matchPattern(action Action, pattern string) bool {
 	}
 }
 
+// argField extracts a string field from the tool-call arguments JSON. Empty
+// when absent/unparseable — the permission summary degrades gracefully.
+func argField(arguments, key string) string {
+	var m map[string]any
+	if err := json.Unmarshal([]byte(arguments), &m); err != nil {
+		return ""
+	}
+	if v, ok := m[key]; ok {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+// buildPrompt renders a user-facing summary of what the tool call will do.
+// It is shown verbatim in the TUI / desktop / simpleui approval dialogs, so
+// it carries a compact argument preview (paths, commands, content excerpts)
+// to let the user judge the request before approving — not just the tool name.
 func (g *Gate) buildPrompt(action Action) string {
 	switch action.Tool {
 	case "bash":
 		return fmt.Sprintf("执行命令: %s", action.Command)
 	case "write_file":
+		// Show the write target plus a short content excerpt so the user can
+		// verify what is about to be written (Claude Code parity).
+		excerpt := truncate(strings.Join(strings.Fields(argField(action.Arguments, "content")), " "), 120)
+		if excerpt != "" {
+			return fmt.Sprintf("写入文件: %s (%d 字节)\n内容: %s", action.Path, len(action.Arguments), excerpt)
+		}
 		return fmt.Sprintf("写入文件: %s (%d 字节)", action.Path, len(action.Arguments))
 	case "edit":
+		// Show old → new excerpt for the specific edit.
+		oldS := truncate(argField(action.Arguments, "old_string"), 80)
+		newS := truncate(argField(action.Arguments, "new_string"), 80)
+		if oldS != "" || newS != "" {
+			return fmt.Sprintf("编辑文件: %s\n将 \"%s\" 改为 \"%s\"", action.Path, oldS, newS)
+		}
 		return fmt.Sprintf("编辑文件: %s", action.Path)
 	case "read_file":
 		return fmt.Sprintf("读取文件: %s", action.Path)
@@ -1271,8 +1312,10 @@ func (g *Gate) buildPrompt(action Action) string {
 		return "查看 git 状态"
 	case "git_commit":
 		return fmt.Sprintf("提交 git: %s", truncate(action.Command, 50))
+	case "fetch":
+		return fmt.Sprintf("访问网络: %s", truncate(action.URL, 120))
 	default:
-		return fmt.Sprintf("%s: %s", action.Tool, truncate(action.Arguments, 60))
+		return fmt.Sprintf("%s: %s", action.Tool, truncate(action.Arguments, 100))
 	}
 }
 
