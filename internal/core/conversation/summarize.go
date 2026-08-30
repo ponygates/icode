@@ -115,7 +115,17 @@ Keep it under 500 words.`
 	if summary == "" {
 		return "", fmt.Errorf("summarize: empty model reply")
 	}
-	return firstN(summary, 6000), nil
+	summary = firstN(summary, 6000)
+
+	// PostCompact lifecycle hook — the compaction actually happened (the
+	// PreCompact hook fired earlier at the top of this function).
+	if hr := e.getHooksRunner(); hr.HasHooks(hooks.PostCompact) {
+		hr.Fire(ctx, hooks.PostCompact, hooks.Input{
+			SessionID:  sessionID,
+			ToolOutput: fmt.Sprintf("summarized %d turns", turns),
+		})
+	}
+	return summary, nil
 }
 
 // renderTranscript flattens session messages into labeled lines for the

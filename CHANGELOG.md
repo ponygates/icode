@@ -1,5 +1,19 @@
 # 更新日志
 
+## v0.48.1 — /share html 单文件网页导出 + hooks 补至 15 种（2026-08-30）
+
+> 继续 ZCode 差距分析顺位表：C1 会话分享 HTML（第 5 顺位）+ C4 hooks 补 5 事件（第 8 顺位）。
+
+- **`/share html [file]`**（C1，OpenCode /share parity · 本地单文件路线）：导出**自包含 HTML**——内联 CSS（对话气泡：User 蓝 / Assistant 绿 / System 灰 / Tool 黄）+ 零依赖 JS Markdown 渲染器（标题/列表/代码围栏/行内码/粗斜体/链接/引用/表格）+ `<noscript>` 兜底。无需服务器、不上传（规避隐私风险），浏览器直接打开或托管到任意静态空间。原 `/share` Markdown 行为保持。
+- **hooks 补 5 种事件至 15 种**（C4）：
+  - `SessionEnd` —— `/clear` 会话删除（新增 `Engine.FireHook` 供非引擎层发事件）
+  - `PostCompact` —— 压缩完成后（与 PreCompact 配对，带汇总轮数）
+  - `ToolError` —— 工具执行失败（带工具名 + 错误文本）
+  - `AgentStart` / `AgentStop` —— 主循环一轮用户提问→应答的起止（AgentStop 带耗时 ms，与子代理 SubagentStart/Stop 区分）
+- 事件全集（15）：PreToolUse / PostToolUse / UserPromptSubmit / Stop / Notification / PreCompact / PostCompact / SessionStart / SessionEnd / PermissionRequest / ToolError / AgentStart / AgentStop / SubagentStart / SubagentStop。
+- 单测：share HTML 生成/转义/无原生围栏正则泄漏；hooks 15 事件注册分发。
+- 验证：全量编译绿；slashui/hooks/conversation 测试绿；四份二进制重编 PE 正确。
+
 ## v0.48.0 — ZCode 协作轮：自动化模板库 + Git 工作台 + 桌面多会话流式（2026-08-30）
 
 > ZCode（智谱）按新一轮对标差距分析推进 D3/D2/D1，中途断点由 WorkBuddy 接续修复完成（ChatPage TS 错误、TabBar streamingIds/onReorder、权限弹窗 {req,sid} 结构）。

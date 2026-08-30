@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ponygates/icode/internal/config"
+	"github.com/ponygates/icode/internal/core/hooks"
 	"github.com/ponygates/icode/internal/core/agent"
 	"github.com/ponygates/icode/internal/core/checkpoint"
 	projectcontext "github.com/ponygates/icode/internal/core/context"
@@ -330,7 +331,7 @@ func helpDefs() []helpItem {
 		{"/diff", "显示 git 工作区差异"}, {"/review [file]", "审查 diff 或指定文件"},
 		{"/apply", "应用已暂存编辑"}, {"/reject", "丢弃已暂存编辑"},
 		{"/search <query>", "搜索历史会话"}, {"/export [file]", "导出会话为 Markdown"},
-		{"/share", "导出会话为带时间戳 Markdown"}, {"/copy [file]", "复制最后输出到剪贴板"},
+		{"/share [html] [file]", "导出会话为 Markdown 或单文件网页（/share html）"}, {"/copy [file]", "复制最后输出到剪贴板"},
 		{"/token", "Token 节省报告"}, {"/usage", "同上（费用别名）"}, {"/cost", "本次会话费用"}, {"/context", "上下文用量"},
 		{"/summarize", "会话摘要"}, {"/compact", "压缩会话（自动五层压缩）"},
 		{"/status", "系统状态"}, {"/whoami", "显示当前配置"},
@@ -1151,6 +1152,9 @@ func cmdClear(b *Backend, st *State) Result {
 			if err := sessionum.MarkDeleted(b.SessStore, sess); err != nil {
 				return errf("归档失败（会话未删除）: %v", err)
 			}
+			// SessionEnd lifecycle hook — the session is being deleted, so
+			// external scripts can flush per-session state.
+			b.Engine.FireHook(hooks.SessionEnd, hooks.Input{SessionID: st.SessionID})
 		}
 	}
 	return Result{Output: "会话已归档并标记删除，可从列表移除（/restore <id> 可恢复）。", ClearSession: true}
@@ -1386,6 +1390,11 @@ func cmdExport(b *Backend, st *State, args []string) Result {
 }
 
 func cmdShare(b *Backend, st *State, args []string) Result {
+	// /share html — self-contained single-file HTML export (OpenCode /share
+	// parity via the local-file route: no server, user hosts it anywhere).
+	if len(args) > 0 && strings.EqualFold(args[0], "html") {
+		return cmdShareHTML(b, st, args[1:])
+	}
 	name := fmt.Sprintf("icode-share-%s.md", time.Now().Format("20060102-150405"))
 	if len(args) > 0 {
 		name = args[0]
@@ -1395,9 +1404,46 @@ func cmdShare(b *Backend, st *State, args []string) Result {
 		return res
 	}
 	if abs, err := filepath.Abs(name); err == nil {
-		return ok(res.Output + "\n分享文件: " + abs + "\n（可直接发送或粘贴到支持 Markdown 的工具）")
+		return ok(res.Output + "\n分享文件: " + abs + "\n（可直接发送或粘贴到支持 Markdown 的工具；用 /share html 可导出网页版）")
 	}
 	return res
+}
+
+// cmdShareHTML exports the current session as one self-contained .html file:
+// inlined styles + dependency-free JS Markdown renderer, chat-bubble layout.
+func cmdShareHTML(b *Backend, st *State, args []string) Result {
+	if b == nil || b.SessStore == nil || st.SessionID == "" {
+		return ok("没有可导出的会话（先发一条消息）。")
+	}
+	sess, err := b.SessStore.Get(st.SessionID)
+	if err != nil {
+		return errf("读取会话失败: %v", err)
+	}
+	name := fmt.Sprintf("icode-share-%s.html", time.Now().Format("20060102-150405"))
+	if len(args) > 0 {
+		name = args[0]
+		if !strings.HasSuffix(strings.ToLower(name), ".html") {
+			name += ".html"
+		}
+	}
+	msgs := make([]shareMsg, 0, len(sess.Messages))
+	for _, m := range sess.Messages {
+		if strings.TrimSpace(m.Content) == "" && len(m.ToolCalls) == 0 {
+			continue
+		}
+		role := m.Role
+		if role == "tool" && len(m.ToolCalls) > 0 {
+			role = "tool"
+		}
+		msgs = append(msgs, shareMsg{Role: string(role), Content: m.Content})
+	}
+	title := "iCode 会话"
+	page := buildShareHTML(title, st.Model, msgs)
+	if err := os.WriteFile(name, []byte(page), 0o644); err != nil {
+		return errf("导出失败: %v", err)
+	}
+	abs, _ := filepath.Abs(name)
+	return ok(fmt.Sprintf("✓ 已导出单文件网页（%d 条消息）: %s\n用浏览器打开即可阅读；可直接发给任何人或托管到任意静态空间。", len(msgs), abs))
 }
 
 func cmdReview(args []string) Result {

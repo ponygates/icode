@@ -389,6 +389,18 @@ func (e *Engine) SetHooksRunner(r *hooks.Runner) {
 	e.hooksRunner = r
 }
 
+// FireHook emits a lifecycle hook on behalf of a non-engine layer (e.g.
+// /clear marking a session deleted → SessionEnd). No-ops when no runner is
+// attached or the event has no registered rules.
+func (e *Engine) FireHook(ev hooks.Event, in hooks.Input) {
+	if e == nil {
+		return
+	}
+	if hr := e.getHooksRunner(); hr.HasHooks(ev) {
+		hr.Fire(context.Background(), ev, in)
+	}
+}
+
 // SetSkillLoader wires the on-demand skill resolver into the use_skill tool so
 // the model can fetch a SKILL.md body without it ever entering the cached
 // system prefix. Call from app bootstrap after SetSkillsRegistry.
@@ -731,6 +743,17 @@ func (e *Engine) executeToolBatch(
 	finish := func(i int, result *types.ToolResult) {
 		if result == nil {
 			result = &types.ToolResult{Success: false, Error: "tool produced no result"}
+		}
+		// ToolError lifecycle hook — a tool execution failed (error text
+		// rides in ToolOutput, tool name in ToolName).
+		if !result.Success {
+			if hr := e.getHooksRunner(); hr.HasHooks(hooks.ToolError) {
+				hr.Fire(ctx, hooks.ToolError, hooks.Input{
+					SessionID:  sessionID,
+					ToolName:   toolCalls[i].Name,
+					ToolOutput: result.Error,
+				})
+			}
 		}
 		toolCalls[i].Result = result
 	}
@@ -1653,6 +1676,13 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 			hr.Fire(context.Background(), hooks.SessionStart, hooks.Input{SessionID: sessionID})
 		}
 	}
+	// AgentStart lifecycle hook — brackets the main agent turn (the whole
+	// user-prompt → response cycle), as opposed to sub-agent runs.
+	if hr := e.getHooksRunner(); hr.HasHooks(hooks.AgentStart) {
+		hr.Fire(context.Background(), hooks.AgentStart, hooks.Input{
+			SessionID: sessionID, Prompt: firstN(content, 200),
+		})
+	}
 
 	// Stash-and-continue audit: if the user pivots to a (different) task while
 	// in-progress work exists in this session, snapshot a checkpoint + refresh
@@ -1984,6 +2014,14 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 					if hr := e.getHooksRunner(); hr.HasHooks(hooks.Notification) {
 						hr.Fire(context.Background(), hooks.Notification, hooks.Input{
 							SessionID: sessionID, ToolOutput: "completed",
+						})
+					}
+					// AgentStop — the main agent turn is done (counterpart to
+					// AgentStart fired at the top of Send).
+					if hr := e.getHooksRunner(); hr.HasHooks(hooks.AgentStop) {
+						hr.Fire(context.Background(), hooks.AgentStop, hooks.Input{
+							SessionID: sessionID,
+							ToolOutput: fmt.Sprintf("%dms", time.Since(startTime).Milliseconds()),
 						})
 					}
 					out <- types.StreamEvent{

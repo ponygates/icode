@@ -61,6 +61,20 @@ const (
 	// SubagentStart / SubagentStop bracket a sub-agent run (task tool).
 	SubagentStart Event = "SubagentStart"
 	SubagentStop  Event = "SubagentStop"
+	// SessionEnd fires when a session is deleted or the app shuts down with
+	// the session active — external scripts can flush per-session state.
+	SessionEnd Event = "SessionEnd"
+	// PostCompact fires right after a conversation was compacted (the
+	// counterpart to PreCompact): message counts before/after ride in
+	// ToolOutput.
+	PostCompact Event = "PostCompact"
+	// ToolError fires when a tool execution fails — the error text rides in
+	// ToolOutput, tool name in ToolName.
+	ToolError Event = "ToolError"
+	// AgentStart / AgentStop bracket the main agent turn (the top-level
+	// user-prompt → response cycle), as opposed to sub-agent runs.
+	AgentStart Event = "AgentStart"
+	AgentStop  Event = "AgentStop"
 )
 
 // Rule is a single hook definition: a tool-name matcher plus a shell command.

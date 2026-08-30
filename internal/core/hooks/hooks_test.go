@@ -151,9 +151,20 @@ func TestFireLifecycleEvents(t *testing.T) {
 		"PermissionRequest": {{Command: passCmd}},
 		"SubagentStart":     {{Command: passCmd}},
 		"SubagentStop":      {{Command: passCmd}},
+		// New lifecycle events (C4 batch).
+		"SessionEnd":  {{Command: passCmd}},
+		"PostCompact": {{Command: passCmd}},
+		"ToolError":   {{Command: passCmd}},
+		"AgentStart":  {{Command: passCmd}},
+		"AgentStop":   {{Command: passCmd}},
 	}, ".")
 
-	for _, ev := range []Event{SessionStart, Notification, PreCompact, PermissionRequest, SubagentStart, SubagentStop} {
+	all := []Event{
+		SessionStart, Notification, PreCompact, PermissionRequest,
+		SubagentStart, SubagentStop,
+		SessionEnd, PostCompact, ToolError, AgentStart, AgentStop,
+	}
+	for _, ev := range all {
 		if !r.HasHooks(ev) {
 			t.Errorf("%s hook not registered", ev)
 		}
