@@ -374,7 +374,9 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
   // across renders (the button click uses the latest via ref).
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
-  const voiceChunksRef = useRef<Blob[]>([]);
+  const voiceChunksRef = useRef<Float32Array[]>([]);
+  // Stop handle for the WebAudio PCM recorder (captures real 16k mono PCM → WAV).
+  const voiceStopRef = useRef<(() => void) | null>(null);
   const [voiceActive, setVoiceActive] = useState(false);
   const [voiceBusy, setVoiceBusy] = useState(false);
 
@@ -754,53 +756,61 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
   // (PCM → WAV) then POSTs to the backend /api/voice, which runs it through
   // the configured ASR provider (zhipu, baidu, or xfyun).
   const toggleVoice = useCallback(async () => {
-    const rec = mediaRecorderRef.current;
-    // Stop an in-progress recording → onstop fires → transcribe.
-    if (rec && rec.state !== 'inactive') {
-      rec.stop();
+    // Stop an in-progress recording → the stop handle assembles WAV → transcribe.
+    if (voiceStopRef.current) {
+      voiceStopRef.current();
       return;
     }
     if (voiceBusy) return;
+    let ctx: AudioContext;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       mediaStreamRef.current = stream;
       voiceChunksRef.current = [];
 
-      // Try to use MediaRecorder with WAV if supported, otherwise fallback to webm.
-      // WAV is preferred for Baidu/iFlytek providers which require PCM format.
-      const wavSupported = typeof MediaRecorder !== 'undefined' &&
-        MediaRecorder.isTypeSupported('audio/wav');
-      const mimeType = wavSupported ? 'audio/wav' : 'audio/webm';
+      // Capture raw microphone PCM (16 kHz mono) — MediaRecorder cannot emit
+      // WAV in Chromium, and the ASR providers (Baidu/iFlytek/Zhipu) require
+      // PCM/WAV; a webm blob mislabelled as wav made Baidu reject every take.
+      ctx = new AudioContext({ sampleRate: 16000 });
+      const source = ctx.createMediaStreamSource(stream);
+      const processor = ctx.createScriptProcessor(4096, 1, 1);
+      processor.onaudioprocess = (e) => {
+        voiceChunksRef.current.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+      };
+      source.connect(processor);
+      // Muted destination keeps the graph pumping without echoing audio.
+      processor.connect(ctx.destination);
 
-      const mr = new MediaRecorder(stream, { mimeType });
-      mr.ondataavailable = (e) => { if (e.data.size > 0) voiceChunksRef.current.push(e.data); };
-      mr.onstop = async () => {
+      voiceStopRef.current = () => {
+        voiceStopRef.current = null;
         setVoiceActive(false);
         setVoiceBusy(true);
         try {
-          stream.getTracks().forEach(t => t.stop());
+          processor.disconnect();
+          source.disconnect();
+          stream.getTracks().forEach(tr => tr.stop());
           mediaStreamRef.current = null;
-          const ext = wavSupported ? 'wav' : 'webm';
-          const blob = new Blob(voiceChunksRef.current, { type: mimeType });
+          void ctx.close();
+          const blob = encodeWav(voiceChunksRef.current, ctx.sampleRate);
+          voiceChunksRef.current = [];
+          if (blob.size <= 44) { setVoiceBusy(false); return; } // nothing captured
           const form = new FormData();
-          form.append('file', blob, `voice.${ext}`);
-          const res = await fetch(`${backendUrl}/api/voice`, { method: 'POST', body: form });
-          const data = await res.json().catch(() => ({}));
-          if (!res.ok) {
-            alert(data.error || t('chat.voiceError'));
-          } else if (data.text) {
-            setInput(prev => (prev ? prev + ' ' : '') + data.text);
-            inputRef.current?.focus();
-          }
-        } catch {
-          /* ignore — button state already reset */
+          form.append('file', blob, 'voice.wav');
+          fetch(`${backendUrl}/api/voice`, { method: 'POST', body: form })
+            .then(async res => {
+              const data = await res.json().catch(() => ({}));
+              if (!res.ok) {
+                alert(data.error || t('chat.voiceError'));
+              } else if (data.text) {
+                setInput(prev => (prev ? prev + ' ' : '') + data.text);
+                inputRef.current?.focus();
+              }
+            })
+            .catch(() => {});
         } finally {
           setVoiceBusy(false);
-          mediaRecorderRef.current = null;
         }
       };
-      mr.start();
-      mediaRecorderRef.current = mr;
       setVoiceActive(true);
     } catch {
       alert(t('chat.voiceUnsupported'));
@@ -2452,6 +2462,36 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
     </div>
   );
 };
+
+// encodeWav packs captured PCM float samples into a 16-bit mono RIFF/WAVE
+// blob (44-byte header), the format every ASR provider path expects.
+function encodeWav(chunks: Float32Array[], sampleRate: number): Blob {
+  let total = 0;
+  for (const c of chunks) total += c.length;
+  const pcm = new DataView(new ArrayBuffer(44 + total * 2));
+  const w = (off: number, s: string) => { for (let i = 0; i < s.length; i++) pcm.setUint8(off + i, s.charCodeAt(i)); };
+  w(0, 'RIFF');
+  pcm.setUint32(4, 36 + total * 2, true);
+  w(8, 'WAVE');
+  w(12, 'fmt ');
+  pcm.setUint32(16, 16, true);
+  pcm.setUint16(20, 1, true);          // PCM
+  pcm.setUint16(22, 1, true);          // mono
+  pcm.setUint32(24, sampleRate, true);
+  pcm.setUint32(28, sampleRate * 2, true); // byte rate
+  pcm.setUint16(32, 2, true);          // block align
+  pcm.setUint16(34, 16, true);         // bits per sample
+  w(36, 'data');
+  pcm.setUint32(40, total * 2, true);
+  let off = 44;
+  for (const c of chunks) {
+    for (let i = 0; i < c.length; i++, off += 2) {
+      const s = Math.max(-1, Math.min(1, c[i]));
+      pcm.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    }
+  }
+  return new Blob([pcm.buffer], { type: 'audio/wav' });
+}
 
 // Active streams keyed by session id — one AbortController per session so
 // several tabs can generate in parallel and each can be stopped individually

@@ -1,5 +1,10 @@
 # 更新日志
 
+## v0.52.1 — 桌面语音修复（2026-08-30）
+
+- **百度/智谱/讯飞语音识别全部修复**：此前录音用 MediaRecorder（Chromium 不支持 audio/wav，实际产出 webm），后端却按 wav 声明送 ASR → 百度必然报错。改为 WebAudio 真实采集 16kHz 单声道 PCM + 手工编码 RIFF/WAVE（44 字节头），三种 ASR 供应商链路一致。
+- 二进制构建配方修正：icode-cli.exe 恢复为 simpleui UI 版（-tags simpleui）、icode-desktop.exe 恢复为 desktop_only 专用构建——此前误用 cp/nogui 替代导致双击无反应。
+
 ## v0.52.0 — D1 完整分屏 + Go 内置办公生成器 + 诊断包 + ACP e2e（2026-08-30）
 
 > 第二轮对标体检的大项轮：D1 双向分屏收官；办公文档从「依赖外部工具」升级为「零依赖内置」；/bug 升级为脱敏诊断包；ACP 协议通过脚本化真机 e2e（7/7）。
