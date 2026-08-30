@@ -1655,9 +1655,10 @@ func simpleUIHTML(model, provider string) string {
     background: linear-gradient(135deg, var(--accent), var(--accent-2));
     display: inline-block; box-shadow: var(--shadow-glow);
   }
+  #bar button { flex: 0 0 auto; white-space: nowrap; }
   #bar select, #bar input.listbar {
     background: var(--bg-elev); color: var(--text); border: 1px solid #2f3850;
-    border-radius: var(--r-sm); padding: 5px 10px; max-width: 320px;
+    border-radius: var(--r-sm); padding: 5px 10px; max-width: 200px; min-width: 70px;
     outline: none; transition: border-color .15s;
   }
   #bar select:focus, #bar input.listbar:focus { border-color: var(--accent); }
@@ -1744,6 +1745,13 @@ func simpleUIHTML(model, provider string) string {
   }
   #side .side-head { padding: 11px 14px; font-weight: 700; color: var(--accent); border-bottom: 1px solid #232a3a; flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; }
   .side-tabs { display: flex; gap: 4px; margin-right: auto; }
+  #cmdFilter {
+    margin: 8px; padding: 6px 9px; font: inherit; font-size: 12px;
+    border: 1px solid #2f3850; border-radius: var(--r-sm);
+    background: var(--bg-elev); color: var(--text); outline: none;
+  }
+  #cmdFilter:focus { border-color: var(--accent); }
+  .cmd-desc { display: block; color: #6b7690; font-size: 10.5px; margin-top: 1px; }
   .side-tab { background: transparent; border: none; color: #8a93a6; padding: 4px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
   .side-tab.active { background: #2d5a88; color: #fff; }
   .side-kb { padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; overflow: hidden; flex: 1; min-height: 0; }
@@ -1965,7 +1973,7 @@ func simpleUIHTML(model, provider string) string {
     </div>
     <div id="inputbar">
       <div id="attZone" style="display:none; flex-wrap:wrap; gap:6px; margin-bottom:6px;"></div>
-      <div style="display:flex; align-items:flex-end; gap:8px;">
+      <div style="display:flex; align-items:flex-end; gap:8px; flex:1; min-width:0;">
         <button id="attachBtn" title="附加文件（图片走多模态，其他走 @路径 引用；也可直接拖拽文件进来）" style="flex:0 0 auto; padding:8px 10px; border-radius:8px; border:1px solid #2a2e3a; background:#0f1115; color:#e6e6e6; cursor:pointer;">📎</button>
         <textarea id="inp" placeholder="输入消息或 /命令，Enter 发送，Shift+Enter 换行…（可 Ctrl+V 粘贴图片、拖拽文件）"></textarea>
         <button id="stopBtn" title="停止生成" style="display:none;">■ 停止</button>
@@ -2564,16 +2572,33 @@ func simpleUIHTML(model, provider string) string {
     {g:'系统', c:['/login','/logout','/release-notes','/bug']}
   ];
   var sideList = document.getElementById('sideList');
-  CATALOG.forEach(function(group){
-    var h = document.createElement('div'); h.className = 'grp'; h.textContent = group.g;
-    sideList.appendChild(h);
-    group.c.forEach(function(name){
-      var d = document.createElement('div'); d.className = 'cmd'; d.textContent = name;
-      d.title = '执行 ' + name;
-      d.addEventListener('click', function(){ if (window.runCommand) window.runCommand(name); });
-      sideList.appendChild(d);
+  var DESC = {'/clear':'清空当前会话','/new':'新建会话','/sessions':'会话列表','/resume':'恢复会话','/fork':'分支会话','/branch':'分支管理','/rename':'重命名会话','/goal':'目标模式','/budget':'预算控制','/compact':'压缩上下文','/export':'导出 Markdown','/share':'分享导出','/diff':'查看 git diff','/review':'审查改动','/summarize':'总结会话','/undo':'撤销改动','/rewind':'回滚到检查点','/checkpoint':'检查点管理','/restore':'恢复检查点','/search':'搜索会话','/wipe':'清除全部数据','/apply':'应用暂存修改','/reject':'拒绝暂存修改','/model':'切换模型','/provider':'切换供应商','/models':'模型列表','/keys':'API 密钥管理','/update':'检查更新','/thinking':'深度思考开关','/config':'配置面板','/theme':'主题切换','/lang':'界面语言','/security':'安全等级','/permissions':'权限规则','/mcp':'MCP 服务器','/output-style':'输出风格','/mode':'权限模式','/plan':'计划模式','/ask':'询问模式','/debug':'调试模式','/init':'初始化 ICODE.md','/add-dir':'添加工作目录','/agents':'子代理列表','/skills':'技能列表','/skill-eval':'技能评测','/plugin':'插件管理','/teams':'团队协作','/hooks':'自动化钩子','/todo':'待办统计','/lsp':'LSP 状态','/kb':'知识库','/idle':'闲时代理','/tasks':'后台任务','/mesh':'多机协同','/admin':'管理面板','/help':'帮助','/whoami':'当前身份','/status':'系统状态','/cost':'费用统计','/token':'Token 统计','/usage':'用量报告','/stats':'使用统计','/doctor':'自检诊断','/memory':'记忆文件','/context':'上下文占用','/feedback':'反馈','/copy':'复制回复','/login':'登录','/logout':'登出','/release-notes':'更新日志','/bug':'反馈问题（/bug zip 生成诊断包）'};
+  // Filter box on top of the command list — CLI-grade discoverability.
+  var filter = document.createElement('input');
+  filter.id = 'cmdFilter'; filter.placeholder = '搜索命令…';
+  filter.autocomplete = 'off';
+  sideList.parentNode.insertBefore(filter, sideList);
+  function renderCommands(q) {
+    q = (q || '').trim().toLowerCase();
+    sideList.innerHTML = '';
+    CATALOG.forEach(function(group){
+      var items = group.c.filter(function(name){
+        if (!q) return true;
+        return name.indexOf(q) >= 0 || (DESC[name] || '').indexOf(q) >= 0;
+      });
+      if (items.length === 0) return;
+      var h = document.createElement('div'); h.className = 'grp'; h.textContent = group.g;
+      sideList.appendChild(h);
+      items.forEach(function(name){
+        var d = document.createElement('div'); d.className = 'cmd'; d.title = DESC[name] || ('执行 ' + name);
+        d.innerHTML = name + '<span class="cmd-desc">' + (DESC[name] || '') + '</span>';
+        d.addEventListener('click', function(){ if (window.runCommand) window.runCommand(name); });
+        sideList.appendChild(d);
+      });
     });
-  });
+  }
+  renderCommands('');
+  filter.addEventListener('input', function(){ renderCommands(filter.value); });
 
   // ── Side panel tabs: 命令 / 知识库 ──────────────────────────────
   var tabCmd = document.getElementById('tabCmd');
