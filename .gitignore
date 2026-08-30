@@ -73,3 +73,6 @@ build-desktop-backend.js
 
 # Temp
 .freebuff/
+
+# Personal business assets (not part of iCode source)
+.wecom-news/
