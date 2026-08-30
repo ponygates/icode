@@ -1,5 +1,16 @@
 # 更新日志
 
+## v0.50.2 — ACP 权限路由 session/request_permission（C3 收官）（2026-08-30）
+
+> C3 ACP 全部核心方法落地：补齐权限路由，实现完整的「握手→建会话→提问→流式→工具权限弹窗→切模式」闭环。
+
+- **`session/request_permission`**（已核实精确 schema）：engine 权限流经 `PermissionHandler` 转发到 ACP 客户端（编辑器）——Agent 发带 id 的 JSON-RPC 请求（options: allow_once/allow_always/reject_once），等编辑器响应（outcome.optionId）→ 映射回 iCode 决策（allow_once→allow、allow_always→allow_all_session、reject/cancelled→deny）。
+- **响应路由**：`rpcRequest` 补 `result` 字段；`resolvePermission` 按 id 回填 pending channel（id 经 json.Unmarshal 去引号）。
+- 单测：权限响应解析 + 选项映射；acp 包测试绿。
+- 验证：Go 全量测试绿；四份二进制重编 PE 正确。
+- **C3 ACP 至此全方法实现**（initialize/session-new/prompt/load/set-mode/cancel/request_permission），仅剩 Zed 真机联调验证字段。
+- 遗留：D1 SessionPane 参数化（唯一未完成项）；推送 63 commit。
+
 ## v0.50.1 — ACP session/load + session/set_mode（C3 P2 部分）（2026-08-30）
 
 > C3 P2 继续：补齐会话加载与模式切换（可高质量交付部分）；权限路由 `session/request_permission`（反向请求+异步响应）留 Zed 真机联调。

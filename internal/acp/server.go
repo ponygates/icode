@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 
 	"github.com/ponygates/icode/internal/core/conversation"
 	"github.com/ponygates/icode/internal/core/permission"
@@ -24,12 +25,14 @@ import (
 // protocolVersion is the ACP protocol version we speak.
 const protocolVersion = 1
 
-// rpcRequest is a JSON-RPC 2.0 request or notification.
+// rpcRequest is a JSON-RPC 2.0 request, notification, or response (a response
+// has no method and carries result instead of params).
 type rpcRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      json.RawMessage `json:"id,omitempty"`
 	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params,omitempty"`
+	Result  json.RawMessage `json:"result,omitempty"`
 }
 
 // rpcResponse is a JSON-RPC 2.0 response (id null for notifications).
@@ -53,17 +56,29 @@ type Server struct {
 
 	out *json.Encoder
 	in  *json.Decoder
+
+	// permPending tracks in-flight session/request_permission requests keyed
+	// by the JSON-RPC id we assigned; the response carries the chosen optionId.
+	permMu      sync.Mutex
+	permPending map[string]chan string
+	permSeq     int
 }
 
 // Run serves ACP requests on stdin/stdout until EOF or ctx cancellation.
 // It blocks; call from the `icode acp` command's RunE.
 func Run(ctx context.Context, eng *conversation.Engine, gate *permission.Gate, store types.SessionStore) error {
 	s := &Server{
-		Engine: eng,
-		Gate:   gate,
-		Store:  store,
-		in:     json.NewDecoder(bufio.NewReader(os.Stdin)),
-		out:    json.NewEncoder(os.Stdout),
+		Engine:      eng,
+		Gate:        gate,
+		Store:       store,
+		in:          json.NewDecoder(bufio.NewReader(os.Stdin)),
+		out:         json.NewEncoder(os.Stdout),
+		permPending: map[string]chan string{},
+	}
+	// Route the engine's permission flow through the ACP client (editor): the
+	// editor shows the prompt and its answer is fed back as the decision.
+	if eng != nil {
+		eng.SetPermissionHandler(s.requestPermission)
 	}
 	for {
 		select {
@@ -83,9 +98,14 @@ func Run(ctx context.Context, eng *conversation.Engine, gate *permission.Gate, s
 }
 
 // dispatch routes one request/notification. Notifications (no id) never get
-// a response per JSON-RPC 2.0.
+// a response per JSON-RPC 2.0. A request with no method whose id is a pending
+// permission request id is the editor's answer to session/request_permission.
 func (s *Server) dispatch(ctx context.Context, req rpcRequest) {
 	isNotify := len(req.ID) == 0 || string(req.ID) == "null"
+	if req.Method == "" && !isNotify {
+		s.resolvePermission(req.ID, req)
+		return
+	}
 	switch req.Method {
 	case "initialize":
 		s.respond(req.ID, map[string]any{
@@ -275,6 +295,77 @@ func (s *Server) handleSessionSetMode(req rpcRequest, isNotify bool) {
 	if !isNotify {
 		s.respond(req.ID, map[string]any{"modeId": p.ModeID}, nil)
 	}
+}
+
+// requestPermission implements conversation.PermissionHandler: it forwards
+// the gate's ask decision to the ACP client (editor) via
+// session/request_permission and waits for the answer, mapping the option
+// kind back to an iCode decision (allow_once/allow_always → allow;
+// reject_* / cancelled → deny).
+func (s *Server) requestPermission(sessionID string, req *types.PermissionReq, res permission.CheckResult) permission.Decision {
+	// Only forward when the gate actually asked; read/auto-approved calls
+	// never reach here (they short-circuit before the handler).
+	s.permMu.Lock()
+	s.permSeq++
+	id := fmt.Sprintf("perm-%d", s.permSeq)
+	ch := make(chan string, 1)
+	s.permPending[id] = ch
+	s.permMu.Unlock()
+
+	s.out.Encode(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"method":  "session/request_permission",
+		"params": map[string]any{
+			"sessionId": sessionID,
+			"toolCall":  map[string]any{"toolCallId": "tool-" + req.Tool, "title": req.Tool, "kind": "other"},
+			"options": []map[string]any{
+				{"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"},
+				{"optionId": "allow-always", "name": "Allow always", "kind": "allow_always"},
+				{"optionId": "reject-once", "name": "Reject", "kind": "reject_once"},
+			},
+		},
+	})
+
+	// Wait for the editor's answer (or a close of the channel on shutdown).
+	option, ok := <-ch
+	s.permMu.Lock()
+	delete(s.permPending, id)
+	s.permMu.Unlock()
+	if !ok {
+		return permission.DecisionDeny
+	}
+	switch option {
+	case "allow-always":
+		return permission.DecisionAllowAll
+	case "allow-once":
+		return permission.DecisionAllow
+	default:
+		return permission.DecisionDeny
+	}
+}
+
+// resolvePermission feeds the editor's response back to the waiting handler.
+func (s *Server) resolvePermission(id json.RawMessage, req rpcRequest) {
+	var key string
+	_ = json.Unmarshal(id, &key) // strip JSON string quotes
+	s.permMu.Lock()
+	ch, ok := s.permPending[key]
+	s.permMu.Unlock()
+	if !ok {
+		return
+	}
+	option := ""
+	var resp struct {
+		Outcome struct {
+			Outcome  string `json:"outcome"`
+			OptionID string `json:"optionId"`
+		} `json:"outcome"`
+	}
+	if json.Unmarshal(req.Result, &resp) == nil {
+		option = resp.Outcome.OptionID
+	}
+	ch <- option
 }
 
 // promptText flattens an ACP prompt content list into plain text.
