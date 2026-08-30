@@ -1,5 +1,16 @@
 # 更新日志
 
+## v0.48.2 — /replay 会话检查点回放（OpenCode git-backed review parity）（2026-08-30）
+
+> 继续差距分析顺位表：C2 会话回放（第 9 顺位）。
+
+- **`/replay` 时间轴**：列出本会话检查点（序号 · 时间 · 描述，1 = 最新），数据源即 checkpoint 的 git log——不改存储结构、零迁移成本。
+- **`/replay <a> [b]`**：对比任意两个检查点的文件差异（a/b 支持**时间轴序号**或原始 hash；b 默认最新快照），输出 diff 代码块。
+- **后端**：`checkpoint.Store.DiffBetween(ctx, from, to)`（任意两快照 diff，与既有 `Diff(steps)`「最近 N 步」互补）。
+- 三端生效（slashui 共享命令集：CLI / simpleui / 桌面）；帮助列表同步。
+- 单测：truncate/fromShort 辅助函数；slashui + checkpoint 包测试绿。
+- 验证：全量编译绿；四份二进制重编 PE 正确。
+
 ## v0.48.1 — /share html 单文件网页导出 + hooks 补至 15 种（2026-08-30）
 
 > 继续 ZCode 差距分析顺位表：C1 会话分享 HTML（第 5 顺位）+ C4 hooks 补 5 事件（第 8 顺位）。

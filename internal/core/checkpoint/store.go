@@ -186,6 +186,19 @@ func (s *Store) Diff(ctx context.Context, steps int) (string, error) {
 	return out, nil
 }
 
+// DiffBetween returns the combined diff between two snapshots (hash or any
+// git revision) — the data source for /replay <a> <b> (OpenCode git-backed
+// session review parity): compare any two points of a session's timeline.
+func (s *Store) DiffBetween(ctx context.Context, from, to string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out, err := s.gitCmd(ctx, "diff", from, to)
+	if err != nil {
+		return "", fmt.Errorf("checkpoint diff %s..%s: %w", from, to, err)
+	}
+	return out, nil
+}
+
 func (s *Store) gitCmd(ctx context.Context, args ...string) (string, error) {
 	cmdArgs := append([]string{"--git-dir", s.gitDir, "--work-tree", s.workDir}, args...)
 	cmd := executil.CommandContext(ctx, "git", cmdArgs...)

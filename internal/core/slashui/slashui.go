@@ -168,6 +168,8 @@ func Execute(ctx context.Context, b *Backend, st *State, text string) Result {
 		return cmdKnowledge(b, args)
 	case "/idle":
 		return cmdIdle(b, args)
+	case "/replay":
+		return cmdReplay(st, args)
 	case "/loop":
 		return cmdLoop(b, args)
 	case "/export":
@@ -329,6 +331,7 @@ func helpDefs() []helpItem {
 		{"/clear", "清空当前会话"}, {"/wipe", "清空会话上下文"},
 		{"/undo [N]", "回滚 N 步文件更改"}, {"/rewind [N]", "同上（检查点回滚）"},
 		{"/diff", "显示 git 工作区差异"}, {"/review [file]", "审查 diff 或指定文件"},
+		{"/replay [a] [b]", "会话检查点时间轴 / 对比两点差异（如 /replay 1 3）"},
 		{"/apply", "应用已暂存编辑"}, {"/reject", "丢弃已暂存编辑"},
 		{"/search <query>", "搜索历史会话"}, {"/export [file]", "导出会话为 Markdown"},
 		{"/share [html] [file]", "导出会话为 Markdown 或单文件网页（/share html）"}, {"/copy [file]", "复制最后输出到剪贴板"},
@@ -1210,6 +1213,84 @@ func cmdUndo(st *State, args []string) Result {
 		b.WriteString("  （无检查点文件）\n")
 	}
 	return ok(b.String())
+}
+
+// cmdReplay lists the session's checkpoint timeline, or diffs any two points
+// in it (OpenCode git-backed session review parity — the low-cost route: no
+// storage migration, the checkpoint git log already is the timeline).
+//
+//	/replay            — timeline (index · time · message)
+//	/replay <a> [b]    — diff between two checkpoints (a,b = timeline index or
+//	                     hash; b defaults to the latest snapshot)
+func cmdReplay(st *State, args []string) Result {
+	store, err := checkpoint.GetOrOpen(st.SessionID)
+	if err != nil {
+		return errf("打开检查点失败: %v", err)
+	}
+	entries, err := store.List(context.Background())
+	if err != nil {
+		return errf("读取检查点失败: %v", err)
+	}
+	if len(entries) == 0 {
+		return ok("本会话还没有检查点（改动文件后会自动快照）。")
+	}
+	// git log is newest-first; index 1 = most recent for the user.
+	if len(args) == 0 {
+		var b strings.Builder
+		b.WriteString(fmt.Sprintf("本会话检查点时间轴（%d 个，1 = 最新）:\n", len(entries)))
+		for i, e := range entries {
+			b.WriteString(fmt.Sprintf("  %2d. [%s] %s\n", i+1,
+				e.When.Format("01-02 15:04:05"), truncateIcode(e.Message, 60)))
+		}
+		b.WriteString("\n对比两点差异: /replay <a> [b]（a、b 为序号，如 /replay 1 3）")
+		return ok(b.String())
+	}
+
+	resolve := func(tok string) (string, error) {
+		if n, aerr := strconv.Atoi(tok); aerr == nil {
+			if n < 1 || n > len(entries) {
+				return "", fmt.Errorf("序号 %d 超出范围（1-%d）", n, len(entries))
+			}
+			return entries[n-1].Hash, nil
+		}
+		return tok, nil // treat as a raw hash / revision
+	}
+	from, err := resolve(args[0])
+	if err != nil {
+		return errf("解析失败: %v", err)
+	}
+	to := "HEAD"
+	if len(args) > 1 {
+		to, err = resolve(args[1])
+		if err != nil {
+			return errf("解析失败: %v", err)
+		}
+	}
+	diff, err := store.DiffBetween(context.Background(), from, to)
+	if err != nil {
+		return errf("对比失败: %v", err)
+	}
+	if strings.TrimSpace(diff) == "" {
+		return ok(fmt.Sprintf("两个检查点之间没有文件差异（%s..%s）。", fromShort(from), fromShort(to)))
+	}
+	return ok(fmt.Sprintf("检查点差异 %s..%s:\n\n```diff\n%s\n```",
+		fromShort(from), fromShort(to), strings.TrimRight(diff, "\n")))
+}
+
+func fromShort(hash string) string {
+	if len(hash) > 8 {
+		return hash[:8]
+	}
+	return hash
+}
+
+// truncateIcode caps s at n runes with an ellipsis (used by /replay timeline).
+func truncateIcode(s string, n int) string {
+	r := []rune(strings.TrimSpace(s))
+	if len(r) <= n {
+		return string(r)
+	}
+	return string(r[:n]) + "…"
 }
 
 func cmdDiff(args []string) Result {
