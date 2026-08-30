@@ -24,9 +24,37 @@ const SetupWizard: React.FC<{ onDone: () => void }> = ({ onDone }) => {
   const [provider, setProvider] = useState('openrouter');
   const [apiKey, setApiKey] = useState('');
   const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testMsg, setTestMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [error, setError] = useState('');
 
   const current = providers.find(p => p.id === provider)!;
+
+  // Test the key by saving it then hitting /api/models — fails fast so the
+  // user never completes onboarding with a bad key (D7 wizard enhancement).
+  const testConnection = async () => {
+    if (!apiKey.trim()) return;
+    setTesting(true);
+    setTestMsg(null);
+    try {
+      if (backendUrl) {
+        await fetch(`${backendUrl}/api/config/key`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ provider, api_key: apiKey.trim(), api_base: current.baseUrl }),
+        });
+        const r = await fetch(`${backendUrl}/api/models`, { cache: 'no-cache' });
+        if (r.ok) {
+          setTestMsg({ ok: true, text: t('setup.testOk') });
+          return;
+        }
+      }
+      setTestMsg({ ok: false, text: t('setup.testFail') });
+    } catch {
+      setTestMsg({ ok: false, text: t('setup.testFail') });
+    } finally {
+      setTesting(false);
+    }
+  };
 
   const handleSave = async () => {
     if (!apiKey.trim()) return;
@@ -170,23 +198,38 @@ const SetupWizard: React.FC<{ onDone: () => void }> = ({ onDone }) => {
                     {error}
                   </div>
                 )}
-                <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-                  <button onClick={() => setStep(0)} style={{
+                {testMsg && (
+                  <div style={{ fontSize: 12, color: testMsg.ok ? 'var(--success, #2da44e)' : 'var(--error)', padding: '2px 0' }}>
+                    {testMsg.ok ? '✓ ' : '✗ '}{testMsg.text}
+                  </div>
+                )}
+                <div style={{ display: 'flex', gap: 8, justifyContent: 'space-between' }}>
+                  <button onClick={testConnection} disabled={!apiKey.trim() || testing} style={{
                     padding: '8px 16px', borderRadius: 8,
                     background: 'transparent', border: '1px solid var(--border-color)',
-                    color: 'var(--text-muted)', cursor: 'pointer', fontSize: 12,
+                    color: apiKey.trim() ? 'var(--text-secondary)' : 'var(--text-muted)',
+                    cursor: apiKey.trim() ? 'pointer' : 'not-allowed', fontSize: 12,
                   }}>
-                    {t('setup.back')}
+                    {testing ? t('setup.testing') : t('setup.testConn')}
                   </button>
-                  <button onClick={handleSave} disabled={!apiKey.trim() || saving} style={{
-                    padding: '8px 20px', borderRadius: 8,
-                    background: apiKey.trim() ? 'var(--accent)' : 'var(--bg-tertiary)',
-                    border: 'none', color: apiKey.trim() ? '#fff' : 'var(--text-muted)',
-                    cursor: apiKey.trim() ? 'pointer' : 'not-allowed',
-                    fontSize: 12, fontWeight: 500,
-                  }}>
-                    {saving ? t('setup.saving') : t('setup.saveAndStart')}
-                  </button>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button onClick={() => setStep(0)} style={{
+                      padding: '8px 16px', borderRadius: 8,
+                      background: 'transparent', border: '1px solid var(--border-color)',
+                      color: 'var(--text-muted)', cursor: 'pointer', fontSize: 12,
+                    }}>
+                      {t('setup.back')}
+                    </button>
+                    <button onClick={handleSave} disabled={!apiKey.trim() || saving} style={{
+                      padding: '8px 20px', borderRadius: 8,
+                      background: apiKey.trim() ? 'var(--accent)' : 'var(--bg-tertiary)',
+                      border: 'none', color: apiKey.trim() ? '#fff' : 'var(--text-muted)',
+                      cursor: apiKey.trim() ? 'pointer' : 'not-allowed',
+                      fontSize: 12, fontWeight: 500,
+                    }}>
+                      {saving ? t('setup.saving') : t('setup.saveAndStart')}
+                    </button>
+                  </div>
                 </div>
               </div>
             </>

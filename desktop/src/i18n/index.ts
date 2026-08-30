@@ -588,6 +588,10 @@ i18n.use(initReactI18next).init({
           skip: '跳过，使用默认配置',
           saveFailed: '保存失败',
           saveFailedBackend: '保存失败，请检查后端是否在运行',
+          testConn: '测试连接',
+          testing: '测试中…',
+          testOk: '连接成功',
+          testFail: '连接失败，请检查 Key',
         },
         filePicker: {
           readDirError: '无法读取目录',
@@ -1319,6 +1323,10 @@ i18n.use(initReactI18next).init({
           skip: '跳過，使用預設設定',
           saveFailed: '儲存失敗',
           saveFailedBackend: '儲存失敗，請檢查後端是否在運行',
+          testConn: '測試連線',
+          testing: '測試中…',
+          testOk: '連線成功',
+          testFail: '連線失敗，請檢查 Key',
         },
         filePicker: {
           readDirError: '無法讀取目錄',
@@ -2050,6 +2058,10 @@ i18n.use(initReactI18next).init({
           skip: 'Skip, use default config',
           saveFailed: 'Save failed',
           saveFailedBackend: 'Save failed, check if backend is running',
+          testConn: 'Test connection',
+          testing: 'Testing…',
+          testOk: 'Connected',
+          testFail: 'Connection failed, check the key',
         },
         filePicker: {
           readDirError: 'Cannot read directory',
