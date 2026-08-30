@@ -11,6 +11,7 @@ import TabBar from '../components/TabBar';
 import CheckpointPanel from '../components/CheckpointPanel';
 import LspPanel from '../components/LspPanel';
 import GitPanel from '../components/GitPanel';
+import SessionViewer from '../components/SessionViewer';
 import KnowledgePanel from '../components/KnowledgePanel';
 import GoalPanel from '../components/GoalPanel';
 import McpPanel from '../components/McpPanel';
@@ -430,6 +431,9 @@ const ChatPage: React.FC = () => {
   const tabOrder = useAppStore(s => s.tabOrder);
   const reorderTab = useAppStore(s => s.reorderTab);
   const isStreaming = !!(activeSessionId && streamingSessions[activeSessionId]);
+  // D1 split-pane (minimal): a read-only session comparison pane. splitViewId
+  // holds the session shown side-by-side; null = off.
+  const [splitViewId, setSplitViewId] = useState<string | null>(null);
   // S5: last wall-clock time we wrote a live token/cost estimate into the
   // store while streaming. The backend only reports usage on 'done', so the
   // input-bar counters would otherwise sit frozen during generation; we tick
@@ -1719,6 +1723,11 @@ const ChatPage: React.FC = () => {
           )}
         </div>
 
+        {/* D1 split-pane (minimal): read-only session comparison pane. */}
+        {splitViewId && splitViewId !== activeSessionId && (
+          <SessionViewer sessionId={splitViewId} onClose={() => setSplitViewId(null)} />
+        )}
+
         {/* Lightbox — zoomed image attachment */}
         {lightbox && (
           <div
@@ -1739,6 +1748,28 @@ const ChatPage: React.FC = () => {
           background: 'var(--bg-secondary)', padding: '16px 14px', overflowY: 'auto',
           fontSize: 12, color: 'var(--text-secondary)', display: 'flex', flexDirection: 'column', gap: 14,
         }}>
+          {/* Split-pane comparison (D1 minimal): pick another session to view
+              read-only next to the active conversation. */}
+          <div className="card" style={{ padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
+              {t('split.title')}
+            </div>
+            <select
+              value={splitViewId || ''}
+              onChange={e => setSplitViewId(e.target.value || null)}
+              style={{
+                width: '100%', padding: '5px 6px', borderRadius: 6, fontSize: 11,
+                border: '1px solid var(--border-color)', background: 'var(--bg-primary)',
+                color: 'var(--text-primary)', outline: 'none',
+              }}
+            >
+              <option value="">{t('split.off')}</option>
+              {sessions.filter(s => s.id !== activeSessionId).map(s => (
+                <option key={s.id} value={s.id}>{s.title || s.id}</option>
+              ))}
+            </select>
+          </div>
+
           {/* Workspace file tree — shown when the active workspace is bound
               to a real local directory. Double-click inserts @path into the
               input; right-click offers ask/explain/optimize actions. */}
