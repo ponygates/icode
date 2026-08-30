@@ -376,6 +376,7 @@ export const slashCommands: SlashCommand[] = [
   { name: 'plugin', usage: '[list|add|rm]', descKey: 'slash.descPlugin', run: () => ({ type: 'passthrough' as const }) },
   { name: 'whoami', descKey: 'slash.descWhoami', run: () => ({ type: 'passthrough' as const }) },
   { name: 'history', descKey: 'slash.descHistory', run: () => ({ type: 'passthrough' as const }) },
+  { name: 'replay', usage: '[a] [b]', descKey: 'slash.descReplay', run: () => ({ type: 'passthrough' as const }) },
   { name: 'release-notes', aliases: ['changelog'], descKey: 'slash.descReleaseNotes', run: () => ({ type: 'passthrough' as const }) },
   { name: 'bug', descKey: 'slash.descBug', run: () => ({ type: 'passthrough' as const }) },
   {

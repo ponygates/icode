@@ -14,6 +14,12 @@ triggers:
 当用户要求生成 .pptx 演示文稿时，按以下流程产出。
 
 ## 流程
+0. **环境检测（必做，先于一切生成动作）**：用一次 bash 调用探测：
+   `python -c "import pptx" >/dev/null 2>&1 && echo PPTX_OK`
+   - `PPTX_OK` → 用 python-pptx 生成。
+   - 缺失 → 征询用户：「缺少 python-pptx。选择：① 安装 `pip install python-pptx` 后继续（推荐）；② 不装，退而产出逐页大纲（每页标题+要点+配图建议）的 Markdown，供用户粘贴到 WPS/PowerPoint 大纲视图」。
+
+## 流程
 1. **先出大纲**：每页 = 标题 + 要点（3-5 条），让用户确认页序与内容。
 2. **生成方式**：`python -c` + python-pptx（或 python-pptx 脚本文件）。
 3. **版式规范**：
@@ -24,6 +30,5 @@ triggers:
 
 ## 输出要求
 - 生成后返回**文件路径**与总页数。
-- 若缺 python-pptx，给出安装命令（`pip install python-pptx`）。
 - **合规**：保险/金融演示涉及收益/费率时标注"以正式条款为准"，不承诺收益；数据需用户提供，不虚构。
 - 结合 image_gen 可先出封面图再嵌入（可选）。

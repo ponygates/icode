@@ -1,5 +1,16 @@
 # 更新日志
 
+## v0.51.1 — 对标体检二轮：5 项收尾快修（2026-08-30）
+
+> v0.48~v0.51 全量审计后的收尾：小尾巴全部清零，为 D1 完整分屏（SessionPane 参数化）让路。
+
+- **/share 与 /export 文件名消毒**（slashui）：filepath.Base 防止 ../ 逃出工作目录；空名回退默认时间戳文件名。
+- **桌面补 /replay 命令入口**：slashCommands 注册 + 三语 descReplay——此前桌面端只能盲打，命令面板搜不到。
+- **自动更新闭环补最后一环：一键重启**——后端 POST /api/update/restart（分离式 2s 延迟重拉 + 600ms 优雅关停退出，先释放单实例互斥锁）；设置页更新成功后出现「立即重启」按钮（三语）。重启即生效，不再让用户手动找 exe。
+- **更新器跨平台资产映射**（update/upgrade.go）：按 GOOS/GOARCH + 二进制种类（desktop/cli，从自身文件名判定）匹配 CI 发布资产（含 macos-13/14、ubuntu-latest 命名差异与 x64 别名）；desktop 永不降级为 CLI 构建（匹配不到直接报错给手动下载链接）；magic 校验按平台区分（PE MZ / ELF / Mach-O 四变体）；旧版裸名 icode.exe 资产保留回退。7 组平台映射单测。
+- **办公技能×3 加「第 0 步：环境检测」**（docx/xlsx/pptx）：生成前先一次 bash 探测工具链，缺失时给用户明确选择——①一键可复制的安装命令（winget/brew/pip）后继续，②诚实降级路径（Markdown/CSV/大纲），不再硬造文件。
+- 验证：Go build/vet/test 全绿；桌面 tsc 零错误 + 34 测试全过 + vite build 成功。
+
 ## v0.51.0 — 桌面分屏对照（D1 最小版）（2026-08-30）
 
 > D1 分屏收官（最小侵入版）：右侧只读会话对照面板，不碰 ChatPage 的交互状态（36 处 activeSessionId 零改动，规避 2488 行重构回归风险）。完整双交互分屏（SessionPane 参数化）清单已就绪，见 docs/split_design.md。

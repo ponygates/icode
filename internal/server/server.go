@@ -17,6 +17,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
+	"runtime"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
@@ -129,6 +131,7 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 
 	// App update check
 	mux.HandleFunc("/api/update/check", s.handleUpdateCheck)
+	mux.HandleFunc("/api/update/restart", s.handleUpdateRestart)
 	mux.HandleFunc("/api/update/apply", s.handleUpdateApply)
 
 	// Provider & models
@@ -467,6 +470,51 @@ func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
 		"rolled":  res.Rolled,
 		"skipped": res.Skipped,
 	})
+}
+
+// handleUpdateRestart closes the auto-update loop's final step: relaunches
+// the (already swapped) binary and exits, so "restart to take effect" becomes
+// a single click. The relaunch is detached with a 2s delay so this process can
+// release the single-instance mutex first; the HTTP response is flushed before
+// the delayed shutdown.
+func (s *Server) handleUpdateRestart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "POST required"})
+		return
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	dir, base := filepath.Dir(exe), filepath.Base(exe)
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		// cd is set to the exe dir so the bare filename needs no quoting
+		// (a quoted path inside "cmd /C ... & start ..." breaks cmd's quote rules).
+		cmd = exec.Command("cmd", "/C", "timeout /t 2 /nobreak >nul & start \"\" "+base)
+	} else {
+		cmd = exec.Command("sh", "-c", "sleep 2; exec ./"+base)
+	}
+	cmd.Dir = dir
+	if err := cmd.Start(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	// Detach: let the spawned child outlive this process.
+	go func() { _ = cmd.Wait() }()
+
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	// Flush the response, then exit so the mutex is released before the
+	// delayed relaunch fires. SQLite writes are transactional (WAL); the
+	// 600ms grace covers the response flush.
+	go func() {
+		time.Sleep(600 * time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = s.Shutdown(ctx)
+		os.Exit(0)
+	}()
 }
 
 // updateCache returns the cached update info when it is fresh (< 1 day).

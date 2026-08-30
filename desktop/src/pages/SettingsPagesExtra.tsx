@@ -277,6 +277,21 @@ export function PageUpdates({ store }: { store: StoreState }) {
       .catch(() => {});
   }, [store.backendUrl]);
 
+  const [canRestart, setCanRestart] = useState(false);
+  const [restarting, setRestarting] = useState(false);
+
+  // POST /api/update/restart — the backend relaunches the swapped binary and
+  // exits; this window dies with the old process, so no further UI updates.
+  const restartNow = async () => {
+    if (!store.backendUrl) return;
+    setRestarting(true);
+    try {
+      await fetch(`${store.backendUrl}/api/update/restart`, { method: 'POST' });
+    } catch {
+      // The old process exiting can abort this very request — not an error.
+    }
+  };
+
   const checkUpdate = async () => {
     if (!store.backendUrl) return;
     setChecking(true);
@@ -302,7 +317,10 @@ export function PageUpdates({ store }: { store: StoreState }) {
       const res = await fetch(`${store.backendUrl}/api/update/apply`, { method: 'POST' });
       const j = await res.json().catch(() => ({}));
       if (j.skipped) setApplyMsg(t('updates.upToDate'));
-      else if (j.ok) setApplyMsg(`${t('updates.updatedTo')} v${j.to} — ${t('updates.restartNeeded')}`);
+      else if (j.ok) {
+        setApplyMsg(`${t('updates.updatedTo')} v${j.to} — ${t('updates.restartNeeded')}`);
+        setCanRestart(true);
+      }
       else setApplyMsg(`${t('updates.applyFailed')}: ${j.error || `HTTP ${res.status}`}`);
       await checkUpdate();
     } catch (e) {
@@ -361,6 +379,13 @@ export function PageUpdates({ store }: { store: StoreState }) {
                 <span>{t('updates.upToDate')}</span>
               )}
               {applyMsg && <span style={{ color:'var(--text-primary)' }}>{applyMsg}</span>}
+              {canRestart && !restarting && (
+                <button onClick={restartNow} style={{
+                  padding: '5px 14px', borderRadius: 6, cursor: 'pointer', fontSize: 11,
+                  background: 'var(--accent)', color: '#fff', border: 'none', fontWeight: 600,
+                }}>{t('updates.restartNow')}</button>
+              )}
+              {restarting && <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{t('updates.restarting')}</span>}
             </div>
           )}
         </div>

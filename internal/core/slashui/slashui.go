@@ -1432,7 +1432,12 @@ func cmdLsp(b *Backend, st *State, args []string) Result {
 func cmdExport(b *Backend, st *State, args []string) Result {
 	filename := "icode-export.md"
 	if len(args) > 0 {
-		filename = args[0]
+		// Bare basename only — a "../" or absolute path in the argument must
+		// not write outside the working directory.
+		filename = filepath.Base(args[0])
+		if filename == "." || filename == string(filepath.Separator) {
+			filename = "icode-export.md"
+		}
 	}
 	if b == nil || b.SessStore == nil || st.SessionID == "" {
 		return ok("没有可导出的会话（先发一条消息）。")
@@ -1478,7 +1483,7 @@ func cmdShare(b *Backend, st *State, args []string) Result {
 	}
 	name := fmt.Sprintf("icode-share-%s.md", time.Now().Format("20060102-150405"))
 	if len(args) > 0 {
-		name = args[0]
+		name = filepath.Base(args[0])
 	}
 	res := cmdExport(b, st, []string{name})
 	if res.IsError {
@@ -1502,8 +1507,11 @@ func cmdShareHTML(b *Backend, st *State, args []string) Result {
 	}
 	name := fmt.Sprintf("icode-share-%s.html", time.Now().Format("20060102-150405"))
 	if len(args) > 0 {
-		name = args[0]
-		if !strings.HasSuffix(strings.ToLower(name), ".html") {
+		// Same path-escape guard as /export.
+		name = filepath.Base(args[0])
+		if name == "." || name == string(filepath.Separator) {
+			name = fmt.Sprintf("icode-share-%s.html", time.Now().Format("20060102-150405"))
+		} else if !strings.HasSuffix(strings.ToLower(name), ".html") {
 			name += ".html"
 		}
 	}
