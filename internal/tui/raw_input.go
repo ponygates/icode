@@ -13,6 +13,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"github.com/ponygates/icode/internal/config"
 	"github.com/ponygates/icode/internal/executil"
@@ -60,6 +61,23 @@ func (t *TUI) keyPump() {
 		r, _, err := br.ReadRune()
 		if err != nil {
 			return // EOF or read error — session input is gone
+		}
+		// ConHost/IME noise: NUL and the 0xE0 extended-key prefix are control
+		// artifacts, and astral-plane input arrives as UTF-16 surrogate pairs
+		// that must be combined — a lone half would later surface as garbage.
+		if r == 0 || r == 0xE0 {
+			continue
+		}
+		if utf16.IsSurrogate(r) {
+			r2, _, err2 := br.ReadRune()
+			if err2 != nil {
+				return
+			}
+			if combined := utf16.DecodeRune(r, r2); combined != 0xFFFD {
+				r = combined
+			} else {
+				continue
+			}
 		}
 		t.mu.Lock()
 		pending := t.permPending
@@ -432,16 +450,10 @@ func (t *TUI) handleKey(r rune) bool {
 			t.acceptSuggestion()
 			return true
 		}
-		if len(t.models) > 1 && !t.streaming {
-			// Cycle to next model (Tab). Guard against a stale modelIdx
-			// (e.g. set by /model with an unknown id) so we never index t.models[-1].
-			if t.modelIdx < 0 || t.modelIdx >= len(t.models) {
-				t.modelIdx = 0
-			}
-			t.modelIdx = (t.modelIdx + 1) % len(t.models)
-			t.model = t.models[t.modelIdx]
-			t.add(RoleSystem, "Tab -> "+t.model)
-			return true
+		// No menu open — cycle the permission mode (plan/agent/yolo/auto);
+		// model switching lives in /model, the picker and Alt+P.
+		if !t.streaming {
+			t.cycleMode()
 		}
 		return true
 	case 0x2c: // Ctrl+, — open settings panel (same as Ctrl+P)
@@ -533,8 +545,9 @@ func (t *TUI) handleKey(r rune) bool {
 			t.closeResumePicker()
 			return true
 		}
-		if ur == '[' {
-			// CSI sequence: read the parameter/command byte.
+		if ur == '[' || ur == 'O' {
+			// CSI (ESC[…) or SS3 (ESC O…) sequence — application-cursor-mode
+			// terminals send arrows as SS3; both share the letter alphabet.
 			c1, ok := t.nextKey()
 			if !ok {
 				return true
@@ -554,9 +567,8 @@ func (t *TUI) handleKey(r rune) bool {
 					return true
 				}
 				if t.acOpen && len(t.acItems) > 0 {
-					if t.acIdx > 0 {
-						t.acIdx--
-					}
+					// Wrap around: up from the first item lands on the last.
+					t.acIdx = (t.acIdx - 1 + len(t.acItems)) % len(t.acItems)
 					return true
 				}
 				li, col := inputCursorPos(t.inputBuf, t.cursor)
@@ -580,9 +592,8 @@ func (t *TUI) handleKey(r rune) bool {
 					return true
 				}
 				if t.acOpen && len(t.acItems) > 0 {
-					if t.acIdx < len(t.acItems)-1 {
-						t.acIdx++
-					}
+					// Wrap around: down from the last item lands on the first.
+					t.acIdx = (t.acIdx + 1) % len(t.acItems)
 					return true
 				}
 				lines := strings.Split(t.inputBuf, "\n")
@@ -624,6 +635,24 @@ func (t *TUI) handleKey(r rune) bool {
 			case '<': // SGR mouse report
 				t.handleMouse(keyRuneReader{ch: t.keyCh})
 				return true
+			case 'M': // X10 mouse report — 3 raw coordinate bytes follow
+				b1, ok1 := t.nextKey()
+				b2, ok2 := t.nextKey()
+				b3, ok3 := t.nextKey()
+				if !ok1 || !ok2 || !ok3 {
+					return true
+				}
+				_ = b2
+				_ = b3
+				switch btn := int(b1) - 32; {
+				case btn == 64:
+					t.scrollUpSmall()
+				case btn == 65:
+					t.scrollDownSmall()
+				case btn&3 == 2:
+					t.pasteFromClipboard() // legacy terminals: right-click press
+				}
+				return true
 			case '2':
 				// Bracketed paste begins with "200~"; otherwise it's an
 				// unknown CSI we consume and ignore.
@@ -633,10 +662,10 @@ func (t *TUI) handleKey(r rune) bool {
 					if ok3 && c3 == '0' {
 						c4, ok4 := t.nextKey()
 						if ok4 && c4 == '~' {
-						pasted := t.readPaste(keyRuneReader{ch: t.keyCh})
-						t.dismissWelcome()
-						t.insertPasted(pasted)
-						t.updateSuggestions()
+							pasted := t.readPaste(keyRuneReader{ch: t.keyCh})
+							t.dismissWelcome()
+							t.insertPasted(pasted)
+							t.updateSuggestions()
 							return true
 						}
 					}
@@ -1491,7 +1520,6 @@ func (t *TUI) pasteClipboardImage() {
 	t.notice("📎 已粘贴剪贴板图片: " + filepath.Base(path) + "（发送时作为多模态附件）")
 }
 
-
 // readImageFile reads an image file and returns its base64 payload plus a MIME
 // type, or ok=false when the file is unreadable, too large, or not a supported
 // image format.
@@ -1710,9 +1738,27 @@ func (t *TUI) handleSettingsKey(r rune) bool {
 			t.render()
 		}
 		return true
-	case '\r', '\n': // Enter — edit selected setting (placeholder)
-		t.add(RoleSystem, t.tstr("settings.soon"))
+	case '\r', '\n': // Enter — act on the selected row
+		items := t.settingsPanelItems(cfg)
+		if t.settingsCursor < 0 || t.settingsCursor >= len(items) {
+			return true
+		}
 		t.settingsOpen = false
+		t.settingsCfg = nil
+		switch t.settingsCursor {
+		case 0: // model → open the interactive model picker
+			t.showModelPicker()
+		case 2: // mode → cycle plan/agent/yolo/auto
+			t.cycleMode()
+		case 3: // language → cycle zh-CN/zh-TW/en
+			t.handleSlash("/lang")
+		case 4: // theme → toggle dark/light
+			t.handleSlash("/theme")
+		case 1, 5, 6, 7: // provider & voice credentials → full config editor
+			t.handleSlash("/config")
+		default:
+			t.add(RoleSystem, t.tstr("settings.soon"))
+		}
 		t.render()
 		return true
 	}
