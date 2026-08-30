@@ -16,7 +16,8 @@ triggers:
 ## 流程
 0. **环境检测（必做，先于一切生成动作）**：用一次 bash 调用探测：
    `python -c "import pptx" >/dev/null 2>&1 && echo PPTX_OK`
-   - `PPTX_OK` → 用 python-pptx 生成。
+   - **首选 `icode msoffice pptx`（内置零依赖生成器，任何机器可用）**：把大纲写成「# 页标题 + - 要点」格式，然后 `icode msoffice pptx -o 输出.pptx outline.md`。
+   - `PPTX_OK` 且需要母版/配色/图片等高级定制时用 python-pptx。
    - 缺失 → 征询用户：「缺少 python-pptx。选择：① 安装 `pip install python-pptx` 后继续（推荐）；② 不装，退而产出逐页大纲（每页标题+要点+配图建议）的 Markdown，供用户粘贴到 WPS/PowerPoint 大纲视图」。
 
 ## 流程

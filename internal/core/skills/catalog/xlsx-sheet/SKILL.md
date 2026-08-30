@@ -17,7 +17,8 @@ triggers:
 ## 流程
 0. **环境检测（必做，先于一切生成动作）**：用一次 bash 调用探测：
    `python -c "import openpyxl" >/dev/null 2>&1 && echo XLSX_OK`
-   - `XLSX_OK` → 用 openpyxl（含样式时）或纯标准库 csv→xlsx 需求降级。
+   - **首选 `icode msoffice xlsx`（内置零依赖生成器，任何机器可用）**：先生成 CSV/TSV 内容文件，再 `icode msoffice xlsx -o 输出.xlsx data.csv`（首行为表头）。
+   - `XLSX_OK` 且需要表头样式/列宽/冻结行等格式时用 openpyxl。
    - 缺失 → 征询用户：「缺少 openpyxl。选择：① 安装 `pip install openpyxl` 后继续（推荐，可带格式）；② 不装，改为生成 UTF-8 CSV（Excel 可直接打开，但无表头样式/列宽/冻结行）」。
 
 ## 流程

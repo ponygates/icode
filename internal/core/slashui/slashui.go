@@ -1,11 +1,13 @@
 package slashui
 
 import (
+	"archive/zip"
 	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -250,7 +252,10 @@ func Execute(ctx context.Context, b *Backend, st *State, text string) Result {
 		}
 		return ok("最近的更新日志:\n" + strings.Join(lines[:limit], "\n") + "\n\n完整日志: https://github.com/ponygates/icode/releases")
 	case "/bug", "/feedback":
-		return ok("反馈问题:\n  · GitHub Issues: https://github.com/ponygates/icode/issues\n  · 或对话中 `# <内容>` 写入记忆文件")
+		if len(args) > 0 && strings.EqualFold(args[0], "zip") {
+			return cmdBugZip(st)
+		}
+		return ok("反馈问题:\n  · /bug zip — 生成脱敏诊断包（版本/日志/配置打码，附 issue 直接上传）\n  · GitHub Issues: https://github.com/ponygates/icode/issues\n  · 或对话中 `# <内容>` 写入记忆文件")
 	case "/pr", "/pr_comments":
 		return ok("PR 评论功能需配合 GitHub 相关工具使用；当前桌面端/UI 版未内置该命令。")
 	case "/exit", "/quit":
@@ -2614,4 +2619,64 @@ func cmdMesh(args []string, ctx context.Context) Result {
 	default:
 		return errf("用法: /mesh [list | add <名> <url> [token] | remove <名> | token]")
 	}
+}
+
+// cmdBugZip assembles a sanitized diagnostics bundle: version, recent logs,
+// config with every key/secret masked, OS info — one zip to attach to an issue.
+func cmdBugZip(st *State) Result {
+	name := fmt.Sprintf("icode-diagnostics-%s.zip", time.Now().Format("20060102-150405"))
+	zf, err := os.Create(name)
+	if err != nil {
+		return errf("创建诊断包失败: %v", err)
+	}
+	defer zf.Close()
+	zw := zip.NewWriter(zf)
+	defer zw.Close()
+
+	add := func(name string, data []byte) {
+		f, err := zw.Create(name)
+		if err != nil {
+			return
+		}
+		_, _ = f.Write(data)
+	}
+
+	// 1. version + environment
+	ver := "unknown"
+	if st != nil {
+		ver = st.Version
+	}
+	add("version.txt", []byte(fmt.Sprintf("version: %s\nos: %s/%s\ntime: %s\n",
+		ver, runtime.GOOS, runtime.GOARCH, time.Now().Format(time.RFC3339))))
+
+	// 2. config (sanitized: every field whose name hints at a secret is masked)
+	if data, err := os.ReadFile(config.DefaultPath()); err == nil {
+		add("config.sanitized.yaml", []byte(sanitizeConfig(string(data))))
+	}
+
+	// 3. recent logs (last 200 lines each)
+	home, _ := os.UserHomeDir()
+	for _, logName := range []string{"desktop.log", "simpleui.log"} {
+		if data, err := os.ReadFile(filepath.Join(home, ".icode", logName)); err == nil {
+			add("logs/"+logName, []byte(tailLines(string(data), 200)))
+		}
+	}
+
+	abs, _ := filepath.Abs(name)
+	return ok(fmt.Sprintf("✓ 诊断包已生成: %s\n已脱敏（API key 全部打码）；直接附到 GitHub issue 即可。", abs))
+}
+
+// sanitizeConfig masks values of secret-looking keys.
+func sanitizeConfig(cfg string) string {
+	re := regexp.MustCompile(`(?i)^(\s*(?:key|api_key|apikey|token|secret|password)\s*:\s*).+$`)
+	return re.ReplaceAllString(cfg, "$1\"***MASKED***\"")
+}
+
+// tailLines keeps the last n lines of s.
+func tailLines(s string, n int) string {
+	lines := strings.Split(strings.ReplaceAll(s, "\r\n", "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
 }

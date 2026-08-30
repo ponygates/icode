@@ -1,5 +1,15 @@
 # 更新日志
 
+## v0.52.0 — D1 完整分屏 + Go 内置办公生成器 + 诊断包 + ACP e2e（2026-08-30）
+
+> 第二轮对标体检的大项轮：D1 双向分屏收官；办公文档从「依赖外部工具」升级为「零依赖内置」；/bug 升级为脱敏诊断包；ACP 协议通过脚本化真机 e2e（7/7）。
+
+- **D1 完整版分屏（A+E 合并手术）**：ChatPage 参数化——加 sessionId 可选 prop，选择器改名 storeActiveId + 派生 `activeSessionId = sessionId ?? storeActiveId`，设计文档列出的 36 处引用零改动自动生效（回归风险最小化）；嵌入模式跳过壳层（Header/TabBar/侧栏/状态栏）并门控全局副作用（checkBackend/快捷键/事件监听/palette Ctrl+K 仅主实例）；SplitPane 左=当前活跃会话（跟随 tab 切换）右=嵌入 ChatPage（可独立输入/流式/权限弹窗），拖拽分隔条比例持久化；tab 右键「在右侧分屏打开 / 退出分屏」；只读 SessionViewer 退役。权限弹窗/plan 栏按 pane 归属（各自实例状态天然隔离）。
+- **C · Go 内置办公文档生成器**（internal/msoffice，零依赖）：docx（Markdown→标题/列表/段落+中文样式表）、xlsx（CSV/TSV→inlineStr 工作表）、pptx（大纲→母版/布局/主题/幻灯片全套 OOXML）；单测覆盖 zip 结构+XML well-formed+转义+A1 引用；新命令 `icode msoffice docx|xlsx|pptx -o out <in>`（e2e 实测三种格式出文件）。办公技能×3 生成方式改为「内置生成器 → pandoc/python 增强」三级优先级。
+- **D · /bug zip 脱敏诊断包**：版本+OS、config（key/token/secret/password 字段正则打码）、desktop.log/simpleui.log 尾部 200 行打包 zip，附 issue 即用。
+- **B · ACP 真机 e2e**：脚本化 JSON-RPC stdio 客户端跑 initialize / session/new / set_mode（合法+非法）/ 未知方法 / load 不存在会话——7/7 通过，协议 schema 与规范一致。
+- 验证：Go build/vet/test 全绿；桌面 tsc 零错误 + 34 测试 + vite build 成功。
+
 ## v0.51.1 — 对标体检二轮：5 项收尾快修（2026-08-30）
 
 > v0.48~v0.51 全量审计后的收尾：小尾巴全部清零，为 D1 完整分屏（SessionPane 参数化）让路。

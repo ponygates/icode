@@ -20,9 +20,10 @@ triggers:
    - 仅 `DOCX_OK` → 走 python-docx。
    - 两者皆缺 → 先征询用户：「检测到缺少 pandoc / python-docx，选择：① 我给你安装命令（Windows: `winget install -e --id JohnMacFarlane.Pandoc` 或 `pip install python-docx`；macOS: `brew install pandoc`），装好后继续；② 不装了，退而生成排版好的 Markdown 文件，用户自行粘贴到 Word」——用户选 ② 时把 Markdown 按 Word 可粘贴的层级写清楚，不要硬造 .docx。
 1. **确认结构**：先列出文档大纲（标题层级）让用户确认，再生成。
-2. **生成方式**（二选一）：
-   - 优先 `pandoc`（若已安装）：写 Markdown 源 → `pandoc input.md -o output.docx`，最省事且样式统一。
-   - 无 pandoc 用 `python -c` + python-docx：脚本设置标题/正文/表格样式。
+2. **生成方式**（按优先级）：
+   - **首选 `icode msoffice docx`（内置零依赖生成器，任何机器可用）**：把大纲写成 Markdown（#/##/### 标题、- 列表、正文段落），然后 `icode msoffice docx -o 输出.docx outline.md`。
+   - 次选 `pandoc`（若已安装且需要更复杂样式）：`pandoc input.md -o output.docx`。
+   - 最后 python-docx：需要超出上述能力的格式定制时用 `python -c` 脚本。
 3. **规范**：
    - 标题层级：一级标题（文档名）、二级标题（章节）、正文、表格。
    - 中文排版：首行缩进 2 字符、行距 1.5、字体仿宋/宋体（正文）+ 黑体（标题）。
