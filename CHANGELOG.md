@@ -8,6 +8,7 @@
 - **C · Go 内置办公文档生成器**（internal/msoffice，零依赖）：docx（Markdown→标题/列表/段落+中文样式表）、xlsx（CSV/TSV→inlineStr 工作表）、pptx（大纲→母版/布局/主题/幻灯片全套 OOXML）；单测覆盖 zip 结构+XML well-formed+转义+A1 引用；新命令 `icode msoffice docx|xlsx|pptx -o out <in>`（e2e 实测三种格式出文件）。办公技能×3 生成方式改为「内置生成器 → pandoc/python 增强」三级优先级。
 - **D · /bug zip 脱敏诊断包**：版本+OS、config（key/token/secret/password 字段正则打码）、desktop.log/simpleui.log 尾部 200 行打包 zip，附 issue 即用。
 - **B · ACP 真机 e2e**：脚本化 JSON-RPC stdio 客户端跑 initialize / session/new / set_mode（合法+非法）/ 未知方法 / load 不存在会话——7/7 通过，协议 schema 与规范一致。
+- **修复：`icode server` 现在服务内嵌 UI**（此前只有 desktop 模式接 SetEmbeddedFrontend，server 子命令只出「UI not found」占位页）——无头 Web UI 模式真正可用；已用无头 Edge 截图验证 UI 完整渲染（侧栏/头部/TabBar/欢迎屏/Git 工作台面板/状态栏/输入区）。
 - 验证：Go build/vet/test 全绿；桌面 tsc 零错误 + 34 测试 + vite build 成功。
 
 ## v0.51.1 — 对标体检二轮：5 项收尾快修（2026-08-30）

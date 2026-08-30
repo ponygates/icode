@@ -22,6 +22,7 @@ import (
 	"github.com/ponygates/icode/internal/core/todo"
 	"github.com/ponygates/icode/internal/core/tool"
 	"github.com/ponygates/icode/internal/core/voice"
+	"github.com/ponygates/icode/internal/embedded"
 	"github.com/ponygates/icode/internal/llm/provider"
 	"github.com/ponygates/icode/internal/server"
 	"github.com/ponygates/icode/internal/tui"
@@ -2373,6 +2374,12 @@ var serverCmd = &cobra.Command{
 			Version:  appVersion,
 			Port:     port,
 		})
+
+		// Serve the embedded desktop UI so `icode server` is a complete
+		// headless web-UI mode (browser on any device → this port).
+		if f := embedded.Frontend(); f != nil {
+			server.SetEmbeddedFrontend(f)
+		}
 
 		ctx := context.Background()
 		actualPort, err := srv.Start(ctx)
