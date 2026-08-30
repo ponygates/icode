@@ -1,5 +1,16 @@
 # 更新日志
 
+## v0.48.0 — ZCode 协作轮：自动化模板库 + Git 工作台 + 桌面多会话流式（2026-08-30）
+
+> ZCode（智谱）按新一轮对标差距分析推进 D3/D2/D1，中途断点由 WorkBuddy 接续修复完成（ChatPage TS 错误、TabBar streamingIds/onReorder、权限弹窗 {req,sid} 结构）。
+
+- **D3 自动化任务模板库（WorkBuddy 杀手锏对齐）**：内置 9 个模板（dev 3：代码巡检/改动审查/依赖检查；info 2：竞品 Release 摘要/行业早报；office 3：周报/会议纪要/知识库整理；life 1：朋友圈文案）+ 用户自存模板（`~/.icode/automation_templates.json`）；`GET/POST/DELETE /api/automations/templates`。
+- **D2 Git 工作台面板（Claude Code 桌面对齐）**：桌面右侧 Git 面板（变更文件列表 M/A/D → DiffViewer → 暂存勾选 → 提交）；8 个端点 `/api/git/*`（status/diff/stage/unstage/commit/discard/branches/checkout）；**AI commit message**（复用分类器便宜模型，`Engine.GenerateCommitMessage`）；DiffViewer 重构拆出 DiffBody 组件。
+- **D1 桌面多会话并行流式（opencode 对齐）**：`streamingSessions` 多会话流式状态；TabBar **流式脉冲点**（后台 tab 生成中可见）；**拖拽排序**接线（appStore.reorderTab 死代码激活，拖动高亮落点）。
+- **D5 桌面英文 i18n**：en 资源补全（fallbackLng 生效）。
+- 修复（WorkBuddy 接续）：ChatPage 权限弹窗 13 处字段访问适配 `{req, sid}` 结构；TabBarProps 补 `streamingIds`/`onReorder`。
+- 验证：Go 全量测试绿；tsc --noEmit 0 错误；vite build ✓；四份二进制重编 PE 正确（含嵌入新前端）。
+
 ## v0.47.3 — ask_user_form 多问题 wizard（opencode AskQuestion parity）（2026-08-29）
 
 > 对标体检 P2 收官：一次交互问最多 8 个问题，每个问题支持单选 / 多选 / 自由文本——opencode AskQuestion wizard 对齐。

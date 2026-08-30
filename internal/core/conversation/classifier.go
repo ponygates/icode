@@ -63,6 +63,7 @@ func (e *Engine) SetClassifierModel(modelID string) {
 	e.mu.Lock()
 	gate := e.gate
 	provReg := e.providerReg
+	e.cheapModelID = strings.TrimSpace(modelID)
 	e.mu.Unlock()
 	if gate == nil || provReg == nil {
 		return
@@ -82,6 +83,53 @@ func (e *Engine) SetClassifierModel(modelID string) {
 	}
 	gate.SetClassifier(&llmClassifier{prov: prov, model: model})
 }
+
+// GenerateCommitMessage drafts a one-line commit message from a unified diff
+// using the configured cheap model (the same one as the auto-mode classifier).
+// Used by the desktop git workbench. Returns an error when no cheap model is
+// configured so the UI can hide the affordance instead of guessing.
+func (e *Engine) GenerateCommitMessage(ctx context.Context, diff string) (string, error) {
+	e.mu.Lock()
+	modelID := e.cheapModelID
+	provReg := e.providerReg
+	e.mu.Unlock()
+	if modelID == "" {
+		return "", fmt.Errorf("no classifier_model configured")
+	}
+	provName, model, ok := splitProviderModel(modelID)
+	if !ok {
+		return "", fmt.Errorf("bad classifier_model %q", modelID)
+	}
+	prov, err := provReg.Get(provName)
+	if err != nil {
+		return "", fmt.Errorf("provider %q: %w", provName, err)
+	}
+	prompt := fmt.Sprintf(commitMsgPrompt, truncateStr(diff, 6000))
+	msg, err := prov.Chat(ctx, types.ChatRequest{
+		Model:       model,
+		Messages:    []types.Message{{Role: types.RoleUser, Content: prompt}},
+		MaxTokens:   80,
+		Temperature: 0,
+	})
+	if err != nil {
+		return "", fmt.Errorf("commit message: %w", err)
+	}
+	out := strings.TrimSpace(msg.Content)
+	// Strip markdown fences / surrounding quotes some models add.
+	out = strings.Trim(out, "`\"' \n")
+	// First line only — the workbench input is single-line by design.
+	if i := strings.IndexAny(out, "\r\n"); i >= 0 {
+		out = strings.TrimSpace(out[:i])
+	}
+	if len([]rune(out)) > 100 {
+		out = string([]rune(out)[:100]) + "…"
+	}
+	return out, nil
+}
+
+const commitMsgPrompt = `根据下面的 git diff 草拟一条简洁的提交信息。要求：中文或英文与 diff 注释语言一致；格式为 conventional commit（feat:/fix:/refactor:/docs:/chore: 之一 + 一句话描述，不超过 50 字）；不要解释，只输出提交信息本身。
+diff:
+%s`
 
 // splitProviderModel parses "provider/model" into its parts.
 func splitProviderModel(id string) (string, string, bool) {

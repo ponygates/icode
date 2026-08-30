@@ -175,6 +175,11 @@ interface AppStore {
   tabOrder: string[] | null;
   // Trash holds soft-deleted sessions (recoverable via restoreSession).
   trash: Session[];
+  // Sessions with a live in-flight stream (multi-session parallel streaming).
+  // Keyed by session id; drives per-tab spinners and guards the lazy message
+  // fetch in setActiveSession from clobbering a still-streaming transcript.
+  streamingSessions: Record<string, boolean>;
+  setStreaming: (sessionId: string, on: boolean) => void;
   createSession: (modelId: string, provider: string) => void;
   setActiveSession: (id: string) => void;
   deleteSession: (id: string) => void;
@@ -484,6 +489,19 @@ export const useAppStore = create<AppStore>()(
   openTabIds: loadOpenTabs(),
   tabOrder: loadTabOrder(),
   trash: [],
+  streamingSessions: {},
+
+  setStreaming: (sessionId, on) => {
+    set((state) => {
+      // New object identity only when the membership actually changes —
+      // TabBar subscribes to this slice and must not re-render per event.
+      if (!!state.streamingSessions[sessionId] === on) return state;
+      const next = { ...state.streamingSessions };
+      if (on) next[sessionId] = true;
+      else delete next[sessionId];
+      return { streamingSessions: next };
+    });
+  },
 
   workspaces: [],
   activeWorkspaceId: loadActiveWorkspace(),
@@ -521,6 +539,8 @@ export const useAppStore = create<AppStore>()(
         .then((r) => (r.ok ? r.json() : null))
         .then((data: ApiSession | null) => {
           if (!data) return;
+          // Never clobber a session that is still streaming (parallel tabs).
+          if (get().streamingSessions[aid]) return;
           const msgs = (data.messages || []).map((m) => ({
             id: m.id || Math.random().toString(36).slice(2),
             role: (m.role as Message['role']) || 'assistant',
@@ -673,6 +693,8 @@ export const useAppStore = create<AppStore>()(
         .then((r) => (r.ok ? r.json() : null))
         .then((data: ApiSession | null) => {
           if (!data) return;
+          // Never clobber a session that is still streaming (parallel tabs).
+          if (get().streamingSessions[id]) return;
           const msgs = (data.messages || []).map((m) => ({
             id: m.id || Math.random().toString(36).slice(2),
             role: (m.role as Message['role']) || 'assistant',

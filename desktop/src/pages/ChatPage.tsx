@@ -10,6 +10,7 @@ import TokenBar from '../components/TokenBar';
 import TabBar from '../components/TabBar';
 import CheckpointPanel from '../components/CheckpointPanel';
 import LspPanel from '../components/LspPanel';
+import GitPanel from '../components/GitPanel';
 import KnowledgePanel from '../components/KnowledgePanel';
 import GoalPanel from '../components/GoalPanel';
 import McpPanel from '../components/McpPanel';
@@ -320,12 +321,17 @@ const ChatPage: React.FC = () => {
   const palette = useCommandPalette();
   const { t } = useTranslation();
   const [input, setInput] = useState('');
-  const [isStreaming, setIsStreaming] = useState(false);
+  // Per-session streaming state lives in the store (streamingSessions) so
+  // background tabs keep generating in parallel; `isStreaming` below is the
+  // active session's slice of it.
   // Set when a plan-mode turn finished and the plan awaits confirmation.
-  const [planPending, setPlanPending] = useState(false);
-  // Interactive permission request pending an answer from the user. When set,
-  // the conversation engine is blocked server-side until we respond.
-  const [pendingPermission, setPendingPermission] = useState<PermissionRequest | null>(null);
+  // sid = the session the plan belongs to (only that tab shows the bar).
+  const [planPending, setPlanPending] = useState<{ sid: string } | null>(null);
+  // Interactive permission requests pending an answer from the user, one
+  // queue entry per streaming session. The modal shows queue[0]; while a
+  // conversation engine is blocked server-side until we respond.
+  const [permQueue, setPermQueue] = useState<{ req: PermissionRequest; sid: string }[]>([]);
+  const pendingPermission = permQueue[0] || null;
   // Zoomed image attachment (lightbox)
   const [lightbox, setLightbox] = useState<string | null>(null);
   const [attachedImages, setAttachedImages] = useState<{ mime: string; data: string }[]>([]);
@@ -417,11 +423,13 @@ const ChatPage: React.FC = () => {
   const refreshModels = useAppStore(s => s.refreshModels);
   const loadWorkspaces = useAppStore(s => s.loadWorkspaces);
 
-  const abortRef = useRef<AbortController | null>(null);
-  // True when the user pressed Esc / the stop button — lets streamChat
-  // distinguish "user stopped" from "request timed out" in the AbortError
-  // catch. Reset after each stream ends.
-  const userStoppedRef = useRef(false);
+  const abortRef = useRef<AbortController | null>(null); // legacy: kept for window.icode bridges
+  // Per-session streaming bookkeeping (parallel tabs) + tab order/reorder.
+  const streamingSessions = useAppStore(s => s.streamingSessions);
+  const setStreaming = useAppStore(s => s.setStreaming);
+  const tabOrder = useAppStore(s => s.tabOrder);
+  const reorderTab = useAppStore(s => s.reorderTab);
+  const isStreaming = !!(activeSessionId && streamingSessions[activeSessionId]);
   // S5: last wall-clock time we wrote a live token/cost estimate into the
   // store while streaming. The backend only reports usage on 'done', so the
   // input-bar counters would otherwise sit frozen during generation; we tick
@@ -487,12 +495,21 @@ const ChatPage: React.FC = () => {
       ? activeWs.session_ids.filter((id) => openTabIds.includes(id))
       : openTabIds
     : openTabIds;
-  const visibleTabs = visibleTabIds
+  // Sort by the user's drag order (tabOrder); ids missing from it (new tabs)
+  // keep their relative order at the end.
+  const tabSeq = tabOrder ?? openTabIds;
+  const sortedTabIds = [...visibleTabIds].sort((a, b) => {
+    const ia = tabSeq.indexOf(a), ib = tabSeq.indexOf(b);
+    return (ia < 0 ? tabSeq.length : ia) - (ib < 0 ? tabSeq.length : ib);
+  });
+  const visibleTabs = sortedTabIds
     .map((id) => {
       const s = sessions.find((x) => x.id === id);
       return { id, title: s?.title || t('chat.session') };
     })
     .filter((tab) => tab.id);
+  // Sessions still generating — background tabs get a live spinner dot.
+  const streamingTabIds = Object.keys(streamingSessions);
 
   // Derived: files the agent has touched, recomputed only when messages change
   // (was an inline IIFE re-running every render → expensive during streaming).
@@ -535,6 +552,9 @@ const ChatPage: React.FC = () => {
   };
 
   const handleTabClose = (id: string) => {
+    // A background tab may still be generating — stop its stream before the
+    // tab disappears, otherwise the fetch would keep running headless.
+    if (streamingSessions[id]) stopSessionStream(id);
     closeTab(id);
   };
 
@@ -852,7 +872,7 @@ const ChatPage: React.FC = () => {
     };
     addMessage(sid, userMsg);
     setInput('');
-    setIsStreaming(true);
+    setStreaming(sid, true);
 
     const assistantMsg: Message = {
       id: (Date.now() + 1).toString(36),
@@ -907,7 +927,8 @@ const ChatPage: React.FC = () => {
       if (ty === 'plan_proposal') {
         // Plan-mode turn finished — arm the confirmation bar so the user can
         // accept the plan (switch to auto and start executing) or discard it.
-        setPlanPending(true);
+        // Tagged with the owning session: the bar only renders in that tab.
+        setPlanPending({ sid });
         return;
       }
       if (ty === 'text') {
@@ -933,9 +954,10 @@ const ChatPage: React.FC = () => {
         // S5 live tick: usage only arrives on 'done', so estimate from
         // streamed chars (~4 chars/token) and write to the store at most
         // once per second — keeps the input-bar counters moving while
-        // generating without a store write per chunk.
+        // generating without a store write per chunk. Background sessions
+        // don't touch the visible counters.
         const now = Date.now();
-        if (now - lastUsageTickRef.current >= 1000) {
+        if (now - lastUsageTickRef.current >= 1000 && useAppStore.getState().activeSessionId === sid) {
           lastUsageTickRef.current = now;
           const estOut = Math.round(accumulated.length / 4);
           const live = useAppStore.getState().tokenUsage;
@@ -962,7 +984,9 @@ const ChatPage: React.FC = () => {
         scheduleFlush();
       } else if (ty === 'permission') {
         const req = event.permission || event.Permission;
-        if (req?.request_id) setPendingPermission(req);
+        // Queue per session — a background tab's permission request waits
+        // behind (or ahead of) the visible one instead of overwriting it.
+        if (req?.request_id) setPermQueue(q => [...q, { req, sid }]);
       } else if (ty === 'done') {
         settled = true;
         if (thinkingBuf) {
@@ -970,21 +994,24 @@ const ChatPage: React.FC = () => {
           thinkingBuf = '';
         }
         flushNow();
-        setIsStreaming(false);
-        setPendingPermission(null);
+        setStreaming(sid, false);
+        setPermQueue(q => q.filter(p => p.sid !== sid));
+        setPlanPending(p => (p?.sid === sid ? null : p));
         const u = event.meta?.usage;
-        updateTokenUsage({
-          input: u?.prompt_tokens || u?.PromptTokens || 0,
-          output: u?.completion_tokens || u?.CompletionTokens || 0,
-          cacheHit: u?.cache_hit_tokens || 0,
-          cost: estimateCost(u, currentModel),
-        });
+        if (useAppStore.getState().activeSessionId === sid) {
+          updateTokenUsage({
+            input: u?.prompt_tokens || u?.PromptTokens || 0,
+            output: u?.completion_tokens || u?.CompletionTokens || 0,
+            cacheHit: u?.cache_hit_tokens || 0,
+            cost: estimateCost(u, currentModel),
+          });
+        }
       } else if (ty === 'error') {
         settled = true;
         accumulated += '\n❌ ' + (event.content || t('chat.unknownError'));
         flushNow();
-        setIsStreaming(false);
-        setPendingPermission(null);
+        setStreaming(sid, false);
+        setPermQueue(q => q.filter(p => p.sid !== sid));
       }
     };
 
@@ -1039,7 +1066,7 @@ const ChatPage: React.FC = () => {
           payload.attachments = attachedImages.map(img => ({ type: 'image', mime: img.mime, data: img.data }));
           setAttachedImages([]);
         }
-        await streamChat(url, payload, onEvent, abortRef, userStoppedRef);
+        await streamChat(url, payload, onEvent, sid);
         setInput('');
         return;
       }
@@ -1097,11 +1124,11 @@ const ChatPage: React.FC = () => {
               payload.attachments = attachedImages.map(img => ({ type: 'image', mime: img.mime, data: img.data }));
               setAttachedImages([]);
             }
-            await streamChat(url, payload, onEvent, abortRef, userStoppedRef);
+            await streamChat(url, payload, onEvent, sid);
           } else {
             const out = data?.output || '';
             updateMessage(sid, { ...assistantMsg, content: out || '(no output)' });
-            setIsStreaming(false);
+            setStreaming(sid, false);
           }
           if (!settled) { settled = true; }
           setInput('');
@@ -1117,25 +1144,26 @@ const ChatPage: React.FC = () => {
         setAttachedImages([]);
       }
       console.log('[iCode] sending to', url, 'model:', model, 'provider:', provider);
-      await streamChat(url, payload, onEvent, abortRef, userStoppedRef);
+      await streamChat(url, payload, onEvent, sid);
     } else {
       onEvent({ type: 'error', content: t('chat.backendError') });
     }
 
-    if (!settled) { settled = true; setIsStreaming(false); }
+    if (!settled) { settled = true; setStreaming(sid, false); }
   }, [input, activeSessionId, isStreaming, selectedModel, currentModel, attachedImages]);
   handleSendRef.current = handleSend;
 
   // Accept a plan-mode proposal: leave read-only plan mode and start executing
   // the plan in the continuation turn.
   const confirmPlan = useCallback(() => {
-    setPlanPending(false);
+    setPlanPending(null);
     useAppStore.getState().setMode('auto');
     handleSend('计划已确认。请按上述计划立即开始执行，不要再重复或重新规划，直接动手。');
   }, [handleSend]);
 
   const respondPermission = useCallback(async (requestId: string, decision: string) => {
-    setPendingPermission(null);
+    // Pop this request off the queue; the next queued one (if any) renders.
+    setPermQueue(q => q.slice(1));
     try {
       if (window.icode?.respondPermission) {
         await window.icode.respondPermission(requestId, decision);
@@ -1149,25 +1177,33 @@ const ChatPage: React.FC = () => {
     } catch { /* backend unreachable */ }
   }, [backendUrl]);
 
-  const handleStop = useCallback(() => {
-    if (!activeSessionId) return;
-    // Mark the abort as user-initiated so streamChat's AbortError catch shows
-    // a "stopped" notice instead of the misleading "request timed out" text.
-    userStoppedRef.current = true;
-    abortRef.current?.abort();
-    setPendingPermission(null);
-    setIsStreaming(false);
-    // Try Electron IPC first, then HTTP
+  // stopSessionStream aborts one session's in-flight stream (no-op if it
+  // isn't streaming) and tells the backend to stop generating server-side.
+  const stopSessionStream = useCallback((sid: string) => {
+    const entry = sessionStreams.get(sid);
+    if (entry) {
+      // Mark the abort as user-initiated so streamChat's AbortError catch
+      // shows a "stopped" notice instead of the misleading timeout text.
+      entry.userStopped = true;
+      entry.ctrl.abort();
+    }
+    setStreaming(sid, false);
+    setPermQueue(q => q.filter(p => p.sid !== sid));
     if (window.icode?.stopChat) {
-      window.icode.stopChat(activeSessionId).catch(() => {});
+      window.icode.stopChat(sid).catch(() => {});
     } else if (backendUrl) {
       fetch(`${backendUrl}/api/chat/stop`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: activeSessionId }),
+        body: JSON.stringify({ session_id: sid }),
       }).catch(() => {});
     }
-  }, [activeSessionId, backendUrl]);
+  }, [backendUrl, setStreaming]);
+
+  const handleStop = useCallback(() => {
+    if (!activeSessionId) return;
+    stopSessionStream(activeSessionId);
+  }, [activeSessionId, stopSessionStream]);
 
   // Global shortcuts dispatched from App.tsx: Ctrl+N / Ctrl+L / Esc.
   useEffect(() => {
@@ -1489,9 +1525,11 @@ const ChatPage: React.FC = () => {
       <TabBar
         tabs={visibleTabs}
         activeId={activeSessionId}
+        streamingIds={streamingTabIds}
         onSelect={handleTabSelect}
         onClose={handleTabClose}
         onNew={handleTabNew}
+        onReorder={reorderTab}
         onContextMenu={(e, id) => {
           e.preventDefault();
           setTabMenu({ x: e.clientX, y: e.clientY, id });
@@ -1863,10 +1901,11 @@ const ChatPage: React.FC = () => {
             </div>
           </div>
 
-          {/* Todo & Checkpoint & LSP & Knowledge panels */}
+          {/* Todo & Checkpoint & LSP & Git & Knowledge panels */}
           <TodoPanel />
           <CheckpointPanel />
           <LspPanel />
+          <GitPanel />
           <KnowledgePanel />
           <GoalPanel />
           <McpPanel />
@@ -2003,7 +2042,7 @@ const ChatPage: React.FC = () => {
         padding: '12px 24px', borderTop: '0.5px solid var(--border-color)',
         background: dragOver ? 'var(--accent-soft)' : 'var(--bg-secondary)',
       }}>
-        {planPending && (
+        {planPending && planPending.sid === activeSessionId && (
           <div style={{
             display: 'flex', alignItems: 'center', gap: 10,
             marginBottom: 10, padding: '8px 12px', borderRadius: 8,
@@ -2022,7 +2061,7 @@ const ChatPage: React.FC = () => {
               {t('chat.planAccept', '接受并执行')}
             </button>
             <button
-              onClick={() => setPlanPending(false)}
+              onClick={() => setPlanPending(null)}
               style={{
                 background: 'transparent', border: '1px solid var(--border-color)',
                 color: 'var(--text-muted)', padding: '4px 10px', borderRadius: 6,
@@ -2233,23 +2272,23 @@ const ChatPage: React.FC = () => {
               marginBottom: 16, wordBreak: 'break-word',
             }}>
               <div style={{ color: 'var(--text-muted)', fontSize: 11, marginBottom: 4 }}>
-                {t('permission.tool')}: <span style={{ color: 'var(--accent)' }}>{pendingPermission.tool}</span>
+                {t('permission.tool')}: <span style={{ color: 'var(--accent)' }}>{pendingPermission.req.tool}</span>
               </div>
-              <div>{pendingPermission.prompt || t('permission.confirm')}</div>
-              {!!pendingPermission.strikes && (
+              <div>{pendingPermission.req.prompt || t('permission.confirm')}</div>
+              {!!pendingPermission.req.strikes && (
                 <div style={{ color: 'var(--warning)', fontSize: 11, marginTop: 8 }}>
-                  {pendingPermission.strikes >= (pendingPermission.threshold || 3)
-                    ? `⚠ ${t('permission.strikeEscalated', { n: pendingPermission.strikes })}`
+                  {pendingPermission.req.strikes >= (pendingPermission.req.threshold || 3)
+                    ? `⚠ ${t('permission.strikeEscalated', { n: pendingPermission.req.strikes })}`
                     : t('permission.strikeProgress', {
-                        n: pendingPermission.strikes,
-                        t: pendingPermission.threshold || 3,
+                        n: pendingPermission.req.strikes,
+                        t: pendingPermission.req.threshold || 3,
                       })}
                 </div>
               )}
             </div>
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
               <button
-                onClick={() => respondPermission(pendingPermission.request_id, 'deny')}
+                onClick={() => respondPermission(pendingPermission.req.request_id, 'deny')}
                 style={{
                   padding: '7px 14px', borderRadius: 6, cursor: 'pointer', fontSize: 12,
                   border: '1px solid var(--border-color)', background: 'var(--bg-primary)',
@@ -2259,7 +2298,7 @@ const ChatPage: React.FC = () => {
                 {t('permission.deny')}
               </button>
               <button
-                onClick={() => respondPermission(pendingPermission.request_id, 'allow_all')}
+                onClick={() => respondPermission(pendingPermission.req.request_id, 'allow_all')}
                 style={{
                   padding: '7px 14px', borderRadius: 6, cursor: 'pointer', fontSize: 12,
                   border: '1px solid var(--border-color)', background: 'var(--bg-primary)',
@@ -2271,15 +2310,15 @@ const ChatPage: React.FC = () => {
               <button
                 onClick={async () => {
                   // Allow this tool AND remember for this session
-                  const sid = pendingPermission.sid || activeSessionId;
+                  const sid = pendingPermission.sid;
                   if (backendUrl && sid) {
                     await fetch(`${backendUrl}/api/permission/allow-tool`, {
                       method: 'POST',
                       headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ session_id: sid, tool: pendingPermission.tool }),
+                      body: JSON.stringify({ session_id: sid, tool: pendingPermission.req.tool }),
                     }).catch(() => {});
                   }
-                  respondPermission(pendingPermission.request_id, 'allow');
+                  respondPermission(pendingPermission.req.request_id, 'allow');
                 }}
                 style={{
                   padding: '7px 14px', borderRadius: 6, cursor: 'pointer', fontSize: 12,
@@ -2290,7 +2329,7 @@ const ChatPage: React.FC = () => {
                 {t('permission.allowToolAlways')}
               </button>
               <button
-                onClick={() => respondPermission(pendingPermission.request_id, 'allow')}
+                onClick={() => respondPermission(pendingPermission.req.request_id, 'allow')}
                 style={{
                   padding: '7px 14px', borderRadius: 6, cursor: 'pointer', fontSize: 12,
                   border: 'none', background: 'var(--accent)', color: '#000', fontWeight: 500,
@@ -2311,19 +2350,24 @@ const ChatPage: React.FC = () => {
   );
 };
 
+// Active streams keyed by session id — one AbortController per session so
+// several tabs can generate in parallel and each can be stopped individually
+// (the stop button / Esc only aborts the stream of the visible session).
+const sessionStreams = new Map<string, { ctrl: AbortController; userStopped: boolean }>();
+
 /**
  * streamChat — POST /api/chat, read SSE stream, fire onEvent per message.
  * Includes 120s timeout, empty-stream guard, and AbortError handling.
+ * sessionKey identifies the stream for stop/user-stop bookkeeping.
  */
 async function streamChat(
   baseUrl: string,
   payload: ChatPayload,
   onEvent: (e: ChatEvent) => void,
-  abortRef?: React.MutableRefObject<AbortController | null>,
-  userStoppedRef?: React.MutableRefObject<boolean>,
+  sessionKey?: string,
 ) {
   const ctrl = new AbortController();
-  if (abortRef) abortRef.current = ctrl;
+  if (sessionKey) sessionStreams.set(sessionKey, { ctrl, userStopped: false });
   const t = setTimeout(() => ctrl.abort(), 120_000);
 
   try {
@@ -2367,14 +2411,14 @@ async function streamChat(
     if (e instanceof DOMException && e.name === 'AbortError') {
       // User-initiated stop (Esc / stop button) aborts the fetch — show a
       // neutral "stopped" line instead of the misleading timeout message.
-      onEvent({ type: 'error', content: userStoppedRef?.current ? i18n.t('chat.stopped') : i18n.t('chat.timeoutError') });
+      const entry = sessionKey ? sessionStreams.get(sessionKey) : null;
+      onEvent({ type: 'error', content: entry?.userStopped ? i18n.t('chat.stopped') : i18n.t('chat.timeoutError') });
     } else {
       onEvent({ type: 'error', content: e instanceof Error ? e.message : String(e) });
     }
   } finally {
     clearTimeout(t);
-    if (userStoppedRef) userStoppedRef.current = false;
-    if (abortRef) abortRef.current = null;
+    if (sessionKey) sessionStreams.delete(sessionKey);
   }
 }
 

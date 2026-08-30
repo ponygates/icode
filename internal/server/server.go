@@ -207,6 +207,17 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 	mux.HandleFunc("/api/automations", s.handleAutomations)
 	mux.HandleFunc("/api/automations/", s.handleAutomationByID)
 
+	// Git workbench — desktop "review diffs → stage → commit" panel
+	mux.HandleFunc("/api/git/status", s.handleGitStatus)
+	mux.HandleFunc("/api/git/diff", s.handleGitDiff)
+	mux.HandleFunc("/api/git/stage", s.handleGitStage)
+	mux.HandleFunc("/api/git/unstage", s.handleGitUnstage)
+	mux.HandleFunc("/api/git/commit", s.handleGitCommit)
+	mux.HandleFunc("/api/git/discard", s.handleGitDiscard)
+	mux.HandleFunc("/api/git/branches", s.handleGitBranches)
+	mux.HandleFunc("/api/git/checkout", s.handleGitCheckout)
+	mux.HandleFunc("/api/git/commit-message", s.handleGitCommitMessage)
+
 	// File tree
 	mux.HandleFunc("/api/files", s.handleFiles)
 

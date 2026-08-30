@@ -76,6 +76,9 @@ type Engine struct {
 	// cuStreaks counts consecutive computer-use input ops per session for the
 	// runaway-click guard (reset on any non-CU action or new user turn).
 	cuStreaks map[string]int
+	// cheapModelID is the configured classifier/aux model ("provider/model")
+	// used by low-cost helpers such as GenerateCommitMessage.
+	cheapModelID string
 
 	// Doom-loop detector prevents the model from repeating the same tool
 	// call more than N consecutive times (OpenCode parity).

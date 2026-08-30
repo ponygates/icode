@@ -455,9 +455,41 @@ interface AutomationRun {
   output?: string;
   error?: string;
 }
+interface AutomationTemplate {
+  id: string;
+  name: string;
+  name_en?: string;
+  desc: string;
+  desc_en?: string;
+  category: string;
+  icon: string;
+  schedule: string;
+  prompt: string;
+  custom?: boolean;
+}
+
+// describeSchedule renders a raw schedule string ("every:30m" / "daily:09:00"
+// / "idle") in human words — mirrors backend scheduler.DescribeSchedule.
+function describeSchedule(s: string, t: (k: string, opts?: Record<string, unknown>) => string): string {
+  const v = (s || '').trim().toLowerCase();
+  if (!v) return '—';
+  if (v === 'idle') return t('settings.automationSchedIdle');
+  if (v.startsWith('rrule:')) return s;
+  let m = v.match(/^every:(\d+)\s*([smhd])$/);
+  if (m) {
+    const unit = ({
+      s: t('settings.automationSchedSec'), m: t('settings.automationSchedMin'),
+      h: t('settings.automationSchedHour'), d: t('settings.automationSchedDay'),
+    } as Record<string, string>)[m[2]];
+    return t('settings.automationSchedEvery', { n: m[1], unit });
+  }
+  m = v.match(/^daily:(\d{1,2}):(\d{2})$/);
+  if (m) return t('settings.automationSchedDaily', { time: `${m[1].padStart(2, '0')}:${m[2]}` });
+  return s;
+}
 
 export function PageAutomations({ store }: { store: StoreState }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [tasks, setTasks] = useState<AutomationTask[]>([]);
   const [enabled, setEnabled] = useState(true);
   const [name, setName] = useState('');
@@ -466,6 +498,10 @@ export function PageAutomations({ store }: { store: StoreState }) {
   const [history, setHistory] = useState<Record<string, AutomationRun[]>>({});
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState<string | null>(null);
+  const [templates, setTemplates] = useState<AutomationTemplate[]>([]);
+  const [prefillNote, setPrefillNote] = useState('');
+  const [tplMsg, setTplMsg] = useState('');
+  const addFormRef = React.useRef<HTMLDivElement>(null);
 
   const api = (path: string, opts?: RequestInit) =>
     fetch(`${store.backendUrl}/api/automations${path}`, {
@@ -481,8 +517,54 @@ export function PageAutomations({ store }: { store: StoreState }) {
         setEnabled(!!d.enabled);
       }
     }).catch(() => {});
+    api('/templates').then(r => r.json()).then((d) => {
+      if (d && Array.isArray(d.templates)) setTemplates(d.templates);
+    }).catch(() => {});
   };
   useEffect(load, [store.backendUrl]);
+
+  const isEN = (i18n.language || '').toLowerCase().startsWith('en');
+  const tplName = (tpl: AutomationTemplate) => (isEN && tpl.name_en) || tpl.name || tpl.name_en || '';
+  const tplDesc = (tpl: AutomationTemplate) => (isEN && tpl.desc_en) || tpl.desc || tpl.desc_en || '';
+  const catLabel = (c: string) => ({
+    dev: t('settings.automationCatDev'), info: t('settings.automationCatInfo'),
+    office: t('settings.automationCatOffice'), life: t('settings.automationCatLife'),
+    custom: t('settings.automationCatCustom'),
+  } as Record<string, string>)[c] || c;
+
+  const applyTemplate = (tpl: AutomationTemplate) => {
+    setName(tplName(tpl));
+    setPrompt(tpl.prompt);
+    setSchedule(tpl.schedule);
+    setPrefillNote(t('settings.automationTplPrefilled', { name: tplName(tpl) }));
+    addFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  };
+
+  const saveAsTemplate = async () => {
+    setTplMsg('');
+    if (!name.trim() || !prompt.trim()) return;
+    try {
+      const r = await api('/templates', {
+        method: 'POST',
+        body: JSON.stringify({ name, prompt, schedule, desc: prompt.slice(0, 40) }),
+      });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        alert(t('settings.automationCreateFailed', { error: d?.error || r.status }));
+        return;
+      }
+      setTplMsg(t('settings.automationTplSaved'));
+      load();
+    } catch (e) { alert(String(e)); }
+  };
+
+  const delTemplate = async (tpl: AutomationTemplate) => {
+    if (!window.confirm(`${t('settings.automationDelete')}「${tplName(tpl)}」？`)) return;
+    try {
+      await api(`/templates/${tpl.id}`, { method: 'DELETE' });
+      load();
+    } catch (e) { alert(String(e)); }
+  };
 
   const toggleHistory = async (id: string) => {
     const next = { ...expanded, [id]: !expanded[id] };
@@ -505,7 +587,7 @@ export function PageAutomations({ store }: { store: StoreState }) {
         alert(t('settings.automationCreateFailed', { error: d?.error || r.status }));
         return;
       }
-      setName(''); setPrompt('');
+      setName(''); setPrompt(''); setPrefillNote(''); setTplMsg('');
       load();
     } catch (e) {
       alert(t('settings.automationCreateFailed', { error: String(e) }));
@@ -566,7 +648,7 @@ export function PageAutomations({ store }: { store: StoreState }) {
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{task.name}</div>
                 <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2, wordBreak: 'break-all' }}>
-                  {task.schedule} · {t('settings.automationLastRun')}: {fmt(task.last_run)} · {t('settings.automationNextRun')}: {fmt(task.next_run)}
+                  {describeSchedule(task.schedule, t)} · {t('settings.automationLastRun')}: {fmt(task.last_run)} · {t('settings.automationNextRun')}: {fmt(task.next_run)}
                 </div>
               </div>
               <button onClick={() => toggle(task)} style={{
@@ -619,7 +701,53 @@ export function PageAutomations({ store }: { store: StoreState }) {
         ))}
       </Section>
 
+      <Section title={t('settings.automationTplTitle')}>
+        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 10 }}>{t('settings.automationTplDesc')}</div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))', gap: 8 }}>
+          {templates.map(tpl => (
+            <div key={tpl.id} style={{
+              border: '1px solid var(--border-color)', borderRadius: 8, padding: '10px 12px',
+              display: 'flex', flexDirection: 'column', gap: 6, position: 'relative',
+              background: 'var(--bg-primary)',
+            }}>
+              {tpl.custom && (
+                <button onClick={() => delTemplate(tpl)} title={t('settings.automationDelete')} style={{
+                  position: 'absolute', top: 6, right: 6, cursor: 'pointer', background: 'transparent',
+                  border: 'none', color: 'var(--text-muted)', padding: 2, lineHeight: 1,
+                }}><Trash2 size={11} /></button>
+              )}
+              <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--text-primary)', paddingRight: 18, display: 'flex', gap: 6, alignItems: 'center' }}>
+                <span>{tpl.icon}</span><span>{tplName(tpl)}</span>
+              </div>
+              <div style={{ fontSize: 10.5, color: 'var(--text-muted)', lineHeight: 1.5, flex: 1 }}>{tplDesc(tpl)}</div>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
+                <span style={{
+                  fontSize: 10, padding: '2px 7px', borderRadius: 99,
+                  border: '1px solid var(--border-color)', color: 'var(--text-muted)', whiteSpace: 'nowrap',
+                }}>
+                  {catLabel(tpl.category)} · {describeSchedule(tpl.schedule, t)}
+                </span>
+                <button onClick={() => applyTemplate(tpl)} style={{
+                  ...btnGhost, padding: '3px 10px', fontSize: 10,
+                  color: 'var(--accent)', borderColor: 'var(--accent)', flexShrink: 0,
+                }}>
+                  {t('settings.automationTplUse')}
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </Section>
+
+      <div ref={addFormRef}>
       <Section title={t('settings.automationAdd')}>
+        {(prefillNote || tplMsg) && (
+          <div style={{
+            fontSize: 11, color: prefillNote ? 'var(--accent)' : '#2ea043',
+            marginBottom: 8, padding: '5px 8px', borderRadius: 6,
+            background: prefillNote ? 'rgba(224,122,45,0.08)' : 'rgba(46,160,67,0.08)',
+          }}>{prefillNote || tplMsg}</div>
+        )}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           <div>
             <span style={lbl}>{t('settings.automationName')}</span>
@@ -630,21 +758,39 @@ export function PageAutomations({ store }: { store: StoreState }) {
             <span style={lbl}>{t('settings.automationPrompt')}</span>
             <textarea value={prompt} onChange={e => setPrompt(e.target.value)}
               placeholder="运行 git status，报告未提交的改动"
-              rows={2}
+              rows={4}
               style={{ ...selectStyle, resize: 'vertical', fontFamily: 'inherit' }} />
           </div>
           <div>
             <span style={lbl}>{t('settings.automationSchedule')}</span>
+            <div style={{ display: 'flex', gap: 6, marginBottom: 6, flexWrap: 'wrap' }}>
+              {([['every:30m', t('settings.automationQuick30m')], ['every:1h', t('settings.automationQuick1h')], ['daily:09:00', t('settings.automationQuickDaily9')], ['every:7d', t('settings.automationQuick7d')]] as [string, string][]).map(([val, label]) => (
+                <button key={val} onClick={() => setSchedule(val)} style={{
+                  ...btnGhost, padding: '2px 9px', fontSize: 10,
+                  color: schedule === val ? 'var(--accent)' : 'var(--text-muted)',
+                  borderColor: schedule === val ? 'var(--accent)' : 'var(--border-color)',
+                }}>{label}</button>
+              ))}
+            </div>
             <input value={schedule} onChange={e => setSchedule(e.target.value)} placeholder="every:24h"
               style={selectStyle} />
           </div>
-          <button onClick={create} style={{
-            ...btnGhost, justifyContent: 'center', background: 'var(--accent)', color: '#fff', borderColor: 'transparent',
-          }}>
-            {t('settings.automationAdd')}
-          </button>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={create} style={{
+              ...btnGhost, justifyContent: 'center', background: 'var(--accent)', color: '#fff', borderColor: 'transparent', flex: 1,
+            }}>
+              {t('settings.automationAdd')}
+            </button>
+            <button onClick={saveAsTemplate} disabled={!name.trim() || !prompt.trim()} style={{
+              ...btnGhost, justifyContent: 'center', flexShrink: 0,
+              opacity: name.trim() && prompt.trim() ? 1 : 0.5,
+            }}>
+              {t('settings.automationTplSave')}
+            </button>
+          </div>
         </div>
       </Section>
+      </div>
     </div>
   );
 }

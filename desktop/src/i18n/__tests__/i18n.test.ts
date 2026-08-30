@@ -58,4 +58,26 @@ describe('i18n locale parity', () => {
       expect({ lang, duplicateKeys: [...new Set(dupes)] }).toEqual({ lang, duplicateKeys: [] });
     }
   });
+
+  // The en bundle must be genuinely translated — a stray Chinese value renders
+  // mid-English UI. Language names (简体中文/繁體中文) stay in native script.
+  it('en bundle values contain no untranslated CJK text', () => {
+    const resources = (i18n.options.resources as Record<string, Record<string, Bundle>>) ?? {};
+    const en = resources['en']?.translation;
+    const allowed = /(^|\.)(lang)\./;
+    const cjk = /[\u4e00-\u9fff]/;
+    const offenders: string[] = [];
+    const walk = (obj: unknown, prefix = '') => {
+      for (const [key, value] of Object.entries(obj as Bundle)) {
+        const path = prefix ? `${prefix}.${key}` : key;
+        if (typeof value === 'string') {
+          if (cjk.test(value) && !allowed.test(path)) offenders.push(`${path} = ${value}`);
+        } else if (value && typeof value === 'object') {
+          walk(value, path);
+        }
+      }
+    };
+    walk(en);
+    expect(offenders).toEqual([]);
+  });
 });
