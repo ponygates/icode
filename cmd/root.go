@@ -139,6 +139,7 @@ func init() {
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(doctorCmd)
 	rootCmd.AddCommand(serverCmd)
+	rootCmd.AddCommand(acpCmd)
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(upgradeCmd)
 

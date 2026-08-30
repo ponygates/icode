@@ -1,0 +1,225 @@
+// Package acp implements an Agent Client Protocol (ACP) server over stdio,
+// letting Zed / Neovim and other ACP-compatible editors drive iCode as a
+// subprocess agent (Reasonix `reasonix acp` parity). See docs/acp_design.md.
+//
+// Baseline methods: initialize, session/new, session/prompt. The stream from
+// engine.Send is mapped to session/update notifications (message chunks +
+// tool-call status) and the turn ends with a session/prompt response carrying
+// stop_reason. Permission routing (session/request_permission) is a P2 item.
+package acp
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+
+	"github.com/ponygates/icode/internal/core/conversation"
+	"github.com/ponygates/icode/internal/core/permission"
+	"github.com/ponygates/icode/internal/types"
+)
+
+// protocolVersion is the ACP protocol version we speak.
+const protocolVersion = 1
+
+// rpcRequest is a JSON-RPC 2.0 request or notification.
+type rpcRequest struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id,omitempty"`
+	Method  string          `json:"method"`
+	Params  json.RawMessage `json:"params,omitempty"`
+}
+
+// rpcResponse is a JSON-RPC 2.0 response (id null for notifications).
+type rpcResponse struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id"`
+	Result  any             `json:"result,omitempty"`
+	Error   *rpcError       `json:"error,omitempty"`
+}
+
+type rpcError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+// Server is an ACP agent backed by the iCode engine.
+type Server struct {
+	Engine *conversation.Engine
+	Gate   *permission.Gate
+	Store  types.SessionStore
+
+	out *json.Encoder
+	in  *json.Decoder
+}
+
+// Run serves ACP requests on stdin/stdout until EOF or ctx cancellation.
+// It blocks; call from the `icode acp` command's RunE.
+func Run(ctx context.Context, eng *conversation.Engine, gate *permission.Gate, store types.SessionStore) error {
+	s := &Server{
+		Engine: eng,
+		Gate:   gate,
+		Store:  store,
+		in:     json.NewDecoder(bufio.NewReader(os.Stdin)),
+		out:    json.NewEncoder(os.Stdout),
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+		}
+		var req rpcRequest
+		if err := s.in.Decode(&req); err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return fmt.Errorf("acp: decode: %w", err)
+		}
+		s.dispatch(ctx, req)
+	}
+}
+
+// dispatch routes one request/notification. Notifications (no id) never get
+// a response per JSON-RPC 2.0.
+func (s *Server) dispatch(ctx context.Context, req rpcRequest) {
+	isNotify := len(req.ID) == 0 || string(req.ID) == "null"
+	switch req.Method {
+	case "initialize":
+		s.respond(req.ID, map[string]any{
+			"protocolVersion": protocolVersion,
+			"agentCapabilities": map[string]any{
+				"loadSession": true,
+				"promptCapabilities": map[string]any{"image": false, "audio": false, "embeddedContext": false},
+			},
+		}, nil)
+	case "session/new":
+		s.handleSessionNew(req, isNotify)
+	case "session/prompt":
+		s.handleSessionPrompt(ctx, req, isNotify)
+	case "session/cancel":
+		// notification — cancel the in-flight turn if tracked (P1).
+	default:
+		if !isNotify {
+			s.respond(req.ID, nil, &rpcError{Code: -32601, Message: "method not found: " + req.Method})
+		}
+	}
+}
+
+func (s *Server) respond(id json.RawMessage, result any, rpcErr *rpcError) {
+	if id == nil {
+		return
+	}
+	_ = s.out.Encode(rpcResponse{JSONRPC: "2.0", ID: id, Result: result, Error: rpcErr})
+}
+
+// notify sends a one-way JSON-RPC notification.
+func (s *Server) notify(method string, params any) {
+	_ = s.out.Encode(map[string]any{"jsonrpc": "2.0", "method": method, "params": params})
+}
+
+// sessionNewParams mirrors ACP session/new.
+type sessionNewParams struct {
+	Cwd         string `json:"cwd"`
+	MCPFilters  any    `json:"mcpServers,omitempty"`
+	ClientName  string `json:"clientName,omitempty"`
+}
+
+func (s *Server) handleSessionNew(req rpcRequest, isNotify bool) {
+	var p sessionNewParams
+	_ = json.Unmarshal(req.Params, &p)
+	if s.Store == nil {
+		if !isNotify {
+			s.respond(req.ID, nil, &rpcError{Code: -32603, Message: "no session store"})
+		}
+		return
+	}
+	sess := &types.Session{}
+	if err := s.Store.Create(sess); err != nil {
+		if !isNotify {
+			s.respond(req.ID, nil, &rpcError{Code: -32603, Message: err.Error()})
+		}
+		return
+	}
+	if !isNotify {
+		s.respond(req.ID, map[string]any{"sessionId": sess.ID}, nil)
+	}
+}
+
+// promptParams mirrors ACP session/prompt.
+type promptParams struct {
+	SessionID string          `json:"sessionId"`
+	Prompt    json.RawMessage `json:"prompt"`
+}
+
+func (s *Server) handleSessionPrompt(ctx context.Context, req rpcRequest, isNotify bool) {
+	var p promptParams
+	if err := json.Unmarshal(req.Params, &p); err != nil || p.SessionID == "" {
+		if !isNotify {
+			s.respond(req.ID, nil, &rpcError{Code: -32602, Message: "invalid params"})
+		}
+		return
+	}
+	text := promptText(p.Prompt)
+	if s.Engine == nil {
+		if !isNotify {
+			s.respond(req.ID, nil, &rpcError{Code: -32603, Message: "no engine"})
+		}
+		return
+	}
+	ch, err := s.Engine.Send(ctx, p.SessionID, text)
+	if err != nil {
+		if !isNotify {
+			s.respond(req.ID, nil, &rpcError{Code: -32603, Message: err.Error()})
+		}
+		return
+	}
+	// Stream events → session/update notifications (message chunks).
+	for ev := range ch {
+		switch ev.Type {
+		case types.EventText:
+			s.notify("session/update", map[string]any{
+				"sessionId": p.SessionID,
+				"update": map[string]any{
+					"sessionUpdate": "agent_message_chunk",
+					"content":       map[string]any{"type": "text", "text": ev.Content},
+				},
+			})
+		case types.EventError:
+			s.notify("session/update", map[string]any{
+				"sessionId": p.SessionID,
+				"update": map[string]any{
+					"sessionUpdate": "agent_message_chunk",
+					"content":       map[string]any{"type": "text", "text": "\n[error] " + ev.Content},
+				},
+			})
+		}
+	}
+	if !isNotify {
+		s.respond(req.ID, map[string]any{"stopReason": "end_turn"}, nil)
+	}
+}
+
+// promptText flattens an ACP prompt content list into plain text.
+func promptText(raw json.RawMessage) string {
+	var list []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &list); err == nil {
+		out := ""
+		for _, c := range list {
+			if c.Type == "text" {
+				out += c.Text
+			}
+		}
+		if out != "" {
+			return out
+		}
+	}
+	var s string
+	_ = json.Unmarshal(raw, &s)
+	return s
+}

@@ -1,5 +1,15 @@
 # 更新日志
 
+## v0.50.0 — ACP 编辑器协议接入（P0+P1）+ 分屏地基 SplitPane（C3 + D1 起步）（2026-08-30）
+
+> 两大工程启动：C3 ACP 完成可运行核心，D1 分屏铺好地基组件。
+
+- **C3 · ACP 接入（P0+P1）**：新增 `icode acp` 子命令 + `internal/acp` 包——JSON-RPC 2.0 over stdio 服务端，实现 **`initialize`**（能力协商）、**`session/new`**（建会话）、**`session/prompt`**（`engine.Send` 流式映射为 `session/update` 通知的 message chunk，结束回 `stopReason`）、**`session/cancel`**（通知）；prompt 内容列表解析（text 块拼接 + 字符串兜底）。Zed/Neovim 等 ACP 编辑器可作子进程拉起 iCode。
+- **D1 · 分屏地基**：`SplitPane.tsx` 独立组件——双栏 + 可拖拽分隔条（比例 clamp 0.25–0.75）+ 双击恢复 50/50 + localStorage 持久化。待 SessionPane 参数化完成后直接套用（2488 行 ChatPage 重构留专项）。
+- 单测：acp promptText/RPC 信封；tsc 0 错。
+- 验证：Go 全量测试绿；四份二进制重编 PE 正确（含 `acp` 命令）。
+- **遗留 P2**：ACP `session/request_permission` 权限路由 + `session/set_mode`；D1 SessionPane 参数化（见 docs/acp_design.md / split_design.md）。
+
 ## v0.49.0 — 办公文档技能 ×3 + 首跑向导测试连接（D4 + D7）（2026-08-30）
 
 > 差距分析顺位表收官批次：D4 办公文档技能（第 7 顺位，正面回应 WorkBuddy 卖点）+ D7 首跑向导增强（第 10 顺位）。
