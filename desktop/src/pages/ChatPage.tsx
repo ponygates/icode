@@ -8,10 +8,10 @@ import CommandPalette, { useCommandPalette } from '../components/CommandPalette'
 import TodoPanel from '../components/TodoPanel';
 import TokenBar from '../components/TokenBar';
 import TabBar from '../components/TabBar';
+import SplitPane from '../components/SplitPane';
 import CheckpointPanel from '../components/CheckpointPanel';
 import LspPanel from '../components/LspPanel';
 import GitPanel from '../components/GitPanel';
-import SessionViewer from '../components/SessionViewer';
 import KnowledgePanel from '../components/KnowledgePanel';
 import GoalPanel from '../components/GoalPanel';
 import McpPanel from '../components/McpPanel';
@@ -318,8 +318,17 @@ const MessageList = React.memo(({ messages, isStreaming, onRegenerate, onEditRes
   );
 });
 
-const ChatPage: React.FC = () => {
-  const palette = useCommandPalette();
+interface ChatPageProps {
+  // When set, this instance renders as an embedded single-session pane (the
+  // right side of split view): no shell (header/tab bar/sidebar/status bar),
+  // no global side effects; everything is driven by this session id.
+  sessionId?: string;
+}
+
+const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
+  // Embedded panes skip the shell and the global-only side effects below.
+  const embedded = sessionId !== undefined;
+  const palette = useCommandPalette(!embedded);
   const { t } = useTranslation();
   const [input, setInput] = useState('');
   // Per-session streaming state lives in the store (streamingSessions) so
@@ -373,12 +382,14 @@ const ChatPage: React.FC = () => {
   // renderer (bypassing the fragile Electron IPC+SSE bridge). Falls back to the
   // IPC bridge when the backend URL is unavailable.
   useEffect(() => {
+    if (embedded) return; // global side effect — main page only
     checkBackend();
   }, []);
 
   // Command palette picks land here: fill the input with the chosen slash
   // command and focus it so arguments stay editable.
   useEffect(() => {
+    if (embedded) return; // palette inserts target the main pane's input
     const onInsert = (e: Event) => {
       const detail = (e as CustomEvent<string>).detail;
       if (typeof detail === 'string') {
@@ -394,7 +405,10 @@ const ChatPage: React.FC = () => {
   // unrelated store updates (e.g. settings changes, tokenUsage ticks on other
   // pages) don't re-render the whole ChatPage. Actions are stable refs.
   const sessions = useAppStore(s => s.sessions);
-  const activeSessionId = useAppStore(s => s.activeSessionId);
+  const storeActiveId = useAppStore(s => s.activeSessionId);
+  // Split view: the pane renders its own session; the main page follows the
+  // active tab. One derived const feeds every pre-existing reference.
+  const activeSessionId = sessionId ?? storeActiveId;
   const selectedModel = useAppStore(s => s.selectedModel);
   const models = useAppStore(s => s.models);
   const tokenUsage = useAppStore(s => s.tokenUsage);
@@ -431,9 +445,9 @@ const ChatPage: React.FC = () => {
   const tabOrder = useAppStore(s => s.tabOrder);
   const reorderTab = useAppStore(s => s.reorderTab);
   const isStreaming = !!(activeSessionId && streamingSessions[activeSessionId]);
-  // D1 split-pane (minimal): a read-only session comparison pane. splitViewId
-  // holds the session shown side-by-side; null = off.
-  const [splitViewId, setSplitViewId] = useState<string | null>(null);
+  // D1 split-pane: the session pinned to the right pane; null = single view.
+  const splitSessionId = useAppStore(s => s.splitSessionId);
+  const setSplitSession = useAppStore(s => s.setSplitSession);
   // S5: last wall-clock time we wrote a live token/cost estimate into the
   // store while streaming. The backend only reports usage on 'done', so the
   // input-bar counters would otherwise sit frozen during generation; we tick
@@ -627,6 +641,7 @@ const ChatPage: React.FC = () => {
   // Any UI control (token bar, context card) can trigger compaction via this
   // custom event, keeping the actual execution logic in one place.
   useEffect(() => {
+    if (embedded) return; // global event — main page only
     const onCompact = () => { runCompactNow(); };
     window.addEventListener('icode:compact-session', onCompact);
     return () => window.removeEventListener('icode:compact-session', onCompact);
@@ -687,6 +702,7 @@ const ChatPage: React.FC = () => {
   // synchronously before awaiting the backend, so the value is available
   // for handleSend on the very next render.
   useEffect(() => {
+    if (embedded) return; // global side effect — main page only
     if (!activeSessionId && sessions.length === 0) {
       createSession(selectedModel, currentModel?.provider || 'openrouter');
     }
@@ -715,6 +731,7 @@ const ChatPage: React.FC = () => {
 
   // Fetch git branch for the status bar
   useEffect(() => {
+    if (embedded) return; // global side effect — main page only
     const fetchStatus = async () => {
       if (!backendUrl) return;
       try {
@@ -1211,6 +1228,7 @@ const ChatPage: React.FC = () => {
 
   // Global shortcuts dispatched from App.tsx: Ctrl+N / Ctrl+L / Esc.
   useEffect(() => {
+    if (embedded) return; // global shortcuts — main page only
     const newSession = () => createSession(selectedModel, currentModel?.provider || 'openrouter');
     const focusInput = () => { inputRef.current?.focus(); };
     const stopChat = () => { if (isStreaming) handleStop(); };
@@ -1300,8 +1318,342 @@ const ChatPage: React.FC = () => {
     setInput(prev => prev ? `${prev} @${path}` : `@${path}`);
   };
 
-  return (
-    <div className="page-enter" style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
+  // ── layout regions (extracted for reuse between full page and embedded pane) ──
+  const messagesCol = (
+    <>
+        {/* Messages */}
+        <div
+          ref={scrollContainerRef}
+          onScroll={() => {
+            const el = scrollContainerRef.current;
+            if (!el) return;
+            const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+            stickToBottomRef.current = distance <= 80;
+            setAtBottom(distance <= 80);
+          }}
+          style={{
+            flex: 1, overflowY: 'auto', padding: '24px 24px',
+            display: 'flex', flexDirection: 'column', gap: 4,
+            position: 'relative',
+          }}
+        >
+          {/* Welcome — Apple-style large title with plum blossom logo */}
+          {activeSession?.messages.length === 0 && !isStreaming && (
+            <div style={{
+              flex: 1, display: 'flex', flexDirection: 'column',
+              alignItems: 'center', justifyContent: 'center',
+              padding: 60, color: 'var(--text-muted)',
+            }}>
+              {/* Plum blossom brand mark + iCODE wordmark (Apple-style) */}
+              <PlumBlossom
+                size={76}
+                style={{ marginBottom: 4, filter: 'drop-shadow(0 4px 12px rgba(230,111,168,0.28))' }}
+              />
+              <div style={{
+                fontSize: 34, fontWeight: 700, letterSpacing: '-0.03em',
+                color: 'var(--text-primary)', lineHeight: 1.1,
+              }}>
+                iCODE
+              </div>
+              <div className="page-subtitle" style={{ fontSize: 15, marginBottom: 32, marginTop: 6 }}>
+                {t('chat.yourPartner')}
+              </div>
+              <div style={{
+                display: 'grid', gridTemplateColumns: 'repeat(2, minmax(170px, 1fr))',
+                gap: 10, width: 'min(440px, 100%)',
+              }}>
+                {[
+                  { label: t('chat.promptReact'), icon: '⚛', desc: t('chat.promptReactDesc') },
+                  { label: t('chat.promptExplain'), icon: '🔍', desc: t('chat.promptExplainDesc') },
+                  { label: t('chat.promptRefactor'), icon: '🔄', desc: t('chat.promptRefactorDesc') },
+                  { label: t('chat.promptDebug'), icon: '🐛', desc: t('chat.promptDebugDesc') },
+                ].map((s) => (
+                  <button
+                    key={s.label}
+                    onClick={() => { setInput(s.label); }}
+                    className="interactive"
+                    style={{
+                      display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 5,
+                      padding: '14px 16px', borderRadius: 'var(--r-lg)',
+                      background: 'var(--bg-secondary)', border: '0.5px solid var(--border-color)',
+                      color: 'var(--text-primary)', fontSize: 13, textAlign: 'left',
+                    }}
+                  >
+                    <span style={{ fontSize: 18, lineHeight: 1 }}>{s.icon}</span>
+                    <span style={{ fontWeight: 600, fontSize: 12.5 }}>{s.label}</span>
+                    <span style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.5 }}>{s.desc}</span>
+                  </button>
+                ))}
+              </div>
+              <div style={{ marginTop: 32, fontSize: 11, color: 'var(--text-muted)', lineHeight: 2, textAlign: 'center' }}>
+                {t('chat.inputHint')}
+              </div>
+            </div>
+          )}
+
+          {/* Session list when no active session */}
+          {!activeSessionId && sessions.length > 0 && (
+            <div style={{ textAlign: 'center', padding: 40 }}>
+              <h2 style={{ color: 'var(--text-secondary)', marginBottom: 16, fontSize: 15 }}>
+                {t('chat.selectSession')}
+              </h2>
+              {sessions.map((s) => (
+                <button
+                  key={s.id}
+                  onClick={() => setActiveSession(s.id)}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 10,
+                    width: '100%', maxWidth: 400, margin: '4px auto',
+                    padding: '10px 14px', background: 'var(--bg-secondary)',
+                    border: '1px solid var(--border-color)', borderRadius: 8,
+                    color: 'var(--text-primary)', cursor: 'pointer',
+                    textAlign: 'left',
+                  }}
+                >
+                  <MessageSquare size={16} />
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 13 }}>{s.title}</div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                      {s.modelId} · {s.messages.length} messages
+                    </div>
+                  </div>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); deleteSession(s.id); }}
+                    style={{
+                      background: 'none', border: 'none', color: 'var(--text-muted)',
+                      cursor: 'pointer', padding: 4,
+                    }}
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Chat messages */}
+          <MessageList
+            messages={activeSession?.messages || []}
+            isStreaming={isStreaming}
+            onRegenerate={handleRegenerate}
+            onEditResend={handleEditResend}
+            onZoom={setLightbox}
+          />
+          <div ref={messagesEndRef} />
+          {!atBottom && (
+            <button
+              className="scroll-down-btn"
+              onClick={() => { stickToBottomRef.current = true; setAtBottom(true); messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }}
+            >
+              <ChevronDown size={13} /> {t('chat.scrollToLatest')}
+            </button>
+          )}
+        </div>
+    </>
+  );
+
+  const lightboxEl = (
+    <>
+        {/* Lightbox — zoomed image attachment */}
+        {lightbox && (
+          <div
+            onClick={() => setLightbox(null)}
+            style={{
+              position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.82)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              zIndex: 1000, cursor: 'zoom-out',
+            }}
+          >
+            <img src={lightbox} style={{ maxWidth: '92vw', maxHeight: '92vh', borderRadius: 12, boxShadow: '0 8px 40px rgba(0,0,0,0.5)' }} />
+          </div>
+        )}
+    </>
+  );
+
+  const rightSidebarEl = (
+    <>
+        {/* Right sidebar — iCode overview panels */}
+        <div style={{
+          width: 250, minWidth: 250, borderLeft: '0.5px solid var(--border-color)',
+          background: 'var(--bg-secondary)', padding: '16px 14px', overflowY: 'auto',
+          fontSize: 12, color: 'var(--text-secondary)', display: 'flex', flexDirection: 'column', gap: 14,
+        }}>
+          {/* Workspace file tree — shown when the active workspace is bound
+              to a real local directory. Double-click inserts @path into the
+              input; right-click offers ask/explain/optimize actions. */}
+          {activeWs?.path && (
+            <div className="card" style={{ padding: 0, overflow: 'hidden', height: 300, display: 'flex', flexDirection: 'column' }}>
+              <FileTree
+                path={activeWs.path}
+                onInsertPath={(p) => setInput((prev) => prev ? `${prev} ${p}` : p)}
+                onAction={(action, path) => {
+                  const prompts: Record<string, string> = {
+                    ask: '请回答关于该文件的问题',
+                    explain: `请解释该文件的内容与作用：${path}`,
+                    optimize: `请审查并优化该文件，指出问题并给出改进建议：${path}`,
+                  };
+                  const msg = prompts[action] || prompts.ask;
+                  if (action === 'ask') {
+                    // Ask mode just inserts the path so the user can type their
+                    // question — matches the VS Code extension UX.
+                    setInput((prev) => prev ? `${prev} ${path}` : path);
+                  } else {
+                    setInput(msg);
+                    // Send immediately for explain/optimize (deterministic actions).
+                    if (handleSendRef.current) {
+                      setTimeout(() => handleSendRef.current!(), 0);
+                    }
+                  }
+                }}
+              />
+            </div>
+          )}
+
+          {/* Files touched by agent */}
+          {fileActions.length > 0 && (
+              <div className="card" style={{ padding: 12 }}>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8, fontWeight: 500 }}>
+                  {t('chat.fileActions')} · {fileActions.length}
+                </div>
+                {fileActions.map(([path, action]) => (
+                  <div key={path} style={{
+                    display: 'flex', alignItems: 'center', gap: 6,
+                    padding: '3px 0', fontSize: 11, fontFamily: 'var(--font-mono)',
+                  }}>
+                    <span style={{
+                      color: action === 'write' || action === 'edit' ? 'var(--accent)' : 'var(--text-muted)',
+                      fontSize: 10, flexShrink: 0,
+                    }}>
+                      {action === 'write' ? '✎' : action === 'edit' ? '✏' : '☷'}
+                    </span>
+                    <span style={{
+                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      color: action !== 'read' ? 'var(--text-primary)' : 'var(--text-muted)',
+                    }}>
+                      {path.split('/').pop() || path}
+                    </span>
+                  </div>
+                ))}
+              </div>
+          )}
+
+          {/* Card 1: Context Window — click to compress (/compact) */}
+          <div
+            className="card interactive"
+            onClick={runCompactNow}
+            title={t('chat.ctxClickCompact')}
+            style={{ padding: 14, cursor: 'pointer' }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+              <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>{t('chat.contextWindow')}</span>
+              <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>{ctxWindowLabel}</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              {/* Circular progress */}
+              <svg width="56" height="56" viewBox="0 0 56 56">
+                <circle cx="28" cy="28" r="24" fill="none" stroke="var(--border-color)" strokeWidth="3" />
+                <circle
+                  cx="28" cy="28" r="24" fill="none"
+                  stroke="var(--success)" strokeWidth="3"
+                  strokeDasharray={`${Math.min(tokenUsage.input / ctxWindow, 1) * 150.8} 150.8`}
+                  strokeLinecap="round"
+                  transform="rotate(-90 28 28)"
+                />
+                <text x="28" y="32" textAnchor="middle" fontSize="11" fontWeight="600" fill="var(--text-primary)">
+                  {Math.min((tokenUsage.input / ctxWindow) * 100, 100).toFixed(0)}%
+                </text>
+              </svg>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{t('chat.used')}</div>
+                <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>
+                  {(tokenUsage.input / 1000).toFixed(1)}K
+                </div>
+                <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4 }}>
+                  {t('chat.ctxOf')} {ctxWindowLabel}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Card 2: Session Metrics */}
+          <div className="card" style={{ padding: 14 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 10 }}>
+              {t('chat.sessionMetrics')}
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+              <div>
+                <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{t('token.cacheHit')}</div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--success)' }}>
+                  {tokenUsage.cacheHit > 0
+                    ? ((tokenUsage.cacheHit / (tokenUsage.input + tokenUsage.output + 1)) * 100).toFixed(1) + '%'
+                    : '0%'}
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{t('chat.runTime')}</div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
+                  {activeSession?.createdAt
+                    ? Math.max(0, Math.floor((now - activeSession.createdAt) / 1000)) + 's'
+                    : '0s'}
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{t('chat.totalTokens')}</div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
+                  {(tokenUsage.input + tokenUsage.output).toLocaleString()}
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{t('chat.estCost')}</div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--accent)' }}>
+                  {tokenUsage.cost}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Card 3: Usage Breakdown */}
+          <div className="card" style={{ padding: 14 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 10 }}>
+              {t('chat.usageBreakdown')}
+            </div>
+            <div style={{ display: 'flex', gap: 4, height: 6, borderRadius: 3, overflow: 'hidden', marginBottom: 8 }}>
+              {(() => {
+                const total = tokenUsage.input + tokenUsage.output;
+                if (total === 0) return <div style={{ flex: 1, background: 'var(--bg-tertiary)' }} />;
+                const inputPct = (tokenUsage.input / total) * 100;
+                const outputPct = (tokenUsage.output / total) * 100;
+                const cachePct = tokenUsage.cacheHit > 0 ? Math.min((tokenUsage.cacheHit / total) * 100, 30) : 0;
+                return (
+                  <>
+                    <div style={{ width: `${inputPct - cachePct/2}%`, background: 'var(--accent)' }} />
+                    <div style={{ width: `${cachePct}%`, background: 'var(--success)' }} />
+                    <div style={{ width: `${outputPct}%`, background: 'var(--warning)' }} />
+                  </>
+                );
+              })()}
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, fontSize: 10, color: 'var(--text-muted)' }}>
+              <div>● <span style={{ color: 'var(--accent)' }}>{t('token.input')}</span> {tokenUsage.input.toLocaleString()}</div>
+              <div>● <span style={{ color: 'var(--success)' }}>{t('token.cacheHit')}</span> {tokenUsage.cacheHit.toLocaleString()}</div>
+              <div>● <span style={{ color: 'var(--warning)' }}>{t('token.output')}</span> {tokenUsage.output.toLocaleString()}</div>
+            </div>
+          </div>
+
+          {/* Todo & Checkpoint & LSP & Git & Knowledge panels */}
+          <TodoPanel />
+          <CheckpointPanel />
+          <LspPanel />
+          <GitPanel />
+          <KnowledgePanel />
+          <GoalPanel />
+          <McpPanel />
+        </div>
+    </>
+  );
+
+  const headerEl = (
+    <>
       {/* Header — Apple style */}
       <div style={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -1525,6 +1877,12 @@ const ChatPage: React.FC = () => {
         </div>
       </div>
 
+
+    </>
+  );
+
+  const tabBarEl = (
+    <>
       {/* Tab bar for multi-session switching */}
       <TabBar
         tabs={visibleTabs}
@@ -1568,6 +1926,17 @@ const ChatPage: React.FC = () => {
                 run: () => navigator.clipboard?.writeText(tabMenu.id).catch(() => {}),
               },
               {
+                label: '◧ ' + t('tab.openSplit', '在右侧分屏打开'),
+                run: () => {
+                  if (tabMenu.id !== useAppStore.getState().activeSessionId) {
+                    setSplitSession(tabMenu.id);
+                  }
+                },
+              },
+              ...(tabMenu.id === splitSessionId
+                ? [{ label: '⇔ ' + t('tab.closeSplit', '退出分屏'), run: () => setSplitSession(null) }]
+                : []),
+              {
                 label: '📄 ' + t('chat.exportJson'),
                 run: () => exportSessionJson(tabMenu.id),
               },
@@ -1592,357 +1961,12 @@ const ChatPage: React.FC = () => {
         </div>
       )}
 
-      {/* Middle: conversation + session-stats sidebar (Reasonix style) */}
-      <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
-        {/* Messages */}
-        <div
-          ref={scrollContainerRef}
-          onScroll={() => {
-            const el = scrollContainerRef.current;
-            if (!el) return;
-            const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
-            stickToBottomRef.current = distance <= 80;
-            setAtBottom(distance <= 80);
-          }}
-          style={{
-            flex: 1, overflowY: 'auto', padding: '24px 24px',
-            display: 'flex', flexDirection: 'column', gap: 4,
-            position: 'relative',
-          }}
-        >
-          {/* Welcome — Apple-style large title with plum blossom logo */}
-          {activeSession?.messages.length === 0 && !isStreaming && (
-            <div style={{
-              flex: 1, display: 'flex', flexDirection: 'column',
-              alignItems: 'center', justifyContent: 'center',
-              padding: 60, color: 'var(--text-muted)',
-            }}>
-              {/* Plum blossom brand mark + iCODE wordmark (Apple-style) */}
-              <PlumBlossom
-                size={76}
-                style={{ marginBottom: 4, filter: 'drop-shadow(0 4px 12px rgba(230,111,168,0.28))' }}
-              />
-              <div style={{
-                fontSize: 34, fontWeight: 700, letterSpacing: '-0.03em',
-                color: 'var(--text-primary)', lineHeight: 1.1,
-              }}>
-                iCODE
-              </div>
-              <div className="page-subtitle" style={{ fontSize: 15, marginBottom: 32, marginTop: 6 }}>
-                {t('chat.yourPartner')}
-              </div>
-              <div style={{
-                display: 'grid', gridTemplateColumns: 'repeat(2, minmax(170px, 1fr))',
-                gap: 10, width: 'min(440px, 100%)',
-              }}>
-                {[
-                  { label: t('chat.promptReact'), icon: '⚛', desc: t('chat.promptReactDesc') },
-                  { label: t('chat.promptExplain'), icon: '🔍', desc: t('chat.promptExplainDesc') },
-                  { label: t('chat.promptRefactor'), icon: '🔄', desc: t('chat.promptRefactorDesc') },
-                  { label: t('chat.promptDebug'), icon: '🐛', desc: t('chat.promptDebugDesc') },
-                ].map((s) => (
-                  <button
-                    key={s.label}
-                    onClick={() => { setInput(s.label); }}
-                    className="interactive"
-                    style={{
-                      display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 5,
-                      padding: '14px 16px', borderRadius: 'var(--r-lg)',
-                      background: 'var(--bg-secondary)', border: '0.5px solid var(--border-color)',
-                      color: 'var(--text-primary)', fontSize: 13, textAlign: 'left',
-                    }}
-                  >
-                    <span style={{ fontSize: 18, lineHeight: 1 }}>{s.icon}</span>
-                    <span style={{ fontWeight: 600, fontSize: 12.5 }}>{s.label}</span>
-                    <span style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.5 }}>{s.desc}</span>
-                  </button>
-                ))}
-              </div>
-              <div style={{ marginTop: 32, fontSize: 11, color: 'var(--text-muted)', lineHeight: 2, textAlign: 'center' }}>
-                {t('chat.inputHint')}
-              </div>
-            </div>
-          )}
 
-          {/* Session list when no active session */}
-          {!activeSessionId && sessions.length > 0 && (
-            <div style={{ textAlign: 'center', padding: 40 }}>
-              <h2 style={{ color: 'var(--text-secondary)', marginBottom: 16, fontSize: 15 }}>
-                {t('chat.selectSession')}
-              </h2>
-              {sessions.map((s) => (
-                <button
-                  key={s.id}
-                  onClick={() => setActiveSession(s.id)}
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: 10,
-                    width: '100%', maxWidth: 400, margin: '4px auto',
-                    padding: '10px 14px', background: 'var(--bg-secondary)',
-                    border: '1px solid var(--border-color)', borderRadius: 8,
-                    color: 'var(--text-primary)', cursor: 'pointer',
-                    textAlign: 'left',
-                  }}
-                >
-                  <MessageSquare size={16} />
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 13 }}>{s.title}</div>
-                    <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                      {s.modelId} · {s.messages.length} messages
-                    </div>
-                  </div>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); deleteSession(s.id); }}
-                    style={{
-                      background: 'none', border: 'none', color: 'var(--text-muted)',
-                      cursor: 'pointer', padding: 4,
-                    }}
-                  >
-                    <Trash2 size={14} />
-                  </button>
-                </button>
-              ))}
-            </div>
-          )}
+    </>
+  );
 
-          {/* Chat messages */}
-          <MessageList
-            messages={activeSession?.messages || []}
-            isStreaming={isStreaming}
-            onRegenerate={handleRegenerate}
-            onEditResend={handleEditResend}
-            onZoom={setLightbox}
-          />
-          <div ref={messagesEndRef} />
-          {!atBottom && (
-            <button
-              className="scroll-down-btn"
-              onClick={() => { stickToBottomRef.current = true; setAtBottom(true); messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }}
-            >
-              <ChevronDown size={13} /> {t('chat.scrollToLatest')}
-            </button>
-          )}
-        </div>
-
-        {/* D1 split-pane (minimal): read-only session comparison pane. */}
-        {splitViewId && splitViewId !== activeSessionId && (
-          <SessionViewer sessionId={splitViewId} onClose={() => setSplitViewId(null)} />
-        )}
-
-        {/* Lightbox — zoomed image attachment */}
-        {lightbox && (
-          <div
-            onClick={() => setLightbox(null)}
-            style={{
-              position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.82)',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              zIndex: 1000, cursor: 'zoom-out',
-            }}
-          >
-            <img src={lightbox} style={{ maxWidth: '92vw', maxHeight: '92vh', borderRadius: 12, boxShadow: '0 8px 40px rgba(0,0,0,0.5)' }} />
-          </div>
-        )}
-
-        {/* Right sidebar — iCode overview panels */}
-        <div style={{
-          width: 250, minWidth: 250, borderLeft: '0.5px solid var(--border-color)',
-          background: 'var(--bg-secondary)', padding: '16px 14px', overflowY: 'auto',
-          fontSize: 12, color: 'var(--text-secondary)', display: 'flex', flexDirection: 'column', gap: 14,
-        }}>
-          {/* Split-pane comparison (D1 minimal): pick another session to view
-              read-only next to the active conversation. */}
-          <div className="card" style={{ padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
-              {t('split.title')}
-            </div>
-            <select
-              value={splitViewId || ''}
-              onChange={e => setSplitViewId(e.target.value || null)}
-              style={{
-                width: '100%', padding: '5px 6px', borderRadius: 6, fontSize: 11,
-                border: '1px solid var(--border-color)', background: 'var(--bg-primary)',
-                color: 'var(--text-primary)', outline: 'none',
-              }}
-            >
-              <option value="">{t('split.off')}</option>
-              {sessions.filter(s => s.id !== activeSessionId).map(s => (
-                <option key={s.id} value={s.id}>{s.title || s.id}</option>
-              ))}
-            </select>
-          </div>
-
-          {/* Workspace file tree — shown when the active workspace is bound
-              to a real local directory. Double-click inserts @path into the
-              input; right-click offers ask/explain/optimize actions. */}
-          {activeWs?.path && (
-            <div className="card" style={{ padding: 0, overflow: 'hidden', height: 300, display: 'flex', flexDirection: 'column' }}>
-              <FileTree
-                path={activeWs.path}
-                onInsertPath={(p) => setInput((prev) => prev ? `${prev} ${p}` : p)}
-                onAction={(action, path) => {
-                  const prompts: Record<string, string> = {
-                    ask: '请回答关于该文件的问题',
-                    explain: `请解释该文件的内容与作用：${path}`,
-                    optimize: `请审查并优化该文件，指出问题并给出改进建议：${path}`,
-                  };
-                  const msg = prompts[action] || prompts.ask;
-                  if (action === 'ask') {
-                    // Ask mode just inserts the path so the user can type their
-                    // question — matches the VS Code extension UX.
-                    setInput((prev) => prev ? `${prev} ${path}` : path);
-                  } else {
-                    setInput(msg);
-                    // Send immediately for explain/optimize (deterministic actions).
-                    if (handleSendRef.current) {
-                      setTimeout(() => handleSendRef.current!(), 0);
-                    }
-                  }
-                }}
-              />
-            </div>
-          )}
-
-          {/* Files touched by agent */}
-          {fileActions.length > 0 && (
-              <div className="card" style={{ padding: 12 }}>
-                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8, fontWeight: 500 }}>
-                  {t('chat.fileActions')} · {fileActions.length}
-                </div>
-                {fileActions.map(([path, action]) => (
-                  <div key={path} style={{
-                    display: 'flex', alignItems: 'center', gap: 6,
-                    padding: '3px 0', fontSize: 11, fontFamily: 'var(--font-mono)',
-                  }}>
-                    <span style={{
-                      color: action === 'write' || action === 'edit' ? 'var(--accent)' : 'var(--text-muted)',
-                      fontSize: 10, flexShrink: 0,
-                    }}>
-                      {action === 'write' ? '✎' : action === 'edit' ? '✏' : '☷'}
-                    </span>
-                    <span style={{
-                      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                      color: action !== 'read' ? 'var(--text-primary)' : 'var(--text-muted)',
-                    }}>
-                      {path.split('/').pop() || path}
-                    </span>
-                  </div>
-                ))}
-              </div>
-          )}
-
-          {/* Card 1: Context Window — click to compress (/compact) */}
-          <div
-            className="card interactive"
-            onClick={runCompactNow}
-            title={t('chat.ctxClickCompact')}
-            style={{ padding: 14, cursor: 'pointer' }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-              <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>{t('chat.contextWindow')}</span>
-              <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>{ctxWindowLabel}</span>
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-              {/* Circular progress */}
-              <svg width="56" height="56" viewBox="0 0 56 56">
-                <circle cx="28" cy="28" r="24" fill="none" stroke="var(--border-color)" strokeWidth="3" />
-                <circle
-                  cx="28" cy="28" r="24" fill="none"
-                  stroke="var(--success)" strokeWidth="3"
-                  strokeDasharray={`${Math.min(tokenUsage.input / ctxWindow, 1) * 150.8} 150.8`}
-                  strokeLinecap="round"
-                  transform="rotate(-90 28 28)"
-                />
-                <text x="28" y="32" textAnchor="middle" fontSize="11" fontWeight="600" fill="var(--text-primary)">
-                  {Math.min((tokenUsage.input / ctxWindow) * 100, 100).toFixed(0)}%
-                </text>
-              </svg>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{t('chat.used')}</div>
-                <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>
-                  {(tokenUsage.input / 1000).toFixed(1)}K
-                </div>
-                <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4 }}>
-                  {t('chat.ctxOf')} {ctxWindowLabel}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Card 2: Session Metrics */}
-          <div className="card" style={{ padding: 14 }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 10 }}>
-              {t('chat.sessionMetrics')}
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-              <div>
-                <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{t('token.cacheHit')}</div>
-                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--success)' }}>
-                  {tokenUsage.cacheHit > 0
-                    ? ((tokenUsage.cacheHit / (tokenUsage.input + tokenUsage.output + 1)) * 100).toFixed(1) + '%'
-                    : '0%'}
-                </div>
-              </div>
-              <div>
-                <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{t('chat.runTime')}</div>
-                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
-                  {activeSession?.createdAt
-                    ? Math.max(0, Math.floor((now - activeSession.createdAt) / 1000)) + 's'
-                    : '0s'}
-                </div>
-              </div>
-              <div>
-                <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{t('chat.totalTokens')}</div>
-                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
-                  {(tokenUsage.input + tokenUsage.output).toLocaleString()}
-                </div>
-              </div>
-              <div>
-                <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>{t('chat.estCost')}</div>
-                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--accent)' }}>
-                  {tokenUsage.cost}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Card 3: Usage Breakdown */}
-          <div className="card" style={{ padding: 14 }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 10 }}>
-              {t('chat.usageBreakdown')}
-            </div>
-            <div style={{ display: 'flex', gap: 4, height: 6, borderRadius: 3, overflow: 'hidden', marginBottom: 8 }}>
-              {(() => {
-                const total = tokenUsage.input + tokenUsage.output;
-                if (total === 0) return <div style={{ flex: 1, background: 'var(--bg-tertiary)' }} />;
-                const inputPct = (tokenUsage.input / total) * 100;
-                const outputPct = (tokenUsage.output / total) * 100;
-                const cachePct = tokenUsage.cacheHit > 0 ? Math.min((tokenUsage.cacheHit / total) * 100, 30) : 0;
-                return (
-                  <>
-                    <div style={{ width: `${inputPct - cachePct/2}%`, background: 'var(--accent)' }} />
-                    <div style={{ width: `${cachePct}%`, background: 'var(--success)' }} />
-                    <div style={{ width: `${outputPct}%`, background: 'var(--warning)' }} />
-                  </>
-                );
-              })()}
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4, fontSize: 10, color: 'var(--text-muted)' }}>
-              <div>● <span style={{ color: 'var(--accent)' }}>{t('token.input')}</span> {tokenUsage.input.toLocaleString()}</div>
-              <div>● <span style={{ color: 'var(--success)' }}>{t('token.cacheHit')}</span> {tokenUsage.cacheHit.toLocaleString()}</div>
-              <div>● <span style={{ color: 'var(--warning)' }}>{t('token.output')}</span> {tokenUsage.output.toLocaleString()}</div>
-            </div>
-          </div>
-
-          {/* Todo & Checkpoint & LSP & Git & Knowledge panels */}
-          <TodoPanel />
-          <CheckpointPanel />
-          <LspPanel />
-          <GitPanel />
-          <KnowledgePanel />
-          <GoalPanel />
-          <McpPanel />
-        </div>
-      </div>
-
+  const statusBarEl = (
+    <>
       {/* Status bar — full metrics like Reasonix */}
       <div style={{
         display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
@@ -1980,7 +2004,11 @@ const ChatPage: React.FC = () => {
           <span style={{ fontWeight: 500 }}>{t('token.cost')}: {tokenUsage.cost}</span>
         </span>
       </div>
+    </>
+  );
 
+  const inputDock = (
+    <>
       {/* Action toolbar — iCode session actions */}
       {activeSession?.messages && activeSession.messages.length > 0 && (
         <div style={{
@@ -2372,10 +2400,54 @@ const ChatPage: React.FC = () => {
           </div>
         </div>
       )}
+    </>
+  );
 
+  // One chat pane = message list + input dock. Used as the main column and,
+  // in split view, as the left half; the right half is an embedded ChatPage.
+  const chatPaneCol = (
+    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, height: '100%', background: 'var(--bg-primary)' }}>
+      {messagesCol}
+      {inputDock}
+    </div>
+  );
+
+  // Split mode: pin another session on the right while the left follows the
+  // active tab. Embedded panes never recurse into split mode.
+  const splitOn = !embedded && !!splitSessionId && splitSessionId !== activeSessionId;
+
+  if (embedded) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minWidth: 0, background: 'var(--bg-primary)' }}>
+        {chatPaneCol}
+        <FilePicker visible={pickerOpen} onClose={() => setPickerOpen(false)} onSelect={handleFileSelect} />
+        <ModelPicker open={modelPickerOpen} onClose={() => setModelPickerOpen(false)} />
+      </div>
+    );
+  }
+
+  return (
+    <div className="page-enter" style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
+{headerEl}
+{tabBarEl}
+      {/* Middle: conversation + session-stats sidebar (Reasonix style) */}
+      <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
+        {splitOn ? (
+          <SplitPane
+            left={chatPaneCol}
+            right={<ChatPage sessionId={splitSessionId!} />}
+          />
+        ) : (
+          messagesCol
+        )}
+        {lightboxEl}
+        {rightSidebarEl}
+      </div>
+{statusBarEl}
+      {!splitOn && inputDock}
       {palette.open && <CommandPalette onClose={() => palette.setOpen(false)} />}
       <FilePicker visible={pickerOpen} onClose={() => setPickerOpen(false)} onSelect={handleFileSelect} />
-  <ModelPicker open={modelPickerOpen} onClose={() => setModelPickerOpen(false)} />
+      <ModelPicker open={modelPickerOpen} onClose={() => setModelPickerOpen(false)} />
       <TokenBar />
     </div>
   );

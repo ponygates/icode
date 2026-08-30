@@ -196,10 +196,11 @@ const CommandPalette: React.FC<{ onClose: () => void }> = ({ onClose }) => {
 
 // Global Ctrl+K listener hook (binding from the user-configurable shortcut
 // map — see Settings → Shortcuts).
-export function useCommandPalette() {
+export function useCommandPalette(enabled = true) {
   const [open, setOpen] = useState(false);
 
   useEffect(() => {
+    if (!enabled) return; // embedded panes must not double-bind Ctrl+K
     const handler = (e: KeyboardEvent) => {
       if (matchesBinding(e, loadShortcuts().commandPalette)) {
         e.preventDefault();
@@ -208,7 +209,7 @@ export function useCommandPalette() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, []);
+  }, [enabled]);
 
   return { open, setOpen };
 }

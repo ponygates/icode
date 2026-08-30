@@ -563,6 +563,8 @@ i18n.use(initReactI18next).init({
           newTabTitle: '新建标签',
           ctxHint: '右键：重命名 / 复制 ID / 导出 / 关闭',
           copyId: '复制会话 ID',
+          openSplit: '在右侧分屏打开',
+          closeSplit: '退出分屏',
           close: '关闭标签',
         },
         todo: {
@@ -1303,6 +1305,8 @@ i18n.use(initReactI18next).init({
           newTabTitle: '新建標籤',
           ctxHint: '右鍵：重新命名 / 複製 ID / 匯出 / 關閉',
           copyId: '複製對話 ID',
+          openSplit: '在右側分屏開啟',
+          closeSplit: '退出分屏',
           close: '關閉標籤',
         },
         todo: {
@@ -2043,6 +2047,8 @@ i18n.use(initReactI18next).init({
           newTabTitle: 'New Tab',
           ctxHint: 'Right-click: rename / copy ID / export / close',
           copyId: 'Copy Session ID',
+          openSplit: 'Open in split view',
+          closeSplit: 'Exit split view',
           close: 'Close Tab',
         },
         todo: {

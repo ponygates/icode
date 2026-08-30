@@ -193,6 +193,11 @@ interface AppStore {
   // Drag-drop tab reordering
   reorderTab: (dragId: string, dropId: string) => void;
 
+  // D1 split view: the session pinned to the right pane (null = single view).
+  // Not persisted — sessions may not exist after a restart.
+  splitSessionId: string | null;
+  setSplitSession: (id: string | null) => void;
+
   // Workspaces (project containers grouping sessions)
   workspaces: Workspace[];
   activeWorkspaceId: string | null;
@@ -490,6 +495,9 @@ export const useAppStore = create<AppStore>()(
   tabOrder: loadTabOrder(),
   trash: [],
   streamingSessions: {},
+  splitSessionId: null,
+
+  setSplitSession: (id) => set({ splitSessionId: id }),
 
   setStreaming: (sessionId, on) => {
     set((state) => {
