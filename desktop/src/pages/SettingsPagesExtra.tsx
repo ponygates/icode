@@ -255,6 +255,8 @@ export function PageUpdates({ store }: { store: StoreState }) {
   const [autoUpdate, setAutoUpdate] = useState(true);
   const [channel, setChannel] = useState('stable');
   const [checking, setChecking] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [applyMsg, setApplyMsg] = useState<string | null>(null);
   const [result, setResult] = useState<{ available: boolean; current: string; latest?: string; html_url?: string; error?: string } | null>(null);
   const saveConfig = async (patch: ConfigPatch) => {
     if (!store.backendUrl) return;
@@ -287,6 +289,26 @@ export function PageUpdates({ store }: { store: StoreState }) {
       setResult({ available: false, current: '', error: e instanceof Error ? e.message : String(e) });
     } finally {
       setChecking(false);
+    }
+  };
+
+  // One-click in-place update (D6 auto-update loop): swaps the binary, then
+  // asks the user to restart.
+  const applyUpdate = async () => {
+    if (!store.backendUrl) return;
+    setApplying(true);
+    setApplyMsg(null);
+    try {
+      const res = await fetch(`${store.backendUrl}/api/update/apply`, { method: 'POST' });
+      const j = await res.json().catch(() => ({}));
+      if (j.skipped) setApplyMsg(t('updates.upToDate'));
+      else if (j.ok) setApplyMsg(`${t('updates.updatedTo')} v${j.to} — ${t('updates.restartNeeded')}`);
+      else setApplyMsg(`${t('updates.applyFailed')}: ${j.error || `HTTP ${res.status}`}`);
+      await checkUpdate();
+    } catch (e) {
+      setApplyMsg(`${t('updates.applyFailed')}: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setApplying(false);
     }
   };
   return (
@@ -326,6 +348,10 @@ export function PageUpdates({ store }: { store: StoreState }) {
               ) : result.available ? (
                 <>
                   <span style={{ color:'var(--accent)' }}>→ v{result.latest} 可用</span>
+                  <button onClick={applyUpdate} disabled={applying}
+                    style={{ padding:'6px 14px', borderRadius:6, fontSize:11, cursor:'pointer', border:'none', background:'var(--accent)', color:'#000', fontWeight:600 }}>
+                    {applying ? t('updates.updating') : t('updates.updateNow')}
+                  </button>
                   <a href={result.html_url} target="_blank" rel="noreferrer"
                     style={{ color:'var(--accent)', textDecoration:'underline', fontSize:12 }}>
                     {t('updates.openDownload')}
@@ -334,6 +360,7 @@ export function PageUpdates({ store }: { store: StoreState }) {
               ) : (
                 <span>{t('updates.upToDate')}</span>
               )}
+              {applyMsg && <span style={{ color:'var(--text-primary)' }}>{applyMsg}</span>}
             </div>
           )}
         </div>

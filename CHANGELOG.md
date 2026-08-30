@@ -1,5 +1,14 @@
 # 更新日志
 
+## v0.48.3 — 桌面自动更新闭环（D6，Reasonix 桌面对齐）（2026-08-30）
+
+> 继续差距分析顺位表：D6 桌面自动更新闭环（第 6 顺位，质量项）。此前「自动更新」勾选框只存配置不执行，更新页仅跳 GitHub 下载。
+
+- **后端 `POST /api/update/apply`**：复用 `update.Upgrade` 原地换二进制，返回 from/to/rolled（需重启）+ skipped；更新后清缓存。
+- **启动静默检查**：`startUpdateAutoCheck`——auto_update 开启时启动即查一次 + 每日轮询，结果缓存 24h；`/api/update/check` 优先返回缓存（桌面启动秒开，不等 GitHub）。
+- **前端更新页**：「一键更新」按钮（apply）→ 进度 → 「已更新到 vX — 重启后生效」/失败提示；三语 i18n 补 5 键（updateNow/updating/updatedTo/restartNeeded/applyFailed）。
+- 验证：server 编译/vet 绿；tsc 0 错；vite build ✓；四份二进制重编 PE 正确（含嵌入新前端）。
+
 ## v0.48.2 — /replay 会话检查点回放（OpenCode git-backed review parity）（2026-08-30）
 
 > 继续差距分析顺位表：C2 会话回放（第 9 顺位）。

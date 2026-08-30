@@ -56,6 +56,11 @@ type Server struct {
 	port     int
 	mu       sync.Mutex
 	apiToken string
+
+	// updateInfo / updateCheckedAt cache the background release check so the
+	// desktop's startup poll is instant (see startUpdateAutoCheck).
+	updateInfo     *update.Info
+	updateCheckedAt time.Time
 }
 
 // Store exposes the session store, used by handlers and external consumers
@@ -112,6 +117,10 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 	if removed, err := sessionum.PurgeExpiredTrash(s.store, 0); err == nil && removed > 0 {
 		log.Printf("[iCode] purged %d expired trash session(s)", removed)
 	}
+	// Silent release check (startup + daily) so the desktop shows the
+	// "update available" badge immediately instead of after a network round
+	// trip (D6 auto-update loop).
+	s.startUpdateAutoCheck()
 	mux := http.NewServeMux()
 
 	// Health & status
@@ -120,6 +129,7 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 
 	// App update check
 	mux.HandleFunc("/api/update/check", s.handleUpdateCheck)
+	mux.HandleFunc("/api/update/apply", s.handleUpdateApply)
 
 	// Provider & models
 	mux.HandleFunc("/api/providers", s.handleListProviders)
@@ -412,7 +422,15 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 // handleUpdateCheck reports whether a newer release is available on GitHub.
 // Failures (offline, rate limit) return 200 with available=false so the UI
 // never shows a scary error for a background check.
+//
+// The result is served from the background auto-check cache when it is fresh
+// (D6 auto-update loop): the desktop polls this on startup and once a day, so
+// a cached answer keeps the UI instant instead of blocking on GitHub.
 func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
+	if cached, ok := s.updateCache(); ok {
+		writeJSON(w, http.StatusOK, cached)
+		return
+	}
 	info, err := update.Check(s.version)
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -420,7 +438,80 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	s.setUpdateCache(info)
 	writeJSON(w, http.StatusOK, info)
+}
+
+// handleUpdateApply performs an in-place self-update: downloads the matching
+// release asset, swaps the running binary and reports whether a restart is
+// needed (Rolled). This closes the desktop auto-update loop — the UI used to
+// only link to the GitHub release page.
+func (s *Server) handleUpdateApply(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "POST required"})
+		return
+	}
+	res, err := update.Upgrade(r.Context(), s.version)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	// Drop the cache so a follow-up check re-queries GitHub instead of
+	// reporting the (now installed) version as available.
+	s.setUpdateCache(nil)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      res.Skipped == "",
+		"from":    res.From,
+		"to":      res.To,
+		"path":    res.Path,
+		"rolled":  res.Rolled,
+		"skipped": res.Skipped,
+	})
+}
+
+// updateCache returns the cached update info when it is fresh (< 1 day).
+func (s *Server) updateCache() (*update.Info, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.updateCheckedAt.IsZero() || time.Since(s.updateCheckedAt) > 24*time.Hour {
+		return nil, false
+	}
+	return s.updateInfo, s.updateInfo != nil
+}
+
+func (s *Server) setUpdateCache(info *update.Info) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.updateInfo = info
+	s.updateCheckedAt = time.Now()
+}
+
+// startUpdateAutoCheck does a silent startup check (and refreshes it daily)
+// so the desktop can show an "update available" badge the moment it opens —
+// the second half of the D6 auto-update loop.
+func (s *Server) startUpdateAutoCheck() {
+	if !s.cfg.Update.AutoUpdate {
+		return // user disabled auto-check
+	}
+	go func() {
+		s.runUpdateCheck()
+		t := time.NewTicker(24 * time.Hour)
+		defer t.Stop()
+		for range t.C {
+			if !s.cfg.Update.AutoUpdate {
+				return
+			}
+			s.runUpdateCheck()
+		}
+	}()
+}
+
+func (s *Server) runUpdateCheck() {
+	info, err := update.Check(s.version)
+	if err != nil {
+		return // offline / rate-limited — silently skip, cache stays empty
+	}
+	s.setUpdateCache(info)
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
