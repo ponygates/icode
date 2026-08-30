@@ -40,3 +40,13 @@ func TestRPCTypes(t *testing.T) {
 		t.Errorf("bad response: %s", b)
 	}
 }
+
+func TestSetModeParamsDecode(t *testing.T) {
+	var p setModeParams
+	if err := json.Unmarshal([]byte(`{"sessionId":"s1","modeId":"auto"}`), &p); err != nil {
+		t.Fatal(err)
+	}
+	if p.SessionID != "s1" || p.ModeID != "auto" {
+		t.Errorf("bad decode: %+v", p)
+	}
+}

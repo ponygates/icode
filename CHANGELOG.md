@@ -1,5 +1,15 @@
 # 更新日志
 
+## v0.50.1 — ACP session/load + session/set_mode（C3 P2 部分）（2026-08-30）
+
+> C3 P2 继续：补齐会话加载与模式切换（可高质量交付部分）；权限路由 `session/request_permission`（反向请求+异步响应）留 Zed 真机联调。
+
+- **`session/load`**：`sessionum.Get` 加载已有会话（配合 initialize 声明的 `loadSession` 能力），不存在返回 JSON-RPC 错误。
+- **`session/set_mode`**：映射 ACP 模式到 iCode 权限门 `plan/agent/auto/yolo`，非法模式拒绝（-32602）。
+- 单测：setModeParams 解码；acp 包测试绿。
+- 验证：Go 全量测试绿；四份二进制重编 PE 正确。
+- **遗留**：`session/request_permission` 权限路由（需 Zed 联调 schema）；D1 SessionPane 参数化。
+
 ## v0.50.0 — ACP 编辑器协议接入（P0+P1）+ 分屏地基 SplitPane（C3 + D1 起步）（2026-08-30）
 
 > 两大工程启动：C3 ACP 完成可运行核心，D1 分屏铺好地基组件。

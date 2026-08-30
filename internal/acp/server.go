@@ -99,6 +99,10 @@ func (s *Server) dispatch(ctx context.Context, req rpcRequest) {
 		s.handleSessionNew(req, isNotify)
 	case "session/prompt":
 		s.handleSessionPrompt(ctx, req, isNotify)
+	case "session/load":
+		s.handleSessionLoad(req, isNotify)
+	case "session/set_mode":
+		s.handleSessionSetMode(req, isNotify)
 	case "session/cancel":
 		// notification — cancel the in-flight turn if tracked (P1).
 	default:
@@ -199,6 +203,77 @@ func (s *Server) handleSessionPrompt(ctx context.Context, req rpcRequest, isNoti
 	}
 	if !isNotify {
 		s.respond(req.ID, map[string]any{"stopReason": "end_turn"}, nil)
+	}
+}
+
+// loadParams mirrors ACP session/load.
+type loadParams struct {
+	SessionID string `json:"sessionId"`
+}
+
+// handleSessionLoad resumes an existing session (requires loadSession
+// capability, which we advertise in initialize).
+func (s *Server) handleSessionLoad(req rpcRequest, isNotify bool) {
+	var p loadParams
+	if err := json.Unmarshal(req.Params, &p); err != nil || p.SessionID == "" {
+		if !isNotify {
+			s.respond(req.ID, nil, &rpcError{Code: -32602, Message: "invalid params"})
+		}
+		return
+	}
+	if s.Store == nil {
+		if !isNotify {
+			s.respond(req.ID, nil, &rpcError{Code: -32603, Message: "no session store"})
+		}
+		return
+	}
+	sess, err := s.Store.Get(p.SessionID)
+	if err != nil || sess == nil {
+		if !isNotify {
+			s.respond(req.ID, nil, &rpcError{Code: -32602, Message: "session not found: " + p.SessionID})
+		}
+		return
+	}
+	if !isNotify {
+		s.respond(req.ID, map[string]any{"sessionId": sess.ID}, nil)
+	}
+}
+
+// setModeParams mirrors ACP session/set_mode.
+type setModeParams struct {
+	SessionID string `json:"sessionId"`
+	ModeID    string `json:"modeId"`
+}
+
+// handleSessionSetMode switches the permission gate mode for the session
+// (plan / agent / auto / yolo — iCode's vocabulary).
+func (s *Server) handleSessionSetMode(req rpcRequest, isNotify bool) {
+	var p setModeParams
+	if err := json.Unmarshal(req.Params, &p); err != nil || p.ModeID == "" {
+		if !isNotify {
+			s.respond(req.ID, nil, &rpcError{Code: -32602, Message: "invalid params"})
+		}
+		return
+	}
+	if s.Gate == nil {
+		if !isNotify {
+			s.respond(req.ID, nil, &rpcError{Code: -32603, Message: "no permission gate"})
+		}
+		return
+	}
+	// Map ACP's mode vocabulary onto iCode's; unknown modes are rejected.
+	mode := permission.Mode(p.ModeID)
+	switch mode {
+	case permission.ModePlan, permission.ModeAgent, permission.ModeAuto, permission.ModeYOLO:
+	default:
+		if !isNotify {
+			s.respond(req.ID, nil, &rpcError{Code: -32602, Message: "unsupported mode: " + p.ModeID})
+		}
+		return
+	}
+	s.Gate.SetMode(mode)
+	if !isNotify {
+		s.respond(req.ID, map[string]any{"modeId": p.ModeID}, nil)
 	}
 }
 
