@@ -18,8 +18,8 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"runtime"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -61,7 +61,7 @@ type Server struct {
 
 	// updateInfo / updateCheckedAt cache the background release check so the
 	// desktop's startup poll is instant (see startUpdateAutoCheck).
-	updateInfo     *update.Info
+	updateInfo      *update.Info
 	updateCheckedAt time.Time
 }
 

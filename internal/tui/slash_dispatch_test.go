@@ -346,27 +346,27 @@ func (c *testCallback) OnInterrupt() {
 		c.onInterrupt()
 	}
 }
-func (c *testCallback) OnListSessions() string                                 { return "" }
-func (c *testCallback) OnResume(id string) string                              { return "" }
-func (c *testCallback) OnCompactSummarize(instruction string) string           { return "" }
-func (c *testCallback) TodoCounts() (int, int, int, int)                       { return 0, 0, 0, 0 }
-func (c *testCallback) SessionID() string                                      { return "" }
-func (c *testCallback) OnStatus() string                                       { return "" }
-func (c *testCallback) OnTokenStats() string                                   { return "" }
-func (c *testCallback) OnOutputStyle(style string) string                      { return "" }
-func (c *testCallback) OnAddDir(dir string) string                             { return "" }
-func (c *testCallback) OnUpdateModels() string                                 { return "" }
-func (c *testCallback) OnSetMode(mode string) string                           { return "" }
-func (c *testCallback) OnRenameSession(title string) string                    { return "" }
-func (c *testCallback) OnSetAskUser(fn func(string, []string) (int, error))     {}
+func (c *testCallback) OnListSessions() string                                                   { return "" }
+func (c *testCallback) OnResume(id string) string                                                { return "" }
+func (c *testCallback) OnCompactSummarize(instruction string) string                             { return "" }
+func (c *testCallback) TodoCounts() (int, int, int, int)                                         { return 0, 0, 0, 0 }
+func (c *testCallback) SessionID() string                                                        { return "" }
+func (c *testCallback) OnStatus() string                                                         { return "" }
+func (c *testCallback) OnTokenStats() string                                                     { return "" }
+func (c *testCallback) OnOutputStyle(style string) string                                        { return "" }
+func (c *testCallback) OnAddDir(dir string) string                                               { return "" }
+func (c *testCallback) OnUpdateModels() string                                                   { return "" }
+func (c *testCallback) OnSetMode(mode string) string                                             { return "" }
+func (c *testCallback) OnRenameSession(title string) string                                      { return "" }
+func (c *testCallback) OnSetAskUser(fn func(string, []string) (int, error))                      {}
 func (c *testCallback) OnSetAskUserForm(fn func([]tool.FormQuestion) ([]tool.FormAnswer, error)) {}
-func (c *testCallback) OnAddCustomModel(provider, modelID, name string) string { return "" }
-func (c *testCallback) OnRemoveCustomModel(id string) string                   { return "" }
-func (c *testCallback) LSPQuery(sub string, args []string) string              { return "" }
-func (c *testCallback) KnowledgeQuery(query string) string                     { return "" }
-func (c *testCallback) CreateIdleTask(name, prompt string) string              { return "" }
-func (c *testCallback) OnPermissionNote(toolPrompt, note string)               {}
-func (c *testCallback) OnListSessionsStructured(limit int) []SessionInfo       { return nil }
+func (c *testCallback) OnAddCustomModel(provider, modelID, name string) string                   { return "" }
+func (c *testCallback) OnRemoveCustomModel(id string) string                                     { return "" }
+func (c *testCallback) LSPQuery(sub string, args []string) string                                { return "" }
+func (c *testCallback) KnowledgeQuery(query string) string                                       { return "" }
+func (c *testCallback) CreateIdleTask(name, prompt string) string                                { return "" }
+func (c *testCallback) OnPermissionNote(toolPrompt, note string)                                 {}
+func (c *testCallback) OnListSessionsStructured(limit int) []SessionInfo                         { return nil }
 
 // feedEsc pushes an ESC sequence (leading 0x1b + follow-up bytes) into the
 // key channel — the same path the key pump uses in production — then dispatches

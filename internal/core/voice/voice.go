@@ -31,8 +31,8 @@ import (
 // ---------- Provider identifiers ----------
 
 const (
-	ProviderZhipu  = "zhipu"
-	ProviderBaidu  = "baidu"
+	ProviderZhipu   = "zhipu"
+	ProviderBaidu   = "baidu"
 	ProvideriFlytek = "xfyun"
 )
 

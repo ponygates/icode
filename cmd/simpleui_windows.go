@@ -1206,22 +1206,26 @@ func (b *simpleUIBridge) handleVoiceCommand(args []string) string {
 			return "读取配置失败: " + err.Error()
 		}
 		mask := func(s string) string {
-			if s == "" { return "(未设置)" }
-			if len(s) <= 8 { return "****" }
+			if s == "" {
+				return "(未设置)"
+			}
+			if len(s) <= 8 {
+				return "****"
+			}
 			return s[:4] + "****" + s[len(s)-4:]
 		}
 		return fmt.Sprintf(
 			"语音输入设置:\n"+
-			"  提供商: %s\n"+
-			"  百度 API Key: %s\n"+
-			"  百度 Secret: %s\n"+
-			"  讯飞 App ID: %s\n"+
-			"  讯飞 API Key: %s\n"+
-			"  讯飞 Secret: %s\n\n"+
-			"用法:\n"+
-			"  /voice provider <name>     设置提供商 (zhipu|baidu|xfyun)\n"+
-			"  /voice baidu <key> <secret> 设置百度语音 API 凭证\n"+
-			"  /voice xfyun <appid> <key> <secret> 设置讯飞语音 API 凭证",
+				"  提供商: %s\n"+
+				"  百度 API Key: %s\n"+
+				"  百度 Secret: %s\n"+
+				"  讯飞 App ID: %s\n"+
+				"  讯飞 API Key: %s\n"+
+				"  讯飞 Secret: %s\n\n"+
+				"用法:\n"+
+				"  /voice provider <name>     设置提供商 (zhipu|baidu|xfyun)\n"+
+				"  /voice baidu <key> <secret> 设置百度语音 API 凭证\n"+
+				"  /voice xfyun <appid> <key> <secret> 设置讯飞语音 API 凭证",
 			cfg.Voice.Provider,
 			mask(cfg.Voice.BaiduAPIKey),
 			mask(cfg.Voice.BaiduSecretKey),

@@ -64,14 +64,14 @@ func (s *Server) handleRemoteStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"version":      s.version,
-		"mode":         mode,
-		"security":     sec,
-		"bg_agents":    tool.RunningAgentTaskCount(),
-		"bg_shells":    tool.RunningShellTaskCount(),
-		"automations":  auto,
-		"kb_chunks":    chunks,
-		"server_time":  time.Now().Format("2006-01-02 15:04:05"),
+		"version":     s.version,
+		"mode":        mode,
+		"security":    sec,
+		"bg_agents":   tool.RunningAgentTaskCount(),
+		"bg_shells":   tool.RunningShellTaskCount(),
+		"automations": auto,
+		"kb_chunks":   chunks,
+		"server_time": time.Now().Format("2006-01-02 15:04:05"),
 	})
 }
 

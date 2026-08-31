@@ -111,7 +111,7 @@ func (s *Server) dispatch(ctx context.Context, req rpcRequest) {
 		s.respond(req.ID, map[string]any{
 			"protocolVersion": protocolVersion,
 			"agentCapabilities": map[string]any{
-				"loadSession": true,
+				"loadSession":        true,
 				"promptCapabilities": map[string]any{"image": false, "audio": false, "embeddedContext": false},
 			},
 		}, nil)
@@ -146,9 +146,9 @@ func (s *Server) notify(method string, params any) {
 
 // sessionNewParams mirrors ACP session/new.
 type sessionNewParams struct {
-	Cwd         string `json:"cwd"`
-	MCPFilters  any    `json:"mcpServers,omitempty"`
-	ClientName  string `json:"clientName,omitempty"`
+	Cwd        string `json:"cwd"`
+	MCPFilters any    `json:"mcpServers,omitempty"`
+	ClientName string `json:"clientName,omitempty"`
 }
 
 func (s *Server) handleSessionNew(req rpcRequest, isNotify bool) {

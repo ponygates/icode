@@ -57,7 +57,7 @@ func TestPermissionResponseResolved(t *testing.T) {
 
 	// Editor's answer to our session/request_permission request.
 	s.resolvePermission(json.RawMessage(`"perm-1"`), rpcRequest{
-		ID: json.RawMessage(`"perm-1"`),
+		ID:     json.RawMessage(`"perm-1"`),
 		Result: json.RawMessage(`{"outcome":{"outcome":"selected","optionId":"allow-once"}}`),
 	})
 

@@ -23,9 +23,9 @@ type FormQuestion struct {
 
 // FormAnswer is the user's answer to one FormQuestion.
 type FormAnswer struct {
-	Index   int      `json:"index,omitempty"`  // single-select choice
-	Indices []int    `json:"indices,omitempty"` // multi-select choices
-	Text    string   `json:"text,omitempty"`   // free-text answer
+	Index   int    `json:"index,omitempty"`   // single-select choice
+	Indices []int  `json:"indices,omitempty"` // multi-select choices
+	Text    string `json:"text,omitempty"`    // free-text answer
 }
 
 // askUserFormKey carries the form asker through the context.
@@ -58,7 +58,7 @@ func (t *AskUserFormTool) Def() types.ToolDef {
 			"type": "object",
 			"properties": map[string]any{
 				"questions": map[string]any{
-					"type":  "array",
+					"type": "array",
 					"items": map[string]any{
 						"type": "object",
 						"properties": map[string]any{

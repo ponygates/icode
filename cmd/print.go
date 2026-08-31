@@ -20,11 +20,11 @@ import (
 // parity): run one prompt to completion, print the result, exit. Designed for
 // scripts, pipes, and CI — no TUI, no raw terminal mode.
 //
-//   icode -p "fix the failing test"                  # plain text to stdout
-//   icode -p "..." --output-format json              # single JSON result object
-//   icode -p "..." --output-format stream-json       # one JSON event per line
-//   icode -p "..." -c                                # continue the last session
-//   icode -p "..." --resume <session-id>
+//	icode -p "fix the failing test"                  # plain text to stdout
+//	icode -p "..." --output-format json              # single JSON result object
+//	icode -p "..." --output-format stream-json       # one JSON event per line
+//	icode -p "..." -c                                # continue the last session
+//	icode -p "..." --resume <session-id>
 //
 // Diagnostics (tool calls, permission auto-approvals, usage, errors) go to
 // stderr so stdout stays clean and pipeable.

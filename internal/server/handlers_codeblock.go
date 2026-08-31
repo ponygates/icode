@@ -22,9 +22,9 @@ type codeblockRequest struct {
 }
 
 type codeblockResponse struct {
-	OK       bool   `json:"ok"`
-	Path     string `json:"path,omitempty"`
-	Error    string `json:"error,omitempty"`
+	OK    bool   `json:"ok"`
+	Path  string `json:"path,omitempty"`
+	Error string `json:"error,omitempty"`
 }
 
 // handleCodeBlockOpen saves a code-block snippet to a temp file and opens it

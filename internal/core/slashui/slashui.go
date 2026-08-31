@@ -14,11 +14,11 @@ import (
 	"time"
 
 	"github.com/ponygates/icode/internal/config"
-	"github.com/ponygates/icode/internal/core/hooks"
 	"github.com/ponygates/icode/internal/core/agent"
 	"github.com/ponygates/icode/internal/core/checkpoint"
 	projectcontext "github.com/ponygates/icode/internal/core/context"
 	"github.com/ponygates/icode/internal/core/conversation"
+	"github.com/ponygates/icode/internal/core/hooks"
 	"github.com/ponygates/icode/internal/core/knowledge"
 	"github.com/ponygates/icode/internal/core/permission"
 	"github.com/ponygates/icode/internal/core/plugins"

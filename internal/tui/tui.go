@@ -238,8 +238,8 @@ type TUI struct {
 	// "#123 OPEN". Refreshed lazily (prCheck) via `gh pr view` so no gh exec
 	// happens on the render hot path. Empty when there is no PR for the branch
 	// or `gh` is unavailable.
-	prBadge  string
-	prCheck  time.Time
+	prBadge string
+	prCheck time.Time
 
 	// lastActivity / lastAutoRecap power the "auto-recommend after 3 min away"
 	// feature (Claude Code parity): when the user has been idle for 3 minutes
@@ -500,8 +500,8 @@ type TUI struct {
 
 	// skillCount caches the number of installed skills (lazily computed once,
 	// never on the render hot path).
-	skillCount        int
-	skillCountLoaded  bool
+	skillCount       int
+	skillCountLoaded bool
 }
 
 // New creates a TUI instance. Security level defaults to "local" (safest).
@@ -672,10 +672,10 @@ func (t *TUI) runLine() error {
 						t.add(RoleError, fmt.Sprintf("内部错误: %v", r))
 					}
 				}()
-			sentText, atts := t.expandFileRefs(text)
-			t.callback.OnSend(sentText, atts)
-		}()
-		t.drainStream()
+				sentText, atts := t.expandFileRefs(text)
+				t.callback.OnSend(sentText, atts)
+			}()
+			t.drainStream()
 		}
 	}
 	return nil

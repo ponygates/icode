@@ -2013,23 +2013,23 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 		// which already used an accumulator) don't.
 		acc := &textAccumulator{}
 
-	for {
-		select {
-		case <-ctx.Done():
-			// User interrupted (Esc / stop button): keep whatever partial
-			// output already streamed (Claude Code parity — "已完成的工作保留"),
-			// persist it into the session, and tell the UI explicitly so it
-			// can reset its streaming state and show a confirmation.
-			e.persistPartialTurn(sessionID, opt, assistantMsg)
-			msg := "⏹ 已中断生成。"
-			if assistantMsg.Content != "" {
-				msg += " 已生成的部分输出已保留。"
-			}
+		for {
 			select {
-			case out <- types.StreamEvent{Type: types.EventSystem, Content: msg}:
-			default:
-			}
-			return
+			case <-ctx.Done():
+				// User interrupted (Esc / stop button): keep whatever partial
+				// output already streamed (Claude Code parity — "已完成的工作保留"),
+				// persist it into the session, and tell the UI explicitly so it
+				// can reset its streaming state and show a confirmation.
+				e.persistPartialTurn(sessionID, opt, assistantMsg)
+				msg := "⏹ 已中断生成。"
+				if assistantMsg.Content != "" {
+					msg += " 已生成的部分输出已保留。"
+				}
+				select {
+				case out <- types.StreamEvent{Type: types.EventSystem, Content: msg}:
+				default:
+				}
+				return
 			case event, ok := <-eventCh:
 				if !ok {
 					return
@@ -2078,7 +2078,7 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 					// AgentStart fired at the top of Send).
 					if hr := e.getHooksRunner(); hr.HasHooks(hooks.AgentStop) {
 						hr.Fire(context.Background(), hooks.AgentStop, hooks.Input{
-							SessionID: sessionID,
+							SessionID:  sessionID,
 							ToolOutput: fmt.Sprintf("%dms", time.Since(startTime).Milliseconds()),
 						})
 					}
