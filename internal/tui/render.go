@@ -993,7 +993,14 @@ func (t *TUI) messageLinesW(m Message, width int) []string {
 			// Per-block folding (Claude Code / opencode style): a folded card
 			// shows the header plus a short excerpt; expanded shows everything.
 			toolOutput := m.Content
-			if m.Folded || t.zenMode {
+			if t.zenMode {
+				// Focus view (Claude Code parity): in zen/focus mode show only
+				// the tool header — no output excerpt — so the transcript reads
+				// as pure conversation with a one-line activity marker.
+				out = append(out, t.paint("dim", "    ⎿ … (工具输出已折叠，/zen 展开)"))
+				return out
+			}
+			if m.Folded {
 				fold := strings.Split(toolOutput, "\n")
 				if len(fold) > maxToolLines {
 					toolOutput = strings.Join(fold[:maxToolLines], "\n") + "\n" +

@@ -1921,20 +1921,40 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 		if p == nil {
 			p = provider
 		}
-		eventCh, err = p.ChatStream(ctx, types.ChatRequest{
-			SessionID:        sessionID,
-			Messages:         messages,
-			Model:            mt.modelID,
-			ProviderName:     mt.providerName,
-			SystemPrompt:     opt.BuildPrefix(),
-			Tools:            e.toolReg.ListDefs(),
-			MaxTokens:        orMaxTokens(e.maxTokens, mt.modelInfo.MaxOutputTokens),
-			Temperature:      e.temperature,
-			CacheBreakpoints: opt.BuildCacheBreakpoints(),
-			Thinking:         e.thinkingConfig(),
-		})
+		build := func() (<-chan types.StreamEvent, error) {
+			return p.ChatStream(ctx, types.ChatRequest{
+				SessionID:        sessionID,
+				Messages:         messages,
+				Model:            mt.modelID,
+				ProviderName:     mt.providerName,
+				SystemPrompt:     opt.BuildPrefix(),
+				Tools:            e.toolReg.ListDefs(),
+				MaxTokens:        orMaxTokens(e.maxTokens, mt.modelInfo.MaxOutputTokens),
+				Temperature:      e.temperature,
+				CacheBreakpoints: opt.BuildCacheBreakpoints(),
+				Thinking:         e.thinkingConfig(),
+				CacheTTL:         e.cacheTTL,
+			})
+		}
+		eventCh, err = build()
 		if err == nil {
 			break
+		}
+		// Rate-limit / quota auto-retry (Claude Code "continue automatically at
+		// usage limit" parity): wait with backoff and retry the SAME model a
+		// couple of times before giving up or falling back.
+		if isRateLimitError(err) {
+			for attempt := 1; attempt <= 2 && err != nil; attempt++ {
+				select {
+				case <-ctx.Done():
+					attempt = 99 // abort retries
+				case <-time.After(time.Duration(15*attempt) * time.Second):
+					eventCh, err = build()
+				}
+			}
+			if err == nil {
+				break
+			}
 		}
 		lastErr = err
 	}

@@ -1,5 +1,13 @@
 # 更新日志
 
+## v0.53.1 — 用量自动重试 + Focus view（对标对齐补齐）(2026-08-31)
+
+> 补齐最后两项对标细节，14 项全部落地。
+
+- **C6 用量达限自动重试**：`isRateLimitError` 分类（429/rate limit/quota/billing/过载），engine fallback 循环中遇限流时**同模型退避重试**（15s/30s，最多 2 次）再切备用模型（Claude Code "continue automatically at usage limit" parity）。
+- **C7 Focus view**：Zen 模式下工具卡片只显 header（不显 output 摘录），transcript 呈现为纯对话 + 单行活动标记（Claude Code Focus view parity）。
+- 验证：全量编译 + 测试无 FAIL；四份二进制重编 PE 正确。
+
 ## v0.53.0 — 四对标对象对齐（11 项）(2026-08-31)
 
 > 基于对标审查，向 Claude Code / OpenCode / Reasonix 补齐 11 个细节（C1/C2/R2/O1/C3/C5/R1/R3/C4/R4/O2）。全部经编译 + 测试验证。

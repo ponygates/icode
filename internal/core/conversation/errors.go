@@ -65,6 +65,20 @@ func containsAny(s string, subs ...string) bool {
 	return false
 }
 
+// isRateLimitError reports whether the error is a transient rate-limit / quota
+// / billing condition (429 or equivalent). Used by the engine's automatic
+// retry path (Claude Code "continue automatically at usage limit" parity):
+// a rate-limit error is worth waiting-and-retrying, unlike a bad API key.
+func isRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return containsAny(lower, "429", "rate limit", "rate_limit", "too many requests",
+		"quota", "insufficient", "limit reached", "billing", "overloaded",
+		"temporarily unavailable", "service unavailable")
+}
+
 // FriendlyModelError is the exported wrapper around friendlyModelError, used
 // by non-engine callers (e.g. the simple UI bridge) that need the same
 // human-friendly model-error translation without reaching into the engine.
