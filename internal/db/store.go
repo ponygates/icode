@@ -143,7 +143,8 @@ func (s *Store) migrate() error {
 			finished_at TEXT NOT NULL,
 			status TEXT NOT NULL DEFAULT '',
 			output TEXT NOT NULL DEFAULT '',
-			error TEXT NOT NULL DEFAULT ''
+			error TEXT NOT NULL DEFAULT '',
+			tokens INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE TABLE IF NOT EXISTS agent_messages (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -164,6 +165,9 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("migration %d: %w", i+1, err)
 		}
 	}
+	// Additive column migrations — tolerate "duplicate column" for pre-existing
+	// databases (CREATE IF NOT EXISTS above does not add columns).
+	_, _ = s.db.Exec(`ALTER TABLE automation_runs ADD COLUMN tokens INTEGER NOT NULL DEFAULT 0`)
 	return nil
 }
 
@@ -758,16 +762,16 @@ func (s *Store) DeleteAutomation(id string) error {
 // AppendAutomationRun records one execution result.
 func (s *Store) AppendAutomationRun(r scheduler.RunRecord) error {
 	_, err := s.db.Exec(`INSERT OR REPLACE INTO automation_runs
-		(id, task_id, started_at, finished_at, status, output, error)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		(id, task_id, started_at, finished_at, status, output, error, tokens)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ID, r.TaskID, rf3339(r.StartedAt), rf3339(r.FinishedAt),
-		r.Status, r.Output, r.Error)
+		r.Status, r.Output, r.Error, r.Tokens)
 	return err
 }
 
 // ListAutomationRuns returns the most recent runs for a task.
 func (s *Store) ListAutomationRuns(taskID string, limit int) ([]scheduler.RunRecord, error) {
-	rows, err := s.db.Query(`SELECT id, task_id, started_at, finished_at, status, output, error
+	rows, err := s.db.Query(`SELECT id, task_id, started_at, finished_at, status, output, error, tokens
 		FROM automation_runs WHERE task_id = ? ORDER BY started_at DESC LIMIT ?`, taskID, limit)
 	if err != nil {
 		return nil, err
@@ -778,7 +782,7 @@ func (s *Store) ListAutomationRuns(taskID string, limit int) ([]scheduler.RunRec
 		var r scheduler.RunRecord
 		var startedAt, finishedAt string
 		if err := rows.Scan(&r.ID, &r.TaskID, &startedAt, &finishedAt,
-			&r.Status, &r.Output, &r.Error); err != nil {
+			&r.Status, &r.Output, &r.Error, &r.Tokens); err != nil {
 			return nil, err
 		}
 		r.StartedAt, _ = time.Parse(time.RFC3339, startedAt)

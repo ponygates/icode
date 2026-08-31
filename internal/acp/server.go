@@ -222,7 +222,15 @@ func (s *Server) handleSessionPrompt(ctx context.Context, req rpcRequest, isNoti
 		}
 	}
 	if !isNotify {
-		s.respond(req.ID, map[string]any{"stopReason": "end_turn"}, nil)
+		result := map[string]any{"stopReason": "end_turn"}
+		// Authoritative total token count for the session (Reasonix parity:
+		// ACP exposes totalTokens so editors show usage).
+		if s.Engine != nil {
+			if st := s.Engine.SessionStats(p.SessionID); st != nil {
+				result["totalTokens"] = st.TotalTokens
+			}
+		}
+		s.respond(req.ID, result, nil)
 	}
 }
 

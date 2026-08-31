@@ -402,7 +402,11 @@ func (p *Provider) buildMessagesBody(req types.ChatRequest, stream bool) (io.Rea
 		// Add cache_control to system prompt for prompt caching
 		if p.SupportsCache() {
 			if sc, ok := body["system"].([]map[string]any); ok && len(sc) > 0 {
-				sc[len(sc)-1]["cache_control"] = map[string]string{"type": "ephemeral"}
+				cc := map[string]string{"type": "ephemeral"}
+				if req.CacheTTL != "" {
+					cc["ttl"] = req.CacheTTL
+				}
+				sc[len(sc)-1]["cache_control"] = cc
 			}
 		}
 	}

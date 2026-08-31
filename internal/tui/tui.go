@@ -224,6 +224,9 @@ type TUI struct {
 	// curTool is the tool currently executing while streaming ("⚙ bash" in
 	// the status bar). Set by AddToolMessage, cleared by AppendToolResult.
 	curTool string
+	// zenMode hides tool-output noise — all tool cards render folded so the
+	// user sees only the conversation (OpenCode Zen parity).
+	zenMode bool
 	// voiceRec is the live CLI microphone capture (/voice toggle).
 	voiceRec *voice.Recorder
 	// gitBranch caches the workspace branch for the status bar; refreshed
@@ -512,12 +515,14 @@ func New(cfg Config) *TUI {
 	}
 	secLvl := "local"
 	vimMode := false
+	zenMode := false
 	statusVisible := true
 	if c, err := config.Load(); err == nil {
 		if c.SecurityLevel != "" {
 			secLvl = string(c.SecurityLevel)
 		}
 		vimMode = c.TUI.Vim
+		zenMode = c.TUI.Zen
 		if c.TUI.ShowStatusLine != nil {
 			statusVisible = *c.TUI.ShowStatusLine
 		}
@@ -550,6 +555,7 @@ func New(cfg Config) *TUI {
 		welcomeVisible: true, // show the startup banner on a fresh session
 		vimMode:        vimMode,
 		vimInsert:      true,
+		zenMode:        zenMode,
 		statusVisible:  statusVisible,
 	}
 }

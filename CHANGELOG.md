@@ -1,5 +1,30 @@
 # 更新日志
 
+## v0.53.0 — 四对标对象对齐（11 项）(2026-08-31)
+
+> 基于对标审查，向 Claude Code / OpenCode / Reasonix 补齐 11 个细节（C1/C2/R2/O1/C3/C5/R1/R3/C4/R4/O2）。全部经编译 + 测试验证。
+
+**省 token / 成本（批次 1）**
+- **C1 `/usage` Loops 分解**：`scheduler.LoopStats` 聚合每任务运行次数/总 token/token-per-run/最后运行，`/usage` 末尾展示，失控 `/loop` 一目了然（Claude Code parity）。`RunRecord` 加 `tokens` 字段 + db 迁移。
+- **C2 `prompt_cache_ttl`**：`DefaultCfg.PromptCacheTTL` 经 `engine.SetCacheTTL` → Anthropic `cache_control.ttl`（主会话 1h / 子代理 5min 分离可配）。
+- **R2 MCP `tools/list_changed`**：`Client` 补 `onNotification` 回调 + notify 消费 goroutine + `RefreshTools`；`Pool.SetOnToolsChanged` → server 层 `refreshMCPTools` 自动刷新工具目录。
+
+**体验（批次 2）**
+- **O1 LSP 项目语言自动探测**：`lsp.DetectProjectLanguages`（go.mod/package.json/Cargo.toml/pyproject 等）自动加载匹配 LSP，无需手动 `auto_start`。
+- **C3 用户 prompt 渲染 Markdown**：TUI `RoleUser` 走 `renderMarkdown`（代码块/行内码/列表），与回复一致。
+- **C5 `/permissions reload`**：从磁盘重载权限规则（ParamRule + Claude settings + 路径 + 模式）到 gate，**即时生效**。
+
+**深度（批次 3）**
+- **R1 目标级 token 预算**：`/goal set --budget <N>`，engine 超预算注入收尾指令（Reasonix goal_token_budget）。
+- **C4 `model_pricing`**：`config.PricingOverride` + `engine.SetModelPricing`，`calculateCostWithPricing` 让 `/cost` 反映合同价而非目录价。
+- **R3 ACP totalTokens**：`session/prompt` 响应暴露权威总令牌数。
+
+**打磨（批次 4）**
+- **R4 `/preset`**：light/balanced/deliver 三档执行设定（一键切换 mode + thinking）。
+- **O2 `/zen`**：Zen 模式折叠所有工具卡片，只留对话（`config.TUI.Zen` 持久化）。
+
+**遗留**：C6 用量达限自动重试（错误识别已有，重试状态机留二期）、C7 Focus view（Zen 已覆盖工具折叠核心）。
+
 ## v0.52.1 — CLI 对齐 Claude Code 交互（第一轮）（2026-08-31）
 
 > 五维审计（状态栏/思考展示/快捷键/补全/simpleui）后落地 S 级高价值项，token 节省优势不动。

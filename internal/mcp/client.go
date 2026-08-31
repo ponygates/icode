@@ -66,6 +66,11 @@ type Client struct {
 	pending map[int64]chan *jsonrpcResponse
 	notify  chan *jsonrpcNotification
 
+	// onNotification, when set, receives server-push notifications (method +
+	// params) such as notifications/tools/list_changed. Called from the notify
+	// pump goroutine; must be concurrency-safe.
+	onNotification func(method string, params any)
+
 	// SSE transport fields
 	httpClient   *http.Client
 	sseEndpoint  string // session-scoped endpoint URL for POST/GET
@@ -89,16 +94,44 @@ func NewClient(cfg ServerConfig) *Client {
 	}
 }
 
+// SetOnNotification wires a server-push notification handler (method + params).
+// The notify pump goroutine is started lazily on first Connect.
+func (c *Client) SetOnNotification(fn func(method string, params any)) {
+	c.mu.Lock()
+	c.onNotification = fn
+	c.mu.Unlock()
+}
+
+// startNotifyPump drains the notify channel and dispatches to onNotification.
+// It exits when the channel is closed (on Close).
+func (c *Client) startNotifyPump() {
+	go func() {
+		for n := range c.notify {
+			c.mu.RLock()
+			fn := c.onNotification
+			c.mu.RUnlock()
+			if fn != nil {
+				fn(n.Method, n.Params)
+			}
+		}
+	}()
+}
+
 // Connect establishes the connection based on the transport type.
 func (c *Client) Connect(ctx context.Context) error {
+	var err error
 	switch c.config.Type {
 	case TransportStdio:
-		return c.connectStdio(ctx)
+		err = c.connectStdio(ctx)
 	case TransportSSE:
-		return c.connectSSE(ctx)
+		err = c.connectSSE(ctx)
 	default:
 		return fmt.Errorf("unsupported transport: %s", c.config.Type)
 	}
+	if err == nil {
+		c.startNotifyPump()
+	}
+	return err
 }
 
 func (c *Client) connectStdio(ctx context.Context) error {
@@ -500,6 +533,19 @@ func (c *Client) Tools() []types.ToolDef {
 	return c.tools
 }
 
+// RefreshTools re-discovers the server's tool list and replaces the cached
+// catalog (Reasonix parity: called on notifications/tools/list_changed).
+func (c *Client) RefreshTools(ctx context.Context) error {
+	defs, err := c.DiscoverTools(ctx)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.tools = defs
+	c.mu.Unlock()
+	return nil
+}
+
 // Close terminates the server connection and cleans up all resources.
 func (c *Client) Close() error {
 	c.mu.Lock()
@@ -693,6 +739,9 @@ func (c *Client) readLoop() {
 type Pool struct {
 	mu      sync.RWMutex
 	clients map[string]*Client
+	// onToolsChanged, when set, fires after a connected server signals
+	// notifications/tools/list_changed and its catalog is re-discovered.
+	onToolsChanged func(clientName string)
 }
 
 // NewPool creates an empty MCP client pool.
@@ -700,6 +749,15 @@ func NewPool() *Pool {
 	return &Pool{
 		clients: make(map[string]*Client),
 	}
+}
+
+// SetOnToolsChanged wires a callback fired when a server's tool list changes
+// (notifications/tools/list_changed). The caller (server layer) refreshes the
+// engine's MCP tool registry from it.
+func (p *Pool) SetOnToolsChanged(fn func(clientName string)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.onToolsChanged = fn
 }
 
 // Add registers and connects to a new MCP server.
@@ -712,6 +770,21 @@ func (p *Pool) Add(ctx context.Context, cfg ServerConfig) error {
 	if err := client.Connect(ctx); err != nil {
 		return fmt.Errorf("connect to %s: %w", cfg.Name, err)
 	}
+
+	// Auto-refresh the catalog when the server signals a tool-list change
+	// (Reasonix parity: notifications/tools/list_changed).
+	client.SetOnNotification(func(method string, _ any) {
+		if method != "notifications/tools/list_changed" {
+			return
+		}
+		_ = client.RefreshTools(context.Background())
+		p.mu.RLock()
+		cb := p.onToolsChanged
+		p.mu.RUnlock()
+		if cb != nil {
+			cb(cfg.Name)
+		}
+	})
 
 	// Discover tools immediately
 	if _, err := client.DiscoverTools(ctx); err != nil {

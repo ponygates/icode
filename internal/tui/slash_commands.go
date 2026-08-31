@@ -710,6 +710,17 @@ func (t *TUI) handleSlash(text string) {
 			t.add(RoleSystem, "[ ] 详细输出已关闭")
 		}
 
+	case "/zen":
+		// Zen mode (OpenCode parity): fold all tool cards so the user sees only
+		// the conversation — deep-work without tool-output noise.
+		t.zenMode = !t.zenMode
+		t.persistSetting(func(c *config.Config) { c.TUI.Zen = t.zenMode })
+		if t.zenMode {
+			t.add(RoleSystem, "[x] Zen 模式已开启（工具输出折叠，只留对话；/zen 关闭）")
+		} else {
+			t.add(RoleSystem, "[ ] Zen 模式已关闭（工具输出完整显示）")
+		}
+
 	case "/vim":
 		t.vimMode = !t.vimMode
 		t.persistSetting(func(c *config.Config) { c.TUI.Vim = t.vimMode })

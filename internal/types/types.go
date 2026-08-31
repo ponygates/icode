@@ -132,6 +132,12 @@ type ChatRequest struct {
 	// Thinking, when non-nil, enables provider extended thinking (Anthropic
 	// Claude). Ignored by providers that do not support it.
 	Thinking *ThinkingConfig `json:"thinking,omitempty"`
+
+	// CacheTTL overrides the default ephemeral cache breakpoint TTL for
+	// providers that honor cache_control ttl (Anthropic). Values like "5m",
+	// "1h" mirror Claude Code's promptCacheTtl setting. Empty = provider
+	// default.
+	CacheTTL string `json:"cache_ttl,omitempty"`
 }
 
 // ThinkingConfig enables extended thinking (Anthropic Messages API

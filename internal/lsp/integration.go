@@ -149,6 +149,42 @@ func DetectLanguage(filePath string) string {
 	}
 }
 
+// DetectProjectLanguages inspects the project root for well-known manifest
+// files and returns the language IDs to eagerly start (OpenCode parity:
+// auto-load the right LSP from the project, no manual auto_start config).
+// Order is stable and de-duplicated.
+func DetectProjectLanguages(cwd string) []string {
+	if cwd == "" {
+		cwd = "."
+	}
+	type probe struct {
+		file string
+		lang string
+	}
+	probes := []probe{
+		{"go.mod", "go"},
+		{"package.json", "typescript"},
+		{"Cargo.toml", "rust"},
+		{"pyproject.toml", "python"},
+		{"requirements.txt", "python"},
+		{"pom.xml", "java"},
+		{"build.gradle", "java"},
+		{"build.gradle.kts", "java"},
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, p := range probes {
+		if seen[p.lang] {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(cwd, p.file)); err == nil {
+			out = append(out, p.lang)
+			seen[p.lang] = true
+		}
+	}
+	return out
+}
+
 // ensureClient starts the language server for a file's language (idempotent)
 // and returns the client, or an error when the server is unavailable.
 func (m *Manager) ensureClient(ctx context.Context, filePath string) (*Client, string, error) {

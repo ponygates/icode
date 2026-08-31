@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ponygates/icode/internal/llm/tokenopt"
 	"github.com/ponygates/icode/internal/types"
 )
 
@@ -45,6 +46,9 @@ type RunRecord struct {
 	Status     string    `json:"status"` // running | ok | error
 	Output     string    `json:"output"` // truncated (max 4000 chars)
 	Error      string    `json:"error,omitempty"`
+	// Tokens is the total token count consumed by this run (Claude Code
+	// /usage Loops parity — per-loop totals make runaway /loop tasks visible).
+	Tokens int `json:"tokens,omitempty"`
 }
 
 // Store is the persistence interface the scheduler needs. Implemented by the
@@ -60,6 +64,9 @@ type Store interface {
 // Engine is the subset of the conversation engine the scheduler needs.
 type Engine interface {
 	Send(ctx context.Context, sessionID, content string, attachments ...[]types.Attachment) (<-chan types.StreamEvent, error)
+	// SessionStats reports per-session token usage; used to record how many
+	// tokens each scheduled run consumed (nil when the session is unknown).
+	SessionStats(sessionID string) *tokenopt.Stats
 }
 
 // SessionFactory creates a fresh session for a scheduled run and returns its
@@ -413,6 +420,13 @@ func (s *Scheduler) runTask(id string) RunRecord {
 	rec.Output = text
 	rec.Error = runErr
 	rec.FinishedAt = time.Now()
+	// Record this run's token usage so /usage can break loops down by cost
+	// (Claude Code /usage Loops parity).
+	if s.engine != nil {
+		if st := s.engine.SessionStats(sessID); st != nil {
+			rec.Tokens = st.TotalTokens
+		}
+	}
 	if runErr != "" {
 		rec.Status = "error"
 	} else {
@@ -438,6 +452,68 @@ func (s *Scheduler) runTask(id string) RunRecord {
 	s.persistRun(rec)
 	log.Printf("[scheduler] task %s (%s) → %s in %s", id, t.Name, rec.Status, time.Since(rec.StartedAt).Round(time.Millisecond))
 	return rec
+}
+
+// LoopStat is the aggregated cost of one scheduled loop task — the shape
+// /usage renders as its "Loops 分解" section (Claude Code parity).
+type LoopStat struct {
+	TaskID   string    `json:"task_id"`
+	Name     string    `json:"name"`
+	Schedule string    `json:"schedule"`
+	Runs     int       `json:"runs"`
+	Tokens   int       `json:"tokens"`
+	LastRun  time.Time `json:"last_run"`
+	Enabled  bool      `json:"enabled"`
+	Errors   int       `json:"errors"`
+}
+
+// TokensPerRun reports average tokens per run (0 when there are no runs).
+func (l LoopStat) TokensPerRun() int {
+	if l.Runs == 0 {
+		return 0
+	}
+	return l.Tokens / l.Runs
+}
+
+// LoopStats aggregates run history per task so runaway /loop jobs are easy to
+// spot (Claude Code /usage Loops parity: run count, total tokens, tokens per
+// run, last run).
+func (s *Scheduler) LoopStats() []LoopStat {
+	s.mu.Lock()
+	tasks := make([]Task, 0, len(s.tasks))
+	for _, t := range s.tasks {
+		tasks = append(tasks, *t)
+	}
+	s.mu.Unlock()
+
+	out := make([]LoopStat, 0, len(tasks))
+	for _, t := range tasks {
+		st := LoopStat{
+			TaskID:   t.ID,
+			Name:     t.Name,
+			Schedule: t.Schedule,
+			LastRun:  t.LastRun,
+			Enabled:  t.Enabled,
+		}
+		if s.store != nil {
+			if runs, err := s.store.ListAutomationRuns(t.ID, 0); err == nil {
+				for _, r := range runs {
+					st.Runs++
+					st.Tokens += r.Tokens
+					if r.Status == "error" {
+						st.Errors++
+					}
+					if r.FinishedAt.After(st.LastRun) {
+						st.LastRun = r.FinishedAt
+					}
+				}
+			}
+		}
+		out = append(out, st)
+	}
+	// Heaviest loops first.
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Tokens > out[j].Tokens })
+	return out
 }
 
 func (s *Scheduler) persistRun(r RunRecord) {

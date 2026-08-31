@@ -145,6 +145,11 @@ type DefaultCfg struct {
 	// ThinkingTokens enables Anthropic extended thinking when > 0 (budget in
 	// tokens, e.g. 4096). 0 = disabled. Only affects Anthropic-capable models.
 	ThinkingTokens int `yaml:"thinking_tokens,omitempty" json:"thinking_tokens,omitempty"`
+	// PromptCacheTTL overrides the ephemeral cache breakpoint TTL for the main
+	// conversation (Anthropic cache_control ttl, e.g. "1h"). Subagent TTL stays
+	// separate via SubagentPromptCacheTTL (Claude Code promptCacheTtl parity).
+	PromptCacheTTL         string `yaml:"prompt_cache_ttl,omitempty" json:"prompt_cache_ttl,omitempty"`
+	SubagentPromptCacheTTL string `yaml:"subagent_prompt_cache_ttl,omitempty" json:"subagent_prompt_cache_ttl,omitempty"`
 	// ExtraDirs are additional working directories (beyond cwd) the agent may
 	// reference, surfaced in the system prompt (Claude Code /add-dir parity).
 	ExtraDirs []string `yaml:"extra_dirs,omitempty" json:"extra_dirs,omitempty"`
@@ -156,6 +161,18 @@ type DefaultCfg struct {
 	CheapProv     string `yaml:"cheap_provider,omitempty" json:"cheap_provider,omitempty"`
 	PowerfulModel string `yaml:"powerful_model,omitempty" json:"powerful_model,omitempty"`
 	PowerfulProv  string `yaml:"powerful_provider,omitempty" json:"powerful_provider,omitempty"`
+	// ModelPricing overrides list-price cost figures per model so /cost and
+	// the status line reflect contracted rates instead of catalog prices
+	// (Claude Code modelPricing parity). Key = model ID.
+	ModelPricing map[string]PricingOverride `yaml:"model_pricing,omitempty" json:"model_pricing,omitempty"`
+}
+
+// PricingOverride is a per-model contracted price (CNY per million tokens).
+// Any zero field falls back to the model's built-in plan price.
+type PricingOverride struct {
+	InputPrice  float64 `yaml:"input" json:"input"`
+	OutputPrice float64 `yaml:"output" json:"output"`
+	CachePrice  float64 `yaml:"cache,omitempty" json:"cache,omitempty"`
 }
 
 type ProviderCfg struct {
@@ -195,6 +212,8 @@ type TUICfg struct {
 	// Vim toggles vi-style key bindings in the CLI TUI (mirrors Claude Code's
 	// /vim). Off by default.
 	Vim bool `yaml:"vim" json:"vim"`
+	// Zen folds all tool-output cards in the CLI TUI (OpenCode Zen parity).
+	Zen bool `yaml:"zen" json:"zen"`
 	// ShowStatusLine controls the bottom status bar. Defaults to true; a nil
 	// pointer means "unset" → treated as true by consumers.
 	ShowStatusLine *bool `yaml:"show_status_line,omitempty" json:"show_status_line,omitempty"`

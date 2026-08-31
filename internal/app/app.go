@@ -170,6 +170,15 @@ func Bootstrap() (*App, error) {
 	if cfg.Defaults.ThinkingTokens > 0 {
 		app.Engine.SetThinking(cfg.Defaults.ThinkingTokens)
 	}
+	// Prompt cache TTL (Anthropic cache_control ttl, Claude Code parity):
+	// main conversation uses prompt_cache_ttl, subagents stay at their own TTL.
+	if cfg.Defaults.PromptCacheTTL != "" {
+		app.Engine.SetCacheTTL(cfg.Defaults.PromptCacheTTL)
+	}
+	// Per-model contracted prices (Claude Code modelPricing parity).
+	if len(cfg.Defaults.ModelPricing) > 0 {
+		app.Engine.SetModelPricing(cfg.Defaults.ModelPricing)
+	}
 	app.Engine.SetSystemPrompt(config.EffectiveSystemPrompt(cfg))
 	app.Engine.SetFallbackModels(cfg.Defaults.FallbackModels)
 	// Load remembered user preferences from disk (persisted on Close) so they
@@ -287,6 +296,22 @@ func Bootstrap() (*App, error) {
 						lcancel()
 					}
 				}(cfg.LSP.AutoStart)
+			} else {
+				// Auto-detect the project's languages from manifest files and
+				// eagerly start their LSPs (OpenCode parity — no manual
+				// auto_start needed for go/ts/rust/python/java projects).
+				if langs := lsp.DetectProjectLanguages(cfg.Defaults.WorkingDir); len(langs) > 0 {
+					log.Printf("[iCode LSP] auto-detected project languages: %v", langs)
+					go func(langs []string) {
+						for _, lang := range langs {
+							lctx, lcancel := context.WithTimeout(context.Background(), 10*time.Second)
+							if err := app.LSPManager.StartLanguageServer(lctx, lang); err != nil {
+								log.Printf("[iCode LSP] auto-start %s skipped: %v", lang, err)
+							}
+							lcancel()
+						}
+					}(langs)
+				}
 			}
 		}
 	}

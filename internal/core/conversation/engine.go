@@ -149,6 +149,12 @@ type Engine struct {
 	// thinking, when non-nil, enables provider extended thinking (Anthropic
 	// Claude). Set via SetThinking / config thinking_tokens.
 	thinking *types.ThinkingConfig
+	// cacheTTL overrides the ephemeral cache breakpoint TTL (Anthropic), set
+	// via SetCacheTTL from config prompt_cache_ttl.
+	cacheTTL string
+	// pricingOverrides maps model ID → contracted price (CNY/MTok) used by
+	// /cost instead of catalog prices (Claude Code modelPricing parity).
+	pricingOverrides map[string]config.PricingOverride
 
 	// compactHinted tracks sessions that already received the one-time
 	// long-session /compact nudge (so it never nags on every turn).
@@ -305,6 +311,30 @@ func (e *Engine) SetThinking(budget int) {
 // thinkingConfig returns the active thinking config (nil when disabled).
 func (e *Engine) thinkingConfig() *types.ThinkingConfig {
 	return e.thinking
+}
+
+// SetCacheTTL sets the ephemeral cache breakpoint TTL for the main
+// conversation (Anthropic cache_control ttl, Claude Code promptCacheTtl
+// parity). Empty restores the provider default.
+func (e *Engine) SetCacheTTL(ttl string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.cacheTTL = ttl
+}
+
+// SetModelPricing installs per-model contracted prices (Claude Code
+// modelPricing parity) so /cost reflects negotiated rates.
+func (e *Engine) SetModelPricing(p map[string]config.PricingOverride) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if p == nil {
+		e.pricingOverrides = nil
+		return
+	}
+	e.pricingOverrides = make(map[string]config.PricingOverride, len(p))
+	for k, v := range p {
+		e.pricingOverrides[k] = v
+	}
 }
 
 // ThinkingBudget returns the active extended-thinking budget in tokens, or 0
@@ -1232,6 +1262,7 @@ func (e *Engine) repairBrokenToolCalls(
 			Temperature:      e.temperature,
 			CacheBreakpoints: opt.BuildCacheBreakpoints(),
 			Thinking:         e.thinkingConfig(),
+			CacheTTL:         e.cacheTTL,
 		})
 		if err != nil {
 			out <- types.StreamEvent{Type: types.EventError, Content: friendlyModelError(err)}
@@ -1539,7 +1570,7 @@ func (e *Engine) finishTextTurn(
 	out chan types.StreamEvent,
 	depth int,
 ) {
-	opt.RecordUsage(done.Meta.Usage, calculateCost(done.Meta.Usage, modelInfo), startTime)
+	opt.RecordUsage(done.Meta.Usage, calculateCostWithPricing(done.Meta.Usage, modelInfo, e.pricingOverrides), startTime)
 	if e.truncDet != nil && e.truncDet.IsTruncated(done.Meta.FinishReason, assistantMsg.Content) && ctx.Err() == nil {
 		if recovered := e.recoverTruncation(ctx, sessionID, provider, opt, modelInfo, &assistantMsg, out); recovered {
 			if len(assistantMsg.ToolCalls) > 0 {
@@ -1604,6 +1635,7 @@ func (e *Engine) recoverTruncation(
 			Temperature:      e.temperature,
 			CacheBreakpoints: opt.BuildCacheBreakpoints(),
 			Thinking:         e.thinkingConfig(),
+			CacheTTL:         e.cacheTTL,
 		})
 		if err != nil {
 			out <- types.StreamEvent{Type: types.EventError, Content: friendlyModelError(err)}
@@ -1769,6 +1801,12 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 	// provider cache prefix stable.
 	if goal := sessionum.GetGoal(sess); goal != "" {
 		prompt := e.buildSystemPrompt(sessionID) + "\n\nCURRENT GOAL (keep working toward this until done):\n" + goal
+		// Per-goal token cap (Reasonix goal_token_budget parity): once the
+		// session's cumulative tokens exceed the budget, tell the model to
+		// wrap up instead of iterating indefinitely.
+		if budget := sessionum.GetGoalTokenBudget(sess); budget > 0 && sess.TotalTokens.TotalTokens >= budget {
+			prompt += fmt.Sprintf("\n\nTOKEN BUDGET REACHED（目标 token 预算 %d 已用尽）: 请立即收尾——总结已完成的工作、未完成的项与后续建议，然后停止，不要再启动新的改动。", budget)
+		}
 		if verify := sessionum.GetGoalVerify(sess); verify != "" {
 			prompt += "\n\nACCEPTANCE CHECK（验收命令，对标 ZCode Goal 模式）: " + verify +
 				"\n每一轮代码/配置改动后，都必须运行上面的验收命令判断目标是否已达成。" +
@@ -2457,6 +2495,32 @@ func calculateCost(usage types.TokenUsage, model types.ModelInfo) float64 {
 	inputCost := float64(usage.PromptTokens-usage.CacheHitTokens) * plan.InputPrice / 1_000_000
 	outputCost := float64(usage.CompletionTokens) * plan.OutputPrice / 1_000_000
 	cacheCost := float64(usage.CacheHitTokens) * plan.CachePrice / 1_000_000
+	return inputCost + outputCost + cacheCost
+}
+
+// calculateCostWithPricing is calculateCost with per-model contracted-price
+// overrides (Claude Code modelPricing parity). Any zero override field falls
+// back to the model's built-in plan price.
+func calculateCostWithPricing(usage types.TokenUsage, model types.ModelInfo, overrides map[string]config.PricingOverride) float64 {
+	if len(model.Plans) == 0 {
+		return 0
+	}
+	plan := model.Plans[0]
+	inPrice, outPrice, cachePrice := plan.InputPrice, plan.OutputPrice, plan.CachePrice
+	if o, ok := overrides[model.ID]; ok {
+		if o.InputPrice > 0 {
+			inPrice = o.InputPrice
+		}
+		if o.OutputPrice > 0 {
+			outPrice = o.OutputPrice
+		}
+		if o.CachePrice > 0 {
+			cachePrice = o.CachePrice
+		}
+	}
+	inputCost := float64(usage.PromptTokens-usage.CacheHitTokens) * inPrice / 1_000_000
+	outputCost := float64(usage.CompletionTokens) * outPrice / 1_000_000
+	cacheCost := float64(usage.CacheHitTokens) * cachePrice / 1_000_000
 	return inputCost + outputCost + cacheCost
 }
 

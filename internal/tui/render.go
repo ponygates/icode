@@ -952,6 +952,11 @@ func (t *TUI) messageLinesW(m Message, width int) []string {
 	case RoleThinking:
 		return thinkingLines(m.Content, width)
 	case RoleUser:
+		// Claude Code parity: the user's own prompt renders Markdown (code
+		// blocks, inline code, lists) the same way replies do.
+		if t.rawMode {
+			return t.renderMarkdown(m.Content, t.paint("orange", "❯ "), "    ", width)
+		}
 		return wrapPrefixed(t.paint("orange", "❯ ")+"  ", "    ", m.Content, width)
 	case RoleAssistant:
 		if t.rawMode {
@@ -988,7 +993,7 @@ func (t *TUI) messageLinesW(m Message, width int) []string {
 			// Per-block folding (Claude Code / opencode style): a folded card
 			// shows the header plus a short excerpt; expanded shows everything.
 			toolOutput := m.Content
-			if m.Folded {
+			if m.Folded || t.zenMode {
 				fold := strings.Split(toolOutput, "\n")
 				if len(fold) > maxToolLines {
 					toolOutput = strings.Join(fold[:maxToolLines], "\n") + "\n" +

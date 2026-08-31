@@ -330,6 +330,12 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 	// populate when the connections succeed.
 	s.mcpPool = mcp.NewPool()
 	s.mcpToolNames = make(map[string]bool)
+	// Auto-refresh the engine's MCP tool registry when a connected server
+	// signals notifications/tools/list_changed (Reasonix parity).
+	s.mcpPool.SetOnToolsChanged(func(name string) {
+		log.Printf("[iCode MCP] tool list changed on %s — refreshing registry", name)
+		s.refreshMCPTools()
+	})
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {

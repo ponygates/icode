@@ -133,6 +133,8 @@ func Execute(ctx context.Context, b *Backend, st *State, text string) Result {
 		return cmdMode(b, st, args)
 	case "/thinking":
 		return cmdThinking(b, args)
+	case "/preset":
+		return cmdPreset(b, st, args)
 	case "/copy":
 		return cmdCopy(b, st, args)
 	case "/session", "/sessions":
@@ -225,7 +227,7 @@ func Execute(ctx context.Context, b *Backend, st *State, text string) Result {
 	case "/security":
 		return cmdSecurity(b, st, args)
 	case "/permissions":
-		return cmdPermissions(b, st)
+		return cmdPermissions(b, st, args)
 	case "/add-dir":
 		return cmdAddDir(b, args)
 	case "/update":
@@ -331,6 +333,7 @@ func helpDefs() []helpItem {
 	return []helpItem{
 		{"/cd <path>", "移动会话工作目录"}, {"/model [id]", "切换模型"}, {"/provider [名]", "切换提供商"},
 		{"/mode [agent|plan|yolo|auto|ask]", "切换模式"}, {"/plan|/ask|/debug", "/mode 快捷方式"}, {"/models", "列出自定义模型"},
+		{"/preset [light|balanced|deliver]", "执行设定（轻量/均衡/交付）"},
 		{"/session", "显示当前会话"}, {"/sessions", "列出已保存会话"},
 		{"/resume <id>", "载入历史会话"}, {"/fork <id>[@n]", "从历史会话分支出独立会话"}, {"/rename <标题>", "重命名当前会话"}, {"/goal [set|show|clear]", "长目标模式"}, {"/budget [set|show|clear]", "Token 预算护栏"}, {"/new", "开启新会话"},
 		{"/clear", "清空当前会话"}, {"/wipe", "清空会话上下文"},
@@ -621,6 +624,30 @@ func cmdThinking(b *Backend, args []string) Result {
 		return ok(fmt.Sprintf("✓ extended thinking 已开启（预算 %d tokens，对 Anthropic 模型生效，已持久化）", budget))
 	}
 	return ok("✓ extended thinking 已关闭（已持久化）。")
+}
+
+// cmdPreset applies a one-shot execution profile (Reasonix 执行设定 parity):
+// light / balanced / deliver — each toggles permission mode + thinking in one
+// command instead of the user composing /mode + /thinking by hand.
+func cmdPreset(b *Backend, st *State, args []string) Result {
+	if len(args) == 0 {
+		return ok("用法: /preset <light|balanced|deliver>\n  light     轻量（auto 模式 + 关闭思考，最快最省 token）\n  balanced  均衡（auto 模式，默认思考）\n  deliver   交付（agent 模式 + 开启思考，质量优先）")
+	}
+	switch strings.ToLower(strings.TrimSpace(args[0])) {
+	case "light":
+		cmdMode(b, st, []string{"auto"})
+		cmdThinking(b, []string{"off"})
+		return ok("✓ 执行设定 = light（轻量）：auto 模式 + 关闭 extended thinking。适合简单任务与省 token。")
+	case "balanced":
+		cmdMode(b, st, []string{"auto"})
+		return ok("✓ 执行设定 = balanced（均衡）：auto 模式，思考保持当前设置。")
+	case "deliver":
+		cmdMode(b, st, []string{"agent"})
+		cmdThinking(b, []string{"on"})
+		return ok("✓ 执行设定 = deliver（交付）：agent 模式 + 开启 extended thinking。适合复杂重构与高质量交付。")
+	default:
+		return errf("无效执行设定: %s（可选 light|balanced|deliver）", args[0])
+	}
 }
 
 // cmdModeShortcut maps the mode-shortcut commands to /mode values:
@@ -957,9 +984,11 @@ func cmdGoal(b *Backend, st *State, args []string) Result {
 		if len(args) < 2 {
 			return ok("用法: /goal set <目标文本> [--verify <验收命令>]")
 		}
-		// Parse optional --verify <acceptance command> (ZCode Goal parity).
+		// Parse optional --verify <acceptance command> and --budget <tokens>
+		// (ZCode Goal parity + Reasonix goal_token_budget parity).
 		goal := ""
 		verify := ""
+		budget := 0
 		rest := args[1:]
 		for i := 0; i < len(rest); i++ {
 			if rest[i] == "--verify" || rest[i] == "-v" {
@@ -968,6 +997,15 @@ func cmdGoal(b *Backend, st *State, args []string) Result {
 				}
 				break
 			}
+			if rest[i] == "--budget" || rest[i] == "-b" {
+				if i+1 < len(rest) {
+					if n, err := strconv.Atoi(rest[i+1]); err == nil {
+						budget = n
+					}
+					i++
+				}
+				continue
+			}
 			if goal != "" {
 				goal += " "
 			}
@@ -975,7 +1013,7 @@ func cmdGoal(b *Backend, st *State, args []string) Result {
 		}
 		goal = strings.TrimSpace(goal)
 		if goal == "" {
-			return ok("目标不能为空。用法: /goal set <目标文本> [--verify <验收命令>]")
+			return ok("目标不能为空。用法: /goal set <目标文本> [--verify <验收命令>] [--budget <token 上限>]")
 		}
 		sess, r := load()
 		if sess == nil {
@@ -984,13 +1022,26 @@ func cmdGoal(b *Backend, st *State, args []string) Result {
 		if err := sessionum.SetGoal(b.SessStore, sess, goal); err != nil {
 			return errf("保存目标失败: %v", err)
 		}
+		if budget > 0 {
+			if err := sessionum.SetGoalTokenBudget(b.SessStore, sess, budget); err != nil {
+				return errf("保存预算失败: %v", err)
+			}
+		}
 		if verify != "" {
 			if err := sessionum.SetGoalVerify(b.SessStore, sess, verify); err != nil {
 				return errf("保存验收命令失败: %v", err)
 			}
-			return ok("已设置可验收目标（每轮自动迭代直到验收命令通过）：\n目标：" + goal + "\n验收命令：" + verify)
+			msg := "已设置可验收目标（每轮自动迭代直到验收命令通过）：\n目标：" + goal + "\n验收命令：" + verify
+			if budget > 0 {
+				msg += fmt.Sprintf("\nToken 预算：%d（用尽后自动收尾）", budget)
+			}
+			return ok(msg)
 		}
-		return ok("已设置长目标（后续每轮对话都会自动携带）：\n" + goal)
+		msg := "已设置长目标（后续每轮对话都会自动携带）：\n" + goal
+		if budget > 0 {
+			msg += fmt.Sprintf("\nToken 预算：%d（用尽后自动收尾）", budget)
+		}
+		return ok(msg)
 	case "show":
 		sess, r := load()
 		if sess == nil {
@@ -2181,6 +2232,26 @@ func cmdToken(b *Backend, st *State) Result {
 				r.Turn, formatInt(r.Prompt), formatInt(r.Completion), hit, r.Cost, bar))
 		}
 	}
+	// Loops breakdown (Claude Code /usage parity): per-loop run count, total
+	// tokens, tokens-per-run and last run so runaway /loop tasks stand out.
+	if b.Scheduler != nil {
+		if loops := b.Scheduler.LoopStats(); len(loops) > 0 {
+			sb.WriteString("\nLoops 分解（自动化/循环任务）:\n")
+			for _, l := range loops {
+				last := "—"
+				if !l.LastRun.IsZero() {
+					last = l.LastRun.Format("01-02 15:04")
+				}
+				state := "停用"
+				if l.Enabled {
+					state = "启用"
+				}
+				sb.WriteString(fmt.Sprintf("  %-20s  runs %-3d  %s tok  ~%s/run  last %s  %s\n",
+					truncateIcode(l.Name, 20), l.Runs, formatInt(l.Tokens),
+					formatInt(l.TokensPerRun()), last, state))
+			}
+		}
+	}
 	sb.WriteString("\n机制: Cache-First Loop（不可变前缀 + 追加日志 + 易失暂存）\n5 层压缩: Snip → 去重 → 折叠 → 摘要 → 预算上限")
 	return ok(sb.String())
 }
@@ -2324,7 +2395,36 @@ func cmdSecurity(b *Backend, st *State, args []string) Result {
 	return Result{Output: "安全等级已设为 " + permission.SecurityLabel(level), Security: newLevel}
 }
 
-func cmdPermissions(b *Backend, st *State) Result {
+func cmdPermissions(b *Backend, st *State, args []string) Result {
+	// /permissions reload — re-read permission rules from disk and push them
+	// into the live gate so changes take effect mid-turn (Claude Code parity:
+	// permission changes apply to the rest of the current turn).
+	if len(args) > 0 && strings.EqualFold(args[0], "reload") {
+		if b == nil || b.Gate == nil {
+			return ok("权限门未初始化。")
+		}
+		cfg, _ := config.Load()
+		if cfg == nil {
+			return ok("无可用配置。")
+		}
+		var rules []permission.ParamRule
+		for _, r := range cfg.Permission.Rules {
+			d := permission.Decision(strings.ToLower(strings.TrimSpace(r.Decision)))
+			if d != permission.DecisionAllow && d != permission.DecisionDeny && d != permission.DecisionAsk {
+				continue
+			}
+			rules = append(rules, permission.ParamRule{Pattern: r.Pattern, Decision: d})
+		}
+		b.Gate.SetParamRules(rules)
+		if wd, err := os.Getwd(); err == nil {
+			b.Gate.SetClaudeSettings(permission.LoadClaudeSettings(wd))
+		}
+		b.Gate.SetAllowedPaths(cfg.Tools.AllowedPaths)
+		b.Gate.SetDeniedCommands(cfg.Tools.DeniedCommands)
+		b.Gate.SetMode(permission.Mode(cfg.Defaults.Mode))
+		return ok(fmt.Sprintf("权限规则已重载并即时生效（%d 条参数规则，安全等级 %s）。",
+			len(rules), permission.SecurityLabel(cfg.SecurityLevel)))
+	}
 	cfg, _ := config.Load()
 	var sb strings.Builder
 	sb.WriteString("权限 / 安全:\n")

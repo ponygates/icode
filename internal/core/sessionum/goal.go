@@ -17,6 +17,11 @@ const GoalKey = "goal"
 // changes and keep iterating until it passes — 对标 ZCode 的可验收 Goal 模式.
 const GoalVerifyKey = "goal_verify"
 
+// GoalTokenBudgetKey holds an optional per-goal token cap (Metadata). When the
+// session's cumulative tokens exceed it, the engine tells the model to wrap up
+// (Reasonix goal_token_budget parity).
+const GoalTokenBudgetKey = "goal_token_budget"
+
 // GetGoal returns the session's long goal, or "" when none is set.
 func GetGoal(sess *types.Session) string {
 	if sess == nil || sess.Metadata == nil {
@@ -64,6 +69,37 @@ func SetGoalVerify(store types.SessionStore, sess *types.Session, verify string)
 		delete(sess.Metadata, GoalVerifyKey)
 	} else {
 		sess.Metadata[GoalVerifyKey] = strings.TrimSpace(verify)
+	}
+	return store.Update(sess)
+}
+
+// GetGoalTokenBudget returns the session's per-goal token cap, or 0 when unset.
+func GetGoalTokenBudget(sess *types.Session) int {
+	if sess == nil || sess.Metadata == nil {
+		return 0
+	}
+	switch v := sess.Metadata[GoalTokenBudgetKey].(type) {
+	case int:
+		return v
+	case float64:
+		return int(v)
+	default:
+		return 0
+	}
+}
+
+// SetGoalTokenBudget persists the session's per-goal token cap (0 clears it).
+func SetGoalTokenBudget(store types.SessionStore, sess *types.Session, budget int) error {
+	if store == nil || sess == nil {
+		return fmt.Errorf("goal budget: missing store or session")
+	}
+	if sess.Metadata == nil {
+		sess.Metadata = map[string]any{}
+	}
+	if budget <= 0 {
+		delete(sess.Metadata, GoalTokenBudgetKey)
+	} else {
+		sess.Metadata[GoalTokenBudgetKey] = budget
 	}
 	return store.Update(sess)
 }
