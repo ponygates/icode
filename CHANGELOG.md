@@ -1,5 +1,16 @@
 # 更新日志
 
+## v0.52.1 — CLI 对齐 Claude Code 交互（第一轮）（2026-08-31）
+
+> 五维审计（状态栏/思考展示/快捷键/补全/simpleui）后落地 S 级高价值项，token 节省优势不动。
+
+- **生成 spinner 升级**：⠙ 正在生成… ↑1.2k · 38 tok/s · 89% 12s · esc 中断——token 数、实时速率、剩余上下文、中断提示一行齐（Claude Code 同款）。
+- **流式时输入行提示**换成「esc 中断」（i18n input.hint.streaming 此前是死键）。
+- **上下文读数改为剩余 %**：状态栏与 ctx 条统一 Claude Code 惯例（bar 仍按已用填充，直观）。
+- **Enter 采纳高亮补全项**：菜单开着时 Enter 选当前行；完全匹配所敲内容时照旧直接提交（肌肉记忆无损）。
+- **Alt+V 图片粘贴**别名（Ctrl+V 保留）。
+- M 级差距已入 backlog：simpleui 流式思考/消息队列/git 段、状态栏当前 todo 文本、思考合并单块、Ctrl+R 搜 transcript、补全 N more 分页。
+
 ## v0.52.1 — TUI 输入体验修复（2026-08-31）
 
 - **方向键/鼠标右键乱码**：SS3 序列（ESC O A/B/C/D，application-cursor 模式终端的方向键）此前未解析直接漏成文本；X10 老式鼠标报告（ESC [ M + 3 原始坐标字节）落入通用 drain 且坐标字节 0x4D(=M) 会提前截断——分别接入 CSI 同款字母映射与专用解析（滚轮/右键粘贴均生效）。

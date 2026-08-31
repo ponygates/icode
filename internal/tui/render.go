@@ -1099,9 +1099,20 @@ func (t *TUI) thinkingBar() string {
 		modelTag = t.paint("dim", truncate(m, 18)+" ")
 	}
 
+	// Claude Code parity: token count + live token rate + "esc 中断" hint.
+	rateStr := ""
+	if t.completionTokens > 0 && secs >= 2 {
+		rateStr = t.paint("dim", fmt.Sprintf(" · %d tok/s", t.completionTokens/secs))
+	}
+	tokStr := ""
+	if t.completionTokens > 0 {
+		tokStr = t.paint("dim", " ↑"+formatTokens(t.completionTokens))
+	}
 	return modelTag + t.paint("cyan", spinner) + " " +
 		t.paint("dim", t.tstr("status.gen")) +
-		t.paint("dim", pctStr) + t.paint("dim", fmt.Sprintf(" %ds", secs))
+		tokStr + rateStr +
+		t.paint("dim", pctStr) + t.paint("dim", fmt.Sprintf(" %ds", secs)) +
+		t.paint("dim", " · esc 中断")
 }
 
 // fit returns s padded (or truncated with an ellipsis) to exactly w *visible*
@@ -1342,7 +1353,8 @@ func (t *TUI) statusLine() string {
 			d("▸"+formatTokens(t.promptTokens)+" ▸"+formatTokens(t.completionTokens)))
 	}
 	if t.contextWindow > 0 && t.contextTokens > 0 {
-		parts = append(parts, d(fmt.Sprintf("%d%%", t.contextTokens*100/t.contextWindow)))
+		// Claude Code shows context REMAINING (how much is left), not used.
+		parts = append(parts, d(fmt.Sprintf("ctx %d%%", 100-t.contextTokens*100/t.contextWindow)))
 	}
 	if t.cacheHitRate > 0 {
 		parts = append(parts, d(fmt.Sprintf("%.0f%% cache", t.cacheHitRate*100)))
@@ -1410,7 +1422,9 @@ func (t *TUI) contextBar(tokens, window int) string {
 	case pct >= 60:
 		color = "yellow"
 	}
-	return t.paint(color, bar) + t.paint("dim", fmt.Sprintf(" %d%%", pct))
+	// Label shows context REMAINING (Claude Code convention) — the bar still
+	// fills with usage so "how full" reads at a glance.
+	return t.paint(color, bar) + t.paint("dim", fmt.Sprintf(" %d%% left", 100-pct))
 }
 
 // branchSegment returns the cached git branch for the status bar. Runs under
@@ -1644,9 +1658,14 @@ func (t *TUI) drawInputBox(W, H int, inputBuf string, cursor int, streaming bool
 				// surprises the user (Alt+Enter submits).
 				line = prompt + " " + t.paint("yellow", "[MULTI]") + " " +
 					t.paint("dim", "Enter=换行·Alt+Enter=发送 ") + ln
-			} else if ln == "" && !streaming {
-				// Empty input: quiet Claude Code-style placeholder hint.
-				line = prompt + " " + t.paint("dim", "/ 查看命令 · Tab 补全 · Ctrl+R 历史 · Alt+P 模型")
+			} else if ln == "" {
+				if streaming {
+					// Claude Code-style "esc to interrupt" hint while generating.
+					line = prompt + " " + t.paint("dim", t.tstr("input.hint.streaming"))
+				} else {
+					// Empty input: quiet Claude Code-style placeholder hint.
+					line = prompt + " " + t.paint("dim", "/ 查看命令 · Tab 补全 · Ctrl+R 历史 · Alt+P 模型")
+				}
 			}
 		} else {
 			line = strings.Repeat(" ", indent) + ln

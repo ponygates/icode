@@ -60,12 +60,12 @@ func TestClaudeStyleRender(t *testing.T) {
 		t.Fatalf("expected task-bar dot separators '·' in output:\n%s", out)
 	}
 	// Minimal design: the model sits next to the wordmark in the header, and
-	// context usage (120000/1048576 ≈ 11%) lives on the status bar below the
+	// context remaining (1048576-120000 ≈ 89% left) lives on the status bar below
 	// prompt — no duplicated header strip.
 	if !strings.Contains(out, "deepseek-v4-flash") {
 		t.Fatalf("expected model in header/status output:\n%s", out)
 	}
-	if !strings.Contains(out, "11%") {
+	if !strings.Contains(out, "89% left") {
 		t.Fatalf("expected context %%-meter ('11%%') in status bar:\n%s", out)
 	}
 

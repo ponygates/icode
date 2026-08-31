@@ -693,6 +693,11 @@ func (t *TUI) handleKey(r rune) bool {
 			t.showModelPicker()
 			return true
 		}
+		// Alt+V — image paste alias (Claude Code parity; Ctrl+V also works).
+		if ur == 'v' || ur == 'V' {
+			t.pasteClipboardImage()
+			return true
+		}
 		// Alt+T — toggle extended thinking in place (Claude Code).
 		if ur == 't' || ur == 'T' {
 			t.thinkingOn = !t.thinkingOn
@@ -740,6 +745,15 @@ func (t *TUI) handleKey(r rune) bool {
 				return true
 			}
 			return true
+		}
+		// Claude Code parity: Enter accepts the HIGHLIGHTED autocomplete row —
+		// except when the highlighted item is exactly what was typed (then it
+		// just submits, preserving muscle memory for exact commands).
+		if t.acOpen && len(t.acItems) > 0 && t.acIdx < len(t.acItems) {
+			if item := t.acItems[t.acIdx].Name; item != text {
+				t.acceptSuggestion()
+				return true
+			}
 		}
 		// Auto-complete an incomplete slash-command prefix on Enter: "/c"
 		// runs the first matching command (e.g. /compact), a bare "/" never
