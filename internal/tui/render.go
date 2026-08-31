@@ -1671,6 +1671,13 @@ func (t *TUI) drawInputBox(W, H int, inputBuf string, cursor int, streaming bool
 	// Position the cursor: prompt + space (line 0) or indent (later lines),
 	// plus content up to the cursor column. Use visibleWidth so CJK width
 	// handling stays correct (see the single-line version's history).
+	if curVisRow < 0 {
+		// Cursor line scrolled out of the visible window — park at the end of
+		// the last visible line so the terminal cursor (and IME composition
+		// windows, which open at the physical cursor) never lands mid-log.
+		curVisRow = len(visLines) - 1
+		curVisCol = len([]rune(lines[visStart+curVisRow]))
+	}
 	if curVisRow >= 0 {
 		vw := visibleWidth(string([]rune(lines[visStart+curVisRow])[:curVisCol]))
 		col := indent + vw + 1 // 1-based ANSI column
@@ -1754,6 +1761,11 @@ func (t *TUI) drawSearchBox(W, H int, searchBuf, current string, streaming bool)
 	b.WriteString(fmt.Sprintf("\x1b[%d;%dH", topRow, 2))
 	b.WriteString("\x1b[?25h")
 	fmt.Fprint(t.writer, b.String())
+	// Park the terminal cursor at the bottom input row: overlays replace the
+	// input box, and a cursor left mid-screen makes IME composition / typed
+	// text land in the log area.
+	fmt.Fprintf(t.writer, "[%d;2H", H)
+
 }
 
 // ── Scrolling support ───────────────────────────────────────────
@@ -2044,6 +2056,9 @@ func (t *TUI) renderSettingsPanel() {
 	b.WriteString(fmt.Sprintf("\x1b[%d;%dH%s", hintY, hintX, hint))
 
 	fmt.Fprint(t.writer, b.String())
+	// Park the cursor at the bottom row (see drawSearchBox note).
+	fmt.Fprintf(t.writer, "[%d;2H", H)
+
 }
 
 func maskStringTUI(s string) string {
