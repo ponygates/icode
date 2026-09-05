@@ -63,6 +63,17 @@ type simpleUIBridge struct {
 	// the engine's real usage overwrites it on the final pushStats.
 	liveCompletion int
 
+	// gitBranch / gitBranchAt cache the branch segment (spawned at most
+	// once per 30s, not per status refresh).
+	gitBranch   string
+	gitBranchAt time.Time
+	// turnStartedAt marks the in-flight turn for the ⏱ segment.
+	turnStartedAt time.Time
+	// sendQueue holds user input typed while a turn was streaming —
+	// Claude Code message-queue parity. Drained automatically when the turn ends.
+	sendQueue []string
+	// lastThinkPush throttles live-thinking updates (≤1 per 300ms).
+	lastThinkPush time.Time
 	// activeStreams tracks sessions with an in-flight engine generation
 	// (sessionID → true). C7 multi-session parallelism: switching sessions
 	// does NOT cancel the background turn — its events are consumed silently
@@ -535,9 +546,45 @@ func (b *simpleUIBridge) LspDiag(file string) string {
 //   - "# user: ..."   → append to user-level memory (~/.icode/)
 //   - "! <shell>"     → run a shell command and show the output
 //   - anything else   → normal chat message
+//
+// queueLen returns the pending message-queue depth.
+func (b *simpleUIBridge) queueLen() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.sendQueue)
+}
+
+// popSendQueue drains one queued message ("" when empty) and clears the
+// queue hint in the UI.
+func (b *simpleUIBridge) popSendQueue() string {
+	b.mu.Lock()
+	if len(b.sendQueue) == 0 {
+		b.mu.Unlock()
+		return ""
+	}
+	next := b.sendQueue[0]
+	b.sendQueue = b.sendQueue[1:]
+	b.mu.Unlock()
+	b.push("uiQueue(0)")
+	return next
+}
+
 func (b *simpleUIBridge) RunCommand(text string) {
 	text = strings.TrimSpace(text)
 	if text == "" {
+		return
+	}
+	// Message queue (Claude Code parity): input typed while any turn is
+	// streaming is QUEUED and auto-sent when the turn ends, not dropped.
+	b.mu.Lock()
+	busy := len(b.activeStreams) > 0
+	b.mu.Unlock()
+	if busy {
+		b.mu.Lock()
+		b.sendQueue = append(b.sendQueue, text)
+		n := len(b.sendQueue)
+		b.mu.Unlock()
+		b.push(fmt.Sprintf("uiQueue(%d)", n))
 		return
 	}
 	if strings.HasPrefix(text, "/") {
@@ -774,6 +821,7 @@ func (b *simpleUIBridge) runPrompt(prompt string, atts []types.Attachment) {
 	}
 	b.mu.Lock()
 	b.activeStreams[sid] = true
+	b.turnStartedAt = time.Now()
 	b.mu.Unlock()
 	b.push("uiBusy(true)")
 
@@ -788,6 +836,10 @@ func (b *simpleUIBridge) runPrompt(prompt string, atts []types.Attachment) {
 			b.mu.Lock()
 			delete(b.activeStreams, sid)
 			b.mu.Unlock()
+			// Auto-send queued input once this turn is fully over.
+			if next := b.popSendQueue(); next != "" {
+				go b.RunCommand(next)
+			}
 		}()
 		for event := range eventCh {
 			// Session switched away mid-turn: swallow the remaining events so
@@ -806,6 +858,16 @@ func (b *simpleUIBridge) runPrompt(prompt string, atts []types.Attachment) {
 				b.thinkingBuf += event.Content
 				if len(b.thinkingBuf) > 2000 {
 					b.thinkingBuf = b.thinkingBuf[:2000]
+				}
+				// Live thinking line (Claude Code parity): dim italic preview,
+				// throttled to one push per 300ms.
+				if time.Since(b.lastThinkPush) > 300*time.Millisecond {
+					b.lastThinkPush = time.Now()
+					preview := b.thinkingBuf
+					if runes := []rune(preview); len(runes) > 300 {
+						preview = string(runes[len(runes)-300:])
+					}
+					b.push(fmt.Sprintf("uiThinkingLive(%s)", jsStr(preview)))
 				}
 				b.mu.Unlock()
 			case types.EventText:
@@ -879,6 +941,7 @@ func (b *simpleUIBridge) runPrompt(prompt string, atts []types.Attachment) {
 				if th != "" {
 					b.push(fmt.Sprintf("uiThinking(%s)", jsStr(th)))
 				}
+				b.push("uiThinkingLive('')")
 				b.push("uiDone()")
 				b.push("uiBusy(false)")
 				b.pushStats()
@@ -892,6 +955,7 @@ func (b *simpleUIBridge) runPrompt(prompt string, atts []types.Attachment) {
 				if th != "" {
 					b.push(fmt.Sprintf("uiThinking(%s)", jsStr(th)))
 				}
+				b.push("uiThinkingLive('')")
 				b.push(fmt.Sprintf("uiAppend('error', %s)", jsStr(event.Content)))
 				b.push("uiDone()")
 				b.push("uiBusy(false)")
@@ -1292,6 +1356,8 @@ func (b *simpleUIBridge) sys(s string) {
 
 // uiStatsPayload is the status-bar payload pushed after each turn.
 type uiStatsPayload struct {
+	GitBranch    string  `json:"git_branch,omitempty"`
+	ElapsedSec   int     `json:"elapsed_sec,omitempty"`
 	Model        string  `json:"model"`
 	Provider     string  `json:"provider"`
 	Mode         string  `json:"mode"`
@@ -1334,6 +1400,24 @@ func (b *simpleUIBridge) statsJSON() string {
 			p.Completion = live
 			p.Total = p.PromptTokens + p.Completion
 		}
+	}
+	// Git branch segment — cached 30s, one child process at most.
+	b.mu.Lock()
+	if b.gitBranch == "" || time.Since(b.gitBranchAt) > 30*time.Second {
+		b.gitBranchAt = time.Now()
+		if out, err := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD").Output(); err == nil {
+			b.gitBranch = strings.TrimSpace(string(out))
+		}
+	}
+	branch := b.gitBranch
+	b.mu.Unlock()
+	p.GitBranch = branch
+	b.mu.Lock()
+	busy := len(b.activeStreams) > 0
+	start := b.turnStartedAt
+	b.mu.Unlock()
+	if busy && !start.IsZero() {
+		p.ElapsedSec = int(time.Since(start).Seconds())
 	}
 	v, err := json.Marshal(&p)
 	if err != nil {
@@ -1841,6 +1925,7 @@ func simpleUIHTML(model, provider string) string {
   .content a { color: #ff9d6e; }
   .content del { text-decoration: line-through; opacity: 0.6; }
   .md-task { display: flex; align-items: baseline; gap: 6px; padding: 1px 0; }
+  .thinking-live { color: #8a93a8; font-style: italic; font-size: 12px; padding: 3px 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .md-chk { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 4px; border: 1px solid #3a4151; font-size: 10px; flex-shrink: 0; color: transparent; }
   .md-chk.checked { border-color: #4caf50; background: #4caf50; color: #fff; }
   .md-task-text.done { text-decoration: line-through; color: #6b7484; }
@@ -2305,6 +2390,30 @@ func simpleUIHTML(model, provider string) string {
     d.appendChild(cp);
     log.appendChild(d); stick();
   }
+  // Live thinking preview — dim italic line, replaced every 300ms while
+  // the model reasons; removed on the first text token or turn end.
+  function uiThinkingLive(text) {
+    var el = document.getElementById('thinkLive');
+    if (!text) { if (el) el.remove(); return; }
+    if (!el) {
+      el = document.createElement('div'); el.id = 'thinkLive';
+      el.className = 'thinking-live';
+      log.appendChild(el);
+    }
+    el.textContent = '🧠 ' + text;
+    stick();
+  }
+  // Queued-message hint (typed while generating → auto-sent on turn end).
+  function uiQueue(n) {
+    var el = document.getElementById('queueHint');
+    if (!el) {
+      el = document.createElement('div'); el.id = 'queueHint';
+      el.style.cssText = 'font-size:11px;color:#e0a745;padding:0 18px 4px;';
+      var bar = document.getElementById('inputbar');
+      bar.parentNode.insertBefore(el, bar);
+    }
+    el.textContent = n > 0 ? ('📨 已排队 ' + n + ' 条 — 当前回合结束后自动发送') : '';
+  }
   function uiTool(name, args) {
     current = null;
     var d = document.createElement('div'); d.className = 'msg tool';
@@ -2365,7 +2474,9 @@ func simpleUIHTML(model, provider string) string {
     if (s.security) parts.push('安全 ' + s.security);
     if (s.total !== undefined && s.total > 0) parts.push('↑' + fmtTok(s.prompt_tokens) + ' ↓' + fmtTok(s.completion_tokens) + ' = ' + fmtTok(s.total));
     if (s.cache_hit_rate > 0) parts.push('缓存 ' + Math.round(s.cache_hit_rate * 100) + '%');
+    if (s.git_branch) parts.push('⎇ ' + s.git_branch);
     if (s.cost > 0) parts.push('¥' + s.cost.toFixed(4));
+    if (s.elapsed_sec > 0) parts.push('⏱ ' + s.elapsed_sec + 's');
     el.textContent = parts.join('  ·  ');
   }
 

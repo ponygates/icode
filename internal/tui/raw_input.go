@@ -1643,10 +1643,30 @@ func (t *TUI) updateSearchMatches() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	q := strings.ToLower(t.searchBuf)
-	matches := make([]string, 0, len(t.history))
+	// Transcript search (Claude Code Ctrl+R parity): match the conversation
+	// log — user AND assistant messages — newest first, then fall back to the
+	// typed-input history. Dedup keeps repeated prompts from stacking.
+	matches := make([]string, 0, len(t.messages)+len(t.history))
+	seen := map[string]bool{}
+	add := func(s string) {
+		if s == "" || seen[s] {
+			return
+		}
+		seen[s] = true
+		matches = append(matches, s)
+	}
+	for i := len(t.messages) - 1; i >= 0; i-- {
+		m := t.messages[i]
+		switch m.Role {
+		case RoleUser, RoleAssistant, RoleSystem:
+			if q == "" || strings.Contains(strings.ToLower(m.Content), q) {
+				add(m.Content)
+			}
+		}
+	}
 	for i := len(t.history) - 1; i >= 0; i-- {
 		if q == "" || strings.Contains(strings.ToLower(t.history[i]), q) {
-			matches = append(matches, t.history[i])
+			add(t.history[i])
 		}
 	}
 	t.searchMatches = matches
