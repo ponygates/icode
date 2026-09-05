@@ -1,4 +1,4 @@
-# iCode &middot; [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE) [![Go Version](https://img.shields.io/badge/Go-1.23%2B-00ADD8?logo=go)](https://go.dev)
+# iCode &middot; [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE) [![Go Version](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go)](https://go.dev)
 
 > **多模型 AI 编程 Agent** — 终端原生、多厂商支持的编程助手。
 
@@ -74,7 +74,7 @@ npm run dev
 ┌─────────────────────────────────────────────────────────┐
 │                   表现层                                 │
 │  ┌──────────┐   ┌──────────────┐   ┌────────────────┐  │
-│  │ CLI/TUI  │   │   Electron   │   │   HTTP API     │  │
+│  │ CLI/TUI  │   │ WebView2+React │   │   HTTP API    │  │
 │  │  (ANSI)  │   │ (React + TS) │   │  (JSON-REST)   │  │
 │  └────┬─────┘   └──────┬───────┘   └───────┬────────┘  │
 │       └────────┬───────┘                   │           │
@@ -193,7 +193,7 @@ icode server --port 0          # 启动 HTTP API 服务（桌面版使用）
 | `/pr` / `/pr_comments` | PR 评论（需 gh CLI） |
 | `/changelog` | 查看更新日志 |
 
-> 桌面端（Electron）和 TUI 共享同一套命令；未知命令自动转发到后端 `/api/slash`。
+> 桌面端（WebView2）和 TUI 共享同一套命令；未知命令自动转发到后端 `/api/slash`。
 
 ## 权限模式
 
@@ -296,10 +296,10 @@ go run . server --port 9090
 
 ## 路线图
 
-- [x] **P1**: 项目骨架、核心接口、配置系统、i18n、Electron 前端骨架
+- [x] **P1**: 项目骨架、核心接口、配置系统、i18n、WebView2 桌面前端骨架
 - [x] **P2**: LLM 流式集成、9 大 Provider、SQLite 持久化、权限系统
 - [x] **P3**: Token 优化器、TUI 终端界面、MCP 协议
-- [x] **P4**: Electron 桌面版联调、HTTP API 服务、CI/CD
+- [x] **P4**: WebView2 桌面版联调、HTTP API 服务、CI/CD
 - [x] **v0.5**: 技能系统（SKILL.md）、多智能体团队、LSP 诊断、智能路由、跨平台磁盘清理、/api/skills 与 /api/teams
 - [x] **v0.6**: 生命周期 Hooks（PreToolUse/PostToolUse/Stop）、Headless JSON 输出（`--output-format json|stream-json`）、双层 Memory（项目级 + 用户级）、`code_search` 符号索引工具
 - [x] **v0.7**: WorkBuddy 技能/MCP 桥接（自动导入 `~/.workbuddy/mcp.json` + 技能目录互通）、并行工具执行（只读并发）、后台任务（`run_in_background` + `task_output`）、LLM 分级路由（`routing.mode: llm`）+ 中英文关键词升级

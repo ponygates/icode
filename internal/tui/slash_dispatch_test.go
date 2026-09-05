@@ -386,6 +386,8 @@ func feedEsc(t *testing.T, tu *TUI, seq string) {
 	}
 }
 
+func (c *testCallback) TodoActiveText() string { return "" }
+
 // feedEscLone dispatches a plain Esc with no follow-up bytes — keyCh stays
 // empty so handleKey's ESC branch hits the escFollowTimeout window and treats
 // it as a standalone Esc (the real-terminal shape of a lone Esc keypress).

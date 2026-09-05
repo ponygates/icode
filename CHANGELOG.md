@@ -1,5 +1,13 @@
 # 更新日志
 
+## v0.52.2 补遗 — 批次三尾 + 批次四（2026-08-31）
+
+- **状态栏显示当前 todo 文本**（Claude Code 同款「◑ 正在做什么」段，取 in_progress 项的 activeForm）。
+- **思考流合并单块**：连续 reasoning 增量并入同一条思考消息，不再 N 个盒子堆叠。
+- CI 的 govulncheck/覆盖率门移除 || true（现在真能拦）；删除 .icode/undo 陈旧源码副本；README 清理 Electron 陈旧声明（实际为 WebView2）、Go 版本徽章 1.25+。
+- checkpoint 集成测试复验通过（上轮失败为环境性闪失）。
+- 剩余待办：Ctrl+R 搜 transcript、simpleui 状态段、主题跨端共享、desktop/xgo 冒烟测试。
+
 ## v0.52.2 — 审查报告落地（批次一/二/三）（2026-08-31）
 
 > docs/项目审查_2026-08-31.md 全部 24 项发现中的 P1×5 + P2×8 + UX 高价值×3 已落地。

@@ -1134,8 +1134,10 @@ func (c *chatCallback) OnSend(text string, attachments []types.Attachment) {
 				c.tui.AppendStream(event.Content)
 			}
 		case types.EventThinking:
-			// Store thinking content for display in the thinking box
-			c.tui.AddMessage(tui.RoleThinking, event.Content)
+			// Merge consecutive reasoning deltas into one thinking block —
+			// previously every delta became its own box and a long reasoning
+			// phase piled up dozens of them.
+			c.tui.AppendThinkingDelta(event.Content)
 		case types.EventSystem:
 			c.tui.AddMessage(tui.RoleSystem, strings.TrimSpace(event.Content))
 		case types.EventPlanProposal:
@@ -1910,6 +1912,14 @@ func (c *chatCallback) TodoCounts() (pending, active, done, total int) {
 		return
 	}
 	return todo.Default.Counts(c.sessionID)
+}
+
+// TodoActiveText implements tui.Callback — the in-progress item's text.
+func (c *chatCallback) TodoActiveText() string {
+	if c.sessionID == "" {
+		return ""
+	}
+	return todo.Default.ActiveText(c.sessionID)
 }
 
 func (c *chatCallback) SessionID() string { return c.sessionID }

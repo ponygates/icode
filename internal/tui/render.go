@@ -1377,6 +1377,10 @@ func (t *TUI) statusLine() string {
 	// Todo counter — shown when the current session has an active todo list.
 	// Zero-list sessions render nothing.
 	if t.callback != nil {
+		if text := t.callback.TodoActiveText(); text != "" {
+			// Claude Code parity: show WHAT is being worked on right now.
+			parts = append(parts, d("◑ "+text))
+		}
 		if pending, active, done, total := t.callback.TodoCounts(); total > 0 {
 			seg := fmt.Sprintf("✓%d", done)
 			if pending > 0 || active > 0 {

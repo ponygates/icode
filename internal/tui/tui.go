@@ -85,6 +85,9 @@ type Callback interface {
 	// TodoCounts returns the current session's todo counts for the status
 	// bar. Returns all zeros when there is no active session or no list.
 	TodoCounts() (pending, active, done, total int)
+	// TodoActiveText returns the in-progress todo's display text ("" if none)
+	// for the Claude Code-style status bar segment.
+	TodoActiveText() string
 	// SessionID returns the active session ID, or "".
 	SessionID() string
 	// OnStatus returns a formatted system status report (providers, keys,

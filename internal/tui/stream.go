@@ -33,6 +33,28 @@ func (t *TUI) AddMessage(role Role, content string) {
 	}
 }
 
+// AppendThinkingDelta merges one reasoning delta into the previous thinking
+// message when it is still the newest entry — consecutive deltas render as ONE
+// collapsible block instead of a pile of boxes (Claude Code parity). Any
+// other role appended in between naturally starts a fresh block.
+func (t *TUI) AppendThinkingDelta(content string) {
+	t.mu.Lock()
+	n := len(t.messages)
+	if n > 0 && t.messages[n-1].Role == RoleThinking {
+		t.messages[n-1].Content += content
+		t.mu.Unlock()
+	} else {
+		t.mu.Unlock()
+		t.AddMessage(RoleThinking, content)
+		return
+	}
+	if t.rawMode {
+		t.render()
+	} else {
+		t.printMessage(t.messages[len(t.messages)-1])
+	}
+}
+
 // AddToolMessage records a tool invocation.
 func (t *TUI) AddToolMessage(tool, toolArgs, content string) {
 	t.mu.Lock()

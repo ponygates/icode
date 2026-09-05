@@ -105,6 +105,22 @@ func (s *Store) Counts(sessionID string) (pending, active, done, total int) {
 	return
 }
 
+// ActiveText returns the in-progress item's ActiveForm (or Content) — the
+// "what am I doing right now" text for the status bar. "" when none active.
+func (s *Store) ActiveText(sessionID string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, it := range s.lists[sessionID] {
+		if it.Status == StatusInProgress {
+			if it.ActiveForm != "" {
+				return it.ActiveForm
+			}
+			return it.Content
+		}
+	}
+	return ""
+}
+
 // Clear wipes a session's list (used by /clear).
 func (s *Store) Clear(sessionID string) {
 	s.mu.Lock()

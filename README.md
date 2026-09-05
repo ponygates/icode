@@ -1,4 +1,4 @@
-# iCode &middot; [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE) [![Go Version](https://img.shields.io/badge/Go-1.23%2B-00ADD8?logo=go)](https://go.dev)
+# iCode &middot; [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE) [![Go Version](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go)](https://go.dev)
 
 > **Multi-Model AI Coding Agent** — Your terminal-native, multi-provider coding companion.
 
@@ -74,7 +74,7 @@ npm run dev
 ┌─────────────────────────────────────────────────────────┐
 │                 Presentation Layer                      │
 │  ┌──────────┐   ┌──────────────┐   ┌────────────────┐  │
-│  │ CLI/TUI  │   │   Electron   │   │   HTTP API     │  │
+│  │ CLI/TUI  │   │ WebView2+React │   │   HTTP API    │  │
 │  │  (ANSI)  │   │ (React + TS) │   │  (JSON-REST)   │  │
 │  └────┬─────┘   └──────┬───────┘   └───────┬────────┘  │
 │       └────────┬───────┘                   │           │
@@ -243,10 +243,10 @@ go run . server --port 9090
 
 ## Roadmap
 
-- [x] **P1**: Project skeleton, interfaces, config, i18n, Electron skeleton
+- [x] **P1**: Project skeleton, interfaces, config, i18n, WebView2 desktop skeleton
 - [x] **P2**: LLM streaming, 9 providers, SQLite, permission system
 - [x] **P3**: Token optimizer, TUI, MCP protocol
-- [x] **P4**: Electron backend integration, HTTP API, CI/CD
+- [x] **P4**: WebView2 desktop integration, HTTP API, CI/CD
 - [x] **v0.5**: Skills (SKILL.md), Agent Teams, LSP diagnostics, smart routing, cross-platform disk cleanup, /api/skills & /api/teams
 - [x] **v0.6**: Lifecycle Hooks (PreToolUse/PostToolUse/Stop), headless JSON output (`--output-format json|stream-json`), dual-layer Memory (project + user), `code_search` symbol index tool
 - [x] **v0.7**: WorkBuddy skill/MCP bridge (auto-import `~/.workbuddy/mcp.json` + shared skill dirs), parallel tool execution (read-only concurrency), background tasks (`run_in_background` + `task_output`), LLM-graded routing (`routing.mode: llm`) with zh/en keyword upgrade
