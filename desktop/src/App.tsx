@@ -65,6 +65,20 @@ const App: React.FC = () => {
       } else {
         root.setAttribute('data-theme', theme);
       }
+      // Cross-UI sharing: no local theme choice yet → adopt the backend's
+      // tui.theme (set by the TUI or another surface). Async, best-effort.
+      if (!localStorage.getItem('icode.theme')) {
+        fetch(window.location.origin.replace(/:d+$/, '') + '/api/config')
+          .then(r => r.json())
+          .then(cfg => {
+            const th = cfg && cfg.tui && cfg.tui.theme;
+            if (th === 'dark' || th === 'light') {
+              localStorage.setItem('icode.theme', th);
+              document.documentElement.setAttribute('data-theme', th);
+            }
+          })
+          .catch(() => {});
+      }
       const seen = localStorage.getItem('icode.wizard.seen');
       if (!seen && !hasAnyKey()) {
         setShowWizard(true);

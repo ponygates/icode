@@ -138,6 +138,15 @@ function PageGeneral({ store }: { store: ReturnType<typeof useAppStore.getState>
       root.setAttribute('data-theme', t);
     }
     localStorage.setItem('icode.theme', t);
+    // Cross-UI sharing: persist to the backend config (tui.theme) so the TUI
+    // and simpleui pick the same theme on their next launch.
+    if (store.backendUrl) {
+      fetch(`${store.backendUrl}/api/config`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tui: { theme: t === 'auto' ? '' : t } }),
+      }).catch(() => {});
+    }
   };
 
   return (

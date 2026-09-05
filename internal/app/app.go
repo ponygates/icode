@@ -135,10 +135,6 @@ func Bootstrap() (*App, error) {
 	}
 	// Strike-counter escalation: N consecutive blocks force manual mode.
 	app.Gate.SetStrikeThreshold(cfg.Permission.StrikeThreshold)
-	if cfg.Tools.MaxToolRounds > 0 {
-		app.Engine.SetMaxToolRounds(cfg.Tools.MaxToolRounds)
-	}
-	app.Engine.SetHumanizeLLMPolish(cfg.Permission.HumanizeLLMPolish)
 	// Parameter-level hard rules (config [permission.rules]): first match
 	// wins and overrides every other decision path, so patterns like
 	// "Bash(git push:*)" → ask are enforced even in auto/yolo modes.
@@ -161,6 +157,12 @@ func Bootstrap() (*App, error) {
 
 	// 5. Initialize conversation engine (with permission gate wired in)
 	app.Engine = conversation.NewEngine(app.Reg, app.SessStore, app.Gate)
+	// Engine knobs from config (audit 2026-08-31). NOTE: must stay AFTER
+	// NewEngine — a nil Engine here panics every entrypoint.
+	if cfg.Tools.MaxToolRounds > 0 {
+		app.Engine.SetMaxToolRounds(cfg.Tools.MaxToolRounds)
+	}
+	app.Engine.SetHumanizeLLMPolish(cfg.Permission.HumanizeLLMPolish)
 	// Auto-mode classifier (Claude Code parity): a cheap model judges
 	// Write/Execute/Connect calls in auto mode so safe ones auto-approve.
 	app.Engine.SetClassifierModel(cfg.Permission.ClassifierModel)
