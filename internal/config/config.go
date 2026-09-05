@@ -220,9 +220,14 @@ type TUICfg struct {
 }
 
 type ToolsCfg struct {
-	BashTimeout    int      `yaml:"bash_timeout_sec" json:"bash_timeout_sec"`
-	AllowedPaths   []string `yaml:"allowed_paths" json:"allowed_paths"`
-	DeniedCommands []string `yaml:"denied_commands" json:"denied_commands"`
+	BashTimeout int `yaml:"bash_timeout_sec" json:"bash_timeout_sec"`
+	// MaxToolRounds caps agent tool iterations per turn (0 = default 25).
+	MaxToolRounds int `yaml:"max_tool_rounds" json:"max_tool_rounds"`
+	// BudgetGlobalChars caps total tool-output characters per turn
+	// (tokenopt Level 4 budget enforcer; 0 = default 200000).
+	BudgetGlobalChars int      `yaml:"budget_global_chars" json:"budget_global_chars"`
+	AllowedPaths      []string `yaml:"allowed_paths" json:"allowed_paths"`
+	DeniedCommands    []string `yaml:"denied_commands" json:"denied_commands"`
 }
 
 // PermissionCfg tunes the permission gate's escalation behaviour.
@@ -231,6 +236,11 @@ type PermissionCfg struct {
 	// which a session is forced back into manual mode (every action must be
 	// confirmed). 0 disables the escalation. Default 3.
 	StrikeThreshold int `yaml:"strike_threshold" json:"strike_threshold"`
+
+	// HumanizeLLMPolish routes denial reasons through the session model for a
+	// friendlier rewrite. Default false — denials stay deterministic local
+	// templates (no extra network call, no content leaves the machine).
+	HumanizeLLMPolish bool `yaml:"humanize_llm_polish" json:"humanize_llm_polish"`
 
 	// Rules are parameter-level permission rules evaluated BEFORE any mode
 	// logic, following Claude Code's Tool(payload) pattern syntax:

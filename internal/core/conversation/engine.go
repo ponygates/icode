@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -82,8 +83,15 @@ type Engine struct {
 
 	// Doom-loop detector prevents the model from repeating the same tool
 	// call more than N consecutive times (OpenCode parity).
-	doomLoop *DoomLoopDetector
+	// doomLoops is keyed by sessionID — a process-global detector let
+	// concurrent desktop sessions trip each other's breakers.
+	doomLoops map[string]*DoomLoopDetector
 
+	// maxToolRounds caps agent tool iterations per turn (configurable via
+	// tools.max_tool_rounds; 0 = default 25).
+	maxToolRounds int
+	// humanizeLLMPolish gates the extra denial-rewrite LLM call (default off).
+	humanizeLLMPolish bool
 	// Budget enforcer (tokenopt Level 4) caps tool-output size per turn so a
 	// single huge read/grep/bash never blows the context budget. Activated
 	// here so the Cache-First Loop keeps saving tokens even on large repos.
@@ -177,7 +185,7 @@ func NewEngine(
 		stopFns:        make(map[string]context.CancelFunc),
 		diagCache:      make(map[string]string),
 		permRespChans:  make(map[string]chan permission.Decision),
-		doomLoop:       NewDoomLoopDetector(),
+		doomLoops:      make(map[string]*DoomLoopDetector),
 		teamRegistry:   make(map[string]*agent.TeamDef),
 		budgetEnforcer: tokenopt.NewBudgetEnforcer(tokenopt.DefaultBudgetConfig()),
 		truncDet:       NewTruncationDetector(DefaultTruncationRecoveryConfig()),
@@ -255,10 +263,46 @@ func (e *Engine) PreferenceMemory() *prefmem.Store {
 	return e.prefMem
 }
 
-// CircuitBreakerStatus returns a snapshot of every tool's circuit breaker for
-// the UI layer (diagnostics panel, /status, server API).
+// SetMaxToolRounds sets the agent tool-iteration cap per turn (0 = default).
+func (e *Engine) SetMaxToolRounds(n int) {
+	e.mu.Lock()
+	e.maxToolRounds = n
+	e.mu.Unlock()
+}
+
+// SetHumanizeLLMPolish toggles the extra LLM call that rewrites denial
+// reasons into friendlier text (default off — local templates only).
+func (e *Engine) SetHumanizeLLMPolish(on bool) {
+	e.mu.Lock()
+	e.humanizeLLMPolish = on
+	e.mu.Unlock()
+}
+
+// CircuitBreakerStatus returns a snapshot of every session's circuit breaker
+// for the UI layer (diagnostics panel, /status, server API).
 func (e *Engine) CircuitBreakerStatus() []CircuitStatus {
-	return e.doomLoop.CircuitStatus()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var all []CircuitStatus
+	for _, dl := range e.doomLoops {
+		all = append(all, dl.CircuitStatus()...)
+	}
+	return all
+}
+
+// doomLoopFor returns the per-session detector, creating it on first use.
+func (e *Engine) doomLoopFor(sessionID string) *DoomLoopDetector {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.doomLoops == nil {
+		e.doomLoops = make(map[string]*DoomLoopDetector)
+	}
+	dl := e.doomLoops[sessionID]
+	if dl == nil {
+		dl = NewDoomLoopDetector()
+		e.doomLoops[sessionID] = dl
+	}
+	return dl
 }
 
 // learnPreferences scans a user message for explicit preference statements
@@ -879,8 +923,8 @@ func (e *Engine) executeTool(
 
 	// Doom loop detection: if the same tool+args appears 3+ consecutive
 	// times, emit a warning and return a failure to break the loop.
-	if e.doomLoop.RecordCall(tc.Name, tc.Arguments) {
-		status := e.doomLoop.DoomLoopStatus()
+	if dl := e.doomLoopFor(sessionID); dl.RecordCall(tc.Name, tc.Arguments) {
+		status := dl.DoomLoopStatus()
 		return &types.ToolResult{
 			Success: false,
 			Error:   fmt.Sprintf("检测到 Doom Loop — AI 连续重复调用同一工具。\n%s\n请重新描述你的需求以改变策略。", status),
@@ -916,7 +960,7 @@ func (e *Engine) executeTool(
 		return e.runTool(ctx, tc)
 	case permission.DecisionDeny:
 		// Track tool rejection for strategy-change forcing
-		if e.doomLoop.RecordRejection(tc.Name) {
+		if dl := e.doomLoopFor(sessionID); dl.RecordRejection(tc.Name) {
 			return &types.ToolResult{
 				Success: false,
 				Error:   fmt.Sprintf("「%s」已经被拒绝多次。AI 应更换方案，不要再调用此工具。", tc.Name),
@@ -1015,7 +1059,7 @@ func (e *Engine) runTool(ctx context.Context, tc types.ToolCall) *types.ToolResu
 	// breaker blocks the tool until its cooldown elapses, then admits exactly
 	// one probe. This prevents the model from hammering a broken tool every
 	// turn while still auto-healing after the failure storm passes.
-	if allowed, retryIn := e.doomLoop.CheckBreaker(tc.Name); !allowed {
+	if allowed, retryIn := e.doomLoopFor(sessionID).CheckBreaker(tc.Name); !allowed {
 		msg := fmt.Sprintf("工具「%s」正处于熔断状态，请更换方案（换工具/换参数），不要再调用它。", tc.Name)
 		if retryIn > 0 {
 			msg = fmt.Sprintf("工具「%s」已熔断，约 %s 后可重试一次。请先检查失败原因或更换方案。", tc.Name, retryIn.Round(time.Second))
@@ -1043,7 +1087,7 @@ func (e *Engine) runTool(ctx context.Context, tc types.ToolCall) *types.ToolResu
 	// detection already covers the "same call repeated" case; this covers
 	// "different calls, same tool, all failing".
 	if !res.Success {
-		if e.doomLoop.RecordFailure(tc.Name) {
+		if dl := e.doomLoopFor(sessionID); dl.RecordFailure(tc.Name) {
 			return &types.ToolResult{
 				Success: false,
 				Error: fmt.Sprintf(
@@ -1053,7 +1097,7 @@ func (e *Engine) runTool(ctx context.Context, tc types.ToolCall) *types.ToolResu
 			}
 		}
 	} else {
-		e.doomLoop.ResetToolFailures(tc.Name)
+		e.doomLoopFor(sessionID).ResetToolFailures(tc.Name)
 	}
 
 	// Tool output dedup: if the same (tool + args) produced the same
@@ -1680,8 +1724,8 @@ func (e *Engine) recoverTruncation(
 // Unlike Claude Code, iCode NEVER sends data externally without the user
 // knowing exactly what level is active — shown in the TUI status bar.
 func (e *Engine) Send(ctx context.Context, sessionID, content string, attachments ...[]types.Attachment) (<-chan types.StreamEvent, error) {
-	// New user input resets the doom loop detector
-	e.doomLoop.Reset()
+	// New user input resets THIS session's doom loop detector.
+	e.doomLoopFor(sessionID).Reset()
 	e.resetToolRepairBudget(sessionID)
 
 	sess, err := e.sessionSt.Get(sessionID)
@@ -2109,10 +2153,14 @@ func (e *Engine) chatStreamWithFallback(
 		}
 		if isRateLimitError(err) {
 			for attempt := 1; attempt <= 2 && err != nil; attempt++ {
+				// Exponential backoff with jitter — a fixed schedule makes
+				// thundering herds the moment a provider recovers.
+				base := time.Duration(15*(1<<(attempt-1))) * time.Second
+				jitter := time.Duration(rand.Int63n(int64(base / 4)))
 				select {
 				case <-ctx.Done():
 					attempt = 99 // abort retries
-				case <-time.After(time.Duration(15*attempt) * time.Second):
+				case <-time.After(base + jitter):
 					eventCh, err = build()
 				}
 			}
@@ -2137,11 +2185,14 @@ func (e *Engine) continueAgentLoop(
 	out chan types.StreamEvent,
 	depth int,
 ) {
-	const maxToolRounds = 10
-	if depth >= maxToolRounds {
+	maxRounds := e.maxToolRounds
+	if maxRounds <= 0 {
+		maxRounds = 25
+	}
+	if depth >= maxRounds {
 		out <- types.StreamEvent{
 			Type:    types.EventText,
-			Content: fmt.Sprintf("\n[Max tool rounds (%d) reached. Stopping.]\n", maxToolRounds),
+			Content: fmt.Sprintf("\n[已连续执行 %d 轮工具调用，主动停止。输入 \"继续\" 可从当前进度接着做。]\n", maxRounds),
 		}
 		return
 	}
@@ -2599,6 +2650,9 @@ func (e *Engine) humanizeDeny(ctx context.Context, sessionID string, tc types.To
 	out := permission.HumanizeDeny(a, reason)
 	if e.gate != nil && e.gate.SecurityLevel() == config.SecLocal {
 		return out // 隐私边界内不做任何额外网络调用
+	}
+	if !e.humanizeLLMPolish {
+		return out // 默认纯本地模板：拒绝理由不再外发 LLM（隐私 + 确定性）
 	}
 	if polished := e.polishDenyWithLLM(ctx, sessionID, tc.Name, reason); polished != "" {
 		return polished

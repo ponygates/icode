@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"runtime"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -948,16 +949,54 @@ func (g *Gate) outsideAllowedPaths(action Action) bool {
 	if err != nil {
 		return true
 	}
+	// Resolve symlinks on both sides so a symlink inside the sandbox cannot
+	// point outside it; on failure fall back to the lexical path (missing
+	// files are common for write targets — the target DIR is what matters,
+	// and the lexical Abs path is still checked below).
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
+	}
 	for _, ap := range g.AllowedPaths {
 		apAbs, err := filepath.Abs(ap)
 		if err != nil {
 			continue
 		}
+		if resolved, err := filepath.EvalSymlinks(apAbs); err == nil {
+			apAbs = resolved
+		}
 		// Match on a path-boundary so allowlist /home/u/proj does not also
-		// permit /home/u/project2.
-		if abs == apAbs || strings.HasPrefix(abs, apAbs+string(os.PathSeparator)) {
+		// permit /home/u/project2. Windows filesystems are case-insensitive.
+		if pathsEquivalent(abs, apAbs) || pathsWithinDir(abs, apAbs) {
 			return false
 		}
+	}
+	return true
+}
+
+// pathsEquivalent compares two absolute paths, case-insensitively on
+// case-insensitive filesystems (Windows).
+func pathsEquivalent(a, b string) bool {
+	if a == b {
+		return true
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return false
+}
+
+// pathsWithinDir reports whether child lives under dir (path-boundary aware,
+// case-insensitive on Windows).
+func pathsWithinDir(child, dir string) bool {
+	rel, err := filepath.Rel(dir, child)
+	if err != nil {
+		return false
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return true // Rel already resolved the case-sensitive comparison
 	}
 	return true
 }

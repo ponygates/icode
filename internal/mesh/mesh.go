@@ -13,6 +13,7 @@ package mesh
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
 	"os"
@@ -73,7 +74,9 @@ func VerifyToken(presented string) bool {
 	if err != nil {
 		return false
 	}
-	return presented == want
+	// Constant-time compare: a loopback listener still should not leak the
+	// token length/content through timing.
+	return subtle.ConstantTimeCompare([]byte(presented), []byte(want)) == 1
 }
 
 // LoadPeers reads ~/.icode/peers.yaml sorted by name.

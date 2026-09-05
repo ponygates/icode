@@ -242,7 +242,7 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 
 	// Recover middleware first: a handler panic becomes a clean 500 + stack
 	// trace in desktop.log instead of crashing the whole desktop process.
-	handler := s.corsMiddleware(s.authMiddleware(sameOriginGuard(s.serverOrigin, recoverMiddleware(mux))))
+	handler := s.corsMiddleware(s.authMiddleware(sameOriginGuard(s.serverOrigin, hostGuard(recoverMiddleware(mux)))))
 
 	addr := fmt.Sprintf("127.0.0.1:%d", s.port)
 	listener, err := net.Listen("tcp", addr)
@@ -896,6 +896,26 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		next.ServeHTTP(w, r)
+	})
+}
+
+// hostGuard rejects requests whose Host header is not loopback. The server
+// binds 127.0.0.1 only, so any other Host value is a DNS-rebinding attempt
+// (attacker page resolves a hostname to 127.0.0.1 and same-origin policies
+// then treat the requests as same-site). GET reads like /api/files and
+// /api/sessions would otherwise be readable cross-origin.
+func hostGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := r.Host
+		if h, _, err := net.SplitHostPort(r.Host); err == nil {
+			host = h
+		}
+		switch host {
+		case "127.0.0.1", "::1", "localhost":
+			next.ServeHTTP(w, r)
+		default:
+			http.Error(w, "forbidden host", http.StatusForbidden)
+		}
 	})
 }
 

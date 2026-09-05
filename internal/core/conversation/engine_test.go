@@ -276,9 +276,10 @@ func TestStashIfPivot_DivergentTopicTriggers(t *testing.T) {
 // surfaces a tripped breaker to the UI layer.
 func TestEngineCircuitBreakerStatus_ExposesTrip(t *testing.T) {
 	e := newTestEngine()
-	e.doomLoop.RecordFailure("bash")
-	e.doomLoop.RecordFailure("bash")
-	e.doomLoop.RecordFailure("bash")
+	dl := e.doomLoopFor("test-session")
+	dl.RecordFailure("bash")
+	dl.RecordFailure("bash")
+	dl.RecordFailure("bash")
 
 	got := e.CircuitBreakerStatus()
 	found := false
