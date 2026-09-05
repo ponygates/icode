@@ -1,5 +1,14 @@
 # 更新日志
 
+## v0.52.2 — 审查报告落地（批次一/二/三）（2026-08-31）
+
+> docs/项目审查_2026-08-31.md 全部 24 项发现中的 P1×5 + P2×8 + UX 高价值×3 已落地。
+
+- **批次一 P1**：工具续轮获得与首轮同款 限流重试+降级链+CacheTTL（chatStreamWithFallback 共享助手）——中途 429 不再报废整回合、prompt_cache_ttl 全程生效；MCP trust_mode 强制执行（ask=必询问绕过分类器、readonly=读动词白名单）；/api/files 钳制工作区根；CI 发布真实 desktop_only 构建 + 新增 simpleui 资产（icode-simpleui-*）。
+- **批次二 P2**：熔断器按会话隔离；max_tool_rounds/budget_global_chars 可配置（默认 25/200K）；限流退避指数+抖动；Host 头校验抗 DNS rebinding；沙箱 EvalSymlinks+Windows 大小写折叠；mesh token 常量时间比较；拒绝理由 LLM 润色改 opt-in（humanize_llm_polish，默认纯本地）。
+- **批次三 UX**：补全菜单 N-more 分页；simpleui 流式思考预览（300ms 节流暗斜体行）；simpleui 消息队列（生成中输入自动排队回合结束发送）。
+- 剩余：todo 文本/思考合并单块/Ctrl+R transcript/simpleui 状态段/README 等（批次三尾+批次四）。
+
 ## v0.53.1 — 用量自动重试 + Focus view（对标对齐补齐）(2026-08-31)
 
 > 补齐最后两项对标细节，14 项全部落地。

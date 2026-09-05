@@ -821,6 +821,7 @@ func (b *simpleUIBridge) runPrompt(prompt string, atts []types.Attachment) {
 					b.thinkingBuf = ""
 					b.mu.Unlock()
 				}
+				b.push("uiThinkingLive('')")
 				if lt != "" {
 					b.push(fmt.Sprintf("uiToolResult(%s)", jsStr(strings.TrimSpace(event.Content))))
 					b.mu.Lock()

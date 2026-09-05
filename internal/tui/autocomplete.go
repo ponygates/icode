@@ -594,5 +594,10 @@ func (t *TUI) autocompleteLines() []string {
 			out = append(out, "    "+t.paint("dim", name+" "+it.Desc))
 		}
 	}
+	// "N more" pager (Claude Code parity): tell the user the window is a
+	// filtered view and typing narrows it.
+	if hidden := len(t.acItems) - len(show); hidden > 0 {
+		out = append(out, "    "+t.paint("dim", fmt.Sprintf("(还有 %d 项 — 继续输入以过滤)", hidden)))
+	}
 	return out
 }
