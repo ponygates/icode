@@ -811,6 +811,19 @@ func (p *Pool) AllTools() []types.ToolDef {
 	return all
 }
 
+// AllToolsByServer returns every discovered tool grouped by owning server
+// name so callers can apply per-server policy (e.g. trust modes) by tool.
+func (p *Pool) AllToolsByServer() map[string][]types.ToolDef {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	out := make(map[string][]types.ToolDef)
+	for name, client := range p.clients {
+		out[name] = append(out[name], client.Tools()...)
+	}
+	return out
+}
+
 // Execute routes a tool call to the appropriate MCP server.
 func (p *Pool) Execute(ctx context.Context, name string, args map[string]any) (*types.ToolResult, error) {
 	p.mu.RLock()

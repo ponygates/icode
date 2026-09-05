@@ -1877,93 +1877,13 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 
 	startTime := time.Now()
 
-	// Build fallback chain: primary + configured fallback models.
-	// The primary entry MUST use the routed modelID (see the smart-router
-	// block above): when routing engaged (session model ""/auto) it differs
-	// from sess.ModelID, and sending the raw sess.ModelID would hit the
-	// provider with an empty/"auto" model id and fail. modelInfo was resolved
-	// for modelID, so they are consistent.
-	type modelTry struct {
-		modelID      string
-		providerName string
-		modelInfo    types.ModelInfo
-		provider     types.Provider // nil for primary
-		isFallback   bool
-	}
-	modelsToTry := []modelTry{
-		{modelID: modelID, providerName: modelInfo.Provider, modelInfo: modelInfo},
-	}
-	for _, fb := range e.fallbackModels {
-		if fb == modelID {
-			continue
-		}
-		p, mi, err := e.providerReg.ResolveModel(fb)
-		if err == nil {
-			modelsToTry = append(modelsToTry, modelTry{
-				modelID: fb, providerName: mi.Provider, modelInfo: mi,
-				provider: p, isFallback: true,
-			})
-		}
-	}
-
-	var eventCh <-chan types.StreamEvent
-	var lastErr error
-	var fallbackMsg string
-	for _, mt := range modelsToTry {
-		if mt.isFallback && lastErr != nil {
-			// Route the fallback notice through the event stream instead of
-			// printing to stdout: a raw-mode TUI owns stdout, and the desktop /
-			// simpleui surfaces can only show the switch if it arrives as an
-			// event. The message is emitted on `out` after the channel exists.
-			fallbackMsg = fmt.Sprintf("⚠️ 主模型不可用，已切换备用模型 %s（原因：%s）", mt.modelID, friendlyModelError(lastErr))
-		}
-		p := mt.provider
-		if p == nil {
-			p = provider
-		}
-		build := func() (<-chan types.StreamEvent, error) {
-			return p.ChatStream(ctx, types.ChatRequest{
-				SessionID:        sessionID,
-				Messages:         messages,
-				Model:            mt.modelID,
-				ProviderName:     mt.providerName,
-				SystemPrompt:     opt.BuildPrefix(),
-				Tools:            e.toolReg.ListDefs(),
-				MaxTokens:        orMaxTokens(e.maxTokens, mt.modelInfo.MaxOutputTokens),
-				Temperature:      e.temperature,
-				CacheBreakpoints: opt.BuildCacheBreakpoints(),
-				Thinking:         e.thinkingConfig(),
-				CacheTTL:         e.cacheTTL,
-			})
-		}
-		eventCh, err = build()
-		if err == nil {
-			break
-		}
-		// Rate-limit / quota auto-retry (Claude Code "continue automatically at
-		// usage limit" parity): wait with backoff and retry the SAME model a
-		// couple of times before giving up or falling back.
-		if isRateLimitError(err) {
-			for attempt := 1; attempt <= 2 && err != nil; attempt++ {
-				select {
-				case <-ctx.Done():
-					attempt = 99 // abort retries
-				case <-time.After(time.Duration(15*attempt) * time.Second):
-					eventCh, err = build()
-				}
-			}
-			if err == nil {
-				break
-			}
-		}
-		lastErr = err
-	}
+	// Full resilience chain (primary + fallbacks + rate-limit retry) lives in
+	// the shared helper so the tool continuation rounds get the same
+	// protection — a mid-task 429 fails over instead of killing the turn.
+	eventCh, fallbackMsg, err := e.chatStreamWithFallback(ctx, sessionID, messages, modelID, provider, modelInfo, opt)
 	if err != nil {
 		cancel()
-		if lastErr != nil {
-			return nil, fmt.Errorf("all models failed, last: %s", friendlyModelError(lastErr))
-		}
-		return nil, fmt.Errorf("chat stream: %s", friendlyModelError(err))
+		return nil, err
 	}
 
 	out := make(chan types.StreamEvent, 64)
@@ -2114,6 +2034,100 @@ func (e *Engine) persistPartialTurn(sessionID string, opt *tokenopt.Optimizer, a
 	e.sessionSt.AppendMessage(sessionID, assistantMsg)
 }
 
+// chatStreamWithFallback opens the model stream with the full resilience
+// chain: primary model + configured fallback models, each with rate-limit /
+// quota retry (2 backoff attempts, Claude Code "continue automatically at
+// usage limit" parity). Used by BOTH the first round (Send) and every tool
+// continuation round (continueAgentLoop) — previously the continuation used a
+// bare ChatStream call, so a mid-task 429 aborted the whole turn.
+// Returns the event channel and, when a fallback model took over, a
+// user-facing notice the caller should emit on its event stream.
+func (e *Engine) chatStreamWithFallback(
+	ctx context.Context,
+	sessionID string,
+	messages []types.Message,
+	modelID string,
+	primary types.Provider,
+	modelInfo types.ModelInfo,
+	opt *tokenopt.Optimizer,
+) (<-chan types.StreamEvent, string, error) {
+	type modelTry struct {
+		modelID      string
+		providerName string
+		modelInfo    types.ModelInfo
+		provider     types.Provider // nil = reuse primary
+		isFallback   bool
+	}
+	// The primary entry MUST use the routed modelID: when the smart router
+	// engaged (session model ""/auto) it differs from sess.ModelID.
+	modelsToTry := []modelTry{
+		{modelID: modelID, providerName: modelInfo.Provider, modelInfo: modelInfo},
+	}
+	for _, fb := range e.fallbackModels {
+		if fb == modelID {
+			continue
+		}
+		p, mi, err := e.providerReg.ResolveModel(fb)
+		if err == nil {
+			modelsToTry = append(modelsToTry, modelTry{
+				modelID: fb, providerName: mi.Provider, modelInfo: mi,
+				provider: p, isFallback: true,
+			})
+		}
+	}
+
+	var lastErr error
+	var fallbackMsg string
+	for _, mt := range modelsToTry {
+		if mt.isFallback && lastErr != nil {
+			// The notice travels through the event stream (a raw-mode TUI owns
+			// stdout; desktop/simpleui can only show it as an event).
+			fallbackMsg = fmt.Sprintf("⚠️ 主模型不可用，已切换备用模型 %s（原因：%s）", mt.modelID, friendlyModelError(lastErr))
+		}
+		p := mt.provider
+		if p == nil {
+			p = primary
+		}
+		build := func() (<-chan types.StreamEvent, error) {
+			return p.ChatStream(ctx, types.ChatRequest{
+				SessionID:        sessionID,
+				Messages:         messages,
+				Model:            mt.modelID,
+				ProviderName:     mt.providerName,
+				SystemPrompt:     opt.BuildPrefix(),
+				Tools:            e.toolReg.ListDefs(),
+				MaxTokens:        orMaxTokens(e.maxTokens, mt.modelInfo.MaxOutputTokens),
+				Temperature:      e.temperature,
+				CacheBreakpoints: opt.BuildCacheBreakpoints(),
+				Thinking:         e.thinkingConfig(),
+				CacheTTL:         e.cacheTTL,
+			})
+		}
+		eventCh, err := build()
+		if err == nil {
+			return eventCh, fallbackMsg, nil
+		}
+		if isRateLimitError(err) {
+			for attempt := 1; attempt <= 2 && err != nil; attempt++ {
+				select {
+				case <-ctx.Done():
+					attempt = 99 // abort retries
+				case <-time.After(time.Duration(15*attempt) * time.Second):
+					eventCh, err = build()
+				}
+			}
+			if err == nil {
+				return eventCh, fallbackMsg, nil
+			}
+		}
+		lastErr = err
+	}
+	if len(modelsToTry) == 1 {
+		return nil, "", fmt.Errorf("chat stream: %s", friendlyModelError(lastErr))
+	}
+	return nil, "", fmt.Errorf("all models failed, last: %s", friendlyModelError(lastErr))
+}
+
 func (e *Engine) continueAgentLoop(
 	ctx context.Context,
 	sessionID string,
@@ -2139,18 +2153,13 @@ func (e *Engine) continueAgentLoop(
 
 	messages := opt.CompactRequest("")
 	startTime := time.Now()
-	eventCh, err := provider.ChatStream(ctx, types.ChatRequest{
-		SessionID:        sessionID,
-		Messages:         messages,
-		Model:            modelInfo.ID,
-		ProviderName:     modelInfo.Provider,
-		SystemPrompt:     opt.BuildPrefix(),
-		Tools:            e.toolReg.ListDefs(),
-		MaxTokens:        orMaxTokens(e.maxTokens, modelInfo.MaxOutputTokens),
-		Temperature:      e.temperature,
-		CacheBreakpoints: opt.BuildCacheBreakpoints(),
-		Thinking:         e.thinkingConfig(),
-	})
+	// Same resilience chain as the first round: rate-limit retry + fallback
+	// models + the user's CacheTTL (which the old bare ChatStream call dropped
+	// after round one, silently breaking prompt_cache_ttl mid-turn).
+	eventCh, fallbackMsg, err := e.chatStreamWithFallback(ctx, sessionID, messages, modelInfo.ID, provider, modelInfo, opt)
+	if fallbackMsg != "" {
+		out <- types.StreamEvent{Type: types.EventSystem, Content: fallbackMsg}
+	}
 	if err != nil {
 		out <- types.StreamEvent{Type: types.EventError, Content: friendlyModelError(err)}
 		return

@@ -661,6 +661,29 @@ func (s *Server) refreshMCPTools() {
 		s.engine.RegisterTool(&mcpToolAdapter{def: def, pool: s.mcpPool})
 		s.mcpToolNames[def.Name] = true
 	}
+
+	// Enforce per-server trust modes in the permission gate (P1 hardening):
+	// without this, trust_mode was stored and displayed but never applied, so
+	// an untrusted MCP server's write tools executed unprompted in yolo/auto.
+	trustByServer := make(map[string]string)
+	for _, m := range s.cfg.MCP {
+		if m.TrustMode != "" {
+			trustByServer[m.Name] = m.TrustMode
+		}
+	}
+	if s.gate != nil && len(trustByServer) > 0 {
+		policy := make(map[string]string)
+		for serverName, defs := range s.mcpPool.AllToolsByServer() {
+			mode := trustByServer[serverName]
+			if mode == "" || mode == "all" {
+				continue
+			}
+			for _, def := range defs {
+				policy[def.Name] = mode
+			}
+		}
+		s.gate.SetMCPPolicy(policy)
+	}
 }
 
 // isProviderDisabled reports whether a provider has been turned off in the

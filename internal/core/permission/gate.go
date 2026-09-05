@@ -105,8 +105,12 @@ type Action struct {
 
 // Gate is the central permission controller.
 type Gate struct {
-	mu   sync.RWMutex
-	mode Mode
+	// mcpPolicy maps MCP tool name → owning server's trust mode. Guarded by
+	// its own lock: refreshMCPTools swaps it while turns may be in flight.
+	mcpMu     sync.RWMutex
+	mcpPolicy map[string]string
+	mu        sync.RWMutex
+	mode      Mode
 
 	// SecurityLevel controls data handling when communicating with external
 	// services. Always visible in the status bar — no hidden telemetry.
@@ -582,6 +586,33 @@ func (g *Gate) SetClassifier(c Classifier) {
 	g.classifier = c
 }
 
+// SetMCPPolicy installs the tool-name → trust-mode map ("ask"|"readonly"|"all")
+// derived from the MCP server configs. Nil clears it.
+func (g *Gate) SetMCPPolicy(policy map[string]string) {
+	g.mcpMu.Lock()
+	g.mcpPolicy = policy
+	g.mcpMu.Unlock()
+}
+
+// mcpTrustMode returns the trust mode for a tool, "" when unrestricted.
+func (g *Gate) mcpTrustMode(tool string) string {
+	g.mcpMu.RLock()
+	defer g.mcpMu.RUnlock()
+	return g.mcpPolicy[tool]
+}
+
+// mcpReadVerbTool is the read-only heuristic for "readonly"-trust servers:
+// only tool names whose verb suggests a pure read are auto-approvable.
+func mcpReadVerbTool(tool string) bool {
+	t := strings.ToLower(tool)
+	for _, v := range []string{"get", "list", "read", "search", "query", "fetch", "find", "show", "describe", "status", "health", "view", "check"} {
+		if strings.Contains(t, v) {
+			return true
+		}
+	}
+	return false
+}
+
 func (g *Gate) Check(sessionID string, action Action) CheckResult {
 	// A session already forced into manual mode: require confirmation for
 	// everything, regardless of mode. Escalated stays false here so the UI
@@ -606,6 +637,24 @@ func (g *Gate) Check(sessionID string, action Action) CheckResult {
 	if result := g.evalParamRules(rules, action); result != nil {
 		g.recordStrike(sessionID, result)
 		return *result
+	}
+
+	// MCP trust policy (P1 hardening): a server configured with trust_mode
+	// "ask" must ALWAYS prompt — the auto classifier must never silently
+	// approve its tools; "readonly" auto-approves only read-verb tool names
+	// and asks for anything else. Servers with "all" (the default) are
+	// unrestricted, preserving pre-policy behavior.
+	if mode := g.mcpTrustMode(action.Tool); mode != "" && mode != "all" {
+		if mode == "ask" || !mcpReadVerbTool(action.Tool) {
+			res := CheckResult{
+				Decision: DecisionAsk,
+				Reason:   "MCP 服务器信任级别为 " + mode + "：" + action.Tool + " 需人工确认",
+				Prompt:   g.buildPrompt(action),
+			}
+			g.recordStrike(sessionID, &res)
+			return res
+		}
+		// readonly + read-verb tool → fall through to the normal flow.
 	}
 
 	result := g.check(sessionID, action)

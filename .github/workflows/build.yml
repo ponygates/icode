@@ -196,13 +196,48 @@ jobs:
           if [ "${{ matrix.os }}" = "windows-latest" ]; then SUFFIX=".exe"; fi
           LDFLAGS="-s -w -X main.Version=${GITHUB_REF_NAME#v} -X main.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ) -X main.GitCommit=${GITHUB_SHA}"
           if [ "$SUFFIX" = ".exe" ]; then LDFLAGS="$LDFLAGS -H windowsgui"; fi
-          GOARCH=${{ matrix.goarch }} CGO_ENABLED=${{ matrix.cgo }} go build -ldflags="$LDFLAGS" -o icode-desktop-${{ matrix.os }}-${{ matrix.goarch }}$SUFFIX .
+          GOARCH=${{ matrix.goarch }} CGO_ENABLED=${{ matrix.cgo }} go build -tags desktop_only -ldflags="$LDFLAGS" -o icode-desktop-${{ matrix.os }}-${{ matrix.goarch }}$SUFFIX .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: icode-desktop-${{ matrix.os }}-${{ matrix.goarch }}
           path: icode-desktop-${{ matrix.os }}-${{ matrix.goarch }}*
+
+  # ============================================================================
+  # Simple UI (Windows WebView2 lightweight window) — the double-click-friendly
+  # "UI 版". Released as icode-simpleui-* to end the icode-cli naming collision
+  # with the headless cross-compiles below.
+  build-simpleui:
+    name: SimpleUI (windows)
+    runs-on: windows-latest
+    needs: [test, frontend]
+    if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: internal/embedded/dist
+
+      - name: Build simpleui binary
+        shell: bash
+        run: |
+          go build -tags simpleui -ldflags="-s -w -H windowsgui -X main.Version=${GITHUB_REF_NAME#v}" -o icode-simpleui-windows-amd64.exe .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: icode-simpleui-windows-amd64
+          path: icode-simpleui-windows-amd64*
 
   # ============================================================================
   # Headless CLI binaries — pure-Go cross-compile (-tags nogui, no CGO)

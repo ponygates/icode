@@ -38,6 +38,18 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 		root = abs
 	}
 
+	// P1 hardening: the tree is only ever rendered for a workspace bound to
+	// this server — an arbitrary absolute path would let any loopback page
+	// enumerate the whole filesystem. Clamp to the process working directory
+	// (kept in sync with /cd and the active workspace), allowing only
+	// subdirectories of it.
+	if cwd, err := os.Getwd(); err == nil {
+		if !pathsWithin(cwd, root) {
+			writeJSON(w, 400, map[string]any{"error": "path is outside the active workspace"})
+			return
+		}
+	}
+
 	// Skip these directories when scanning.
 	skip := map[string]bool{
 		"node_modules": true, ".git": true, ".idea": true, ".vscode": true,
@@ -96,6 +108,22 @@ func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"files": files})
+}
+
+// pathsWithin reports whether child equals parent or lives underneath it
+// (lexically, after cleaning — symlink resolution is handled separately by
+// the gate sandbox for tool actions).
+func pathsWithin(parent, child string) bool {
+	parent = filepath.Clean(parent)
+	child = filepath.Clean(child)
+	if parent == child {
+		return true
+	}
+	rel, err := filepath.Rel(parent, child)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // extToType maps a file extension to a short human-readable label used by the
