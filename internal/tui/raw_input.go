@@ -1457,11 +1457,17 @@ drainLoop:
 								t.mu.Lock()
 								hasQueue := len(t.queue) > 0
 								if hasQueue {
-									t.queueBuf = t.queue[0]
+									recalled := t.queue[0]
 									t.queue = t.queue[1:]
+									if t.inputBuf != "" {
+										recalled = t.inputBuf + " " + recalled
+									}
+									t.inputBuf = recalled
+									t.cursor = len([]rune(t.inputBuf))
 								}
 								t.mu.Unlock()
 								if hasQueue {
+									t.updateSuggestions()
 									t.render()
 								}
 							}
@@ -1522,19 +1528,33 @@ drainLoop:
 func (t *TUI) handleQueueKey(r rune) {
 	switch r {
 	case '\r':
-		if txt := strings.TrimSpace(t.queueBuf); txt != "" {
+		t.mu.Lock()
+		txt := strings.TrimSpace(t.inputBuf)
+		if txt != "" {
 			t.queue = append(t.queue, txt)
+			t.inputBuf = ""
+			t.cursor = 0
 		}
-		t.queueBuf = ""
+		t.mu.Unlock()
+		t.updateSuggestions()
 		t.render()
 	case 0x7f, 0x08: // Backspace
-		if runes := []rune(t.queueBuf); len(runes) > 0 {
-			t.queueBuf = string(runes[:len(runes)-1])
-			t.render()
-		}
+		t.deleteAtCursor()
+		t.updateSuggestions()
+		t.render()
 	default:
 		if r >= 0x20 && r != 0x7f {
-			t.queueBuf += string(r)
+			t.mu.Lock()
+			runes := []rune(t.inputBuf)
+			if t.cursor > len(runes) {
+				t.cursor = len(runes)
+			}
+			rest := append([]rune{r}, runes[t.cursor:]...)
+			runes = append(runes[:t.cursor], rest...)
+			t.inputBuf = string(runes)
+			t.cursor++
+			t.mu.Unlock()
+			t.updateSuggestions()
 			t.render()
 		}
 	}

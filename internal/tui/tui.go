@@ -278,10 +278,9 @@ type TUI struct {
 	streamDone chan struct{}
 
 	// Streaming-time message queue (Claude Code parity): typed-ahead input
-	// lands in queueBuf; Enter moves it to queue; the oldest entry auto-sends
+	// holds queued messages; Enter moves input there; the oldest auto-sends
 	// as the next turn when the current one finishes. ↑ recalls the oldest.
-	queue    []string
-	queueBuf string
+	queue []string
 
 	// askPending is the in-flight interactive multiple-choice question
 	// (Claude Code AskUserQuestion parity): set while the ask_user_question
@@ -946,7 +945,7 @@ func (t *TUI) inputLineCount() int {
 func (t *TUI) queueRows() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if len(t.queue) > 0 || t.queueBuf != "" {
+	if len(t.queue) > 0 {
 		return 1
 	}
 	return 0
@@ -957,9 +956,6 @@ func (t *TUI) queueRows() int {
 func (t *TUI) queueLine() string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.queueBuf != "" {
-		return t.paint("dim", "⏳ 输入中: "+t.queueBuf+" （Enter 排队 · ↑ 取回）")
-	}
 	if len(t.queue) > 0 {
 		return t.paint("dim", fmt.Sprintf("⏳ 已排队 (%d): %s", len(t.queue), t.queue[0]))
 	}
