@@ -13,7 +13,6 @@ import (
 	"runtime/debug"
 	"strings"
 	"time"
-	"unicode/utf16"
 	"unicode/utf8"
 
 	"github.com/ponygates/icode/internal/config"
@@ -58,21 +57,29 @@ func (t *TUI) keyPump() {
 	}
 	defer close(t.keyReaderDone)
 	defer close(t.keyCh)
+	acc := make([]byte, 0, 4)
 	for {
-		r, _, err := br.ReadRune()
+		b, err := br.ReadByte()
 		if err != nil {
 			return // EOF or read error — session input is gone
 		}
-		// ConHost extended keys (arrows/Home/End/Delete/…): the 0xE0/0x00
-		// prefix byte is INVALID UTF-8, so ReadRune surfaces it as RuneError —
-		// a bare `r == 0xE0` check never fires. Read the scan-code byte that
-		// follows and translate the pair into the VT sequence the key parser
-		// expects. Without this, Delete arrives as literal "S", Home as "G",
-		// PageUp as "I" … — the "garbage on delete/arrow" bug.
-		if r == utf8.RuneError {
-			nb, _, nerr := br.ReadRune()
+
+		// ── ConHost extended keys ────────────────────────────────────────
+		// Windows consoles deliver arrows/Home/End/Delete/Insert/PgUp/PgDn
+		// as a 0xE0 (or legacy 0x00) prefix byte + a scan-code letter. The
+		// prefix is INVALID UTF-8 — a rune-based reader misreads it and the
+		// scan-code letter then leaks into the input as garbage ("S" for
+		// Delete, "G" for Home, …). Translate the pair into the VT sequence
+		// the key parser expects. A 0xE0 followed by a UTF-8 continuation
+		// byte (0x80-0xBF) is a legit multibyte character lead, not a prefix.
+		if b == 0x00 || b == 0xE0 {
+			nb, nerr := br.ReadByte()
 			if nerr != nil {
 				return
+			}
+			if b == 0xE0 && nb >= 0x80 && nb <= 0xBF {
+				acc = append(acc[:0], b, nb)
+				continue
 			}
 			var seq string
 			switch nb {
@@ -108,30 +115,56 @@ func (t *TUI) keyPump() {
 			}
 			continue
 		}
-		// IME astral-plane characters arrive as UTF-16 surrogate pairs — a lone
-		// half would surface as garbage. Combine before forwarding.
-		if utf16.IsSurrogate(r) {
-			r2, _, err2 := br.ReadRune()
-			if err2 != nil {
-				return
-			}
-			if combined := utf16.DecodeRune(r, r2); combined != 0xFFFD {
-				r = combined
+
+		// ── Incremental UTF-8 decoding ───────────────────────────────────
+		// Byte-level accumulation handles IME commit bursts that can split a
+		// multibyte character across reads — a rune-based reader misreads
+		// such splits and half characters surfaced as "¿" garbage. ASCII
+		// fast-paths through with zero overhead.
+		if b < 0x80 {
+			acc = acc[:0]
+			r := rune(b)
+			t.mu.Lock()
+			pending := t.permPending
+			t.mu.Unlock()
+			if pending {
+				select {
+				case t.permKeyCh <- r:
+				case <-t.keyStop:
+					return
+				}
 			} else {
-				continue
+				select {
+				case t.keyCh <- r:
+				case <-t.keyStop:
+					return
+				}
 			}
+			continue
 		}
-		if utf16.IsSurrogate(r) {
-			r2, _, err2 := br.ReadRune()
-			if err2 != nil {
-				return
-			}
-			if combined := utf16.DecodeRune(r, r2); combined != 0xFFFD {
-				r = combined
-			} else {
-				continue
-			}
+
+		acc = append(acc, b)
+		need := 1
+		switch {
+		case acc[0] >= 0xF0:
+			need = 4
+		case acc[0] >= 0xE0:
+			need = 3
+		case acc[0] >= 0xC0:
+			need = 2
 		}
+		if len(acc) < need {
+			continue // wait for the rest of the character
+		}
+		r, size := utf8.DecodeRune(acc)
+		if r == utf8.RuneError || size != need {
+			// Invalid sequence — drop it entirely instead of leaking
+			// replacement characters into the input.
+			acc = acc[:0]
+			continue
+		}
+		acc = acc[:0]
+
 		t.mu.Lock()
 		pending := t.permPending
 		t.mu.Unlock()
@@ -150,8 +183,6 @@ func (t *TUI) keyPump() {
 		}
 	}
 }
-
-// nextKey blocks for the next raw-mode rune from the key pump.
 func (t *TUI) nextKey() (rune, bool) {
 	r, ok := <-t.keyCh
 	return r, ok
