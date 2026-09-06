@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/ponygates/icode/internal/config"
 	"github.com/ponygates/icode/internal/executil"
@@ -62,11 +63,63 @@ func (t *TUI) keyPump() {
 		if err != nil {
 			return // EOF or read error — session input is gone
 		}
-		// ConHost/IME noise: NUL and the 0xE0 extended-key prefix are control
-		// artifacts, and astral-plane input arrives as UTF-16 surrogate pairs
-		// that must be combined — a lone half would later surface as garbage.
-		if r == 0 || r == 0xE0 {
+		// ConHost extended keys (arrows/Home/End/Delete/…): the 0xE0/0x00
+		// prefix byte is INVALID UTF-8, so ReadRune surfaces it as RuneError —
+		// a bare `r == 0xE0` check never fires. Read the scan-code byte that
+		// follows and translate the pair into the VT sequence the key parser
+		// expects. Without this, Delete arrives as literal "S", Home as "G",
+		// PageUp as "I" … — the "garbage on delete/arrow" bug.
+		if r == utf8.RuneError {
+			nb, _, nerr := br.ReadRune()
+			if nerr != nil {
+				return
+			}
+			var seq string
+			switch nb {
+			case 'H':
+				seq = "[A" // ↑
+			case 'P':
+				seq = "[B" // ↓
+			case 'K':
+				seq = "[D" // ←
+			case 'M':
+				seq = "[C" // →
+			case 'G':
+				seq = "[H" // Home
+			case 'O':
+				seq = "[F" // End
+			case 'S':
+				seq = "[3~" // Delete
+			case 'R':
+				seq = "[2~" // Insert
+			case 'I':
+				seq = "[5~" // PgUp
+			case 'Q':
+				seq = "[6~" // PgDn
+			default:
+				continue // unknown extended key — drop silently
+			}
+			for _, c := range seq {
+				select {
+				case t.keyCh <- c:
+				case <-t.keyStop:
+					return
+				}
+			}
 			continue
+		}
+		// IME astral-plane characters arrive as UTF-16 surrogate pairs — a lone
+		// half would surface as garbage. Combine before forwarding.
+		if utf16.IsSurrogate(r) {
+			r2, _, err2 := br.ReadRune()
+			if err2 != nil {
+				return
+			}
+			if combined := utf16.DecodeRune(r, r2); combined != 0xFFFD {
+				r = combined
+			} else {
+				continue
+			}
 		}
 		if utf16.IsSurrogate(r) {
 			r2, _, err2 := br.ReadRune()
@@ -629,6 +682,11 @@ func (t *TUI) handleKey(r rune) bool {
 				t.nextKey() // consume trailing '~'
 				t.scrollPgDn()
 				return true
+			case '3': // Delete — remove the rune under the cursor
+				t.nextKey() // consume the trailing '~'
+				t.deleteUnderCursor()
+				t.updateSuggestions()
+				return true
 			case 'Z': // Shift+Tab → cycle agent mode
 				t.cycleMode()
 				return true
@@ -846,6 +904,17 @@ func (t *TUI) handleKey(r rune) bool {
 	t.cursor++
 	t.updateSuggestions()
 	return true
+}
+
+// deleteUnderCursor removes the rune AT the cursor (forward delete — the
+// Delete key, as opposed to Backspace which removes the one before it).
+func (t *TUI) deleteUnderCursor() {
+	runes := []rune(t.inputBuf)
+	if t.cursor >= len(runes) {
+		return
+	}
+	t.pushUndo()
+	t.inputBuf = string(runes[:t.cursor]) + string(runes[t.cursor+1:])
 }
 
 func (t *TUI) deleteAtCursor() {
