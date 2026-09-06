@@ -486,7 +486,58 @@ func (t *TUI) render() {
 	} else {
 		tail = t.drawInputBox(contentW, H, inputBuf, cursor, streaming, status)
 	}
-	fmt.Fprint(t.writer, buf.String()+tail)
+	frame := buf.String() + tail
+	t.traceFrame(frame)
+	fmt.Fprint(t.writer, frame)
+}
+
+// traceFrame dumps every absolute cursor move + the text that follows it to
+// ~/.icode/tui-trace.log when ICODE_TRACE=1 — the definitive evidence for
+// "text renders in the wrong place" reports.
+func (t *TUI) traceFrame(frame string) {
+	if os.Getenv("ICODE_TRACE") == "" {
+		return
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	f, err := os.OpenFile(filepath.Join(home, ".icode", "tui-trace.log"),
+		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	var row, col int
+	for _, seg := range strings.Split(frame, "\x1b[") {
+		if n, _ := fmt.Sscanf(seg, "%d;%dH", &row, &col); n == 2 {
+			rest := seg
+			if i := strings.IndexByte(seg, 'H'); i >= 0 && i+1 < len(seg) {
+				rest = seg[i+1:]
+			}
+			// Strip remaining escapes for a readable preview.
+			var b strings.Builder
+			inEsc := false
+			for _, r := range rest {
+				if r == 0x1b {
+					inEsc = true
+					continue
+				}
+				if inEsc {
+					if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+						inEsc = false
+					}
+					continue
+				}
+				b.WriteRune(r)
+			}
+			prev := strings.TrimSpace(b.String())
+			if len([]rune(prev)) > 40 {
+				prev = string([]rune(prev)[:40]) + "…"
+			}
+			fmt.Fprintf(f, "%s row=%d col=%d %q\n", time.Now().Format("15:04:05.000"), row, col, prev)
+		}
+	}
 }
 
 // headerLine renders the opencode-style top bar: an orange model dot (●) with
