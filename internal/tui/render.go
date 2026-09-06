@@ -474,14 +474,19 @@ func (t *TUI) render() {
 			buf.WriteString(fmt.Sprintf("\x1b[%d;1H\x1b[K", i+1))
 		}
 	}
-	fmt.Fprint(t.writer, buf.String())
+	// Single-flush frame: the main paint and the input/overlay tail go out in
+	// ONE write, so the physical cursor never rests mid-screen between the two.
+	// (A cursor left in the log area makes IME composition / typed text land
+	// above the input box — the "text appears in the blank space" bug.)
+	var tail string
 	if t.settingsOpen {
-		t.renderSettingsPanel()
+		tail = t.renderSettingsPanel()
 	} else if searchMode {
-		t.drawSearchBox(contentW, H, searchBuf, searchCur, streaming)
+		tail = t.drawSearchBox(contentW, H, searchBuf, searchCur, streaming)
 	} else {
-		t.drawInputBox(contentW, H, inputBuf, cursor, streaming, status)
+		tail = t.drawInputBox(contentW, H, inputBuf, cursor, streaming, status)
 	}
+	fmt.Fprint(t.writer, buf.String()+tail)
 }
 
 // headerLine renders the opencode-style top bar: an orange model dot (●) with
@@ -1557,7 +1562,7 @@ func modeColor(m Mode) string {
 //	❯ <input>                              row topRow
 //	ctx ▓▓▓░░░░░ 42%                        row topRow-1 (when context known)
 //	● model · ▸1.2k ▸3.4k · 42%             row topRow+1 (when /statusline on)
-func (t *TUI) drawInputBox(W, H int, inputBuf string, cursor int, streaming bool, status string) {
+func (t *TUI) drawInputBox(W, H int, inputBuf string, cursor int, streaming bool, status string) string {
 	statusRows := 0
 	if t.statusVisible {
 		statusRows = 1
@@ -1738,12 +1743,12 @@ func (t *TUI) drawInputBox(W, H int, inputBuf string, cursor int, streaming bool
 		b.WriteString("\x1b[?25h")
 	}
 
-	fmt.Fprint(t.writer, b.String())
+	return b.String()
 }
 
 // drawSearchBox renders the Claude Code-style reverse-history-search overlay
 // shown while Ctrl+R is active. It replaces the normal input prompt.
-func (t *TUI) drawSearchBox(W, H int, searchBuf, current string, streaming bool) {
+func (t *TUI) drawSearchBox(W, H int, searchBuf, current string, streaming bool) string {
 	bottomRows := 1
 	if t.statusVisible {
 		bottomRows = 2
@@ -1795,12 +1800,7 @@ func (t *TUI) drawSearchBox(W, H int, searchBuf, current string, streaming bool)
 	}
 	b.WriteString(fmt.Sprintf("\x1b[%d;%dH", topRow, 2))
 	b.WriteString("\x1b[?25h")
-	fmt.Fprint(t.writer, b.String())
-	// Park the terminal cursor at the bottom input row: overlays replace the
-	// input box, and a cursor left mid-screen makes IME composition / typed
-	// text land in the log area.
-	fmt.Fprintf(t.writer, "[%d;2H", H)
-
+	return b.String()
 }
 
 // ── Scrolling support ───────────────────────────────────────────
@@ -1962,14 +1962,14 @@ func (t *TUI) settingsPanelItems(cfg *config.Config) []settingItem {
 }
 
 // renderSettingsPanel draws the settings overlay panel.
-func (t *TUI) renderSettingsPanel() {
+func (t *TUI) renderSettingsPanel() string {
 	t.mu.Lock()
 	W := t.width
 	H := t.height
 	t.mu.Unlock()
 
 	if W < 40 || H < 15 {
-		return
+		return ""
 	}
 
 	// Use the snapshot loaded when the panel opened (see the Ctrl+, handler);
@@ -2090,10 +2090,7 @@ func (t *TUI) renderSettingsPanel() {
 	hintX := startX + (panelW-len(hint))/2
 	b.WriteString(fmt.Sprintf("\x1b[%d;%dH%s", hintY, hintX, hint))
 
-	fmt.Fprint(t.writer, b.String())
-	// Park the cursor at the bottom row (see drawSearchBox note).
-	fmt.Fprintf(t.writer, "[%d;2H", H)
-
+	return b.String()
 }
 
 func maskStringTUI(s string) string {

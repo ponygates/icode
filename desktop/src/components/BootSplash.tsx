@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import PlumBlossom from './PlumBlossom';
 
 /**
  * BootSplash is a lightweight startup prompt shown the moment the desktop app
@@ -47,22 +48,11 @@ const BootSplash: React.FC = () => {
         pointerEvents: fade ? 'none' : 'auto',
       }}
     >
-      {/* Opencode-style logo: circular badge with "iCode" */}
-      <div style={{
-        width: 48,
-        height: 48,
-        borderRadius: '50%',
-        background: 'linear-gradient(135deg, #58a6ff 0%, #8b6cff 100%)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        color: 'white',
-        fontWeight: 600,
-        fontSize: 16,
-        letterSpacing: '-0.5px',
-      }}>
-        iCode
-      </div>
+      {/* Brand: the plum blossom mark (restored per user preference) */}
+      <PlumBlossom
+        size={72}
+        style={{ filter: 'drop-shadow(0 4px 14px rgba(230,111,168,0.35))' }}
+      />
       
       <div style={{ fontSize: 20, fontWeight: 600, letterSpacing: '-0.02em', color: 'var(--text-primary)' }}>
         iCode
