@@ -2,7 +2,7 @@
 
 ## 项目描述
 
-iCode 是一个多模型 AI 编码助手，可运行于终端和桌面。开箱支持 9 个 LLM 提供商、60+ 模型，缓存优先架构可实现最高 94% token 节省。Go 语言编写，使用 cobra CLI 框架，附带 Electron 桌面应用。一键自动更新模型：刷新后自动检测新增/下架模型，连续 2 次确认标记下架，文档页富化补充元数据。
+iCode 是一个多模型 AI 编码助手，可运行于终端和桌面。开箱支持 14 个 LLM 提供商、60+ 模型，缓存优先架构可实现最高 94% token 节省。Go 语言编写，使用 cobra CLI 框架，附带 WebView2（Windows）/ 浏览器（macOS·Linux）桌面应用与 VS Code 扩展。一键自动更新模型：刷新后自动检测新增/下架模型，连续 2 次确认标记下架，文档页富化补充元数据。
 
 ## 构建命令
 
@@ -60,52 +60,81 @@ iCode 是一个多模型 AI 编码助手，可运行于终端和桌面。开箱�
 ## 架构总览
 
 ```
-main.go                  入口
-cmd/                     Cobra CLI 命令（root, chat, exec, auth, doctor, server）
+main.go / main_ui.go / desktop_main.go     入口（CLI / simpleui / 桌面）
+cmd/                        Cobra CLI 命令（root, chat, exec, auth, doctor, server,
+                            acp, msoffice, cleanup, keydebug, tray_* / webview_*）
 internal/
-  app/                   App 启动和生命周期
-  config/                配置加载 + 国际化
+  app/                       App 启动和生命周期
+  acp/                       ACP（Agent Client Protocol）stdio 服务端，编辑器接入
+  audit/                     审计/对标差距分析辅助
+  config/                    配置加载 + 国际化（zh-CN/zh-TW/en）
   core/
-    agent/               子代理注册和运行
-    checkpoint/          基于 git 的检查点/回退
-    context/             项目上下文加载（ICODE.md）
-    conversation/        智能体对话循环（引擎）
-    permission/          权限门（Plan/Agent/YOLO/Auto 模式）
-    privacy/             隐私脱敏（6级安全等级）
-    session/             会话持久化
-    slashcmd/            用户自定义斜杠命令
-    todo/                待办事项存储
-    tool/                内置工具注册表（read/write/bash/grep/glob/edit/task）
-  db/                    SQLite 存储
+    agent/                   子代理注册、运行、多智能体团队（team:*）
+    checkpoint/              基于 git worktree 的检查点/回退（/rewind /replay）
+    codegraph/               符号索引（code_search 工具，懒构建）
+    context/                 项目上下文加载（ICODE.md + 项目分析）
+    conversation/            智能体对话循环引擎 + doom-loop 熔断 + 截断恢复
+    hooks/                   生命周期 hooks（15 种事件，PreToolUse 可阻断）
+    knowledge/               本地知识库 RAG（IDF/BM25 加权）
+    permission/              权限门（plan/agent/yolo/auto + 分类器 + AllowedPaths 沙箱）
+    plugins/                 插件加载
+    prefmem/                 用户偏好记忆（跨轮，自动落盘）
+    privacy/                 隐私脱敏（6 级安全等级）
+    router/                  智能模型路由（keyword / embedding 本地零 token / llm）
+    searchreplace/           SEARCH/REPLACE 编辑块 + staged diff
+    session/                 会话持久化
+    sessionum/               会话摘要/lite-resume/预算护栏
+    skills/                  SKILL.md 系统（懒加载索引 + use_skill 工具 + 市场）
+    slashcmd/                用户自定义斜杠命令
+    slashui/                 三端共享斜杠命令集（/share html /replay 等）
+    todo/                    待办事项存储
+    tool/                    内置工具注册表（38 个：bash/read/write/edit/grep/glob/
+                            search_replace/task/browser/computer-use/todo/image_gen/
+                            video_gen/voice/code_search/disk_cleanup/ask_user_form…）
+    voice/                   语音识别（百度/智谱/讯飞，WebAudio 16kHz PCM）
+  db/                        SQLite 存储（WAL + busy_timeout）
+  desktop/                   桌面后端启动/生命周期（WebView2 / 浏览器）
+  embedded/                  前端 dist embed（go:embed，CI 构建填充）
+  executil/                  跨平台命令执行工具
   llm/
-    provider/            提供商实现（anthropic, deepseek, zhipu, kimi,
-                         volcengine, tencent, huawei, scnet, nvidia,
-                         openrouter, openai_compat）+ 注册表
-    tokenopt/            缓存优先 token 优化（不可变前缀、仅追加日志、智能压缩）
-  mcp/                   MCP 客户端（JSON-RPC stdio 传输）
-  server/                HTTP API 服务器（41KB，供桌面端调用）
-  tui/                   终端 UI（71KB，全屏 raw 模式 + 后备行模式）
-  types/                 共享类型定义
+    provider/                14 个提供商（anthropic, deepseek, zhipu, kimi,
+                             volcengine, tencent, huawei, scnet, nvidia, ollama,
+                             openrouter, openai_compat, agnes, sensenova）+ 注册表
+    tokenopt/                缓存优先 token 优化（不可变前缀、仅追加日志、5 层压缩）
+  lsp/                       LSP 代码诊断（项目语言自动探测 + 文件改后注入错误）
+  mcp/                       MCP 客户端（JSON-RPC stdio + SSE 传输，tools/list_changed）
+  mesh/                      跨机 mesh（token 鉴权、消息转发）
+  msoffice/                  零依赖内置办公文档生成（docx/xlsx/pptx，OOXML）
+  notify/                    系统通知（免打扰窗口）
+  scheduler/                 自动化调度器（RRULE 秒级 + 模板库 + 执行历史）
+  secure/                    密钥加密（Windows DPAPI / 跨平台兜底）
+  server/                    HTTP API 服务器（REST + SSE 流式，loopback + 同源校验）
+  static/                    静态资源
+  tui/                       终端 UI（全屏 raw 模式 + 后备行模式 + simpleui）
+  types/                     共享类型定义
+  update/                    自更新（跨平台资产映射 + magic 校验 + 重启）
+  xgo/                       panic 恢复安全 goroutine 包装
 pkg/
-  modelupdate/           模型列表自动更新（API+文档富化+Diff检测+下架标记+持久化）
-desktop/                 Electron 桌面应用 + web UI
-configs/                 默认配置文件
+  modelupdate/               模型列表自动更新（API+文档富化+Diff检测+下架标记+持久化）
+desktop/                     WebView2 + React + TS 桌面前端（含 Git 工作台/分屏/技能市场）
+vscode/                      VS Code 扩展（侧栏聊天/选中代码/状态栏/自动起后端）
+configs/                     默认配置文件
 ```
 
 ## 设计原则
 
 - **缓存优先**: 系统提示+工具定义组成不可变前缀，跨轮保持稳定，利用提供商 KV 缓存
 - **多提供商**: 所有提供商实现 `types.Provider` 接口，统一注册
-- **智能体循环**: `conversation.Engine` 流式推送事件（text/tool_use/done/error），内联执行工具，最多 10 轮递归
+- **智能体循环**: `conversation.Engine` 流式推送事件（text/tool_use/done/error），内联执行工具，默认最多 25 轮（可配 `tools.max_tool_rounds`，0=默认 25）；续轮与首轮共用 `chatStreamWithFallback`（限流退避 + 备用模型 + CacheTTL）
 - **隐私优先**: 6 级安全等级（本地处理→脱敏→本地大模型→代理模式），从不发送遥测
-- **双端统一**: CLI（TUI）+ 桌面（Electron）共享同一后端，会话数据存储在 SQLite
+- **双端统一**: CLI（TUI/simpleui）+ 桌面（WebView2 / 浏览器）+ VS Code 扩展共享同一后端，会话数据存储在 SQLite
 
 ## 当前状态
 
 ### 已有功能
-- 9 个 LLM 提供商（DeepSeek/Zhipu/Kimi/火山引擎/腾讯/华为/SCNet/OpenRouter/Anthropic/NVIDIA）
+- 14 个 LLM 提供商（DeepSeek/Zhipu/Kimi/火山引擎/腾讯/华为/SCNet/NVIDIA/Ollama/OpenRouter/Anthropic/Agnes/SenseNova + 任意 openai_compat 50+）
 - 流式事件推送（goroutine + channel）
-- 内置工具系统（read/write/bash/grep/glob/edit/task/子代理）
+- 内置工具系统（38 个：bash/read_file/write_file/edit/search_replace/grep/glob/ls/task/子代理 team:*/browser/computer-use/todo/image_gen/video_gen/voice/code_search/disk_cleanup/ask_user_form/ask_user_question…）
 - 权限控制 4 模式（Plan/Agent/YOLO/Auto）
 - SQLite 会话持久化
 - 基于 git 的检查点/回退
@@ -116,9 +145,9 @@ configs/                 默认配置文件
 - 子代理系统（Task 工具）
 - 隐私脱敏 6 级
 - 国际化（zh-CN/zh-TW/en）
-- 20+ 斜杠命令
+- 72+ 斜杠命令（/help /model /mode /session /clear /share /replay /rewind /checkpoint /context /vim /statusline /output-style /loop /usage /cost /token /preset /zen /goal /permissions /kb …）
 - 成本计算和仪表盘
-- 桌面端 Electron 应用
+- 桌面端 WebView2 / 浏览器应用（系统托盘 + 全局热键 + 多标签分屏 + Git 工作台 + 技能市场 + 自动化模板库 + 自动更新闭环）+ VS Code 扩展 + ACP 编辑器协议（Zed/Neovim 可接入）
 - 技能系统（SKILL.md，自动注入 system prompt，模型按需遵循）
 - 智能模型路由（按查询复杂度自动选 cheap/normal/powerful 模型）
 - 模型自动更新（API+文档富化+Diff检测+下架标记，一键刷新）
@@ -171,6 +200,7 @@ configs/                 默认配置文件
 
 ### 与竞品差距（剩余）
 > 以下为 2026-07-25 状态（第十九批完成后，含 v0.23.0）。
+> **更新（2026-09-06）**：2026-08-29 差距分析的 C1-C4（/share html、/replay、ACP、hooks 15 种）与 D1-D7（多会话流式 + 分屏、Git 工作台、自动化模板库、办公文档技能、桌面 en i18n、自动更新闭环、首跑向导测试连接）已全部落地（v0.48–v0.52）；2026-08-31 第三轮审查 24 项已全部闭环（v0.52.2 三补）；v0.53.0/v0.53.1 补齐 14 项四对标对齐（含 /usage loops、prompt_cache_ttl、model_pricing、/preset、/zen、用量达限自动重试、Focus view）。当前版本 v0.53.1，本轮（2026-09-06）第四轮审查聚焦引擎长时流式、文档一致性、测试盲区。
 
 1. **非 Windows 平台托盘/热键（已补齐）**: v0.18 起 `icode desktop` 在 macOS / Linux 提供系统托盘 + 菜单「在浏览器中打开 / 退出」+ 自动打开默认浏览器；v0.19 起 POSIX 也注册全局热键 `Ctrl+Shift+Space`（用 `golang.design/x/hotkey`，CGO），触发即重新聚焦/打开本机前端，与 Windows 原生热键组合一致。Windows 仍走原生 WebView2 窗口 + 子类化窗口过程（`Ctrl+Shift+Space` 显隐切换）。**已知限制**：① macOS 需授予辅助功能（Accessibility）权限且热键事件需主线程派发，真机待点测；② Linux Wayland 会话不暴露全局热键协议，注册通常失败，回退托盘菜单；③ macOS / Linux 的原生托盘与热键依赖 CGO（Cocoa / libappindicator / ayatana），必须在目标 OS 上以 `CGO_ENABLED=1` + 对应 SDK 构建，本 Windows 开发环境无法交叉编译验证（仅验证 Windows 构建与代码），真机待点测。
 2. **托盘真机验证**: v0.12 原生托盘/热键仅在无头环境验证编译与纯函数单测，真实 Windows 交互待点测（v0.18 未改变此状态）。

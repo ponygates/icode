@@ -256,9 +256,16 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 		Handler:           handler,
 		ReadTimeout:       30 * time.Second,
 		ReadHeaderTimeout: 10 * time.Second,
-		WriteTimeout:      120 * time.Second,
-		IdleTimeout:       60 * time.Second,
-		MaxHeaderBytes:    1 << 20, // 1 MiB — bound the request header size
+		// WriteTimeout is deliberately 0 (unbounded): the /api/chat handler
+		// streams SSE for agentic turns that legitimately run many minutes
+		// (up to maxToolRounds × model latency + build/test time). An absolute
+		// write deadline would tear the connection down mid-turn — the client
+		// sees "⏹ 已中断生成" at the deadline regardless of activity. Liveness
+		// is instead bounded by r.Context() (cancelled on client disconnect)
+		// plus the engine's per-turn tool-round cap.
+		WriteTimeout:   0,
+		IdleTimeout:    60 * time.Second,
+		MaxHeaderBytes: 1 << 20, // 1 MiB — bound the request header size
 	}
 
 	// Write port to a temp file so the Electron app can discover it

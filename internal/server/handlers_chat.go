@@ -121,9 +121,16 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	// Use a timeout context so a hung provider doesn't block the stream
-	// indefinitely. 120s matches the server WriteTimeout.
-	chatCtx, cancel := context.WithTimeout(r.Context(), 115*time.Second)
+	// Derive the chat context purely from the client connection so an agentic
+	// turn lives as long as the browser is attached — r.Context() is cancelled
+	// on disconnect, which the engine reads as a user interrupt (partial output
+	// is persisted, Claude Code parity). We deliberately do NOT clamp the turn
+	// with a short absolute timeout: a 25-round turn (model stream + go test /
+	// npm build per round) routinely exceeds 2 minutes, and the previous 115s
+	// cap killed every long desktop turn mid-flight. The engine's own
+	// maxToolRounds bound (default 25) prevents unbounded work, and provider
+	// HTTP clients catch hung upstreams, so no backstop is needed here.
+	chatCtx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
 	eventCh, err := s.engine.Send(chatCtx, req.SessionID, req.Content, req.Attachments)
