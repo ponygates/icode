@@ -591,6 +591,10 @@ func (t *TUI) Run() error {
 	if term.IsTerminal(fd) {
 		if state, err := term.MakeRaw(fd); err == nil {
 			defer term.Restore(fd, state)
+			// Belt and braces: some Windows console configurations keep the
+			// ECHO/LINE bits alive after MakeRaw — ConHost then echoes keys at
+			// the physical cursor (text landing in the log area).
+			hardenConsoleInput()
 			// Remember the cooked-mode state so Ctrl+G can hand the terminal
 			// to $EDITOR and take it back afterwards (suspendRaw/resumeRaw).
 			t.rawState = state
