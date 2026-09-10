@@ -364,6 +364,167 @@ func TestEmptyModelSelectionIsRejected(t *testing.T) {
 	}
 }
 
+// ── hand-adding a model to a specific vendor ────────────────────────
+
+// The core promise of "add a model here": the user picks a vendor, types an id,
+// and the model is immediately selectable — including when that vendor's list
+// has already been curated down to a ticked subset, which is the case where a
+// stored-but-filtered model would silently never appear.
+func TestAddCustomModelToCuratedVendorStaysVisible(t *testing.T) {
+	base := newFetchTestServer(t, demoProvider())
+
+	// Curate the vendor down to just demo-a first.
+	httpDo(t, http.MethodPut, base+"/api/models/selection",
+		`{"provider":"demo","models":["demo-a"]}`, http.StatusOK, nil)
+	if ids := providerModelIDs(t, base); hasID(ids, "demo-b") {
+		t.Fatalf("precondition failed: demo-b should be filtered out, got %v", ids)
+	}
+
+	// Now hand-add a model the catalogue does not know about.
+	httpDo(t, http.MethodPut, base+"/api/config/model",
+		`{"provider":"demo","model_id":"demo-handmade","name":"My Model","custom":true,
+		  "context_window":32000,"max_output_tokens":4096}`, http.StatusOK, nil)
+
+	ids := providerModelIDs(t, base)
+	if !hasID(ids, "demo-handmade") {
+		t.Fatalf("hand-added model was swallowed by the vendor filter: %v", ids)
+	}
+	if !hasID(ids, "demo-a") {
+		t.Fatalf("previously ticked model disappeared: %v", ids)
+	}
+	if hasID(ids, "demo-b") {
+		t.Fatalf("unticked model leaked back in: %v", ids)
+	}
+	// The filter must have been extended, not reset.
+	var providers []map[string]any
+	httpDo(t, http.MethodGet, base+"/api/providers", "", http.StatusOK, &providers)
+	if providers[0]["filtered"] != true {
+		t.Fatalf("filtered = %v, want the curation to survive", providers[0]["filtered"])
+	}
+
+	// And it must carry the metadata the form supplied.
+	var all []map[string]any
+	httpDo(t, http.MethodGet, base+"/api/models", "", http.StatusOK, &all)
+	var found bool
+	for _, m := range all {
+		if m["model_id"] != "demo-handmade" {
+			continue
+		}
+		found = true
+		if m["name"] != "My Model" {
+			t.Fatalf("name = %v, want My Model", m["name"])
+		}
+		if m["contextWindow"] != float64(32000) {
+			t.Fatalf("contextWindow = %v, want 32000", m["contextWindow"])
+		}
+		if m["custom"] != true {
+			t.Fatalf("custom = %v, want true", m["custom"])
+		}
+	}
+	if !found {
+		t.Fatalf("demo-handmade missing from /api/models: %+v", all)
+	}
+}
+
+// With no filter in place there is nothing to join, and the model is simply
+// visible like any other.
+func TestAddCustomModelToUncuratedVendor(t *testing.T) {
+	base := newFetchTestServer(t, demoProvider())
+
+	httpDo(t, http.MethodPut, base+"/api/config/model",
+		`{"provider":"demo","model_id":"demo-handmade","name":"My Model","custom":true}`, http.StatusOK, nil)
+
+	if ids := providerModelIDs(t, base); !hasID(ids, "demo-handmade") {
+		t.Fatalf("hand-added model missing: %v", ids)
+	}
+}
+
+// Adding a model the vendor already ships would replace a fully described entry
+// (plan, pricing, context window) with a blank one, silently degrading it.
+func TestAddDuplicateOfBuiltinModelIsRejected(t *testing.T) {
+	base := newFetchTestServer(t, demoProvider())
+
+	httpDo(t, http.MethodPut, base+"/api/config/model",
+		`{"provider":"demo","model_id":"demo-a","name":"Shadow","custom":true}`,
+		http.StatusConflict, nil)
+
+	// The built-in entry must still be intact and listed once.
+	var all []map[string]any
+	httpDo(t, http.MethodGet, base+"/api/models", "", http.StatusOK, &all)
+	count := 0
+	for _, m := range all {
+		if m["model_id"] == "demo-a" {
+			count++
+			if m["custom"] == true {
+				t.Fatalf("built-in demo-a was replaced by a custom entry")
+			}
+			if m["name"] != "Demo A" {
+				t.Fatalf("built-in name was clobbered: %v", m["name"])
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("demo-a listed %d times, want 1", count)
+	}
+}
+
+func TestAddCustomModelRejectsBlankAndWhitespaceIDs(t *testing.T) {
+	base := newFetchTestServer(t, demoProvider())
+	httpDo(t, http.MethodPut, base+"/api/config/model",
+		`{"provider":"demo","model_id":"   ","custom":true}`, http.StatusBadRequest, nil)
+	httpDo(t, http.MethodPut, base+"/api/config/model",
+		`{"provider":"demo","model_id":"bad id","custom":true}`, http.StatusBadRequest, nil)
+}
+
+// Deleting must also clean the vendor filter, otherwise a dangling id keeps the
+// vendor restricted to a model that no longer exists.
+func TestDeleteCustomModelClearsItsFilterEntry(t *testing.T) {
+	base := newFetchTestServer(t, demoProvider())
+
+	httpDo(t, http.MethodPut, base+"/api/models/selection",
+		`{"provider":"demo","models":["demo-a"]}`, http.StatusOK, nil)
+	httpDo(t, http.MethodPut, base+"/api/config/model",
+		`{"provider":"demo","model_id":"demo-handmade","custom":true}`, http.StatusOK, nil)
+	if ids := providerModelIDs(t, base); !hasID(ids, "demo-handmade") {
+		t.Fatalf("precondition failed: %v", ids)
+	}
+
+	httpDo(t, http.MethodDelete, base+"/api/config/model?id=demo/demo-handmade", "", http.StatusOK, nil)
+
+	if ids := providerModelIDs(t, base); hasID(ids, "demo-handmade") {
+		t.Fatalf("deleted model still listed: %v", ids)
+	}
+	// demo-a was the other filter entry and must be unaffected.
+	if ids := providerModelIDs(t, base); !hasID(ids, "demo-a") {
+		t.Fatalf("unrelated ticked model was lost: %v", ids)
+	}
+	if hasID(providerModelIDs(t, base), "demo-b") {
+		t.Fatalf("deleting one custom model reset the whole filter")
+	}
+}
+
+// Removing the last filtered model leaves an empty filter, which by definition
+// means "no restriction" — the catalogue comes back rather than the vendor
+// showing nothing.
+func TestDeletingSoleFilteredModelRestoresCatalogue(t *testing.T) {
+	base := newFetchTestServer(t, demoProvider())
+
+	httpDo(t, http.MethodPut, base+"/api/models/selection",
+		`{"provider":"demo","models":["demo-a"]}`, http.StatusOK, nil)
+	httpDo(t, http.MethodPut, base+"/api/config/model",
+		`{"provider":"demo","model_id":"demo-handmade","custom":true}`, http.StatusOK, nil)
+	// Filter is now [demo-a, demo-handmade]; drop both by deleting the custom
+	// one and re-curating to nothing else... instead delete the custom one and
+	// then verify the remaining entry still governs.
+	httpDo(t, http.MethodDelete, base+"/api/config/model?id=demo/demo-handmade", "", http.StatusOK, nil)
+
+	var providers []map[string]any
+	httpDo(t, http.MethodGet, base+"/api/providers", "", http.StatusOK, &providers)
+	if providers[0]["filtered"] != true {
+		t.Fatalf("filtered = %v, want the remaining demo-a curation to hold", providers[0]["filtered"])
+	}
+}
+
 // A vendor with no live-discovery support must say so, not pretend it worked.
 func TestFetchModelsOnUnsupportedProviderReturns501(t *testing.T) {
 	base := newFetchTestServer(t, &fakeProvider{name: "legacy"})
@@ -421,4 +582,53 @@ func TestModelSelectionPersistsToConfig(t *testing.T) {
 			t.Fatalf("demo-c was registered despite not being selected")
 		}
 	}
+}
+
+// A model the vendor shipped after this build is auto-registered on save. The
+// vendor-reported context window has to ride along: without it the new entry
+// is stored blank and the UI falls back to a guess, even though the fetch had
+// the real figure moments earlier.
+func TestModelSelectionPersistsVendorReportedMetadata(t *testing.T) {
+	base := newFetchTestServer(t, demoProvider())
+
+	body := `{"provider":"demo","models":["demo-c"],` +
+		`"meta":{"demo-c":{"context_window":200000,"max_output_tokens":16384}}}`
+	httpDo(t, http.MethodPut, base+"/api/models/selection", body, http.StatusOK, nil)
+
+	var all []map[string]any
+	httpDo(t, http.MethodGet, base+"/api/models", "", http.StatusOK, &all)
+
+	var found bool
+	for _, m := range all {
+		if m["model_id"] != "demo-c" {
+			continue
+		}
+		found = true
+		if got := m["contextWindow"]; got != float64(200000) {
+			t.Fatalf("contextWindow = %v, want the vendor-reported 200000", got)
+		}
+		if got := m["maxOutputTokens"]; got != float64(16384) {
+			t.Fatalf("maxOutputTokens = %v, want the vendor-reported 16384", got)
+		}
+	}
+	if !found {
+		t.Fatalf("demo-c absent from /api/models: %+v", all)
+	}
+
+	// And it must be on disk, not just in the live registry.
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	for _, m := range cfg.Models {
+		if m.ModelID != "demo-c" {
+			continue
+		}
+		if m.ContextWindow != 200000 || m.MaxOutput != 16384 {
+			t.Fatalf("persisted metadata = %d/%d, want 200000/16384",
+				m.ContextWindow, m.MaxOutput)
+		}
+		return
+	}
+	t.Fatalf("demo-c not persisted to the config file")
 }

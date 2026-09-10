@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { useAppStore, RefreshSummary, type Model } from '../stores/appStore';
 import { ModelFetchPanel } from '../components/ModelFetchPanel';
 import { ModelFetchAllBar } from '../components/ModelFetchAllBar';
+import { AddModelModal, type AddModelPayload } from '../components/AddModelModal';
 import { useModelFetch } from '../lib/useModelFetch';
 import { sortModels, type ModelSort } from '../lib/modelSort';
 import {
@@ -330,9 +331,13 @@ const ModelsPage: React.FC = () => {
   const [refreshing, setRefreshing] = useState(false);
   const [selectedSettingsModel, setSelectedSettingsModel] = useState<Model | null>(null);
   const [expandedProviders, setExpandedProviders] = useState<Set<string>>(new Set());
-  const [showAddCustom, setShowAddCustom] = useState(false);
-  const [newCustom, setNewCustom] = useState({ name: '', id: '', provider: '', apiBase: '' });
-  const [newCustomError, setNewCustomError] = useState('');
+  // Add-model dialog. `provider` locks the vendor when opened from a card;
+  // absent means the free-form global entry (any vendor name).
+  const [addTarget, setAddTarget] = useState<{ open: boolean; provider?: string }>({ open: false });
+  // Deleting a hand-added model is destructive and has no undo, so the first
+  // click arms the button and the second one commits.
+  const [armedDelete, setArmedDelete] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [showAddProvider, setShowAddProvider] = useState(false);
   const [newProvider, setNewProvider] = useState({ name: '', apiBase: '', apiKey: '', timeout: '' });
   const [newProviderError, setNewProviderError] = useState('');
@@ -491,7 +496,7 @@ const ModelsPage: React.FC = () => {
           <RefreshCw size={13} style={{ animation: refreshing ? 'spin 1s linear infinite' : 'none' }} />
           {t('models.refresh')}
         </button>
-        <button onClick={() => setShowAddCustom(true)}
+        <button onClick={() => setAddTarget({ open: true })}
           style={{
             display: 'flex', alignItems: 'center', gap: 6,
             background: 'linear-gradient(135deg, #6366F1, #8B5CF6)',
@@ -573,88 +578,45 @@ const ModelsPage: React.FC = () => {
         <ModelFetchAllBar mf={mf} providers={Object.keys(mf.meta)} />
       </div>
 
-      {/* Custom Model Modal */}
-      {showAddCustom && (
-        <div onClick={() => setShowAddCustom(false)} style={{
-          position: 'fixed', inset: 0, zIndex: 1000,
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(4px)',
+      {/* A failed add/delete must be visible — the previous inline form held its
+          error in a modal that no longer exists, so failures vanished. */}
+      {deleteError && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 8,
+          margin: '0 24px 12px', padding: '8px 12px', borderRadius: 8,
+          background: 'var(--error-soft, rgba(248,81,73,0.1))',
+          border: '1px solid var(--error, #f85149)',
+          color: 'var(--error, #f85149)', fontSize: 11.5,
         }}>
-          <div onClick={(e) => e.stopPropagation()} style={{
-            background: 'var(--bg-secondary)', borderRadius: 16,
-            border: '1px solid var(--border-color)', width: 440,
-            boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
-          }}>
-            <div style={{ padding: '20px 24px 16px', borderBottom: '1px solid var(--border-color)' }}>
-              <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-primary)' }}>
-                <Plus size={16} style={{ display: 'inline', marginRight: 8 }} />
-                {t('models.addCustom')}
-              </div>
-            </div>
-            <div style={{ padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: 12 }}>
-              {newCustomError && (
-                <div style={{
-                  fontSize: 11, color: '#F87171', background: 'rgba(248,113,113,0.08)',
-                  border: '1px solid rgba(248,113,113,0.2)', borderRadius: 8, padding: '8px 12px',
-                }}>
-                  {newCustomError}
-                </div>
-              )}
-              <div>
-                <label style={{ fontSize: 11, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>{t('models.modelName')} *</label>
-                <input value={newCustom.name} onChange={(e) => setNewCustom({...newCustom, name: e.target.value})}
-                  placeholder={t('models.modelNameExample')} style={inputField} />
-              </div>
-              <div>
-                <label style={{ fontSize: 11, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>{t('models.modelId')} *</label>
-                <input value={newCustom.id} onChange={(e) => setNewCustom({...newCustom, id: e.target.value})}
-                  placeholder={t('models.modelIdExample')} style={inputField} />
-              </div>
-              <div>
-                <label style={{ fontSize: 11, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>{t('models.providerName')} *</label>
-                <input value={newCustom.provider} onChange={(e) => setNewCustom({...newCustom, provider: e.target.value})}
-                  placeholder={t('models.providerNameExample')} style={inputField} />
-              </div>
-              <div>
-                <label style={{ fontSize: 11, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>API Base URL</label>
-                <input value={newCustom.apiBase} onChange={(e) => setNewCustom({...newCustom, apiBase: e.target.value})}
-                  placeholder="https://api.example.com/v1（{t('models.keepDefault')}）" style={inputField} />
-              </div>
-            </div>
-            <div style={{ padding: '16px 24px', borderTop: '1px solid var(--border-color)', display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-              <button onClick={() => setShowAddCustom(false)} style={{
-                padding: '8px 16px', borderRadius: 8, cursor: 'pointer', fontSize: 12,
-                background: 'var(--bg-primary)', border: '1px solid var(--border-color)',
-                color: 'var(--text-secondary)',
-              }}>{t('settings.cancel')}</button>
-              <button onClick={async () => {
-                if (!newCustom.name || !newCustom.id || !newCustom.provider) return;
-                const model: Model = {
-                  id: newCustom.id,
-                  name: newCustom.name,
-                  provider: newCustom.provider,
-                  plan: 'Custom',
-                  apiBase: newCustom.apiBase || undefined,
-                  capabilities: { tools: true, streaming: true },
-                };
-                const err = await addCustomModel(model);
-                if (err) {
-                  setNewCustomError(err);
-                  return;
-                }
-                setNewCustom({ name: '', id: '', provider: '', apiBase: '' });
-                setShowAddCustom(false);
-              }} style={{
-                padding: '8px 20px', borderRadius: 8, cursor: 'pointer', fontSize: 12,
-                background: '#6366F1', border: 'none', color: '#fff', fontWeight: 600,
-                display: 'flex', alignItems: 'center', gap: 6,
-              }}>
-                <Check size={13} /> {t('models.add')}
-              </button>
-            </div>
-          </div>
+          <AlertCircle size={13} style={{ flexShrink: 0 }} />
+          <span style={{ flex: 1 }}>{deleteError}</span>
+          <span onClick={() => setDeleteError(null)} style={{ cursor: 'pointer', display: 'flex' }}>
+            <X size={13} />
+          </span>
         </div>
       )}
+
+      {/* Add-model dialog — shared with the settings modal. Opened from a
+          vendor card it locks that vendor; opened from the toolbar it accepts
+          any vendor name, which is how a model is added to a vendor that does
+          not render a card yet. */}
+      <AddModelModal
+        open={addTarget.open}
+        presetProvider={addTarget.provider}
+        onClose={() => setAddTarget({ open: false })}
+        onSubmit={async (payload) => {
+          const err = await addCustomModel({
+            id: payload.id,
+            name: payload.name,
+            provider: payload.provider,
+            plan: 'Custom',
+            contextWindow: payload.contextWindow,
+            maxOutputTokens: payload.maxOutputTokens,
+          });
+          if (!err) await mf.loadMeta();
+          return err;
+        }}
+      />
 
       {/* Add Provider Modal (custom OpenAI-compatible vendor) */}
       {showAddProvider && (
@@ -903,6 +865,22 @@ const ModelsPage: React.FC = () => {
                     </div>
                   )}
 
+                  {/* Add a model under *this* vendor — the common case is a
+                      model the vendor just shipped, so the provider is implied
+                      by where the user clicked. */}
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setAddTarget({ open: true, provider }); }}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 5, marginBottom: 4,
+                      alignSelf: 'flex-start',
+                      padding: '5px 11px', borderRadius: 7, fontSize: 11,
+                      background: 'transparent', border: `1px dashed ${color}50`,
+                      color, cursor: 'pointer', fontWeight: 500,
+                    }}
+                  >
+                    <Plus size={11} /> {t('models.addModelTo', { provider })}
+                  </button>
+
                   {providerModels.map((model) => {
                     const isSelected = model.id === selectedModel;
                     const isDeprecated = model.deprecated;
@@ -997,6 +975,36 @@ const ModelsPage: React.FC = () => {
                           >
                             <Settings size={13} />
                           </button>
+                          {/* Only hand-added models can be removed — a built-in
+                              entry is owned by the provider catalogue. */}
+                          {model.custom && (() => {
+                            const armed = armedDelete === model.id;
+                            return (
+                              <button
+                                onClick={async (e) => {
+                                  e.stopPropagation();
+                                  if (!armed) { setArmedDelete(model.id); return; }
+                                  setArmedDelete(null);
+                                  const err = await removeCustomModel(model.id, model.provider);
+                                  if (err) setDeleteError(err);
+                                }}
+                                title={armed ? t('models.deleteConfirm') : t('models.deleteCustom')}
+                                style={{
+                                  height: 28, padding: armed ? '0 8px' : 0,
+                                  width: armed ? 'auto' : 28, borderRadius: 6,
+                                  background: armed ? 'var(--error-soft, rgba(248,81,73,0.12))' : 'transparent',
+                                  border: `1px solid ${armed ? 'var(--error, #f85149)' : 'var(--border-color)'}`,
+                                  color: armed ? 'var(--error, #f85149)' : 'var(--text-muted)',
+                                  cursor: 'pointer', fontSize: 10.5, fontWeight: armed ? 600 : 400,
+                                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4,
+                                  transition: 'all 0.15s',
+                                }}
+                              >
+                                <Trash2 size={13} />
+                                {armed && t('models.deleteConfirm')}
+                              </button>
+                            );
+                          })()}
                         </div>
                       </div>
                     );
@@ -1064,7 +1072,7 @@ const ModelsPage: React.FC = () => {
                     </div>
                     <button onClick={async () => {
                       const err = await removeCustomModel(model.id, model.provider);
-                      if (err) setNewCustomError(err);
+                      if (err) setDeleteError(err);
                     }}
                       title={t('models.deleteCustom')}
                       style={{

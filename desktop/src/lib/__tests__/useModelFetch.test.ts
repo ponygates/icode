@@ -147,7 +147,16 @@ describe('useModelFetch', () => {
     const put = selCalls()[0];
     expect(put?.init?.method).toBe('PUT');
     expect(JSON.parse(String(put?.init?.body)))
-      .toEqual({ provider: 'deepseek', models: ['deepseek-v4-flash', 'deepseek-r1'] });
+      .toEqual({
+        provider: 'deepseek',
+        models: ['deepseek-v4-flash', 'deepseek-r1'],
+        // The vendor-reported window rides along so an auto-registered model
+        // keeps the real figure instead of a zero.
+        meta: {
+          'deepseek-v4-flash': { context_window: 128000, max_output_tokens: 0 },
+          'deepseek-r1': { context_window: 64000, max_output_tokens: 0 },
+        },
+      });
     expect(result.current.panel).toBeNull();
   });
 

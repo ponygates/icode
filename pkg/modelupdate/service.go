@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ponygates/icode/internal/llm/modelmeta"
 	"github.com/ponygates/icode/internal/types"
 )
 
@@ -378,7 +379,11 @@ func fetchOpenRouterModels(ctx context.Context) ([]types.ModelInfo, error) {
 			Name          string `json:"name"`
 			Description   string `json:"description"`
 			ContextLength int    `json:"context_length"`
-			Pricing       struct {
+			TopProvider   struct {
+				MaxCompletionTokens int `json:"max_completion_tokens"`
+				ContextLength       int `json:"context_length"`
+			} `json:"top_provider"`
+			Pricing struct {
 				Prompt     string `json:"prompt"`
 				Completion string `json:"completion"`
 			} `json:"pricing"`
@@ -391,14 +396,29 @@ func fetchOpenRouterModels(ctx context.Context) ([]types.ModelInfo, error) {
 
 	var models []types.ModelInfo
 	for _, d := range result.Data {
-		// Only include models that support tool calling
+		// OpenRouter's catalogue is not a chat-only list — it also carries
+		// embedding and image models, and iCode can only call chat completions.
+		// (The old comment here claimed this filter existed; it did not.)
+		if !modelmeta.IsChatModel(d.ID) {
+			continue
+		}
+		ctxWindow := d.ContextLength
+		if ctxWindow == 0 {
+			ctxWindow = d.TopProvider.ContextLength
+		}
+		// OpenRouter reports the per-model output cap under top_provider;
+		// fall back only when it is silent.
+		maxOut := d.TopProvider.MaxCompletionTokens
+		if maxOut == 0 {
+			maxOut = 16384
+		}
 		models = append(models, types.ModelInfo{
 			ID:              d.ID,
 			Name:            d.Name,
 			Description:     d.Description,
 			Provider:        "openrouter",
-			ContextWindow:   d.ContextLength,
-			MaxOutputTokens: 16384,
+			ContextWindow:   ctxWindow,
+			MaxOutputTokens: maxOut,
 			Capabilities: types.ModelCap{
 				Tools:     true,
 				Streaming: true,
@@ -411,6 +431,14 @@ func fetchOpenRouterModels(ctx context.Context) ([]types.ModelInfo, error) {
 }
 
 // fetchOpenAICompatModels fetches models from any OpenAI-compatible /models endpoint.
+//
+// Two things matter beyond the id list. First, iCode can only call chat
+// completions, yet vendors publish every artefact they serve on /models
+// (embeddings, speech, image, moderation), so those entries are dropped —
+// otherwise they show up as selectable models and fail only when used.
+// Second, whatever per-model metadata the vendor does report is carried
+// through rather than discarded, so a freshly discovered model gets the real
+// context window instead of a blank one.
 func fetchOpenAICompatModels(ctx context.Context, endpoint, providerName string) ([]types.ModelInfo, error) {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	req.Header.Set("User-Agent", "iCode/0.1.0")
@@ -427,24 +455,24 @@ func fetchOpenAICompatModels(ctx context.Context, endpoint, providerName string)
 		return nil, fmt.Errorf("%s: HTTP %d — %s", providerName, resp.StatusCode, string(body))
 	}
 
-	var result struct {
-		Data []struct {
-			ID      string `json:"id"`
-			Object  string `json:"object"`
-			OwnedBy string `json:"owned_by"`
-		} `json:"data"`
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return nil, fmt.Errorf("%s read: %w", providerName, err)
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("%s decode: %w", providerName, err)
+	entries := modelmeta.FilterChatModels(modelmeta.ParseVendorList(body))
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("%s: 未解析出任何对话模型", providerName)
 	}
 
 	var models []types.ModelInfo
-	for _, d := range result.Data {
+	for _, e := range entries {
 		models = append(models, types.ModelInfo{
-			ID:       d.ID,
-			Name:     d.ID,
-			Provider: providerName,
+			ID:              e.ID,
+			Name:            e.ID,
+			Provider:        providerName,
+			ContextWindow:   e.ContextWindow,
+			MaxOutputTokens: e.MaxOutputTokens,
 			Capabilities: types.ModelCap{
 				Tools:     true,
 				Streaming: true,

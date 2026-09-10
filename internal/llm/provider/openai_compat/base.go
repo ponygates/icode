@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ponygates/icode/internal/llm/modelmeta"
 	"github.com/ponygates/icode/internal/types"
 )
 
@@ -443,14 +444,16 @@ func (p *BaseProvider) FetchModels(ctx context.Context) ([]types.ModelInfo, erro
 		return nil, fmt.Errorf("获取模型列表失败: HTTP %d — %s", resp.StatusCode, errBodyText(body))
 	}
 
-	ids := parseVendorModelIDs(body)
-	if len(ids) == 0 {
+	entries := modelmeta.FilterChatModels(modelmeta.ParseVendorList(body))
+	if len(entries) == 0 {
 		return nil, fmt.Errorf("厂商未返回任何模型（响应格式无法识别）")
 	}
 
 	// Reuse the built-in catalogue's metadata for models we already know so the
-	// UI keeps showing real context windows and prices; newly released models
-	// get the conservative defaults above.
+	// UI keeps showing real context windows and prices. For models the vendor
+	// reports but this build has never heard of, prefer the vendor's own
+	// context window / max output; fall back to the conservative defaults only
+	// when the vendor stays silent.
 	byID := make(map[string]types.ModelInfo, len(known)*2)
 	for _, m := range known {
 		byID[m.ID] = m
@@ -458,18 +461,26 @@ func (p *BaseProvider) FetchModels(ctx context.Context) ([]types.ModelInfo, erro
 	}
 
 	now := time.Now()
-	out := make([]types.ModelInfo, 0, len(ids))
-	for _, id := range ids {
-		if m, ok := byID[id]; ok {
+	out := make([]types.ModelInfo, 0, len(entries))
+	for _, e := range entries {
+		if m, ok := byID[e.ID]; ok {
 			out = append(out, m)
 			continue
 		}
+		ctxWindow := e.ContextWindow
+		if ctxWindow <= 0 {
+			ctxWindow = defaultFetchedContextWindow
+		}
+		maxOut := e.MaxOutputTokens
+		if maxOut <= 0 {
+			maxOut = defaultFetchedMaxOutput
+		}
 		out = append(out, types.ModelInfo{
-			ID:              id,
-			Name:            id,
+			ID:              e.ID,
+			Name:            e.ID,
 			Provider:        name,
-			ContextWindow:   defaultFetchedContextWindow,
-			MaxOutputTokens: defaultFetchedMaxOutput,
+			ContextWindow:   ctxWindow,
+			MaxOutputTokens: maxOut,
 			Plans: []types.TokenPlan{{
 				Name:        "default",
 				Description: "由厂商 /models 实时获取；定价请以厂商为准",
@@ -488,50 +499,14 @@ func (p *BaseProvider) FetchModels(ctx context.Context) ([]types.ModelInfo, erro
 //	{"models":[{"name":"llama3:latest"}]}         Ollama's native /api/tags
 //	["gpt-4o","gpt-4o-mini"]                      a bare array of ids
 //
-// Vendor order is preserved and duplicates are dropped.
+// Vendor order is preserved and duplicates are dropped. Metadata parsing lives
+// in modelmeta.ParseVendorList so both ingestion paths share one parser; this
+// thin wrapper remains for the id-only callers and their tests.
 func parseVendorModelIDs(body []byte) []string {
-	type entry struct {
-		ID string `json:"id"`
-		// Ollama reports "name"/"model"; a few gateways use "slug".
-		Name  string `json:"name"`
-		Model string `json:"model"`
-		Slug  string `json:"slug"`
-	}
-	var wrapper struct {
-		Data   []entry `json:"data"`
-		Models []entry `json:"models"`
-	}
-
-	var ids []string
-	if err := json.Unmarshal(body, &wrapper); err == nil {
-		entries := wrapper.Data
-		if len(entries) == 0 {
-			entries = wrapper.Models
-		}
-		for _, e := range entries {
-			for _, cand := range []string{e.ID, e.Model, e.Name, e.Slug} {
-				if cand != "" {
-					ids = append(ids, cand)
-					break
-				}
-			}
-		}
-	}
-	if len(ids) == 0 {
-		var arr []string
-		if err := json.Unmarshal(body, &arr); err == nil {
-			ids = arr
-		}
-	}
-
-	seen := make(map[string]bool, len(ids))
-	out := make([]string, 0, len(ids))
-	for _, id := range ids {
-		if id == "" || seen[id] {
-			continue
-		}
-		seen[id] = true
-		out = append(out, id)
+	entries := modelmeta.ParseVendorList(body)
+	out := make([]string, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, e.ID)
 	}
 	return out
 }

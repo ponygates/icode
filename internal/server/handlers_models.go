@@ -192,8 +192,14 @@ func (s *Server) handleConfigModel(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
+		m.Provider = strings.TrimSpace(m.Provider)
+		m.ModelID = strings.TrimSpace(m.ModelID)
 		if m.Provider == "" || m.ModelID == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "provider and model_id are required"})
+			return
+		}
+		if strings.ContainsAny(m.ModelID, " \t\n") {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "model_id must not contain whitespace"})
 			return
 		}
 		// Respect an explicit custom flag from the client. New user-added models
@@ -201,14 +207,31 @@ func (s *Server) handleConfigModel(w http.ResponseWriter, r *http.Request) {
 		// stored as a display-name/parameter override rather than duplicating
 		// the built-in entry in the model list.
 		m.ID = config.ModelKey(m.Provider, m.ModelID)
+
+		// Adding a model the vendor's own catalogue already contains would
+		// shadow it with a blank entry, losing its plan, pricing and context
+		// window. Refuse instead of silently degrading a working model.
+		if m.Custom && s.cataloguedByProvider(m.Provider, m.ModelID) {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error": fmt.Sprintf("%s 已内置模型 %s，无需重复添加", m.Provider, m.ModelID),
+			})
+			return
+		}
+
 		s.cfg.UpsertModel(m)
+		// A hand-added model must survive the vendor's curated filter. Without
+		// this the model is stored but hidden — the classic "I clicked add and
+		// nothing appeared" bug.
+		if m.Custom {
+			s.ensureModelEnabled(m.Provider, m.ModelID)
+		}
 		if err := s.cfg.Save(config.DefaultPath()); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
 		}
 		// Register the custom model so the engine can resolve it at chat time.
 		s.registerCustomModel(m)
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": config.ModelKey(m.Provider, m.ModelID)})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": m.ID})
 
 	case http.MethodDelete:
 		id := r.URL.Query().Get("id")
@@ -216,11 +239,18 @@ func (s *Server) handleConfigModel(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "id is required"})
 			return
 		}
+		// Read the entry before it disappears — the vendor filter needs cleaning
+		// up so a dangling id cannot keep the vendor restricted to a model that
+		// no longer exists.
+		prev, had := s.cfg.FindModel(id)
 		if !s.cfg.DeleteModel(id) {
 			writeJSON(w, http.StatusNotFound, map[string]any{"error": "model not found"})
 			return
 		}
 		s.reg.RemoveCustomModel(id)
+		if had && prev.Custom {
+			s.forgetModelEnabled(prev.Provider, prev.ModelID)
+		}
 		if err := s.cfg.Save(config.DefaultPath()); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
@@ -230,6 +260,65 @@ func (s *Server) handleConfigModel(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// cataloguedByProvider reports whether the vendor's built-in catalogue already
+// contains this model id, tolerating either id convention (bare for deepseek,
+// "ollama/llama3"-style for others).
+func (s *Server) cataloguedByProvider(provider, modelID string) bool {
+	p, err := s.reg.Get(provider)
+	if err != nil {
+		return false
+	}
+	for _, m := range p.ListModels() {
+		if m.ID == modelID || config.VendorModelID(provider, m.ID) == modelID {
+			return true
+		}
+	}
+	return false
+}
+
+// ensureModelEnabled appends a newly added model to the vendor's curated list.
+//
+// Only meaningful when a filter exists: an empty filter restricts nothing, so
+// every model is already enabled and there is nothing to join. Joining is what
+// makes "add a model" observable when the user has already ticked a subset.
+func (s *Server) ensureModelEnabled(provider, modelID string) {
+	cur := s.cfg.Providers[provider].EnabledModels
+	if len(cur) == 0 {
+		return
+	}
+	vendorID := config.VendorModelID(provider, modelID)
+	for _, id := range cur {
+		if id == vendorID {
+			return
+		}
+	}
+	next := make([]string, 0, len(cur)+1)
+	next = append(next, cur...)
+	s.cfg.SetEnabledModels(provider, append(next, vendorID))
+}
+
+// forgetModelEnabled drops a deleted model from the vendor's curated list.
+//
+// If that empties the list the vendor goes back to "no restriction", which is
+// the consistent outcome: an empty filter means nothing is filtered out.
+func (s *Server) forgetModelEnabled(provider, modelID string) {
+	cur := s.cfg.Providers[provider].EnabledModels
+	if len(cur) == 0 {
+		return
+	}
+	vendorID := config.VendorModelID(provider, modelID)
+	next := make([]string, 0, len(cur))
+	for _, id := range cur {
+		if id != vendorID && id != modelID {
+			next = append(next, id)
+		}
+	}
+	if len(next) == len(cur) {
+		return // nothing referenced it
+	}
+	s.cfg.SetEnabledModels(provider, next)
 }
 
 // handleConfigProvider dispatches PUT (add/update a vendor's base URL & key)
@@ -475,6 +564,14 @@ func (s *Server) handleSaveModelSelection(w http.ResponseWriter, r *http.Request
 	var req struct {
 		Provider string   `json:"provider"`
 		Models   []string `json:"models"`
+		// Meta carries the vendor-reported parameters for the ticked models,
+		// keyed by model id. Without it an auto-registered model would be stored
+		// with a zero context window, so the UI would fall back to a guess even
+		// though the vendor told us the real figure moments earlier.
+		Meta map[string]struct {
+			ContextWindow   int `json:"context_window"`
+			MaxOutputTokens int `json:"max_output_tokens"`
+		} `json:"meta"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -520,6 +617,12 @@ func (s *Server) handleSaveModelSelection(w http.ResponseWriter, r *http.Request
 			ModelID:  id,
 			Name:     id,
 			Custom:   true,
+		}
+		// Carry the vendor's own figures across, so the new model's context
+		// window is the real one rather than a blank/degenerate default.
+		if meta, ok := req.Meta[id]; ok {
+			m.ContextWindow = meta.ContextWindow
+			m.MaxOutput = meta.MaxOutputTokens
 		}
 		s.cfg.UpsertModel(m)
 		s.registerCustomModel(m)

@@ -273,11 +273,27 @@ export function useModelFetch(backendUrl: string | null | undefined): UseModelFe
     }
     setSaving(true);
     setErr(provider, '');
+    // Pass the vendor-reported figures along with the ticked ids. A model the
+    // vendor shipped after this build gets auto-registered on save; without
+    // its context window it would be stored with a zero and fall back to a
+    // guess, even though we had the real number from the fetch. Only the
+    // ticked models are described — the rest are being excluded anyway.
+    const tickedSet = new Set(ids);
+    const meta: Record<string, { context_window: number; max_output_tokens: number }> = {};
+    for (const m of lists[provider] || []) {
+      if (!tickedSet.has(m.id)) continue;
+      if (m.context_window || m.max_output_tokens) {
+        meta[m.id] = {
+          context_window: m.context_window ?? 0,
+          max_output_tokens: m.max_output_tokens ?? 0,
+        };
+      }
+    }
     try {
       const res = await fetch(`${base}/api/models/selection`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ provider, models: ids }),
+        body: JSON.stringify({ provider, models: ids, meta }),
       });
       const data = await res.json().catch(() => null);
       if (!res.ok) {
@@ -298,7 +314,7 @@ export function useModelFetch(backendUrl: string | null | undefined): UseModelFe
     } finally {
       setSaving(false);
     }
-  }, [base, saving, ticked, t, loadMeta, setErr]);
+  }, [base, saving, ticked, lists, t, loadMeta, setErr]);
 
   const close = useCallback(() => setPanel(null), []);
 

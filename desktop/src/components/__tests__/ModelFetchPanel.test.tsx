@@ -80,7 +80,13 @@ describe('ModelFetchPanel', () => {
       const put = calls.find(c => c.url.includes('/api/models/selection'));
       expect(put?.init?.method).toBe('PUT');
       expect(JSON.parse(String(put!.init!.body)))
-        .toEqual({ provider: 'deepseek', models: ['deepseek-v4-flash'] });
+        .toEqual({
+          provider: 'deepseek',
+          models: ['deepseek-v4-flash'],
+          // The ticked model's vendor-reported window travels with the ids, so
+          // an auto-registered entry is not stored blank.
+          meta: { 'deepseek-v4-flash': { context_window: 128000, max_output_tokens: 0 } },
+        });
     });
   });
 

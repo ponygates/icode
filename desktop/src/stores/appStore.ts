@@ -990,10 +990,22 @@ export const useAppStore = create<AppStore>()(
           model_id: model.id,
           name: model.name,
           base_url: model.apiBase || '',
+          // Optional metadata. The backend feeds these into ModelInfo, which is
+          // what the context gauge and the max-tokens ceiling are derived from —
+          // leaving them out makes a hand-added model look like it has an
+          // unknown window.
+          context_window: model.contextWindow || 0,
+          max_output_tokens: model.maxOutputTokens || 0,
           custom: true,
         }),
       });
-      if (!res.ok) return `HTTP ${res.status}`;
+      if (!res.ok) {
+        // The server answers with an actionable message ("this vendor already
+        // ships that model", "model_id must not contain whitespace"); showing
+        // only the status code would hide the reason.
+        const detail = await res.json().catch(() => null);
+        return (detail && detail.error) || `HTTP ${res.status}`;
+      }
       await get().loadCustomModels();
       await get().refreshModels();
       return null;
@@ -1004,13 +1016,22 @@ export const useAppStore = create<AppStore>()(
   removeCustomModel: async (modelId, provider) => {
     const { backendUrl } = get();
     if (!backendUrl) return 'Backend not connected';
-    const canonical = provider ? `${provider}/${modelId}` : modelId;
+    // Callers come in two shapes: the bare vendor id plus its provider, or an
+    // already-composite id as returned by /api/config/models ("provider/model").
+    // Prefixing blindly produced "provider/provider/model", which 404s — so
+    // deletions from the custom-models list silently never worked.
+    const canonical = !provider || modelId.startsWith(`${provider}/`)
+      ? modelId
+      : `${provider}/${modelId}`;
     try {
       const res = await fetchWithTimeout(
         `${backendUrl}/api/config/model?id=${encodeURIComponent(canonical)}`,
         { method: 'DELETE' }
       );
-      if (!res.ok) return `HTTP ${res.status}`;
+      if (!res.ok) {
+        const detail = await res.json().catch(() => null);
+        return (detail && detail.error) || `HTTP ${res.status}`;
+      }
       await get().loadCustomModels();
       await get().refreshModels();
       return null;

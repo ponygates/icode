@@ -4,6 +4,7 @@ import { useAppStore } from '../stores/appStore';
 import { PageTools, PageUpdates, PageAbout, PageNetwork, PageAutomations } from './SettingsPagesExtra';
 import { ModelFetchPanel } from '../components/ModelFetchPanel';
 import { ModelFetchAllBar } from '../components/ModelFetchAllBar';
+import { AddModelModal } from '../components/AddModelModal';
 import { useModelFetch } from '../lib/useModelFetch';
 import {
   loadShortcuts, saveShortcuts, resetShortcuts, matchesBinding, recordBinding, bindingLabel,
@@ -266,6 +267,9 @@ function PageModels({ store }: { store: ReturnType<typeof useAppStore.getState> 
   // Live model discovery ("获取模型") — shared with the standalone model page.
   const mf = useModelFetch(store.backendUrl);
 
+  // Hand-adding a model to a specific vendor.
+  const [addFor, setAddFor] = useState<string | null>(null);
+
   const doFetchModels = (provider: string) =>
     mf.fetchModels(provider, () => { setExpanded(provider); setEditingModel(null); });
 
@@ -421,6 +425,16 @@ function PageModels({ store }: { store: ReturnType<typeof useAppStore.getState> 
                 <ModelFetchPanel provider={provider} color={color} mf={mf}
                   onApplied={() => store.refreshModels()} />
 
+                {/* Add a model under this vendor */}
+                <button
+                  onClick={(e) => { e.stopPropagation(); setAddFor(provider); }}
+                  style={{
+                    ...btnGhost, alignSelf: 'flex-start', fontSize: 10.5, padding: '4px 10px',
+                    border: `1px dashed ${color}50`, color,
+                  }}>
+                  <Plus size={11} /> {t('models.addModelTo', { provider })}
+                </button>
+
                 {pModels.map(model => {
                   const ed = editData[model.id];
                   const isEditing = editingModel === model.id;
@@ -532,6 +546,25 @@ function PageModels({ store }: { store: ReturnType<typeof useAppStore.getState> 
         </button>
         <ModelFetchAllBar mf={mf} providers={Object.keys(mf.meta)} />
       </div>
+
+      {/* Add-model dialog, locked to the vendor whose card was expanded. */}
+      <AddModelModal
+        open={addFor !== null}
+        presetProvider={addFor || undefined}
+        onClose={() => setAddFor(null)}
+        onSubmit={async (payload) => {
+          const err = await store.addCustomModel({
+            id: payload.id,
+            name: payload.name,
+            provider: payload.provider,
+            plan: 'Custom',
+            contextWindow: payload.contextWindow,
+            maxOutputTokens: payload.maxOutputTokens,
+          });
+          if (!err) await mf.loadMeta();
+          return err;
+        }}
+      />
     </div>
   );
 }
