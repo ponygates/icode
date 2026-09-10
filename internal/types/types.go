@@ -279,6 +279,24 @@ type ModelSetter interface {
 	SetModels(models []ModelInfo)
 }
 
+// ModelFetcher is an OPTIONAL capability implemented by providers that can
+// enumerate the models the configured credentials actually have access to, by
+// querying the vendor's own /models endpoint live.
+//
+// This is the only way to discover models a vendor released after this binary
+// was built: the built-in catalogue is a snapshot, but the vendor's endpoint
+// reflects the account's real entitlements (which vary by plan and region).
+// The desktop settings UI drives it from the per-provider "fetch models"
+// action.
+type ModelFetcher interface {
+	// FetchModels lists the models the configured credentials can use, in the
+	// order the vendor returned them. It returns an error — rather than an
+	// empty slice — when the vendor could not be reached or rejected the key,
+	// so callers can tell "the account has no models" apart from "the fetch
+	// itself failed".
+	FetchModels(ctx context.Context) ([]ModelInfo, error)
+}
+
 // ============================================================================
 // Model Info
 // ============================================================================

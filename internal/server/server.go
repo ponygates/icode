@@ -138,6 +138,9 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 	mux.HandleFunc("/api/providers", s.handleListProviders)
 	mux.HandleFunc("/api/models", s.handleListModels)
 	mux.HandleFunc("/api/models/refresh", s.handleRefreshModels)
+	// Live per-vendor discovery + the user's curated model subset.
+	mux.HandleFunc("/api/models/fetch", s.handleFetchModels)
+	mux.HandleFunc("/api/models/selection", s.handleSaveModelSelection)
 
 	// Sessions
 	mux.HandleFunc("/api/sessions", s.handleSessions)

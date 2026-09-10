@@ -1,10 +1,13 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore, RefreshSummary, type Model } from '../stores/appStore';
+import { ModelFetchPanel } from '../components/ModelFetchPanel';
+import { useModelFetch } from '../lib/useModelFetch';
 import {
   RefreshCw, Search, Zap, Sparkles, Shield, Cpu, X, Check,
   Key, Globe, Thermometer, Hash, DollarSign, Layers,
   ChevronRight, Settings, Star, Plus, Trash2, AlertTriangle,
+  Download, ListChecks, AlertCircle,
 } from 'lucide-react';
 
 // ── Per-model settings modal ──────────────────────────────────────
@@ -333,6 +336,12 @@ const ModelsPage: React.FC = () => {
   const [deletingProvider, setDeletingProvider] = useState<string | null>(null);
   const [showToast, setShowToast] = useState(false);
 
+  // Live model discovery ("获取模型") — shared with the settings modal.
+  const mf = useModelFetch(backendUrl);
+  const doFetchModels = (provider: string) =>
+    mf.fetchModels(provider, () =>
+      setExpandedProviders(prev => new Set(prev).add(provider)));
+
   useEffect(() => {
     if (refreshSummary && (refreshSummary.totalAdded > 0 || refreshSummary.totalRemoved > 0)) {
       setShowToast(true);
@@ -347,7 +356,13 @@ const ModelsPage: React.FC = () => {
     m.id.toLowerCase().includes(search.toLowerCase())
   );
 
-  const providers = Array.from(new Set(filtered.map((m) => m.provider)));
+  // Include vendors that have no catalogue entry at all (a freshly added
+  // custom provider). Without this they would be invisible on the only page
+  // that can populate them — and "获取模型" is exactly how you populate one.
+  const providers = Array.from(new Set([
+    ...filtered.map((m) => m.provider),
+    ...(search ? [] : Object.keys(mf.meta)),
+  ]));
 
   const handleRefresh = async () => {
     setRefreshing(true);
@@ -740,7 +755,9 @@ const ModelsPage: React.FC = () => {
       <div style={{ flex: 1, overflowY: 'auto', padding: '0 24px 24px' }}>
         {providers.map((provider) => {
           const providerModels = filtered.filter((m) => m.provider === provider);
-          if (providerModels.length === 0) return null;
+          // An empty vendor is still worth rendering (it needs "获取模型"),
+          // but not while searching — there it is just noise.
+          if (providerModels.length === 0 && !(mf.meta[provider] && !search)) return null;
           const isExpanded = expandedProviders.has(provider) || search.length > 0;
           const color = providerColors[provider] || '#6366F1';
           const hasActiveInProvider = providerModels.some((m) => m.id === selectedModel);
@@ -775,6 +792,38 @@ const ModelsPage: React.FC = () => {
                     {t('models.modelsCount', { count: providerModels.length })}{hasActiveInProvider ? ' · ' + t('models.active') : ''}
                   </div>
                 </div>
+                {mf.meta[provider]?.filtered && (
+                  <span title={t('models.filteredHint')} style={{
+                    fontSize: 9, padding: '2px 6px', borderRadius: 4,
+                    background: `${color}14`, color, fontWeight: 500,
+                    display: 'flex', alignItems: 'center', gap: 3, flexShrink: 0,
+                  }}>
+                    <ListChecks size={9} />
+                    {t('models.enabledOf', {
+                      enabled: mf.meta[provider].enabled,
+                      total: mf.meta[provider].models,
+                    })}
+                  </span>
+                )}
+                {/* Live catalogue pull — the vendor knows what the key can use,
+                    the built-in list is only a snapshot from build time. */}
+                <button
+                  onClick={(e) => { e.stopPropagation(); doFetchModels(provider); }}
+                  disabled={mf.fetching === provider}
+                  title={t('models.fetchHint')}
+                  style={{
+                    fontSize: 10.5, padding: '4px 9px', borderRadius: 6, flexShrink: 0,
+                    display: 'flex', alignItems: 'center', gap: 4, fontWeight: 500,
+                    background: mf.panel === provider ? `${color}14` : 'transparent',
+                    border: `1px solid ${(mf.fetching === provider || mf.panel === provider) ? `${color}60` : 'var(--border-color)'}`,
+                    color: (mf.fetching === provider || mf.panel === provider) ? color : 'var(--text-secondary)',
+                    cursor: mf.fetching === provider ? 'wait' : 'pointer',
+                  }}>
+                  {mf.fetching === provider
+                    ? <RefreshCw size={11} style={{ animation: 'spin 1s linear infinite' }} />
+                    : <Download size={11} />}
+                  {mf.fetching === provider ? t('models.fetching') : t('models.fetchModels')}
+                </button>
                 {providerModels.every((m) => m.custom) && (
                   <span
                     onClick={(e) => { e.stopPropagation(); setDeletingProvider(provider); }}
@@ -796,6 +845,29 @@ const ModelsPage: React.FC = () => {
               {/* Models under this provider */}
               {isExpanded && (
                 <div style={{ paddingLeft: 4, display: 'flex', flexDirection: 'column', gap: 3 }}>
+                  {/* Errors that have no panel to live in (fetch failed, etc.). */}
+                  {mf.error[provider] && !mf.panel && (
+                    <div style={{
+                      display: 'flex', alignItems: 'center', gap: 6,
+                      padding: '6px 10px', borderRadius: 6, marginBottom: 4,
+                      background: 'var(--error-soft)', border: '1px solid var(--error)',
+                      color: 'var(--error)', fontSize: 10.5,
+                    }}>
+                      <AlertCircle size={12} style={{ flexShrink: 0 }} />
+                      <span style={{ flex: 1 }}>{mf.error[provider]}</span>
+                    </div>
+                  )}
+
+                  {/* Live-fetch checklist */}
+                  <ModelFetchPanel provider={provider} color={color} mf={mf}
+                    onApplied={() => refreshModels()} />
+
+                  {providerModels.length === 0 && mf.panel !== provider && (
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', padding: '8px 12px' }}>
+                      {t('models.noModelsYet')}
+                    </div>
+                  )}
+
                   {providerModels.map((model) => {
                     const isSelected = model.id === selectedModel;
                     const isDeprecated = model.deprecated;

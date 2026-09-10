@@ -390,6 +390,152 @@ func (p *BaseProvider) ChatStream(ctx context.Context, req types.ChatRequest) (<
 	return ch, nil
 }
 
+// ============================================================================
+// FetchModels — live model discovery from the vendor
+// ============================================================================
+
+// maxModelsBody caps how much of a /models response we read. OpenRouter's
+// catalogue is multi-megabyte, so the limit is generous but finite.
+const maxModelsBody = 8 << 20
+
+// Defaults for a model discovered live but absent from the built-in
+// catalogue. Deliberately conservative — the user can edit them in the
+// settings UI once the real limits are known.
+const (
+	defaultFetchedContextWindow = 128000
+	defaultFetchedMaxOutput     = 8192
+)
+
+// FetchModels queries the vendor's /models endpoint with this provider's
+// credentials and returns the models the key can actually use.
+//
+// The built-in catalogue is a snapshot baked in at build time; the vendor's
+// endpoint is the authority on what this account is entitled to, which varies
+// by plan and region and changes whenever the vendor ships a model. The
+// settings UI drives this from the per-provider "fetch models" action.
+func (p *BaseProvider) FetchModels(ctx context.Context) ([]types.ModelInfo, error) {
+	p.mu.RLock()
+	hasKey := p.apiKey != ""
+	apiBase := p.apiBase
+	name := p.name
+	known := p.models
+	p.mu.RUnlock()
+
+	if !hasKey {
+		return nil, fmt.Errorf("%s 未配置 API Key —— 请先在设置里填写 Key，再获取模型", name)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiBase+"/models", nil)
+	if err != nil {
+		return nil, fmt.Errorf("构造模型列表请求失败: %w", err)
+	}
+	p.setAuth(req)
+	p.setHeaders(req)
+
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("获取模型列表失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxModelsBody))
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("获取模型列表失败: HTTP %d — %s", resp.StatusCode, errBodyText(body))
+	}
+
+	ids := parseVendorModelIDs(body)
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("厂商未返回任何模型（响应格式无法识别）")
+	}
+
+	// Reuse the built-in catalogue's metadata for models we already know so the
+	// UI keeps showing real context windows and prices; newly released models
+	// get the conservative defaults above.
+	byID := make(map[string]types.ModelInfo, len(known)*2)
+	for _, m := range known {
+		byID[m.ID] = m
+		byID[strings.TrimPrefix(m.ID, name+"/")] = m
+	}
+
+	now := time.Now()
+	out := make([]types.ModelInfo, 0, len(ids))
+	for _, id := range ids {
+		if m, ok := byID[id]; ok {
+			out = append(out, m)
+			continue
+		}
+		out = append(out, types.ModelInfo{
+			ID:              id,
+			Name:            id,
+			Provider:        name,
+			ContextWindow:   defaultFetchedContextWindow,
+			MaxOutputTokens: defaultFetchedMaxOutput,
+			Plans: []types.TokenPlan{{
+				Name:        "default",
+				Description: "由厂商 /models 实时获取；定价请以厂商为准",
+			}},
+			Capabilities: types.ModelCap{Tools: true, Streaming: true, JSONMode: true},
+			UpdatedAt:    now,
+		})
+	}
+	return out, nil
+}
+
+// parseVendorModelIDs extracts model identifiers from a /models response,
+// tolerating the shapes seen in the wild:
+//
+//	{"data":[{"id":"gpt-4o"}], "object":"list"}   OpenAI, DeepSeek, Moonshot, …
+//	{"models":[{"name":"llama3:latest"}]}         Ollama's native /api/tags
+//	["gpt-4o","gpt-4o-mini"]                      a bare array of ids
+//
+// Vendor order is preserved and duplicates are dropped.
+func parseVendorModelIDs(body []byte) []string {
+	type entry struct {
+		ID string `json:"id"`
+		// Ollama reports "name"/"model"; a few gateways use "slug".
+		Name  string `json:"name"`
+		Model string `json:"model"`
+		Slug  string `json:"slug"`
+	}
+	var wrapper struct {
+		Data   []entry `json:"data"`
+		Models []entry `json:"models"`
+	}
+
+	var ids []string
+	if err := json.Unmarshal(body, &wrapper); err == nil {
+		entries := wrapper.Data
+		if len(entries) == 0 {
+			entries = wrapper.Models
+		}
+		for _, e := range entries {
+			for _, cand := range []string{e.ID, e.Model, e.Name, e.Slug} {
+				if cand != "" {
+					ids = append(ids, cand)
+					break
+				}
+			}
+		}
+	}
+	if len(ids) == 0 {
+		var arr []string
+		if err := json.Unmarshal(body, &arr); err == nil {
+			ids = arr
+		}
+	}
+
+	seen := make(map[string]bool, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
+}
+
 // readStream pumps SSE lines from the response body into ch until EOF, an
 // error, or ctx cancellation. The context matters: when the user interrupts
 // (Esc / stop button) the engine cancels it, and the HTTP transport closes

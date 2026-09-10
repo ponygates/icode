@@ -183,6 +183,57 @@ type ProviderCfg struct {
 	APIBase   string `yaml:"api_base" json:"api_base,omitempty"`
 	Timeout   int    `yaml:"timeout_sec" json:"timeout_sec,omitempty"`
 	Disabled  bool   `yaml:"disabled" json:"disabled,omitempty"`
+	// EnabledModels restricts this vendor to a chosen subset of its models,
+	// using the vendor's own model ids (e.g. "deepseek-v4-flash"). The desktop
+	// settings UI writes it after a live "fetch models" pass, so a user can
+	// keep only the models their key actually serves.
+	//
+	// Empty means "no restriction": the full built-in catalogue stays
+	// available. That keeps configs written before this feature, and vendors
+	// the user never curated, working exactly as before.
+	EnabledModels []string `yaml:"enabled_models,omitempty" json:"enabled_models,omitempty"`
+}
+
+// VendorModelID strips a leading "provider/" from a model id when present, so
+// callers can compare against vendor-native ids regardless of which convention
+// a provider's catalogue happens to use (deepseek stores bare ids, ollama
+// stores them prefixed).
+func VendorModelID(provider, modelID string) string {
+	if provider != "" && strings.HasPrefix(modelID, provider+"/") {
+		return modelID[len(provider)+1:]
+	}
+	return modelID
+}
+
+// IsModelEnabled reports whether a model passes its provider's EnabledModels
+// filter. An absent provider or an empty filter means everything is enabled.
+func (c *Config) IsModelEnabled(provider, modelID string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	pc, ok := c.Providers[provider]
+	if !ok || len(pc.EnabledModels) == 0 {
+		return true
+	}
+	vendorID := VendorModelID(provider, modelID)
+	for _, id := range pc.EnabledModels {
+		if id == modelID || id == vendorID {
+			return true
+		}
+	}
+	return false
+}
+
+// SetEnabledModels records the chosen subset for a provider. Passing an empty
+// slice clears the restriction (back to the full catalogue).
+func (c *Config) SetEnabledModels(provider string, modelIDs []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.Providers == nil {
+		c.Providers = map[string]ProviderCfg{}
+	}
+	pc := c.Providers[provider]
+	pc.EnabledModels = modelIDs
+	c.Providers[provider] = pc
 }
 
 // ModelCfg describes a (possibly user-defined) model entry. Built-in models

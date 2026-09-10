@@ -1,11 +1,16 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/ponygates/icode/internal/config"
 	"github.com/ponygates/icode/internal/llm/provider/openai_compat"
+	"github.com/ponygates/icode/internal/types"
 )
 
 func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
@@ -13,6 +18,11 @@ func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
 		Name      string `json:"name"`
 		Models    int    `json:"models"`
 		CacheSupp bool   `json:"cache_support"`
+		// Filtered reports whether the user has curated this vendor's model
+		// list via the "fetch models" flow; Enabled is how many models
+		// survived that filter.
+		Filtered bool `json:"filtered"`
+		Enabled  int  `json:"enabled"`
 	}
 
 	var result []providerInfo
@@ -24,10 +34,38 @@ func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			continue
 		}
+		// Count over the catalogue *plus* models registered on the fly for this
+		// vendor (a live-discovered model the build never knew about). Both the
+		// numerator and the denominator use the same set, so the UI badge can
+		// never render the nonsense "3/2" when a user enables a model that is
+		// not in the built-in catalogue.
+		enabled, total := 0, 0
+		seen := make(map[string]bool)
+		countOne := func(modelID string) {
+			key := config.VendorModelID(name, modelID)
+			if key == "" || seen[key] {
+				return
+			}
+			seen[key] = true
+			total++
+			if s.cfg.IsModelEnabled(name, key) {
+				enabled++
+			}
+		}
+		for _, m := range p.ListModels() {
+			countOne(m.ID)
+		}
+		for _, cm := range s.cfg.Models {
+			if cm.Custom && cm.Provider == name {
+				countOne(cm.ModelID)
+			}
+		}
 		result = append(result, providerInfo{
 			Name:      name,
-			Models:    len(p.ListModels()),
+			Models:    total,
 			CacheSupp: p.SupportsCache(),
+			Filtered:  len(s.cfg.Providers[name].EnabledModels) > 0,
+			Enabled:   enabled,
 		})
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -52,6 +90,12 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	seen := make(map[string]bool, len(models)+len(s.cfg.Models))
 	for _, m := range models {
 		if s.isProviderDisabled(m.Provider) {
+			continue
+		}
+		// Respect the vendor's curated model list: a user who fetched the
+		// live catalogue and ticked a subset expects only those to be
+		// selectable. An unset filter enables everything (see IsModelEnabled).
+		if !s.cfg.IsModelEnabled(m.Provider, m.ID) {
 			continue
 		}
 		// Custom models are appended below (marked custom:true) so they are not
@@ -90,6 +134,9 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if s.isProviderDisabled(cm.Provider) {
+			continue
+		}
+		if !s.cfg.IsModelEnabled(cm.Provider, cm.ModelID) {
 			continue
 		}
 		if seen[cm.ID] {
@@ -290,6 +337,195 @@ func (s *Server) handleRefreshModels(w http.ResponseWriter, r *http.Request) {
 		"ok":      true,
 		"updated": len(updates),
 		"results": updates,
+	})
+}
+
+// ============================================================================
+// Live model discovery + per-vendor model selection
+// ============================================================================
+
+// handleFetchModels queries the vendor's own /models endpoint using the stored
+// key and returns what that key can actually use.
+//
+// This backs the "获取模型" action in the desktop settings. The built-in
+// catalogue is a build-time snapshot, whereas the vendor is the authority on
+// what this account is entitled to (it varies by plan and region) and on
+// models released since this binary was built.
+func (s *Server) handleFetchModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	provider := r.URL.Query().Get("provider")
+	if provider == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "provider is required"})
+		return
+	}
+	p, err := s.reg.Get(provider)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "provider not found: " + provider})
+		return
+	}
+	fetcher, ok := p.(types.ModelFetcher)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{
+			"error": fmt.Sprintf("%s 暂不支持实时获取模型（该厂商未实现 ModelFetcher）", provider),
+		})
+		return
+	}
+
+	// A vendor round-trip can be slow — OpenRouter's catalogue is megabytes —
+	// so bound it well below a typical browser request timeout.
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	fetched, err := fetcher.FetchModels(ctx)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
+
+	type fetchedModel struct {
+		ID      string `json:"id"`
+		Name    string `json:"name"`
+		Known   bool   `json:"known"`
+		Enabled bool   `json:"enabled"`
+		Context int    `json:"context_window,omitempty"`
+		MaxOut  int    `json:"max_output_tokens,omitempty"`
+	}
+
+	out := make([]fetchedModel, 0, len(fetched))
+	seen := make(map[string]bool, len(fetched))
+	for _, m := range fetched {
+		vendorID := config.VendorModelID(provider, m.ID)
+		if vendorID == "" || seen[vendorID] {
+			continue
+		}
+		seen[vendorID] = true
+		out = append(out, fetchedModel{
+			ID:      vendorID,
+			Name:    m.Name,
+			Known:   true,
+			Enabled: s.cfg.IsModelEnabled(provider, vendorID),
+			Context: m.ContextWindow,
+			MaxOut:  m.MaxOutputTokens,
+		})
+	}
+
+	// Fold in user-added custom models for this vendor so the checklist is the
+	// complete truth for the provider. Without this, ticking "select all" would
+	// silently drop a model the user had added by hand.
+	for _, cm := range s.cfg.Models {
+		if cm.Provider != provider || !cm.Custom {
+			continue
+		}
+		vendorID := config.VendorModelID(provider, cm.ModelID)
+		if vendorID == "" || seen[vendorID] {
+			continue
+		}
+		seen[vendorID] = true
+		out = append(out, fetchedModel{
+			ID:      vendorID,
+			Name:    cm.Name,
+			Known:   true,
+			Enabled: s.cfg.IsModelEnabled(provider, vendorID),
+			Context: cm.ContextWindow,
+			MaxOut:  cm.MaxOutput,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"provider": provider,
+		"count":    len(out),
+		"filtered": len(s.cfg.Providers[provider].EnabledModels) > 0,
+		"models":   out,
+	})
+}
+
+// handleSaveModelSelection persists the models a user ticked for one vendor.
+//
+// Models absent from the built-in catalogue are stored as custom entries and
+// registered, so a model the vendor shipped after this build becomes
+// selectable and resolvable without waiting for a release.
+func (s *Server) handleSaveModelSelection(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Provider string   `json:"provider"`
+		Models   []string `json:"models"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		_ = r.Body.Close()
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	if req.Provider == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "provider is required"})
+		return
+	}
+	p, err := s.reg.Get(req.Provider)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "provider not found: " + req.Provider})
+		return
+	}
+
+	// Index the built-in catalogue under both conventions a provider might use.
+	builtin := make(map[string]bool)
+	for _, m := range p.ListModels() {
+		builtin[m.ID] = true
+		builtin[config.VendorModelID(req.Provider, m.ID)] = true
+	}
+
+	registered := 0
+	clean := make([]string, 0, len(req.Models))
+	for _, id := range req.Models {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		clean = append(clean, id)
+		if builtin[id] {
+			continue // already in the catalogue — nothing to register
+		}
+		key := config.ModelKey(req.Provider, id)
+		if _, exists := s.cfg.FindModel(key); exists {
+			continue
+		}
+		m := config.ModelCfg{
+			ID:       key,
+			Provider: req.Provider,
+			ModelID:  id,
+			Name:     id,
+			Custom:   true,
+		}
+		s.cfg.UpsertModel(m)
+		s.registerCustomModel(m)
+		registered++
+	}
+
+	// An empty selection is rejected rather than stored: "no models ticked"
+	// would be stored as an empty filter, which means "no restriction" and so
+	// would enable the entire catalogue — the exact opposite of the intent.
+	// Disabling a whole vendor is what the provider-level switch is for.
+	if len(clean) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": "至少勾选一个模型；若要停用整个厂商，请使用厂商开关",
+		})
+		return
+	}
+
+	s.cfg.SetEnabledModels(req.Provider, clean)
+	if err := s.cfg.Save(config.DefaultPath()); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":         true,
+		"enabled":    len(clean),
+		"registered": registered,
 	})
 }
 

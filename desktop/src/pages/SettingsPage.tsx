@@ -2,6 +2,8 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../stores/appStore';
 import { PageTools, PageUpdates, PageAbout, PageNetwork, PageAutomations } from './SettingsPagesExtra';
+import { ModelFetchPanel } from '../components/ModelFetchPanel';
+import { useModelFetch } from '../lib/useModelFetch';
 import {
   loadShortcuts, saveShortcuts, resetShortcuts, matchesBinding, recordBinding, bindingLabel,
   SHORTCUT_ACTIONS, type ShortcutAction, type ShortcutBinding,
@@ -10,7 +12,7 @@ import {
   Settings, X, Key, Globe, Shield, Cpu, Moon, Sun, Monitor, Laptop,
   Zap, Wrench, Boxes, DollarSign, ChevronDown, Check, Plus, Trash2,
   Thermometer, Hash, Layers, RefreshCw, Info, ExternalLink, Star, AlertCircle,
-  Timer,
+  Timer, Download, ListChecks,
 } from 'lucide-react';
 
 // ═══════════════════════════════════════════════════════════════
@@ -260,6 +262,12 @@ function PageModels({ store }: { store: ReturnType<typeof useAppStore.getState> 
   const [editData, setEditData] = useState<Record<string,{ apiKey:string; apiBase:string; temp:number; maxToks:number }>>({});
   const [saved, setSaved] = useState<Record<string,boolean>>({});
 
+  // Live model discovery ("获取模型") — shared with the standalone model page.
+  const mf = useModelFetch(store.backendUrl);
+
+  const doFetchModels = (provider: string) =>
+    mf.fetchModels(provider, () => { setExpanded(provider); setEditingModel(null); });
+
   const toggleProvider = (p: string) => {
     setExpanded(prev => prev === p ? null : p);
     setEditingModel(null);
@@ -323,6 +331,8 @@ function PageModels({ store }: { store: ReturnType<typeof useAppStore.getState> 
         const isOpen = expanded === provider;
         const color = pc[provider] || '#6366F1';
         const hasKeyConfigured = editData[pModels[0]?.id]?.apiKey;
+        const vm = mf.meta[provider];
+        const busy = mf.fetching === provider;
 
         return (
           <div key={provider} style={{
@@ -351,11 +361,39 @@ function PageModels({ store }: { store: ReturnType<typeof useAppStore.getState> 
                   {t('models.modelsCount', { count: pModels.length })} · {hasKeyConfigured ? t('models.configured') : t('models.clickConfig')}
                 </div>
               </div>
+              {vm?.filtered && (
+                <span title={t('models.filteredHint')} style={{
+                  fontSize: 9, padding: '2px 6px', borderRadius: 4,
+                  background: `${color}14`, color, fontWeight: 500,
+                  display: 'flex', alignItems: 'center', gap: 3,
+                }}>
+                  <ListChecks size={9} />
+                  {t('models.enabledOf', { enabled: vm.enabled, total: vm.models })}
+                </span>
+              )}
               {hasKeyConfigured && <span style={{
                 fontSize: 9, padding: '2px 6px', borderRadius: 4, background: 'rgba(63,185,80,0.12)', color: 'var(--success)',
               }}>
                 <Check size={10} style={{display:'inline',marginRight:2}} />{t('settings.connected')}
               </span>}
+              {/* Live catalogue pull — the vendor knows what the key can use,
+                  the built-in list is only a snapshot from build time. */}
+              <button
+                onClick={(e) => { e.stopPropagation(); doFetchModels(provider); }}
+                disabled={busy}
+                title={t('models.fetchHint')}
+                style={{
+                  ...btnGhost, fontSize: 10.5, padding: '4px 9px', gap: 4,
+                  color: (busy || mf.panel === provider) ? color : 'var(--text-secondary)',
+                  borderColor: (busy || mf.panel === provider) ? `${color}60` : 'var(--border-color)',
+                  background: mf.panel === provider ? `${color}14` : 'transparent',
+                  cursor: busy ? 'wait' : 'pointer',
+                }}>
+                {busy
+                  ? <RefreshCw size={11} style={{ animation: 'spin 1s linear infinite' }} />
+                  : <Download size={11} />}
+                {busy ? t('models.fetching') : t('models.fetchModels')}
+              </button>
               <ChevronDown size={14} color="var(--text-muted)" style={{
                 transform: isOpen ? 'rotate(180deg)' : 'rotate(0deg)',
                 transition: 'transform 0.2s ease',
@@ -365,6 +403,23 @@ function PageModels({ store }: { store: ReturnType<typeof useAppStore.getState> 
             {/* Expanded model list — Reasonix mcard pattern */}
             {isOpen && (
               <div style={{ padding: '0 16px 16px', display: 'flex', flexDirection: 'column', gap: 6, animation: 'slideUp 0.15s ease' }}>
+                {/* Errors that have no panel to live in (fetch failed, etc.). */}
+                {mf.error[provider] && !mf.panel && (
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: 6,
+                    padding: '6px 10px', borderRadius: 6, marginBottom: 4,
+                    background: 'var(--error-soft)', border: '1px solid var(--error)',
+                    color: 'var(--error)', fontSize: 10.5,
+                  }}>
+                    <AlertCircle size={12} style={{ flexShrink: 0 }} />
+                    <span style={{ flex: 1 }}>{mf.error[provider]}</span>
+                  </div>
+                )}
+
+                {/* Live-fetch checklist */}
+                <ModelFetchPanel provider={provider} color={color} mf={mf}
+                  onApplied={() => store.refreshModels()} />
+
                 {pModels.map(model => {
                   const ed = editData[model.id];
                   const isEditing = editingModel === model.id;

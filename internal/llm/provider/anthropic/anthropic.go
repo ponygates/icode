@@ -60,6 +60,97 @@ func (p *Provider) SetModels(models []types.ModelInfo) {
 	p.models = models
 }
 
+// Defaults for a model discovered live but absent from the built-in catalogue.
+// Anthropic's window is 200K, so that is the better guess here; the user can
+// still edit it in the settings UI.
+const (
+	defaultFetchedContextWindow = 200000
+	defaultFetchedMaxOutput     = 8192
+)
+
+// FetchModels queries Anthropic's /v1/models with the configured key and
+// returns the models this account can actually use.
+//
+// The endpoint reports display_name, which labels far better than the raw id
+// ("Claude Sonnet 4.5" vs "claude-sonnet-4-5-20250929"), so we keep it.
+func (p *Provider) FetchModels(ctx context.Context) ([]types.ModelInfo, error) {
+	p.mu.RLock()
+	hasKey := p.apiKey != ""
+	base := p.apiBase
+	known := p.models
+	p.mu.RUnlock()
+
+	if !hasKey {
+		return nil, fmt.Errorf("anthropic 未配置 API Key —— 请先在设置里填写 Key，再获取模型")
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/models?limit=1000", nil)
+	if err != nil {
+		return nil, fmt.Errorf("构造模型列表请求失败: %w", err)
+	}
+	p.setHeaders(req)
+
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("获取模型列表失败: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("获取模型列表失败: HTTP %d — %s", resp.StatusCode, errBodyText(body))
+	}
+
+	var parsed struct {
+		Data []struct {
+			ID          string `json:"id"`
+			DisplayName string `json:"display_name"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, fmt.Errorf("解析模型列表失败: %w", err)
+	}
+	if len(parsed.Data) == 0 {
+		return nil, fmt.Errorf("anthropic 未返回任何模型")
+	}
+
+	// Reuse built-in metadata for models we already know about.
+	byID := make(map[string]types.ModelInfo, len(known))
+	for _, m := range known {
+		byID[m.ID] = m
+	}
+
+	now := time.Now()
+	out := make([]types.ModelInfo, 0, len(parsed.Data))
+	for _, e := range parsed.Data {
+		if e.ID == "" {
+			continue
+		}
+		if m, ok := byID[e.ID]; ok {
+			out = append(out, m)
+			continue
+		}
+		name := e.DisplayName
+		if name == "" {
+			name = e.ID
+		}
+		out = append(out, types.ModelInfo{
+			ID:              e.ID,
+			Name:            name,
+			Provider:        ProviderName,
+			ContextWindow:   defaultFetchedContextWindow,
+			MaxOutputTokens: defaultFetchedMaxOutput,
+			Plans: []types.TokenPlan{{
+				Name:        "default",
+				Description: "由厂商 /models 实时获取；定价请以厂商为准",
+			}},
+			Capabilities: types.ModelCap{Tools: true, Streaming: true, JSONMode: true},
+			UpdatedAt:    now,
+		})
+	}
+	return out, nil
+}
+
 // SetCredentials updates the API key and base URL at runtime. Empty values are
 // left unchanged. See openai_compat.BaseProvider for rationale.
 func (p *Provider) SetCredentials(apiKey, apiBase string) {
