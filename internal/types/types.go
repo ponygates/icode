@@ -117,8 +117,15 @@ type ChatRequest struct {
 	Model        string    `json:"model"`
 	ProviderName string    `json:"provider"`
 	MaxTokens    int       `json:"max_tokens,omitempty"`
-	Temperature  float64   `json:"temperature,omitempty"`
-	Tools        []ToolDef `json:"tools,omitempty"`
+	// Temperature is a pointer so "not configured" (nil, the field is omitted
+	// and the provider's own default applies) stays distinguishable from an
+	// explicit 0 — a user choosing deterministic sampling means 0, and the old
+	// `> 0` guard silently dropped exactly that request.
+	Temperature *float64 `json:"temperature,omitempty"`
+	// TopP is nucleus sampling. Zero means "not configured" and the field is
+	// omitted (top_p 0 is not a meaningful sampling setting).
+	TopP  float64   `json:"top_p,omitempty"`
+	Tools []ToolDef `json:"tools,omitempty"`
 
 	// SystemPrompt is injected at the head of each request (immutable prefix).
 	SystemPrompt string `json:"system_prompt,omitempty"`
@@ -139,6 +146,11 @@ type ChatRequest struct {
 	// default.
 	CacheTTL string `json:"cache_ttl,omitempty"`
 }
+
+// Temp returns a pointer to v, for ChatRequest.Temperature. Callers that
+// genuinely want a value (including 0) should use this; leaving the field nil
+// means "not configured — let the provider decide".
+func Temp(v float64) *float64 { return &v }
 
 // ThinkingConfig enables extended thinking (Anthropic Messages API
 // "thinking" block). BudgetTokens must be > 0 and less than MaxTokens.

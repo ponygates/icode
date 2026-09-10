@@ -30,10 +30,13 @@ const classifyPrompt = `你是终端 AI 编码助手的工具调用安全审查�
 func (c *llmClassifier) Classify(ctx context.Context, toolName, toolInput string) (bool, string, error) {
 	prompt := fmt.Sprintf(classifyPrompt, toolName, truncateStr(toolInput, 800))
 	msg, err := c.prov.Chat(ctx, types.ChatRequest{
-		Model:       c.model,
-		Messages:    []types.Message{{Role: types.RoleUser, Content: prompt}},
-		MaxTokens:   60,
-		Temperature: 0,
+		Model:     c.model,
+		Messages:  []types.Message{{Role: types.RoleUser, Content: prompt}},
+		MaxTokens: 60,
+		// nil = leave the provider default in place. This used to read
+		// `0`, which the old `> 0` guard dropped from the wire anyway —
+		// nil states that intent instead of relying on the omission.
+		Temperature: nil,
 	})
 	if err != nil {
 		return false, "", fmt.Errorf("classifier: %w", err)
@@ -106,10 +109,11 @@ func (e *Engine) GenerateCommitMessage(ctx context.Context, diff string) (string
 	}
 	prompt := fmt.Sprintf(commitMsgPrompt, truncateStr(diff, 6000))
 	msg, err := prov.Chat(ctx, types.ChatRequest{
-		Model:       model,
-		Messages:    []types.Message{{Role: types.RoleUser, Content: prompt}},
-		MaxTokens:   80,
-		Temperature: 0,
+		Model:     model,
+		Messages:  []types.Message{{Role: types.RoleUser, Content: prompt}},
+		MaxTokens: 80,
+		// nil = leave the provider default in place (see the classifier above).
+		Temperature: nil,
 	})
 	if err != nil {
 		return "", fmt.Errorf("commit message: %w", err)

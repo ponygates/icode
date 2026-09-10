@@ -5,6 +5,7 @@ import { ModelFetchPanel } from '../components/ModelFetchPanel';
 import { ModelFetchAllBar } from '../components/ModelFetchAllBar';
 import { AddModelModal, type AddModelPayload } from '../components/AddModelModal';
 import { useModelFetch } from '../lib/useModelFetch';
+import { saveModelSettings } from '../lib/modelSettings';
 import { sortModels, type ModelSort } from '../lib/modelSort';
 import {
   RefreshCw, Search, Zap, Sparkles, Shield, Cpu, X, Check,
@@ -20,6 +21,8 @@ interface ModelSettings {
   temperature: number;
   maxTokens: number;
   topP: number;
+  /** 0 = leave the model's context window as-is. */
+  contextWindow: number;
 }
 
 const ModelSettingsModal: React.FC<{
@@ -29,12 +32,16 @@ const ModelSettingsModal: React.FC<{
   onSetDefault: (modelId: string) => void;
   isDefault: boolean;
 }> = ({ model, onClose, onSave, onSetDefault, isDefault }) => {
+  // Seed from whatever is already configured for this model. Starting from
+  // hardcoded defaults instead meant opening the dialog and pressing save
+  // silently overwrote the model's real settings with 0.7/4096/0.9.
   const [settings, setSettings] = useState<ModelSettings>({
     apiKey: '',
     apiBase: '',
-    temperature: 0.7,
-    maxTokens: 4096,
-    topP: 0.9,
+    temperature: model.temperature ?? 0.7,
+    maxTokens: model.maxOutputTokens ?? 4096,
+    topP: model.top_p ?? 0.9,
+    contextWindow: model.contextWindow ?? 0,
   });
   const { t } = useTranslation();
   const [saved, setSaved] = useState(false);
@@ -175,7 +182,37 @@ const ModelSettingsModal: React.FC<{
             <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>
               <Settings size={12} style={{ display: 'inline', marginRight: 4 }} /> {t('models.genParams')}
             </div>
+            <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 10 }}>
+              {t('models.perModelHint')}
+            </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {/* Context window */}
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                  <label style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                    <Hash size={10} style={{ display: 'inline', marginRight: 4 }} />
+                    {t('models.ctxWindow')}
+                  </label>
+                  <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--accent)' }}>
+                    {settings.contextWindow > 0
+                      ? (settings.contextWindow >= 1000 ? `${Math.round(settings.contextWindow / 1000)}K` : settings.contextWindow)
+                      : '—'}
+                  </span>
+                </div>
+                <input
+                  type="number" min={0} step={1000}
+                  placeholder={String(model.contextWindow || 128000)}
+                  value={settings.contextWindow || ''}
+                  onChange={(e) => setSettings((s) => ({
+                    ...s, contextWindow: Math.max(0, parseInt(e.target.value || '0', 10) || 0),
+                  }))}
+                  style={inputField}
+                />
+                <div style={{ fontSize: 9, color: 'var(--text-muted)', marginTop: 3 }}>
+                  {t('models.ctxWindowUnit')}
+                </div>
+              </div>
+
               {/* Temperature */}
               <div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
@@ -389,29 +426,18 @@ const ModelsPage: React.FC = () => {
     });
   };
 
-  const handleSaveModelSettings = useCallback(async (modelId: string, settings: ModelSettings): Promise<string> => {
+  // Persist the per-model settings. The two-endpoint split (and why the
+  // parameters must not go to /api/config/key) lives in lib/modelSettings.ts so
+  // it can be unit-tested without mounting this page.
+  const handleSaveModelSettings = useCallback(async (
+    model: Model,
+    settings: ModelSettings,
+  ): Promise<string> => {
     if (!backendUrl) return 'Backend not connected';
-    try {
-      const res = await fetch(`${backendUrl}/api/config/key`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          provider: selectedSettingsModel?.provider,
-          api_key: settings.apiKey,
-          api_base: settings.apiBase,
-          model_id: modelId,
-          temperature: settings.temperature,
-          max_tokens: settings.maxTokens,
-          top_p: settings.topP,
-        }),
-      });
-      if (!res.ok) return `HTTP ${res.status}`;
-      if (settings.apiKey) await refreshModels();
-      return '';
-    } catch (e) {
-      return String(e);
-    }
-  }, [backendUrl, selectedSettingsModel, refreshModels]);
+    const err = await saveModelSettings(backendUrl, model, settings);
+    if (!err) await refreshModels();
+    return err;
+  }, [backendUrl, refreshModels]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: 'var(--bg-primary)' }}>
@@ -420,7 +446,7 @@ const ModelsPage: React.FC = () => {
         <ModelSettingsModal
           model={selectedSettingsModel}
           onClose={() => setSelectedSettingsModel(null)}
-          onSave={(s) => { handleSaveModelSettings(selectedSettingsModel.id, s); }}
+          onSave={(s) => handleSaveModelSettings(selectedSettingsModel, s)}
           onSetDefault={(id) => { setSelectedModel(id); }}
           isDefault={selectedSettingsModel.id === selectedModel}
         />

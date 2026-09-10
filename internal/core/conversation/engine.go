@@ -63,8 +63,9 @@ type Engine struct {
 
 	temperature    float64
 	maxTokens      int
-	systemPrompt   string   // user-configured system prompt override
-	fallbackModels []string // model IDs to try if the primary fails
+	modelParams    ModelParamsResolver // per-model generation overrides (nil = none)
+	systemPrompt   string              // user-configured system prompt override
+	fallbackModels []string            // model IDs to try if the primary fails
 
 	// Sub-agent runner — dispatches Task tool calls to isolated Optimizer
 	// contexts. Created on first use so the tool registry is ready.
@@ -339,6 +340,54 @@ func (e *Engine) SetPermissionResponse(requestID string, decision permission.Dec
 func (e *Engine) SetGenerationParams(temperature float64, maxTokens int) {
 	e.temperature = temperature
 	e.maxTokens = maxTokens
+}
+
+// ModelParamsResolver reports the user-configured generation overrides for one
+// model. temperature is nil when unset, so an explicit 0 (a legitimate
+// "deterministic" choice) stays distinguishable; topP is 0 when unset (top_p 0
+// is not a meaningful sampling setting); maxOutput is 0 when unset. ok=false
+// means the model has no overrides at all.
+//
+// The Engine deliberately does not import the config package: the host passes
+// (*config.Config).ModelGeneration here, which binds to the live config
+// pointer, so later edits are picked up without re-wiring.
+type ModelParamsResolver func(provider, modelID string) (temperature *float64, topP float64, maxOutput int, ok bool)
+
+// SetModelParamsResolver installs the per-model override source. Passing nil
+// disables overrides and the global defaults apply to every model.
+func (e *Engine) SetModelParamsResolver(fn ModelParamsResolver) {
+	e.modelParams = fn
+}
+
+// applyModelParams resolves the effective generation parameters for one model:
+// the user's per-model override where set, otherwise the engine-wide defaults.
+//
+// Resolved in one place so the three request sites (main turn, tool-JSON
+// repair, fallback model) can never drift apart.
+func (e *Engine) applyModelParams(mi types.ModelInfo) (temperature *float64, topP float64, maxOut int) {
+	// The engine-wide default keeps its historical meaning: 0 = "not set", the
+	// provider decides. Only an explicit per-model value can pin it to 0.
+	if e.temperature > 0 {
+		temperature = types.Temp(e.temperature)
+	}
+	maxOut = mi.MaxOutputTokens
+	if e.modelParams == nil || mi.Provider == "" {
+		return temperature, topP, maxOut
+	}
+	ovTemp, ovTopP, ovMaxOut, ok := e.modelParams(mi.Provider, mi.ID)
+	if !ok {
+		return temperature, topP, maxOut
+	}
+	if ovTemp != nil {
+		temperature = ovTemp
+	}
+	if ovTopP > 0 {
+		topP = ovTopP
+	}
+	if ovMaxOut > 0 {
+		maxOut = ovMaxOut
+	}
+	return temperature, topP, maxOut
 }
 
 // SetThinking toggles extended thinking for Anthropic-capable models.
@@ -1258,7 +1307,10 @@ func (e *Engine) repairBrokenToolCalls(
 	}
 	tc := toolCalls[broken]
 
-	maxTok := orMaxTokens(e.maxTokens, modelInfo.MaxOutputTokens)
+	// Same resolution as the main turn so a repair retry does not silently
+	// revert to the engine-wide defaults.
+	temperature, topP, modelMaxOut := e.applyModelParams(modelInfo)
+	maxTok := orMaxTokens(e.maxTokens, modelMaxOut)
 	attempts := 1
 	if truncated {
 		attempts = e.truncDet.config.MaxRetries
@@ -1303,7 +1355,8 @@ func (e *Engine) repairBrokenToolCalls(
 			SystemPrompt:     opt.BuildPrefix(),
 			Tools:            e.toolReg.ListDefs(),
 			MaxTokens:        maxTok,
-			Temperature:      e.temperature,
+			Temperature:      temperature,
+			TopP:             topP,
 			CacheBreakpoints: opt.BuildCacheBreakpoints(),
 			Thinking:         e.thinkingConfig(),
 			CacheTTL:         e.cacheTTL,
@@ -1652,7 +1705,8 @@ func (e *Engine) recoverTruncation(
 	if tr == nil {
 		return false
 	}
-	maxTokens := orMaxTokens(e.maxTokens, modelInfo.MaxOutputTokens)
+	temperature, topP, modelMaxOut := e.applyModelParams(modelInfo)
+	maxTokens := orMaxTokens(e.maxTokens, modelMaxOut)
 	recovered := false
 	for attempt := 0; attempt < tr.config.MaxRetries && ctx.Err() == nil; attempt++ {
 		nextMax := tr.config.NextTokens(maxTokens)
@@ -1676,7 +1730,8 @@ func (e *Engine) recoverTruncation(
 			SystemPrompt:     opt.BuildPrefix(),
 			Tools:            e.toolReg.ListDefs(),
 			MaxTokens:        maxTokens,
-			Temperature:      e.temperature,
+			Temperature:      temperature,
+			TopP:             topP,
 			CacheBreakpoints: opt.BuildCacheBreakpoints(),
 			Thinking:         e.thinkingConfig(),
 			CacheTTL:         e.cacheTTL,
@@ -2133,6 +2188,9 @@ func (e *Engine) chatStreamWithFallback(
 			p = primary
 		}
 		build := func() (<-chan types.StreamEvent, error) {
+			// Resolved per candidate: a fallback model carries its own
+			// overrides, so switching models must not inherit the primary's.
+			temperature, topP, modelMaxOut := e.applyModelParams(mt.modelInfo)
 			return p.ChatStream(ctx, types.ChatRequest{
 				SessionID:        sessionID,
 				Messages:         messages,
@@ -2140,8 +2198,9 @@ func (e *Engine) chatStreamWithFallback(
 				ProviderName:     mt.providerName,
 				SystemPrompt:     opt.BuildPrefix(),
 				Tools:            e.toolReg.ListDefs(),
-				MaxTokens:        orMaxTokens(e.maxTokens, mt.modelInfo.MaxOutputTokens),
-				Temperature:      e.temperature,
+				MaxTokens:        orMaxTokens(e.maxTokens, modelMaxOut),
+				Temperature:      temperature,
+				TopP:             topP,
 				CacheBreakpoints: opt.BuildCacheBreakpoints(),
 				Thinking:         e.thinkingConfig(),
 				CacheTTL:         e.cacheTTL,
@@ -2695,7 +2754,9 @@ func (e *Engine) polishDenyWithLLM(ctx context.Context, sessionID, toolName, rea
 		ProviderName: mi.Provider,
 		SystemPrompt: "你只输出两行中文：第一行原因，第二行以「建议：」开头。",
 		MaxTokens:    150,
-		Temperature:  0, // 相同输入必须产生相同输出（源码解析 ch.5 温度=0 原则）
+		// nil = 沿用 provider 默认。此前写 0 也会被 `> 0` 判断省略掉，
+		// 所以行为完全不变；真要固定 0 得用 types.Temp(0)。
+		Temperature: nil,
 	})
 	if err != nil {
 		return ""

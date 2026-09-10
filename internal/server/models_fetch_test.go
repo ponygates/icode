@@ -632,3 +632,98 @@ func TestModelSelectionPersistsVendorReportedMetadata(t *testing.T) {
 	}
 	t.Fatalf("demo-c not persisted to the config file")
 }
+
+// The per-model ⚙️ settings dialog writes here. These parameters used to be
+// posted to /api/config/key, which decodes only provider/api_key/api_base, so
+// every value was discarded while the dialog still reported 已保存.
+func TestModelSettingsOverridePersistsAndAppearsInList(t *testing.T) {
+	base := newFetchTestServer(t, demoProvider())
+
+	body := `{"provider":"demo","model_id":"demo-a","name":"Demo A (tuned)",` +
+		`"context_window":64000,"max_output_tokens":2048,` +
+		`"temperature":0,"top_p":0.35,"custom":false}`
+	httpDo(t, http.MethodPut, base+"/api/config/model", body, http.StatusOK, nil)
+
+	// Saving again must replace the entry, not append a duplicate.
+	httpDo(t, http.MethodPut, base+"/api/config/model", body, http.StatusOK, nil)
+
+	var models []map[string]any
+	httpDo(t, http.MethodGet, base+"/api/models", "", http.StatusOK, &models)
+
+	hits := 0
+	for _, m := range models {
+		if m["model_id"] != "demo-a" {
+			continue
+		}
+		hits++
+		if m["name"] != "Demo A (tuned)" {
+			t.Fatalf("name = %v, want the override", m["name"])
+		}
+		if m["contextWindow"] != float64(64000) {
+			t.Fatalf("contextWindow = %v, want 64000", m["contextWindow"])
+		}
+		if m["maxOutputTokens"] != float64(2048) {
+			t.Fatalf("maxOutputTokens = %v, want 2048", m["maxOutputTokens"])
+		}
+		// An explicit 0 is a legitimate "deterministic" choice and must be
+		// distinguishable from "not configured" all the way to the DTO.
+		if m["temperature"] != float64(0) {
+			t.Fatalf("temperature = %v, want an explicit 0", m["temperature"])
+		}
+		if m["top_p"] != float64(0.35) {
+			t.Fatalf("top_p = %v, want 0.35", m["top_p"])
+		}
+		if m["custom"] != false {
+			t.Fatalf("custom = %v, want false — an override must not become a duplicate entry", m["custom"])
+		}
+	}
+	if hits != 1 {
+		t.Fatalf("demo-a appeared %d times, want exactly 1", hits)
+	}
+
+	// The engine reads this through (*Config).ModelGeneration, so the stored
+	// shape has to survive a reload with the pointer semantics intact.
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	temp, topP, maxOut, ok := cfg.ModelGeneration("demo", "demo-a")
+	if !ok {
+		t.Fatalf("ModelGeneration reported no override after save")
+	}
+	if temp == nil || *temp != 0 {
+		t.Fatalf("temperature = %v, want an explicit 0", temp)
+	}
+	if topP != 0.35 || maxOut != 2048 {
+		t.Fatalf("topP/maxOut = %v/%d, want 0.35/2048", topP, maxOut)
+	}
+
+	// A model with no entry must resolve to "no override" rather than zeros.
+	if _, _, _, ok := cfg.ModelGeneration("demo", "demo-b"); ok {
+		t.Fatalf("demo-b reported an override it never had")
+	}
+}
+
+// A prefixed model id must not be stored under "provider/provider/…": nothing
+// would ever read that key back, so the settings would silently vanish.
+func TestModelSettingsOverrideNormalisesPrefixedModelID(t *testing.T) {
+	base := newFetchTestServer(t, demoProvider())
+
+	httpDo(t, http.MethodPut, base+"/api/config/model",
+		`{"provider":"demo","model_id":"demo/demo-a","temperature":0.25,"custom":false}`,
+		http.StatusOK, nil)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	for _, m := range cfg.Models {
+		if m.ID == "demo/demo/demo-a" {
+			t.Fatalf("stored under a double-prefixed key: %q", m.ID)
+		}
+	}
+	temp, _, _, ok := cfg.ModelGeneration("demo", "demo-a")
+	if !ok || temp == nil || *temp != 0.25 {
+		t.Fatalf("ModelGeneration = (%v, ok=%v), want 0.25/true", temp, ok)
+	}
+}

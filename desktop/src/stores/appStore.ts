@@ -17,6 +17,10 @@ async function fetchWithTimeout(url: string, opts: RequestInit = {}, ms = 8000):
 
 export interface Model {
   id: string;
+  // model_id is the bare vendor id the provider actually accepts. For a
+  // built-in model it usually equals id; for a hand-added model id is the
+  // composite "provider/model" key while model_id stays bare.
+  model_id?: string;
   name: string;
   provider: string;
   plan: string;
@@ -30,6 +34,10 @@ export interface Model {
   }>;
   contextWindow?: number;
   maxOutputTokens?: number;
+  // Per-model generation overrides. Absent = not configured, so the engine
+  // falls back to the global defaults (see /api/models).
+  temperature?: number;
+  top_p?: number;
   // custom marks user-added models (created via 添加自定义模型), which also
   // means their provider is a user-defined vendor.
   custom?: boolean;

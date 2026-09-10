@@ -247,8 +247,14 @@ type ModelCfg struct {
 	BaseURL       string `yaml:"base_url,omitempty" json:"base_url,omitempty"`
 	ContextWindow int    `yaml:"context_window,omitempty" json:"context_window,omitempty"`
 	MaxOutput     int    `yaml:"max_output_tokens,omitempty" json:"max_output_tokens,omitempty"`
-	FreeTier      bool   `yaml:"free_tier,omitempty" json:"free_tier,omitempty"`
-	Custom        bool   `yaml:"custom,omitempty" json:"custom,omitempty"` // true for user-added models
+	// Temperature / TopP are optional per-model generation overrides. They are
+	// pointers so "unset" is distinguishable from an explicit 0 — a user who
+	// wants fully deterministic sampling sets temperature 0, which is a valid
+	// value and must not be mistaken for "no override".
+	Temperature *float64 `yaml:"temperature,omitempty" json:"temperature,omitempty"`
+	TopP        *float64 `yaml:"top_p,omitempty" json:"top_p,omitempty"`
+	FreeTier    bool     `yaml:"free_tier,omitempty" json:"free_tier,omitempty"`
+	Custom      bool     `yaml:"custom,omitempty" json:"custom,omitempty"` // true for user-added models
 }
 
 // ModelKey builds the stable model key "provider/model_id".
@@ -1085,4 +1091,44 @@ func (c *Config) ModelDisplayName(provider, modelID string) string {
 		}
 	}
 	return ""
+}
+
+// ModelOverride returns the stored entry for a provider/model pair, tolerating
+// either id convention (a bare vendor id or the composite "provider/model"),
+// because callers receive whichever the registry happens to use.
+func (c *Config) ModelOverride(provider, modelID string) (ModelCfg, bool) {
+	if provider == "" || modelID == "" {
+		return ModelCfg{}, false
+	}
+	bare := VendorModelID(provider, modelID)
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, m := range c.Models {
+		if m.Provider != provider {
+			continue
+		}
+		if m.ModelID == bare || m.ModelID == modelID || m.ID == modelID || m.ID == ModelKey(provider, bare) {
+			return m, true
+		}
+	}
+	return ModelCfg{}, false
+}
+
+// ModelGeneration reports the per-model generation overrides for a model.
+//
+// temperature is nil when the user has not set it, so an explicit 0 survives
+// the round trip; topP and maxOutput are 0 when unset. ok is false when the
+// model has no stored entry at all. The signature matches
+// conversation.ModelParamsResolver, so hosts can pass this method value
+// straight to Engine.SetModelParamsResolver — it binds the live config
+// pointer, meaning later edits apply without re-wiring.
+func (c *Config) ModelGeneration(provider, modelID string) (temperature *float64, topP float64, maxOutput int, ok bool) {
+	m, found := c.ModelOverride(provider, modelID)
+	if !found {
+		return nil, 0, 0, false
+	}
+	if m.TopP != nil {
+		topP = *m.TopP
+	}
+	return m.Temperature, topP, m.MaxOutput, true
 }

@@ -327,7 +327,7 @@ func TestBuildMessagesBody_Thinking(t *testing.T) {
 		Model:       "claude-sonnet-5",
 		Messages:    []types.Message{{Role: types.RoleUser, Content: "hi"}},
 		MaxTokens:   8192,
-		Temperature: 0.7,
+		Temperature: types.Temp(0.7),
 		Thinking:    &types.ThinkingConfig{BudgetTokens: 4096},
 	}, false)
 	if err != nil {
@@ -375,7 +375,7 @@ func TestBuildMessagesBody_NoThinkingPreservesTemperature(t *testing.T) {
 	body, err := p.buildMessagesBody(types.ChatRequest{
 		Model:       "claude-sonnet-5",
 		Messages:    []types.Message{{Role: types.RoleUser, Content: "hi"}},
-		Temperature: 0.5,
+		Temperature: types.Temp(0.5),
 	}, false)
 	if err != nil {
 		t.Fatalf("build: %v", err)
@@ -386,5 +386,61 @@ func TestBuildMessagesBody_NoThinkingPreservesTemperature(t *testing.T) {
 	}
 	if m["temperature"] != float64(0.5) {
 		t.Fatalf("temperature should be preserved without thinking, got %v", m["temperature"])
+	}
+}
+
+// A per-model override of 0 means "deterministic" and must reach the API. The
+// old float64 + `> 0` guard dropped it silently, so choosing 0 in the settings
+// dialog produced the provider default instead.
+func TestBuildMessagesBody_ExplicitZeroTemperatureIsSent(t *testing.T) {
+	p := New("sk-test", "")
+	body, err := p.buildMessagesBody(types.ChatRequest{
+		Model:       "claude-sonnet-5",
+		Messages:    []types.Message{{Role: types.RoleUser, Content: "hi"}},
+		Temperature: types.Temp(0),
+	}, false)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	m := decodeBody(t, body)
+	if m["temperature"] != float64(0) {
+		t.Fatalf("explicit 0 temperature must be sent, got %v (present=%v)",
+			m["temperature"], m["temperature"] != nil)
+	}
+}
+
+// top_p is forwarded, and suppressed alongside temperature when extended
+// thinking is on (Anthropic rejects both in that mode).
+func TestBuildMessagesBody_TopPForwardedAndSuppressedWithThinking(t *testing.T) {
+	p := New("sk-test", "")
+
+	body, err := p.buildMessagesBody(types.ChatRequest{
+		Model:    "claude-sonnet-5",
+		Messages: []types.Message{{Role: types.RoleUser, Content: "hi"}},
+		TopP:     0.4,
+	}, false)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if m := decodeBody(t, body); m["top_p"] != float64(0.4) {
+		t.Fatalf("top_p = %v, want 0.4", m["top_p"])
+	}
+
+	body, err = p.buildMessagesBody(types.ChatRequest{
+		Model:       "claude-sonnet-5",
+		Messages:    []types.Message{{Role: types.RoleUser, Content: "hi"}},
+		Temperature: types.Temp(0.9),
+		TopP:        0.4,
+		Thinking:    &types.ThinkingConfig{BudgetTokens: 2048},
+	}, false)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	m := decodeBody(t, body)
+	if _, has := m["top_p"]; has {
+		t.Fatalf("top_p must be suppressed when thinking is enabled")
+	}
+	if _, has := m["temperature"]; has {
+		t.Fatalf("temperature must be suppressed when thinking is enabled")
 	}
 }

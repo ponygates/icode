@@ -227,7 +227,7 @@ func (r *Runner) RunWithPrefix(ctx context.Context, def *AgentDef, input string,
 			SystemPrompt: opt.BuildPrefix(),
 			Tools:        toolDefs,
 			MaxTokens:    def.MaxTokens,
-			Temperature:  0.1,
+			Temperature:  types.Temp(0.1),
 		})
 		if err != nil {
 			if finalText.Len() == 0 {

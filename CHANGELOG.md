@@ -1,5 +1,25 @@
 # 更新日志
 
+## v0.53.6 — 让每模型设置真正生效（修复「⚙️ 保存设置」假成功）(2026-09-10)
+
+> v0.53.5 排查时发现的第三个问题，这一轮修掉。模型设置弹窗里调温度/Top P/最大输出，点「保存设置」会显示「已保存」——**但一个字节都没存下去**。
+
+- **【真实 bug】保存是假的**：弹窗把 `temperature`/`max_tokens`/`top_p`/`model_id` POST 到 `PUT /api/config/key`，而该 handler **只解码 provider/api_key/api_base**，其余字段被静默丢弃。
+  - 根因之二：调用处 `onSave={(s) => { handleSaveModelSettings(...) }}` **把返回的 Promise 丢掉了**，所以即使后端返回错误，弹窗也立刻显示「已保存」。
+  - 修法：拆成两个各司其职的接口——`/api/config/model`（每模型参数）与 `/api/config/key`（厂商凭据）；凭据只在用户真的输入了内容时才写，避免空字段把已存的 Key 抹掉。返回的 Promise 一路 return 到按钮，成功/失败由真实结果决定。
+- **【真实 bug】打开弹窗就会覆盖真实设置**：弹窗状态硬编码 `0.7 / 4096 / 0.9`，从不读取该模型当前值。也就是说**打开设置再点保存**（哪怕什么都没改）就会把模型的真实参数改成这三个默认值。修法：从模型当前配置预填（`model.temperature ?? 全局默认`）。
+- **引擎新增「按模型解析的生成参数覆盖层」**（这是让设置生效的关键）：
+  - `conversation.ModelParamsResolver` + `Engine.SetModelParamsResolver`；`(*config.Config).ModelGeneration` 的签名与之一致，可直接以方法值注入——**绑定的是活的 config 指针，改完设置下一轮对话即生效，无需重新接线**。
+  - 解析集中在 `Engine.applyModelParams`，**三个请求点**（主对话、工具 JSON 补发重试、备用模型回退）统一走它，避免各自漂移。备用模型按各自的覆盖值解析，不会继承主模型的参数。
+  - 引擎**不 import config 包**（避免耦合/环），由 server 与 app 两处注入。
+- **`temperature` 由 `float64` 改为 `*float64`（补一个潜藏问题）**：旧的 `if req.Temperature > 0` 判断意味着**用户选「精确」（0）时字段会被整个丢掉**，实际用的是 provider 默认值——即"选了 0 却不生效"。改为指针后 `nil` 表示"未配置（由 provider 决定）"，显式 0 能真正下发。既有的 `Temperature: 0` 调用点（分类器、提交信息、源码解析）改为 `nil` 并加注释说明——**行为完全不变**（它们此前 0 也会被省略）。
+- **`top_p` 全链路打通**：`ChatRequest.TopP` → openai_compat / anthropic 两个 provider 下发。Anthropic 开启 extended thinking 时 Anthropic 官方不允许同时改 `temperature`/`top_p`/`top_k`，因此在 thinking 分支一并 `delete(body, "top_p")`（原先只删 temperature，加了 top_p 后不删就会 400）。
+- **`/api/config/model` 的 id 归一化**：调用方可能带前缀（内置条目在注册表里是 `openrouter/openai/gpt-4o`，而厂商只认 `openai/gpt-4o`），不归一化就会存成 `openrouter/openrouter/…` —— **一个永远不会被读到的键**，设置照样"消失"。现在统一按裸 vendor id 落键。
+- **`/api/models` 回显覆盖值**：此前内置模型永远显示注册表里的原始上下文窗口/最大输出，覆盖值存了也不显示。现在「存储的覆盖 > 内置值」，并把 `temperature`/`top_p` 一并回传，弹窗因此能显示当前配置而非默认值。
+- **UI**：生成参数区新增「上下文窗口」输入（0 = 沿用当前值）与一句「以下参数仅对本模型生效，覆盖全局默认值」的说明；三语各补 3 个键。
+- **新增测试 19 项**：引擎 6（回退全局 / 全局 0 保持 nil / **显式 0 覆盖被尊重** / 部分覆盖互不干扰 / 未知模型保留全局 / 无 provider 不发起查询）、服务端 2（设置落盘并在列表生效且不重复、前缀 id 不被双前缀）、anthropic 2（显式 0 温度下发、top_p 下发且 thinking 时抑制）、前端 11（`modelSettings` 纯函数载荷 + 双接口分工 + 凭据不被写进模型条目 + 服务端错误原样透传 + 模型写失败即中止）、既有 assertion 同步 2 处。
+- 验证：`go build` / `go vet` / `gofmt` / `go test` 全绿；前端 `tsc --noEmit` 零错误、`vitest run` 全通过。
+
 ## v0.53.5 — 厂商内自定义增删模型 + 厂商元数据自动生效 + 过滤非对话模型（修复「刷新后少数模型用不了」）(2026-09-10)
 
 > 用户反馈：刷新模型后出现的**全部**大模型里，有**少数几个**点了用不了。排查结论不是玄学——`/models` 根本不是「对话模型清单」，厂商把自己提供的**所有**推理产物都列在里面（向量化、语音、图像、审核端点）。这些条目以前被原样塞进可选列表，还统一标上 `Tools: true`，于是它们看起来和 `gpt-4o` 一样正常，只有真正发起对话时才炸。

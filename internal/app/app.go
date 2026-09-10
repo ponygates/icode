@@ -172,6 +172,10 @@ func Bootstrap() (*App, error) {
 		app.Engine.WireMessageStore(msgStore)
 	}
 	app.Engine.SetGenerationParams(cfg.Defaults.Temperature, cfg.Defaults.MaxTokens)
+	// Per-model generation overrides (temperature / top_p / max output) layered
+	// on top of the globals above. Bound as a method value so later config
+	// edits apply without re-wiring.
+	app.Engine.SetModelParamsResolver(app.Cfg.ModelGeneration)
 	// Extended thinking (Anthropic): config thinking_tokens > 0 enables it.
 	if cfg.Defaults.ThinkingTokens > 0 {
 		app.Engine.SetThinking(cfg.Defaults.ThinkingTokens)

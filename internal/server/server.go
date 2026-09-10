@@ -93,7 +93,7 @@ func New(cfg ServerConfig) *Server {
 		h := sha256.Sum256([]byte(fmt.Sprintf("%d-%d", time.Now().UnixNano(), os.Getpid())))
 		tokenBytes = h[:]
 	}
-	return &Server{
+	s := &Server{
 		cfg:      cfg.Config,
 		reg:      cfg.Registry,
 		store:    cfg.Store,
@@ -106,6 +106,13 @@ func New(cfg ServerConfig) *Server {
 		port:     cfg.Port,
 		apiToken: hex.EncodeToString(tokenBytes),
 	}
+	// Per-model generation overrides (temperature / top_p / max output). Bound
+	// as a method value so it reads the live config: a settings change picked
+	// up by the config pointer applies to the next turn with no re-wiring.
+	if s.engine != nil && s.cfg != nil {
+		s.engine.SetModelParamsResolver(s.cfg.ModelGeneration)
+	}
+	return s
 }
 
 // Start begins listening and serving API requests.

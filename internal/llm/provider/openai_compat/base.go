@@ -751,8 +751,13 @@ func (p *BaseProvider) buildRequestBody(req types.ChatRequest, stream bool) (io.
 	if req.MaxTokens > 0 {
 		body["max_tokens"] = req.MaxTokens
 	}
-	if req.Temperature > 0 {
-		body["temperature"] = req.Temperature
+	// nil = not configured (let the provider default stand). A pointer means a
+	// value was deliberately chosen, and 0 is a valid one.
+	if req.Temperature != nil {
+		body["temperature"] = *req.Temperature
+	}
+	if req.TopP > 0 {
+		body["top_p"] = req.TopP
 	}
 	if len(req.Tools) > 0 {
 		var tools []map[string]any

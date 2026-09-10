@@ -95,7 +95,7 @@ Keep it under 500 words.`
 		Model:        modelInfo.ID,
 		ProviderName: modelInfo.Provider,
 		MaxTokens:    1200,
-		Temperature:  0.3,
+		Temperature:  types.Temp(0.3),
 		SystemPrompt: "You are a concise, faithful conversation summarizer. Output markdown only.",
 	})
 	if err != nil {

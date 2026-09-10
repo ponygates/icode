@@ -537,13 +537,19 @@ func (p *Provider) buildMessagesBody(req types.ChatRequest, stream bool) (io.Rea
 		body["max_tokens"] = 8192
 	}
 
-	if req.Temperature > 0 {
-		body["temperature"] = req.Temperature
+	// nil = not configured (Anthropic's default stands). A pointer means a
+	// value was deliberately chosen, and 0 is a valid one.
+	if req.Temperature != nil {
+		body["temperature"] = *req.Temperature
+	}
+	if req.TopP > 0 {
+		body["top_p"] = req.TopP
 	}
 
 	// Extended thinking (Claude Messages API "thinking" block). When enabled,
-	// Anthropic requires temperature to stay at its default (1) — suppress any
-	// configured temperature so the API never rejects the call. budget_tokens
+	// Anthropic requires temperature to stay at its default (1) and rejects
+	// top_p / top_k overrides too — suppress all of them so the API never
+	// rejects the call. budget_tokens
 	// must be < max_tokens; clamp it to max_tokens/2 (>= 1024) as a safety net
 	// so a misconfigured budget can never 400 the request.
 	if req.Thinking != nil && req.Thinking.BudgetTokens > 0 {
@@ -563,6 +569,7 @@ func (p *Provider) buildMessagesBody(req types.ChatRequest, stream bool) (io.Rea
 			"budget_tokens": budget,
 		}
 		delete(body, "temperature")
+		delete(body, "top_p")
 	}
 
 	// Tool definitions in Anthropic format

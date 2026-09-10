@@ -93,6 +93,11 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		MaxOutputTokens int  `json:"maxOutputTokens"`
 		FreeTier        bool `json:"free_tier"`
 		Custom          bool `json:"custom"`
+		// Per-model generation overrides, echoed so the settings modal can show
+		// what is currently configured instead of resetting to its defaults.
+		// Nil means "not overridden".
+		Temperature *float64 `json:"temperature,omitempty"`
+		TopP        *float64 `json:"top_p,omitempty"`
 	}
 	result := make([]modelDTO, 0, len(models)+len(s.cfg.Models))
 	seen := make(map[string]bool, len(models)+len(s.cfg.Models))
@@ -118,10 +123,23 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 			plan = m.Plans[0].Name
 			free = m.Plans[0].FreeTier != nil
 		}
-		// Apply a user-defined display-name override if present.
+		// A stored override wins over the built-in figures, so an edit made in
+		// the per-model settings modal is reflected in the list rather than
+		// being stored and ignored.
 		name := m.Name
-		if ov := s.cfg.ModelDisplayName(m.Provider, m.ID); ov != "" {
-			name = ov
+		ctxWin, maxOut := m.ContextWindow, m.MaxOutputTokens
+		var ovTemp, ovTopP *float64
+		if ov, ok := s.cfg.ModelOverride(m.Provider, m.ID); ok {
+			if ov.Name != "" {
+				name = ov.Name
+			}
+			if ov.ContextWindow > 0 {
+				ctxWin = ov.ContextWindow
+			}
+			if ov.MaxOutput > 0 {
+				maxOut = ov.MaxOutput
+			}
+			ovTemp, ovTopP = ov.Temperature, ov.TopP
 		}
 		result = append(result, modelDTO{
 			ID:              m.ID,
@@ -129,12 +147,14 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 			Provider:        m.Provider,
 			ModelID:         m.ID,
 			Plan:            plan,
-			ContextWin:      m.ContextWindow,
-			MaxOut:          m.MaxOutputTokens,
-			ContextWindow:   m.ContextWindow,
-			MaxOutputTokens: m.MaxOutputTokens,
+			ContextWin:      ctxWin,
+			MaxOut:          maxOut,
+			ContextWindow:   ctxWin,
+			MaxOutputTokens: maxOut,
 			FreeTier:        free,
 			Custom:          false,
+			Temperature:     ovTemp,
+			TopP:            ovTopP,
 		})
 	}
 
@@ -163,6 +183,8 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 			MaxOutputTokens: cm.MaxOutput,
 			FreeTier:        cm.FreeTier,
 			Custom:          true,
+			Temperature:     cm.Temperature,
+			TopP:            cm.TopP,
 		})
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -206,6 +228,13 @@ func (s *Server) handleConfigModel(w http.ResponseWriter, r *http.Request) {
 		// send custom:true; editing a built-in model sends custom:false so it is
 		// stored as a display-name/parameter override rather than duplicating
 		// the built-in entry in the model list.
+		//
+		// Normalise to the bare vendor id before building the key: callers
+		// reach this with either convention (a built-in registry entry may be
+		// keyed "openrouter/openai/gpt-4o" while the vendor expects
+		// "openai/gpt-4o"), and an un-normalised key would store the override
+		// under "openrouter/openrouter/…" where nothing would ever read it.
+		m.ModelID = config.VendorModelID(m.Provider, m.ModelID)
 		m.ID = config.ModelKey(m.Provider, m.ModelID)
 
 		// Adding a model the vendor's own catalogue already contains would
