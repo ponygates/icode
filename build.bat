@@ -53,10 +53,15 @@ if "%BUILD_DESKTOP%"=="1" (
         echo   The --no-embedded flag will be used for CLI-only builds.
     ) else (
         echo   Frontend built.
-        REM Copy frontend dist for Go embed
+        REM Copy frontend dist for Go embed.
+        REM  /MIR (mirror), NOT /E: Vite names its bundles by content hash, so a
+        REM  plain copy leaves every previous build's chunks behind in the
+        REM  destination and go:embed then bakes all of them into the binary
+        REM  (24 stale files / ~1.4 MB per executable, measured 2026-09-01).
+        REM  /MIR purges files in the destination that no longer exist here.
         if exist "dist" (
-            robocopy "dist" "%ROOT%internal\embedded\dist" /E /NFL /NDL /NJH /NJS /NP >nul
-            echo   Frontend copied to embedded.
+            robocopy "dist" "%ROOT%internal\embedded\dist" /MIR /NFL /NDL /NJH /NJS /NP >nul
+            echo   Frontend mirrored to embedded ^(stale chunks purged^).
         )
     )
     cd /d "%ROOT%"
