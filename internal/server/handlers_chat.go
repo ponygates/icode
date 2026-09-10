@@ -11,6 +11,11 @@ import (
 	"github.com/ponygates/icode/internal/types"
 )
 
+// sseHeartbeatInterval is how often the chat SSE stream emits a keepalive
+// comment frame while it has no events to send. A variable rather than a
+// constant so tests can shorten it.
+var sseHeartbeatInterval = 15 * time.Second
+
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// Catch any panic in the chat handler so it gets logged instead of
 	// silently killing the response (the http.Server recovers panics, but
@@ -146,6 +151,16 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("[server] chat: engine.Send OK, streaming events...")
 
+	// Keepalive: emit an SSE comment frame whenever the stream goes quiet. A
+	// long tool round (`go test` / `npm build` can run 60s+) produces no
+	// events, and a byte-silent connection gets dropped or stalled by
+	// intermediaries — after which the desktop UI cannot distinguish "the
+	// model is still working" from "the socket died". Comment frames start
+	// with ':' and are ignored by EventSource, so they keep the pipe warm
+	// without polluting the event stream.
+	heartbeat := time.NewTicker(sseHeartbeatInterval)
+	defer heartbeat.Stop()
+
 	firstEvent := true
 	for {
 		select {
@@ -166,6 +181,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 				log.Printf("[server] chat: stream end event=%s session=%s", event.Type, req.SessionID)
 				return
 			}
+		case <-heartbeat.C:
+			fmt.Fprint(w, ": ping\n\n")
+			flusher.Flush()
 		case <-r.Context().Done():
 			log.Printf("[server] chat: client disconnected session=%s", req.SessionID)
 			return

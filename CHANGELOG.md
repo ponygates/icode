@@ -1,5 +1,21 @@
 # 更新日志
 
+## v0.53.2 — 限流重试修复 + SSE 心跳（性能/智能打磨）(2026-09-10)
+
+> 承接第四轮审查遗留的三项「未做」，本轮落地其中两项（性能/可靠性维度），并在过程中发现并修复了一个让重试完全失效的潜藏 bug。
+
+- **【真实 bug】provider 重试此前从未生效**：`doRequestWithRetry` 在每轮迭代开头 `io.ReadAll(httpReq.Body)` 重建请求体，但 net/http 的 Transport 在上一轮 `Do()` 之后已把 body 读空并关闭——重试时读到 0 字节、而 ContentLength 仍是原值，请求在**本地**就以 `ContentLength=N with Body length 0` 失败。这意味着**所有带 body 的 POST（也就是全部聊天/流式请求）的 429/502/503/504 重试与网络错误重试全部落空**。改为标准做法：用 `GetBody()` 取全新副本，仅在 `GetBody` 缺失时做一次性快照兜底。
+- **限流消费 `Retry-After`**（审计遗留 #1，三层打通）：
+  - 新增 `types.RateLimitError`（携带 `RetryAfter`）与 `RetryAfterFromHeaders`，覆盖 RFC 9110 `Retry-After`（delay-seconds 与 HTTP-date 两种形态）、`retry-after-ms`、`x-ratelimit-reset-after`、`anthropic-ratelimit-requests/tokens-reset`、以及 epoch 形式；过去时刻按"已重置"处理。
+  - `BaseProvider` 重试：头值优先于 100ms 倍增表；若头值超过 30s 则**不在本层消化**，直接把响应交还引擎——避免在 provider 内白白烧掉重试次数（引擎才掌握用户可见的等待策略）。
+  - 引擎 `chatStreamWithFallback`：有头值则按服务端节奏等待（钳制 1s~3min，防异常头值卡死回合），无头值仍走指数退避+抖动。
+  - Anthropic 侧同样返回类型化错误（其 reset 头为 HTTP-date 形态）。
+  - **单点改动覆盖 12 家 OpenAI 兼容厂商**（deepseek/kimi/zhipu/huawei/tencent/volcengine/scnet/openrouter/ollama/nvidia/agnes/sensenova 均经 `openai_compat.NewProvider` 构造）。
+- **桌面 SSE 心跳**（审计遗留 #3）：流式静默期每 15s 发一个 SSE comment 帧（`: ping`）。长工具轮（`go test` 可跑 60s+）期间连接不再"字节静默"，代理不会掐断、前端也能区分「模型在思考」与「连接已死」。comment 帧被 EventSource 忽略，不污染事件流。
+- **清理**：移除 5 个被误提交的一次性 codemod 脚本（`.tmp_*.js`）；`.gitignore` 增加 `.tmp_*` / `*.tmp.js` 防复发；gofmt 归位 `internal/core/permission/gate.go`、`internal/tui/render_input_test.go`（均为 import 字母序，无语义变化）。
+- **新增测试 21 项**：`types` 11（各头方言/优先级/过时日期/垃圾值/错误文本兼容性）、`conversation` 3（类型化识别、头值提取、钳制边界）、`openai_compat` 3（长头值不重试直传、无头值、短头值等待后成功）、`server` 1（心跳帧实测）。
+- 验证：`go build ./...` / `go vet ./...` / `go test ./...` 全绿。
+
 ## v0.52.4 补丁3（2026-09-06）
 
 - **按键泵重写为字节级读取 + 手工增量 UTF-8 解码**：IME 提交的中文可能把一个多字节字符拆在两次读取里，rune 读取器把前半截误判为无效字节、后半截再误触发扩展键翻译——中文偶尔变「¿」、字母被吞。字节级实现：0xE0 前缀精确识别（后跟续字节 0x80-0xBF 视为合法 UTF-8 头）、无效序列整体丢弃、ASCII 零开销直通。

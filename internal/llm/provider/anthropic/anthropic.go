@@ -102,6 +102,35 @@ func (p *Provider) Health(ctx context.Context) error {
 	return nil
 }
 
+// maxErrBody caps how much of a provider error body we echo into an error.
+const maxErrBody = 400
+
+// errBodyText trims and truncates a provider error body for error messages.
+func errBodyText(b []byte) string {
+	s := strings.TrimSpace(string(b))
+	if len(s) > maxErrBody {
+		return s[:maxErrBody] + "…"
+	}
+	return s
+}
+
+// statusError converts a non-2xx response into the most specific error we can
+// produce. For 429 it returns a typed types.RateLimitError carrying the
+// server's own Retry-After hint — Anthropic advertises the reset via
+// Retry-After and the anthropic-ratelimit-*-reset headers, and honouring that
+// beats guessing a backoff.
+func (p *Provider) statusError(prefix string, resp *http.Response, errBody []byte) error {
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return &types.RateLimitError{
+			Provider:   ProviderName,
+			StatusCode: resp.StatusCode,
+			RetryAfter: types.RetryAfterFromHeaders(resp.Header.Get),
+			Body:       errBodyText(errBody),
+		}
+	}
+	return fmt.Errorf("%s: HTTP %d — %s", prefix, resp.StatusCode, errBodyText(errBody))
+}
+
 // ============================================================================
 // Chat — non-streaming Messages API
 // ============================================================================
@@ -126,7 +155,7 @@ func (p *Provider) Chat(ctx context.Context, req types.ChatRequest) (*types.Mess
 
 	if resp.StatusCode >= 400 {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("anthropic: HTTP %d — %s", resp.StatusCode, string(errBody))
+		return nil, p.statusError("anthropic", resp, errBody)
 	}
 
 	return p.parseMessagesResponse(resp.Body)
@@ -156,7 +185,7 @@ func (p *Provider) ChatStream(ctx context.Context, req types.ChatRequest) (<-cha
 	if resp.StatusCode >= 400 {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		resp.Body.Close()
-		return nil, fmt.Errorf("anthropic stream: HTTP %d — %s", resp.StatusCode, string(errBody))
+		return nil, p.statusError("anthropic stream", resp, errBody)
 	}
 
 	ch := make(chan types.StreamEvent, 64)

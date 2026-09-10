@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ponygates/icode/internal/core/session"
 	"github.com/ponygates/icode/internal/core/sessionum"
@@ -88,5 +89,69 @@ func TestLongSessionHint(t *testing.T) {
 	}
 	if got := e.longSessionHint(compacted); got != "" {
 		t.Fatalf("budgeted session must not hint, got %q", got)
+	}
+}
+
+// ============================================================================
+// Rate-limit classification and Retry-After honouring
+// ============================================================================
+
+func TestIsRateLimitError_Typed(t *testing.T) {
+	// The typed error is authoritative even when its text carries none of the
+	// substrings the heuristic looks for.
+	typed := &types.RateLimitError{Provider: "deepseek", StatusCode: 429}
+	if !isRateLimitError(typed) {
+		t.Fatal("typed RateLimitError must be recognised")
+	}
+	// Wrapped, as the engine sees it after fmt.Errorf("...: %w", err).
+	if !isRateLimitError(fmt.Errorf("stream request: %w", typed)) {
+		t.Fatal("wrapped RateLimitError must be recognised")
+	}
+	// The substring path must keep working for providers that still return
+	// plain errors.
+	if !isRateLimitError(errors.New("HTTP 429 too many requests")) {
+		t.Fatal("plain 429 error must remain recognised")
+	}
+	if isRateLimitError(errors.New("HTTP 401 invalid api key")) {
+		t.Fatal("an auth failure must not be treated as a rate limit")
+	}
+	if isRateLimitError(nil) {
+		t.Fatal("nil must not be a rate limit")
+	}
+}
+
+func TestRateLimitRetryAfter(t *testing.T) {
+	typed := &types.RateLimitError{StatusCode: 429, RetryAfter: 42 * time.Second}
+	if got := rateLimitRetryAfter(typed); got != 42*time.Second {
+		t.Fatalf("want 42s, got %v", got)
+	}
+	if got := rateLimitRetryAfter(fmt.Errorf("stream: %w", typed)); got != 42*time.Second {
+		t.Fatalf("wrapped: want 42s, got %v", got)
+	}
+	// No hint → 0, so the caller falls back to its own backoff schedule.
+	if got := rateLimitRetryAfter(&types.RateLimitError{StatusCode: 429}); got != 0 {
+		t.Fatalf("a hintless error should yield 0, got %v", got)
+	}
+	if got := rateLimitRetryAfter(errors.New("HTTP 429 too many requests")); got != 0 {
+		t.Fatalf("a plain error should yield 0, got %v", got)
+	}
+}
+
+func TestClampRetryAfter(t *testing.T) {
+	cases := []struct {
+		in   time.Duration
+		want time.Duration
+	}{
+		{0, retryAfterFloor},
+		{time.Millisecond, retryAfterFloor},
+		{retryAfterFloor, retryAfterFloor},
+		{30 * time.Second, 30 * time.Second},
+		{retryAfterCeiling, retryAfterCeiling},
+		{time.Hour, retryAfterCeiling},
+	}
+	for _, tc := range cases {
+		if got := clampRetryAfter(tc.in); got != tc.want {
+			t.Errorf("clampRetryAfter(%v) = %v, want %v", tc.in, got, tc.want)
+		}
 	}
 }

@@ -2,8 +2,8 @@ package tui
 
 import (
 	"bytes"
-	"strings"
 	"fmt"
+	"strings"
 	"testing"
 )
 

@@ -13,6 +13,11 @@ desktop/dist/
 desktop/release/
 internal/embedded/dist/
 
+# Scratch / one-shot codemod scripts — these are throwaway patch drivers and
+# must never be committed (five of them reached the repo once already).
+.tmp_*
+*.tmp.js
+
 # IDE
 .idea/
 .vscode/

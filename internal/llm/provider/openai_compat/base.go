@@ -186,20 +186,55 @@ func retryableStatus(code int) bool {
 	return false
 }
 
+// maxProviderWait bounds how long a single in-provider retry may sleep. A
+// provider that asks for longer than this is handed straight back (see
+// doRequestWithRetry) so the engine — which owns the user-facing retry policy
+// and reports progress — performs the wait instead of us burning an attempt.
+const maxProviderWait = 30 * time.Second
+
 // doRequestWithRetry executes an HTTP request with exponential backoff.
 // It retries on transient network errors and retryable HTTP status codes
 // (429, 502, 503, 504) with up to maxRetries attempts.
+//
+// For rate limits the provider's own Retry-After hint wins over the default
+// 100ms-doubling schedule: that schedule is far too eager for a real 429 and
+// re-failing early both wastes an attempt and deepens the limit.
 func (p *BaseProvider) doRequestWithRetry(ctx context.Context, httpReq *http.Request, maxRetries int) (*http.Response, error) {
 	backoff := 100 * time.Millisecond
 
+	// Snapshot the body once, for bodies http.NewRequest cannot rewind on its
+	// own (GetBody is only installed for *bytes.Buffer, *bytes.Reader and
+	// *strings.Reader).
+	var bodyBytes []byte
+	if httpReq.Body != nil && httpReq.GetBody == nil {
+		b, err := io.ReadAll(httpReq.Body)
+		if err != nil {
+			return nil, fmt.Errorf("snapshot request body: %w", err)
+		}
+		httpReq.Body.Close()
+		bodyBytes = b
+		httpReq.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	}
+
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		// Clone the request body for each retry (body can only be read once).
-		var bodyReader io.Reader
-		if httpReq.Body != nil {
-			bodyBytes, _ := io.ReadAll(httpReq.Body)
-			httpReq.Body.Close()
-			bodyReader = bytes.NewReader(bodyBytes)
-			httpReq.Body = io.NopCloser(bodyReader)
+		// The transport closes the request body after every attempt, so a
+		// retry must be handed a *fresh* one. The previous implementation
+		// re-read httpReq.Body at the top of each iteration instead, which
+		// yielded an empty body on retry while ContentLength still said 80 —
+		// the request then failed locally with "ContentLength=80 with Body
+		// length 0", so the retry never actually reached the provider. This
+		// silently disabled retries for every body-carrying POST, which is to
+		// say every chat and stream request.
+		if attempt > 0 {
+			if httpReq.GetBody != nil {
+				nb, err := httpReq.GetBody()
+				if err != nil {
+					return nil, fmt.Errorf("rewind request body for retry: %w", err)
+				}
+				httpReq.Body = nb
+			} else if bodyBytes != nil {
+				httpReq.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			}
 		}
 
 		resp, err := p.httpClient.Do(httpReq)
@@ -219,6 +254,19 @@ func (p *BaseProvider) doRequestWithRetry(ctx context.Context, httpReq *http.Req
 
 		// Retry on rate-limit / server-error status codes.
 		if resp.StatusCode >= 400 && retryableStatus(resp.StatusCode) && attempt < maxRetries {
+			// Let the provider's own Retry-After hint override our schedule.
+			if hint := types.RetryAfterFromHeaders(resp.Header.Get); hint > 0 {
+				if hint > maxProviderWait {
+					// Too long to absorb here — hand the response back so
+					// ChatStream surfaces a types.RateLimitError carrying the
+					// hint, and the engine performs the wait (it can report
+					// progress to the user; we cannot).
+					return resp, nil
+				}
+				if hint > backoff {
+					backoff = hint
+				}
+			}
 			resp.Body.Close()
 			select {
 			case <-time.After(backoff):
@@ -233,6 +281,35 @@ func (p *BaseProvider) doRequestWithRetry(ctx context.Context, httpReq *http.Req
 	}
 
 	return nil, fmt.Errorf("max retries exceeded")
+}
+
+// maxErrBody caps how much of a provider error body we echo into an error.
+const maxErrBody = 400
+
+// errBodyText trims and truncates a provider error body for error messages.
+func errBodyText(b []byte) string {
+	s := strings.TrimSpace(string(b))
+	if len(s) > maxErrBody {
+		return s[:maxErrBody] + "…"
+	}
+	return s
+}
+
+// httpStatusError converts a non-2xx response into the most specific error we
+// can produce: a typed types.RateLimitError (carrying the server's own
+// Retry-After hint when present) for 429, a plain descriptive error otherwise.
+// Carrying the hint is what lets the engine honour the provider's schedule
+// instead of guessing.
+func (p *BaseProvider) httpStatusError(prefix string, resp *http.Response, errBody []byte) error {
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return &types.RateLimitError{
+			Provider:   p.name,
+			StatusCode: resp.StatusCode,
+			RetryAfter: types.RetryAfterFromHeaders(resp.Header.Get),
+			Body:       errBodyText(errBody),
+		}
+	}
+	return fmt.Errorf("%s: HTTP %d — %s", prefix, resp.StatusCode, errBodyText(errBody))
 }
 
 // ============================================================================
@@ -267,7 +344,7 @@ func (p *BaseProvider) Chat(ctx context.Context, req types.ChatRequest) (*types.
 
 	if resp.StatusCode >= 400 {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("chat: HTTP %d — %s", resp.StatusCode, string(errBody))
+		return nil, p.httpStatusError("chat", resp, errBody)
 	}
 
 	return p.parseChatResponse(resp.Body)
@@ -305,7 +382,7 @@ func (p *BaseProvider) ChatStream(ctx context.Context, req types.ChatRequest) (<
 	if resp.StatusCode >= 400 {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		resp.Body.Close()
-		return nil, fmt.Errorf("stream: HTTP %d — %s", resp.StatusCode, string(errBody))
+		return nil, p.httpStatusError("stream", resp, errBody)
 	}
 
 	ch := make(chan types.StreamEvent, 64)

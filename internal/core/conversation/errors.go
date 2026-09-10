@@ -1,7 +1,11 @@
 package conversation
 
 import (
+	"errors"
 	"strings"
+	"time"
+
+	"github.com/ponygates/icode/internal/types"
 )
 
 // friendlyModelError maps raw provider/network errors to a clear, actionable
@@ -73,10 +77,47 @@ func isRateLimitError(err error) bool {
 	if err == nil {
 		return false
 	}
+	// Providers that report the condition through the typed error tell us
+	// outright — trust that over string matching, which can misfire on a body
+	// that merely mentions "429" or "quota" in passing.
+	var rle *types.RateLimitError
+	if errors.As(err, &rle) {
+		return true
+	}
 	lower := strings.ToLower(err.Error())
 	return containsAny(lower, "429", "rate limit", "rate_limit", "too many requests",
 		"quota", "insufficient", "limit reached", "billing", "overloaded",
 		"temporarily unavailable", "service unavailable")
+}
+
+// rateLimitRetryAfter returns the provider's own wait hint when the error
+// carries one, or 0 when it does not. The engine prefers this over its fixed
+// schedule: the server knows when its window resets, and retrying blind wastes
+// attempts (too eager) or stalls the turn (too patient).
+func rateLimitRetryAfter(err error) time.Duration {
+	var rle *types.RateLimitError
+	if errors.As(err, &rle) && rle.RetryAfter > 0 {
+		return rle.RetryAfter
+	}
+	return 0
+}
+
+const (
+	// retryAfterFloor stops a bogus "retry immediately" hint from spinning hot.
+	retryAfterFloor = 1 * time.Second
+	// retryAfterCeiling stops an absurd header from parking a turn for minutes.
+	retryAfterCeiling = 3 * time.Minute
+)
+
+// clampRetryAfter bounds a provider-supplied wait hint to a sane range.
+func clampRetryAfter(d time.Duration) time.Duration {
+	if d < retryAfterFloor {
+		return retryAfterFloor
+	}
+	if d > retryAfterCeiling {
+		return retryAfterCeiling
+	}
+	return d
 }
 
 // FriendlyModelError is the exported wrapper around friendlyModelError, used

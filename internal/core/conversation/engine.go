@@ -2153,9 +2153,17 @@ func (e *Engine) chatStreamWithFallback(
 		}
 		if isRateLimitError(err) {
 			for attempt := 1; attempt <= 2 && err != nil; attempt++ {
-				// Exponential backoff with jitter — a fixed schedule makes
-				// thundering herds the moment a provider recovers.
+				// Prefer the provider's own Retry-After hint: the server knows
+				// when its window resets, so waiting exactly that long beats
+				// guessing — too short re-fails and deepens the limit, too long
+				// stalls a turn that was already ready to go. Fall back to
+				// exponential backoff with jitter when no hint was given: a
+				// fixed schedule makes thundering herds the moment a provider
+				// recovers.
 				base := time.Duration(15*(1<<(attempt-1))) * time.Second
+				if hint := rateLimitRetryAfter(err); hint > 0 {
+					base = clampRetryAfter(hint)
+				}
 				jitter := time.Duration(rand.Int63n(int64(base / 4)))
 				select {
 				case <-ctx.Done():
