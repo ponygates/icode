@@ -200,7 +200,8 @@ configs/                     默认配置文件
 
 ### 与竞品差距（剩余）
 > 以下为 2026-07-25 状态（第十九批完成后，含 v0.23.0）。
-> **更新（2026-09-06）**：2026-08-29 差距分析的 C1-C4（/share html、/replay、ACP、hooks 15 种）与 D1-D7（多会话流式 + 分屏、Git 工作台、自动化模板库、办公文档技能、桌面 en i18n、自动更新闭环、首跑向导测试连接）已全部落地（v0.48–v0.52）；2026-08-31 第三轮审查 24 项已全部闭环（v0.52.2 三补）；v0.53.0/v0.53.1 补齐 14 项四对标对齐（含 /usage loops、prompt_cache_ttl、model_pricing、/preset、/zen、用量达限自动重试、Focus view）。当前版本 v0.53.1，本轮（2026-09-06）第四轮审查聚焦引擎长时流式、文档一致性、测试盲区。
+> **更新（2026-09-06）**：2026-08-29 差距分析的 C1-C4（/share html、/replay、ACP、hooks 15 种）与 D1-D7（多会话流式 + 分屏、Git 工作台、自动化模板库、办公文档技能、桌面 en i18n、自动更新闭环、首跑向导测试连接）已全部落地（v0.48–v0.52）；2026-08-31 第三轮审查 24 项已全部闭环（v0.52.2 三补）；v0.53.0/v0.53.1 补齐 14 项四对标对齐（含 /usage loops、prompt_cache_ttl、model_pricing、/preset、/zen、用量达限自动重试、Focus view）。第四轮审查（2026-09-06）聚焦引擎长时流式、文档一致性、测试盲区。
+> **更新（2026-09-10）**：v0.53.2 修复 provider 重试从未生效的潜藏 bug（`doRequestWithRetry` 用 `GetBody()` 取新副本）+ 限流消费 `Retry-After`（三层打通，12 家 OpenAI 兼容厂商单点受益）+ 桌面 SSE 心跳；v0.53.3 新增 `types.ModelFetcher` 实时获取厂商模型（13 家全覆盖）+ `ProviderCfg.EnabledModels` 勾选启用（`/api/models/fetch`、`/api/models/selection`，勾选中未在目录里的模型自动注册为 custom）；v0.53.4 新增全部厂商一键获取（并发限流 3）+ 模型排序（上下文长度/新发现优先），并修复 `/api/models` 驼峰/蛇形字段不一致导致上下文窗口长期失真。**当前版本 v0.53.4。**
 
 1. **非 Windows 平台托盘/热键（已补齐）**: v0.18 起 `icode desktop` 在 macOS / Linux 提供系统托盘 + 菜单「在浏览器中打开 / 退出」+ 自动打开默认浏览器；v0.19 起 POSIX 也注册全局热键 `Ctrl+Shift+Space`（用 `golang.design/x/hotkey`，CGO），触发即重新聚焦/打开本机前端，与 Windows 原生热键组合一致。Windows 仍走原生 WebView2 窗口 + 子类化窗口过程（`Ctrl+Shift+Space` 显隐切换）。**已知限制**：① macOS 需授予辅助功能（Accessibility）权限且热键事件需主线程派发，真机待点测；② Linux Wayland 会话不暴露全局热键协议，注册通常失败，回退托盘菜单；③ macOS / Linux 的原生托盘与热键依赖 CGO（Cocoa / libappindicator / ayatana），必须在目标 OS 上以 `CGO_ENABLED=1` + 对应 SDK 构建，本 Windows 开发环境无法交叉编译验证（仅验证 Windows 构建与代码），真机待点测。
 2. **托盘真机验证**: v0.12 原生托盘/热键仅在无头环境验证编译与纯函数单测，真实 Windows 交互待点测（v0.18 未改变此状态）。
