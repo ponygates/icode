@@ -2,12 +2,14 @@ import React, { useState, useCallback, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore, RefreshSummary, type Model } from '../stores/appStore';
 import { ModelFetchPanel } from '../components/ModelFetchPanel';
+import { ModelFetchAllBar } from '../components/ModelFetchAllBar';
 import { useModelFetch } from '../lib/useModelFetch';
+import { sortModels, type ModelSort } from '../lib/modelSort';
 import {
   RefreshCw, Search, Zap, Sparkles, Shield, Cpu, X, Check,
   Key, Globe, Thermometer, Hash, DollarSign, Layers,
   ChevronRight, Settings, Star, Plus, Trash2, AlertTriangle,
-  Download, ListChecks, AlertCircle,
+  Download, ListChecks, AlertCircle, ArrowUpDown, Sparkle,
 } from 'lucide-react';
 
 // ── Per-model settings modal ──────────────────────────────────────
@@ -324,6 +326,7 @@ const ModelsPage: React.FC = () => {
   const saveProvider = useAppStore(s => s.saveProvider);
   const deleteProvider = useAppStore(s => s.deleteProvider);
   const [search, setSearch] = useState('');
+  const [sort, setSort] = useState<ModelSort>('default');
   const [refreshing, setRefreshing] = useState(false);
   const [selectedSettingsModel, setSelectedSettingsModel] = useState<Model | null>(null);
   const [expandedProviders, setExpandedProviders] = useState<Set<string>>(new Set());
@@ -356,11 +359,14 @@ const ModelsPage: React.FC = () => {
     m.id.toLowerCase().includes(search.toLowerCase())
   );
 
+  // Sort applies after filtering so the two compose predictably.
+  const ordered = sortModels(filtered, sort);
+
   // Include vendors that have no catalogue entry at all (a freshly added
   // custom provider). Without this they would be invisible on the only page
   // that can populate them — and "获取模型" is exactly how you populate one.
   const providers = Array.from(new Set([
-    ...filtered.map((m) => m.provider),
+    ...ordered.map((m) => m.provider),
     ...(search ? [] : Object.keys(mf.meta)),
   ]));
 
@@ -511,10 +517,13 @@ const ModelsPage: React.FC = () => {
         </button>
       </div>
 
-      {/* Search bar */}
-      <div style={{ padding: '12px 24px', background: 'var(--bg-primary)' }}>
+      {/* Search + sort + sweep — list-wide controls live together */}
+      <div style={{
+        padding: '12px 24px', background: 'var(--bg-primary)',
+        display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+      }}>
         <div style={{
-          display: 'flex', alignItems: 'center', gap: 10,
+          display: 'flex', alignItems: 'center', gap: 10, flex: 1, minWidth: 220,
           background: 'var(--bg-secondary)', borderRadius: 10,
           border: '1px solid var(--border-color)', padding: '8px 14px',
           transition: 'border-color 0.15s',
@@ -536,6 +545,32 @@ const ModelsPage: React.FC = () => {
             </span>
           )}
         </div>
+
+        {/* Sort — "newly discovered first" surfaces models the vendor ships
+            that this build's catalogue has never heard of. */}
+        <label style={{
+          display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0,
+          background: 'var(--bg-secondary)', border: '1px solid var(--border-color)',
+          borderRadius: 10, padding: '8px 12px',
+        }}>
+          <ArrowUpDown size={13} style={{ color: 'var(--text-muted)' }} />
+          <select
+            value={sort}
+            onChange={(e) => setSort(e.target.value as ModelSort)}
+            title={t('models.sortBy')}
+            style={{
+              background: 'transparent', border: 'none', outline: 'none',
+              color: 'var(--text-primary)', fontSize: 12, cursor: 'pointer',
+            }}
+          >
+            <option value="default">{t('models.sortDefault')}</option>
+            <option value="context-desc">{t('models.sortContextDesc')}</option>
+            <option value="context-asc">{t('models.sortContextAsc')}</option>
+            <option value="new-first">{t('models.sortNewFirst')}</option>
+          </select>
+        </label>
+
+        <ModelFetchAllBar mf={mf} providers={Object.keys(mf.meta)} />
       </div>
 
       {/* Custom Model Modal */}
@@ -754,7 +789,7 @@ const ModelsPage: React.FC = () => {
       {/* Model list — Reasonix-style cards grouped by provider */}
       <div style={{ flex: 1, overflowY: 'auto', padding: '0 24px 24px' }}>
         {providers.map((provider) => {
-          const providerModels = filtered.filter((m) => m.provider === provider);
+          const providerModels = ordered.filter((m) => m.provider === provider);
           // An empty vendor is still worth rendering (it needs "获取模型"),
           // but not while searching — there it is just noise.
           if (providerModels.length === 0 && !(mf.meta[provider] && !search)) return null;
@@ -908,8 +943,22 @@ const ModelsPage: React.FC = () => {
                               {model.name}
                               {isDeprecated && <AlertTriangle size={11} color="#FBBF24" />}
                             </div>
-                            <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                            <div style={{ fontSize: 10, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 5 }}>
                               {model.id}
+                              {/* Not in the built-in catalogue — either the vendor
+                                  shipped it after this build, or it was added by
+                                  hand. Either way it is the flag the
+                                  "newly discovered first" sort keys on. */}
+                              {model.custom && (
+                                <span title={t('models.newModelHint')} style={{
+                                  fontSize: 8.5, padding: '1px 5px', borderRadius: 3,
+                                  fontWeight: 600, letterSpacing: '0.02em',
+                                  background: `${color}18`, color,
+                                  display: 'inline-flex', alignItems: 'center', gap: 2,
+                                }}>
+                                  <Sparkle size={8} />{t('models.newModel')}
+                                </span>
+                              )}
                             </div>
                           </div>
                         </div>

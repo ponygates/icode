@@ -18,6 +18,11 @@ const BASE = 'http://127.0.0.1:8899';
 
 interface Call { url: string; init?: RequestInit }
 let calls: Call[] = [];
+/** Set >0 to make every mocked request take a real tick, so concurrency and
+ *  overlap are observable rather than instantaneous. */
+let latencyMs = 0;
+let inFlight = 0;
+let peakInFlight = 0;
 
 function jsonRes(body: unknown, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: async () => body } as unknown as Response;
@@ -48,10 +53,20 @@ function defaultPlan(url: string, init?: RequestInit): Response {
 beforeEach(() => {
   calls = [];
   plan = defaultPlan;
-  global.fetch = vi.fn(async (input: unknown, init?: RequestInit) => {
+  latencyMs = 0;
+  inFlight = 0;
+  peakInFlight = 0;
+  globalThis.fetch = vi.fn(async (input: unknown, init?: RequestInit) => {
     const url = String(input);
     calls.push({ url, init });
-    return plan(url, init);
+    inFlight++;
+    peakInFlight = Math.max(peakInFlight, inFlight);
+    try {
+      if (latencyMs > 0) await new Promise(r => setTimeout(r, latencyMs));
+      return plan(url, init);
+    } finally {
+      inFlight--;
+    }
   }) as unknown as typeof fetch;
 });
 
@@ -131,7 +146,7 @@ describe('useModelFetch', () => {
 
     const put = selCalls()[0];
     expect(put?.init?.method).toBe('PUT');
-    expect(JSON.parse(String(put.init.body)))
+    expect(JSON.parse(String(put?.init?.body)))
       .toEqual({ provider: 'deepseek', models: ['deepseek-v4-flash', 'deepseek-r1'] });
     expect(result.current.panel).toBeNull();
   });
@@ -197,6 +212,133 @@ describe('useModelFetch', () => {
     expect(result.current.error.deepseek).toBe('disk full');
     expect(result.current.panel).toBe('deepseek');
     expect(result.current.saving).toBe(false);
+  });
+
+  // ── "获取全部厂商" sweep ──────────────────────────────────────────
+
+  describe('fetchAll', () => {
+    const providerNames = ['pa', 'pb', 'pc', 'pd'];
+
+    /** pa/pd succeed, pb answers 501 (no live discovery), pc rejects the key. */
+    function sweepPlan(url: string, init?: RequestInit): Response {
+      if (url.includes('/api/providers')) {
+        return jsonRes(providerNames.map(n => ({ name: n, models: 1, enabled: 1, filtered: false })));
+      }
+      if (url.includes('/api/models/fetch')) {
+        const p = new URL(url).searchParams.get('provider');
+        if (p === 'pb') return jsonRes({ error: 'pb 暂不支持实时获取模型' }, 501);
+        if (p === 'pc') return jsonRes({ error: '401 invalid api key' }, 502);
+        return jsonRes({
+          provider: p, count: 1, filtered: false,
+          models: [{ id: `${p}-1`, name: `${p} 1`, known: true, enabled: true }],
+        });
+      }
+      return defaultPlan(url, init);
+    }
+
+    it('separates unsupported vendors from genuinely failed ones', async () => {
+      plan = sweepPlan;
+      const { result } = renderHook(() => useModelFetch(BASE));
+      await waitFor(() => expect(Object.keys(result.current.meta)).toHaveLength(4));
+
+      let summary: unknown = null;
+      await act(async () => {
+        summary = await result.current.fetchAll(providerNames);
+      });
+
+      // "pb has no live endpoint" and "pc rejected your key" demand different
+      // reactions, so lumping them into one error count would mislead.
+      expect(summary).toEqual({ total: 4, ok: 2, unsupported: 1, failed: 1 });
+      expect(result.current.allSummary).toEqual(summary);
+      expect(result.current.allProgress).toBeNull();
+      expect(result.current.lists.pa).toHaveLength(1);
+      expect(result.current.lists.pd).toHaveLength(1);
+      expect(result.current.lists.pb).toBeUndefined();
+      expect(result.current.error.pc).toBe('401 invalid api key');
+    });
+
+    it('never runs more than `concurrency` requests at once', async () => {
+      plan = sweepPlan;
+      latencyMs = 5;
+      const { result } = renderHook(() => useModelFetch(BASE));
+      await waitFor(() => expect(Object.keys(result.current.meta)).toHaveLength(4));
+
+      peakInFlight = 0;   // ignore the mount-time meta load
+      await act(async () => {
+        await result.current.fetchAll([...providerNames, 'pe', 'pf', 'pg', 'ph']);
+      });
+
+      // Unbounded fan-out would risk rate limits; serialising the whole sweep
+      // would take minutes on a slow vendor. 3 is the agreed compromise.
+      expect(peakInFlight).toBe(3);
+    });
+
+    it('ignores the session cache — "get the latest" is the whole point', async () => {
+      const { result } = renderHook(() => useModelFetch(BASE));
+      await act(async () => { await result.current.fetchModels('deepseek'); });
+      const before = calls.filter(c => c.url.includes('/api/models/fetch')).length;
+
+      await act(async () => { await result.current.fetchAll(['deepseek']); });
+
+      expect(calls.filter(c => c.url.includes('/api/models/fetch')).length)
+        .toBe(before + 1);
+    });
+
+    it('refuses to start a second sweep over the same vendors', async () => {
+      plan = sweepPlan;
+      latencyMs = 5;
+      const { result } = renderHook(() => useModelFetch(BASE));
+      await waitFor(() => expect(Object.keys(result.current.meta)).toHaveLength(4));
+
+      let first: Promise<unknown> | undefined;
+      let second: unknown = 'unset';
+      await act(async () => {
+        first = result.current.fetchAll(providerNames);
+        // Fired in the same tick, before React commits `allProgress` — the
+        // synchronous ref guard is what has to catch this, not the state.
+        second = await result.current.fetchAll(providerNames);
+      });
+      await act(async () => { await first; });
+
+      expect(second).toBeNull();
+      expect(calls.filter(c => c.url.includes('/api/models/fetch')).length)
+        .toBe(providerNames.length);   // exactly one sweep reached the vendor
+    });
+
+    // The mid-flight progress *rendering* is asserted against the real
+    // component in ModelFetchAllBar.test.tsx; React's act() only commits at
+    // flush points, so sampling state mid-sweep here would test batching
+    // rather than behaviour. What matters at this layer is that the sweep
+    // leaves nothing behind.
+    it('leaves no progress behind once the sweep finishes', async () => {
+      plan = sweepPlan;
+      latencyMs = 10;
+      const { result } = renderHook(() => useModelFetch(BASE));
+
+      await act(async () => { await result.current.fetchAll(providerNames); });
+
+      expect(result.current.allProgress).toBeNull();
+      expect(result.current.allSummary)
+        .toEqual({ total: 4, ok: 2, unsupported: 1, failed: 1 });
+    });
+
+    it('clears a finished summary on request', async () => {
+      plan = sweepPlan;
+      const { result } = renderHook(() => useModelFetch(BASE));
+      await act(async () => { await result.current.fetchAll(['pa']); });
+      expect(result.current.allSummary).not.toBeNull();
+
+      act(() => { result.current.clearAllSummary(); });
+      expect(result.current.allSummary).toBeNull();
+    });
+
+    it('does nothing when handed an empty vendor list', async () => {
+      const { result } = renderHook(() => useModelFetch(BASE));
+      let summary: unknown = 'unset';
+      await act(async () => { summary = await result.current.fetchAll([]); });
+      expect(summary).toBeNull();
+      expect(result.current.allSummary).toBeNull();
+    });
   });
 
   it('drops the stale cached list after a save and reloads meta', async () => {

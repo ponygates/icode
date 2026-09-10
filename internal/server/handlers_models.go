@@ -83,8 +83,16 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		Plan       string `json:"plan"`
 		ContextWin int    `json:"context_window"`
 		MaxOut     int    `json:"max_output_tokens"`
-		FreeTier   bool   `json:"free_tier"`
-		Custom     bool   `json:"custom"`
+		// The desktop renderer reads camelCase (model.contextWindow /
+		// model.maxOutputTokens) while these DTOs only ever emitted snake_case,
+		// so those fields were silently always undefined: ChatPage's context
+		// gauge fell back to 200000 and ModelsPage's "ctx" chip never rendered.
+		// Emitting both spellings fixes the renderer without breaking any
+		// existing consumer.
+		ContextWindow   int  `json:"contextWindow"`
+		MaxOutputTokens int  `json:"maxOutputTokens"`
+		FreeTier        bool `json:"free_tier"`
+		Custom          bool `json:"custom"`
 	}
 	result := make([]modelDTO, 0, len(models)+len(s.cfg.Models))
 	seen := make(map[string]bool, len(models)+len(s.cfg.Models))
@@ -116,15 +124,17 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 			name = ov
 		}
 		result = append(result, modelDTO{
-			ID:         m.ID,
-			Name:       name,
-			Provider:   m.Provider,
-			ModelID:    m.ID,
-			Plan:       plan,
-			ContextWin: m.ContextWindow,
-			MaxOut:     m.MaxOutputTokens,
-			FreeTier:   free,
-			Custom:     false,
+			ID:              m.ID,
+			Name:            name,
+			Provider:        m.Provider,
+			ModelID:         m.ID,
+			Plan:            plan,
+			ContextWin:      m.ContextWindow,
+			MaxOut:          m.MaxOutputTokens,
+			ContextWindow:   m.ContextWindow,
+			MaxOutputTokens: m.MaxOutputTokens,
+			FreeTier:        free,
+			Custom:          false,
 		})
 	}
 
@@ -143,14 +153,16 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		result = append(result, modelDTO{
-			ID:         cm.ID,
-			Name:       cm.Name,
-			Provider:   cm.Provider,
-			ModelID:    cm.ModelID,
-			ContextWin: cm.ContextWindow,
-			MaxOut:     cm.MaxOutput,
-			FreeTier:   cm.FreeTier,
-			Custom:     true,
+			ID:              cm.ID,
+			Name:            cm.Name,
+			Provider:        cm.Provider,
+			ModelID:         cm.ModelID,
+			ContextWin:      cm.ContextWindow,
+			MaxOut:          cm.MaxOutput,
+			ContextWindow:   cm.ContextWindow,
+			MaxOutputTokens: cm.MaxOutput,
+			FreeTier:        cm.FreeTier,
+			Custom:          true,
 		})
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -394,6 +406,14 @@ func (s *Server) handleFetchModels(w http.ResponseWriter, r *http.Request) {
 		MaxOut  int    `json:"max_output_tokens,omitempty"`
 	}
 
+	// `known` must mean "present in the built-in catalogue", so the UI can
+	// steer the user to the models that are genuinely new to this build.
+	// Reporting a constant true — as this once did — carries no information.
+	builtin := make(map[string]bool)
+	for _, m := range p.ListModels() {
+		builtin[config.VendorModelID(provider, m.ID)] = true
+	}
+
 	out := make([]fetchedModel, 0, len(fetched))
 	seen := make(map[string]bool, len(fetched))
 	for _, m := range fetched {
@@ -405,7 +425,7 @@ func (s *Server) handleFetchModels(w http.ResponseWriter, r *http.Request) {
 		out = append(out, fetchedModel{
 			ID:      vendorID,
 			Name:    m.Name,
-			Known:   true,
+			Known:   builtin[vendorID],
 			Enabled: s.cfg.IsModelEnabled(provider, vendorID),
 			Context: m.ContextWindow,
 			MaxOut:  m.MaxOutputTokens,
@@ -427,7 +447,7 @@ func (s *Server) handleFetchModels(w http.ResponseWriter, r *http.Request) {
 		out = append(out, fetchedModel{
 			ID:      vendorID,
 			Name:    cm.Name,
-			Known:   true,
+			Known:   builtin[vendorID],
 			Enabled: s.cfg.IsModelEnabled(provider, vendorID),
 			Context: cm.ContextWindow,
 			MaxOut:  cm.MaxOutput,

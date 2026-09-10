@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { useAppStore } from '../stores/appStore';
 import { PageTools, PageUpdates, PageAbout, PageNetwork, PageAutomations } from './SettingsPagesExtra';
 import { ModelFetchPanel } from '../components/ModelFetchPanel';
+import { ModelFetchAllBar } from '../components/ModelFetchAllBar';
 import { useModelFetch } from '../lib/useModelFetch';
 import {
   loadShortcuts, saveShortcuts, resetShortcuts, matchesBinding, recordBinding, bindingLabel,
@@ -522,13 +523,14 @@ function PageModels({ store }: { store: ReturnType<typeof useAppStore.getState> 
         );
       })}
 
-      {/* Refresh button */}
-      <div style={{ display:'flex', justifyContent:'center', marginTop: 4 }}>
+      {/* Refresh + sweep-all */}
+      <div style={{ display:'flex', justifyContent:'center', alignItems:'center', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
         <button onClick={() => store.refreshModels()} style={{
           ...btnGhost, fontSize: 11, padding: '6px 14px',
         }}>
           <RefreshCw size={12} /> {t('settings.refreshModels')}
         </button>
+        <ModelFetchAllBar mf={mf} providers={Object.keys(mf.meta)} />
       </div>
     </div>
   );

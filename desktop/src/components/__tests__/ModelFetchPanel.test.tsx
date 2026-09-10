@@ -36,7 +36,7 @@ function Harness() {
 
 beforeEach(() => {
   calls = [];
-  global.fetch = vi.fn(async (input: unknown, init?: RequestInit) => {
+  globalThis.fetch = vi.fn(async (input: unknown, init?: RequestInit) => {
     const url = String(input);
     calls.push({ url, init });
     if (url.includes('/api/providers')) {

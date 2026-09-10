@@ -1,6 +1,6 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import { ListChecks, AlertCircle } from 'lucide-react';
+import { ListChecks, AlertCircle, Sparkle } from 'lucide-react';
 import type { UseModelFetch } from '../lib/useModelFetch';
 
 /**
@@ -69,6 +69,18 @@ export const ModelFetchPanel: React.FC<{
               <span style={{ fontSize: 11.5, color: 'var(--text-primary)', flex: 1 }}>
                 {m.name || m.id}
               </span>
+              {/* Absent from the built-in catalogue: the vendor knows a model
+                  this build does not. Worth flagging — it is the whole reason
+                  live discovery exists. */}
+              {!m.known && (
+                <span title={t('models.newModelHint')} style={{
+                  fontSize: 8.5, padding: '1px 5px', borderRadius: 3,
+                  fontWeight: 600, background: `${color}18`, color,
+                  display: 'inline-flex', alignItems: 'center', gap: 2, flexShrink: 0,
+                }}>
+                  <Sparkle size={8} />{t('models.newModel')}
+                </span>
+              )}
               {!!m.context_window && (
                 <span style={{ fontSize: 9, color: 'var(--text-muted)' }}>
                   {m.context_window >= 1000 ? `${Math.round(m.context_window / 1000)}K` : m.context_window}

@@ -162,6 +162,66 @@ func hasID(ids []string, want string) bool {
 	return false
 }
 
+// The renderer reads camelCase (model.contextWindow / maxOutputTokens); these
+// DTOs used to emit only snake_case, so those fields were silently always
+// undefined and the context-window gauge always fell back to its default.
+func TestListModelsEmitsCamelCaseTokenLimits(t *testing.T) {
+	base := newFetchTestServer(t, demoProvider())
+
+	var models []map[string]any
+	httpDo(t, http.MethodGet, base+"/api/models", "", http.StatusOK, &models)
+
+	var found bool
+	for _, m := range models {
+		if m["model_id"] != "demo-a" {
+			continue
+		}
+		found = true
+		if got := m["contextWindow"]; got != float64(128000) {
+			t.Fatalf("contextWindow = %v, want 128000", got)
+		}
+		if got := m["maxOutputTokens"]; got != float64(8192) {
+			t.Fatalf("maxOutputTokens = %v, want 8192", got)
+		}
+		// The snake_case spelling predates this and must keep working.
+		if got := m["context_window"]; got != float64(128000) {
+			t.Fatalf("context_window = %v, want 128000 (back-compat)", got)
+		}
+	}
+	if !found {
+		t.Fatalf("demo-a missing from %+v", models)
+	}
+}
+
+// `known` has to mean "present in the built-in catalogue"; reporting a constant
+// true (as it once did) tells the UI nothing and hides the one signal that
+// makes live discovery worth having.
+func TestFetchModelsFlagsModelsAbsentFromBuiltinCatalogue(t *testing.T) {
+	base := newFetchTestServer(t, demoProvider())
+
+	var out struct {
+		Models []struct {
+			ID    string `json:"id"`
+			Known bool   `json:"known"`
+		} `json:"models"`
+	}
+	httpDo(t, http.MethodGet, base+"/api/models/fetch?provider=demo", "", http.StatusOK, &out)
+
+	want := map[string]bool{"demo-a": true, "demo-b": true, "demo-c": false}
+	if len(out.Models) != len(want) {
+		t.Fatalf("got %d models, want %d", len(out.Models), len(want))
+	}
+	for _, m := range out.Models {
+		expected, ok := want[m.ID]
+		if !ok {
+			t.Fatalf("unexpected model %q", m.ID)
+		}
+		if m.Known != expected {
+			t.Fatalf("model %s known = %v, want %v", m.ID, m.Known, expected)
+		}
+	}
+}
+
 // The whole point of the feature: the vendor, not the build, decides what a
 // key can use — including models that did not exist when this binary shipped.
 func TestFetchModelsReturnsLiveCatalogueBeyondBuiltin(t *testing.T) {
