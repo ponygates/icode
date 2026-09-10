@@ -30,7 +30,16 @@ type Runner struct {
 
 	// projectDir anchors project/local memory scopes; set by the host.
 	projectDir string
+
+	// params resolves per-model generation overrides. Installed by the host
+	// (the conversation engine forwards its own resolver); nil = none.
+	params ParamsResolver
 }
+
+// ParamsResolver mirrors conversation.ModelParamsResolver. It returns the
+// user's per-model generation overrides; a nil temperature means "not set"
+// (keep the sub-agent default) while a non-nil pointer, even to 0, wins.
+type ParamsResolver func(provider, modelID string) (temperature *float64, topP float64, maxOutput int, ok bool)
 
 func NewRunner(reg types.ProviderRegistry, tr *tool.Registry) *Runner {
 	return &Runner{
@@ -76,6 +85,59 @@ func (r *Runner) SetSessionID(sessionID string) {
 	r.mu.Lock()
 	r.sessionID = sessionID
 	r.mu.Unlock()
+}
+
+// SetModelParamsResolver installs the per-model generation override source so
+// sub-agents honour the same ⚙️ settings as the main conversation. Passing nil
+// leaves sub-agents on their built-in defaults.
+//
+// Only temperature and top_p are applied. MaxTokens deliberately stays the
+// agent definition's budget (AgentDef.MaxTokens): that is a per-agent design
+// choice, not a per-model one.
+func (r *Runner) SetModelParamsResolver(fn ParamsResolver) {
+	r.mu.Lock()
+	r.params = fn
+	r.mu.Unlock()
+}
+
+// HasModelParamsResolver reports whether a per-model resolver has been
+// installed. Hosts and tests use it to confirm the wiring actually reached the
+// runner.
+func (r *Runner) HasModelParamsResolver() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.params != nil
+}
+
+// subAgentDefaultTemp is the sampling temperature sub-agents use when the user
+// has not pinned a per-model value: keeping it low makes tool-call arguments
+// predictable.
+const subAgentDefaultTemp = 0.1
+
+// resolveGeneration returns the effective temperature and top_p for one
+// sub-agent request. The sub-agent default applies unless the host's per-model
+// override pins the value — including an explicit 0 ("精确").
+func (r *Runner) resolveGeneration(provider, modelID string) (temperature *float64, topP float64) {
+	temperature = types.Temp(subAgentDefaultTemp)
+
+	r.mu.Lock()
+	fn := r.params
+	r.mu.Unlock()
+	if fn == nil {
+		return temperature, 0
+	}
+
+	t, p, _, ok := fn(provider, modelID)
+	if !ok {
+		return temperature, 0
+	}
+	if t != nil {
+		temperature = t
+	}
+	if p > 0 {
+		topP = p
+	}
+	return temperature, topP
 }
 
 // Run executes a sub-agent in its own Optimizer with the given agent
@@ -219,6 +281,7 @@ func (r *Runner) RunWithPrefix(ctx context.Context, def *AgentDef, input string,
 		}
 
 		messages := opt.CompactRequest("")
+		temperature, topP := r.resolveGeneration(modelInfo.Provider, modelInfo.ID)
 		eventCh, err := provider.ChatStream(subCtx, types.ChatRequest{
 			SessionID:    r.sessionID,
 			Messages:     messages,
@@ -227,7 +290,8 @@ func (r *Runner) RunWithPrefix(ctx context.Context, def *AgentDef, input string,
 			SystemPrompt: opt.BuildPrefix(),
 			Tools:        toolDefs,
 			MaxTokens:    def.MaxTokens,
-			Temperature:  types.Temp(0.1),
+			Temperature:  temperature,
+			TopP:         topP,
 		})
 		if err != nil {
 			if finalText.Len() == 0 {

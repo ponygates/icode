@@ -787,6 +787,10 @@ func (e *Engine) getAgentRunner() *agent.Runner {
 		reg.RegisterDefaults()
 		e.agentRegistry = reg
 		e.agentRunner = agent.NewRunnerWithGate(e.providerReg, e.toolReg, e.gate)
+		// Sub-agents must honour the same per-model ⚙️ settings as the main
+		// conversation; otherwise picking 精确 (or a custom top_p) would
+		// silently apply everywhere except Task/fork calls.
+		e.agentRunner.SetModelParamsResolver(agent.ParamsResolver(e.modelParams))
 	})
 	return e.agentRunner
 }

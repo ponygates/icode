@@ -117,3 +117,32 @@ func TestApplyModelParamsSkipsLookupWithoutProvider(t *testing.T) {
 		t.Fatalf("resolver must not be consulted for a provider-less model")
 	}
 }
+
+// The engine owns the sub-agent runner and creates it lazily, so the per-model
+// resolver must be forwarded at creation time. Without this the ⚙️ settings
+// would apply to the main conversation but silently skip Task/fork calls.
+func TestGetAgentRunnerInheritsModelParamsResolver(t *testing.T) {
+	e := newParamEngine(t, 0.7, func(provider, modelID string) (*float64, float64, int, bool) {
+		return ptr(0.2), 0, 0, true
+	})
+	runner := e.getAgentRunner()
+	if runner == nil {
+		t.Fatal("getAgentRunner returned nil")
+	}
+	if !runner.HasModelParamsResolver() {
+		t.Fatal("per-model resolver was not forwarded to the sub-agent runner")
+	}
+}
+
+// With no override source configured the runner must stay on its built-in
+// defaults rather than inheriting something invented.
+func TestGetAgentRunnerWithoutResolverStaysDefault(t *testing.T) {
+	e := newParamEngine(t, 0.7, nil)
+	runner := e.getAgentRunner()
+	if runner == nil {
+		t.Fatal("getAgentRunner returned nil")
+	}
+	if runner.HasModelParamsResolver() {
+		t.Fatal("no resolver was configured, but the runner reports one")
+	}
+}
