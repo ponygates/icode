@@ -361,4 +361,43 @@ describe('useModelFetch', () => {
     const metaCalls = calls.filter(c => c.url.includes('/api/providers')).length;
     expect(metaCalls).toBeGreaterThan(1);
   });
+
+  // ── scoped select-all (the panel's search box) ───────────────────
+
+  // The panel passes its filtered rows, because "select all" should mean what
+  // the user can see. That must union into the selection rather than replace
+  // it: the selection is written to the vendor filter on save, so dropping the
+  // hidden ticks would remove those models from the model list entirely.
+  it('select-all with a subset unions instead of resetting', async () => {
+    const { result } = renderHook(() => useModelFetch(BASE));
+    await act(async () => { await result.current.fetchModels('deepseek'); });
+    act(() => { result.current.selectAll('deepseek', false); });                 // start empty
+    act(() => { result.current.toggle('deepseek', 'deepseek-v4-flash'); });      // tick one by hand
+    act(() => { result.current.selectAll('deepseek', true, ['deepseek-r1']); }); // then "select all" on one match
+
+    expect([...result.current.ticked.deepseek].sort())
+      .toEqual(['deepseek-r1', 'deepseek-v4-flash']);
+  });
+
+  it('select-none with a subset removes only the given ids', async () => {
+    const { result } = renderHook(() => useModelFetch(BASE));
+    await act(async () => { await result.current.fetchModels('deepseek'); });
+
+    act(() => { result.current.selectAll('deepseek', false, ['deepseek-v4']); });
+
+    expect([...result.current.ticked.deepseek].sort())
+      .toEqual(['deepseek-r1', 'deepseek-v4-flash']);
+  });
+
+  // A refresh can retire a model. A tick for an id that is no longer listed
+  // would otherwise survive and be written back as a filter entry.
+  it('drops ticks for models the list no longer contains', async () => {
+    const { result } = renderHook(() => useModelFetch(BASE));
+    await act(async () => { await result.current.fetchModels('deepseek'); });
+    act(() => { result.current.toggle('deepseek', 'deepseek-retired'); });
+    act(() => { result.current.selectAll('deepseek', true); });
+
+    expect(result.current.ticked.deepseek).not.toContain('deepseek-retired');
+    expect(result.current.ticked.deepseek).toHaveLength(3);
+  });
 });

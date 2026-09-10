@@ -20,6 +20,12 @@ export interface FetchedModel {
   name: string;
   known: boolean;
   enabled: boolean;
+  /**
+   * In the built-in catalogue but absent from the vendor's live /models
+   * response. Still callable, so the panel lists it and lets the user tick it
+   * rather than dead-ending in the manual-add dialog.
+   */
+  builtin_only?: boolean;
   context_window?: number;
   max_output_tokens?: number;
 }
@@ -81,7 +87,12 @@ export interface UseModelFetch {
   allSummary: FetchAllSummary | null;
   clearAllSummary: () => void;
   toggle: (provider: string, id: string) => void;
-  selectAll: (provider: string, on: boolean) => void;
+  /**
+   * Tick or untick a vendor's models. `subset` narrows the operation to what
+   * the caller is currently showing — the panel passes its search results —
+   * and omitting it acts on the whole list.
+   */
+  selectAll: (provider: string, on: boolean, subset?: string[]) => void;
   save: (provider: string, afterSave?: () => Promise<void> | void) => Promise<void>;
   close: () => void;
 }
@@ -255,9 +266,31 @@ export function useModelFetch(backendUrl: string | null | undefined): UseModelFe
     });
   }, []);
 
-  const selectAll = useCallback((provider: string, on: boolean) => {
+  /**
+   * Tick or untick models, optionally scoped to `subset`.
+   *
+   * Two deliberate choices, both about not silently losing a selection:
+   *
+   *   - ticking keeps whatever is already ticked (union) instead of resetting
+   *     to the given ids. The panel passes its *filtered* rows, so a reset
+   *     would quietly untick every model the search is hiding — and saving
+   *     then writes that shrunken set to the vendor filter, vanishing those
+   *     models from the model list.
+   *   - ticks that no longer exist in the list are dropped, so a refresh that
+   *     retires a model cannot leave a dangling id in the selection.
+   */
+  const selectAll = useCallback((provider: string, on: boolean, subset?: string[]) => {
     const list = lists[provider] || [];
-    setTicked(prev => ({ ...prev, [provider]: on ? list.map(m => m.id) : [] }));
+    const ids = subset ?? list.map(m => m.id);
+    const live = new Set(list.map(m => m.id));
+    setTicked(prev => {
+      const cur = prev[provider] || [];
+      if (!on) {
+        const drop = new Set(ids);
+        return { ...prev, [provider]: cur.filter(x => !drop.has(x)) };
+      }
+      return { ...prev, [provider]: Array.from(new Set([...cur.filter(x => live.has(x)), ...ids])) };
+    });
   }, [lists]);
 
   const save = useCallback(async (provider: string, afterSave?: () => Promise<void> | void) => {

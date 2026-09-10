@@ -237,12 +237,31 @@ func (s *Server) handleConfigModel(w http.ResponseWriter, r *http.Request) {
 		m.ModelID = config.VendorModelID(m.Provider, m.ModelID)
 		m.ID = config.ModelKey(m.Provider, m.ModelID)
 
-		// Adding a model the vendor's own catalogue already contains would
-		// shadow it with a blank entry, losing its plan, pricing and context
-		// window. Refuse instead of silently degrading a working model.
+		// A model the vendor's own catalogue already contains must not be
+		// duplicated as a custom entry: the blank copy would shadow the
+		// described one, losing its plan, pricing and context window.
+		//
+		// Refusing outright is no better, though. The usual reason to land here
+		// is that the vendor's /models omitted this model — so it was missing
+		// from the fetched checklist and adding it by hand was the only route
+		// left. A flat 409 dead-ends precisely the user who needs help. Enable
+		// the built-in instead, and only fail when something real is in the
+		// way.
 		if m.Custom && s.cataloguedByProvider(m.Provider, m.ModelID) {
-			writeJSON(w, http.StatusConflict, map[string]any{
-				"error": fmt.Sprintf("%s 已内置模型 %s，无需重复添加", m.Provider, m.ModelID),
+			s.ensureModelEnabled(m.Provider, m.ModelID)
+			if err := s.cfg.Save(config.DefaultPath()); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+				return
+			}
+			if s.isProviderDisabled(m.Provider) {
+				writeJSON(w, http.StatusConflict, map[string]any{
+					"error": fmt.Sprintf("%s 是 %s 的内置模型，但该厂商已停用；请先在厂商列表中启用该厂商",
+						m.ModelID, m.Provider),
+				})
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok": true, "id": m.ID, "builtin": true, "enabled": true,
 			})
 			return
 		}
@@ -520,39 +539,67 @@ func (s *Server) handleFetchModels(w http.ResponseWriter, r *http.Request) {
 		Name    string `json:"name"`
 		Known   bool   `json:"known"`
 		Enabled bool   `json:"enabled"`
-		Context int    `json:"context_window,omitempty"`
-		MaxOut  int    `json:"max_output_tokens,omitempty"`
+		// BuiltinOnly marks a model that lives in the built-in catalogue but
+		// which the vendor's own /models did not return. Vendors omit models
+		// for all sorts of reasons — account entitlement, region, or simply an
+		// incomplete listing — yet iCode can still call them. Surfacing them
+		// is what keeps the checklist from contradicting the add endpoint
+		// ("the list doesn't have it" vs "adding it says it already exists"),
+		// and it protects them from being silently dropped by a select-all
+		// save, which would then filter them out of the model list for good.
+		BuiltinOnly bool `json:"builtin_only,omitempty"`
+		Context     int  `json:"context_window,omitempty"`
+		MaxOut      int  `json:"max_output_tokens,omitempty"`
 	}
 
 	// `known` must mean "present in the built-in catalogue", so the UI can
 	// steer the user to the models that are genuinely new to this build.
 	// Reporting a constant true — as this once did — carries no information.
-	builtin := make(map[string]bool)
+	catalogue := make(map[string]types.ModelInfo)
 	for _, m := range p.ListModels() {
-		builtin[config.VendorModelID(provider, m.ID)] = true
+		if id := config.VendorModelID(provider, m.ID); id != "" {
+			catalogue[id] = m
+		}
 	}
 
-	out := make([]fetchedModel, 0, len(fetched))
-	seen := make(map[string]bool, len(fetched))
+	out := make([]fetchedModel, 0, len(fetched)+len(catalogue))
+	seen := make(map[string]bool, len(fetched)+len(catalogue))
 	for _, m := range fetched {
 		vendorID := config.VendorModelID(provider, m.ID)
 		if vendorID == "" || seen[vendorID] {
 			continue
 		}
 		seen[vendorID] = true
-		out = append(out, fetchedModel{
+		entry := fetchedModel{
 			ID:      vendorID,
 			Name:    m.Name,
-			Known:   builtin[vendorID],
 			Enabled: s.cfg.IsModelEnabled(provider, vendorID),
 			Context: m.ContextWindow,
 			MaxOut:  m.MaxOutputTokens,
-		})
+		}
+		// For a built-in model the panel must show the figures iCode will
+		// actually use. /api/models serves the curated registry entry for a
+		// built-in, so echoing the vendor's numbers here would advertise a
+		// context window the rest of the app ignores.
+		if bi, ok := catalogue[vendorID]; ok {
+			entry.Known = true
+			if bi.Name != "" {
+				entry.Name = bi.Name
+			}
+			if bi.ContextWindow > 0 {
+				entry.Context = bi.ContextWindow
+			}
+			if bi.MaxOutputTokens > 0 {
+				entry.MaxOut = bi.MaxOutputTokens
+			}
+		}
+		out = append(out, entry)
 	}
 
 	// Fold in user-added custom models for this vendor so the checklist is the
 	// complete truth for the provider. Without this, ticking "select all" would
 	// silently drop a model the user had added by hand.
+	custom := make([]fetchedModel, 0, 4)
 	for _, cm := range s.cfg.Models {
 		if cm.Provider != provider || !cm.Custom {
 			continue
@@ -562,21 +609,45 @@ func (s *Server) handleFetchModels(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		seen[vendorID] = true
-		out = append(out, fetchedModel{
+		custom = append(custom, fetchedModel{
 			ID:      vendorID,
 			Name:    cm.Name,
-			Known:   builtin[vendorID],
 			Enabled: s.cfg.IsModelEnabled(provider, vendorID),
 			Context: cm.ContextWindow,
 			MaxOut:  cm.MaxOutput,
 		})
 	}
 
+	// Then the built-in models the vendor chose not to report. They go last so
+	// the vendor's own list — what this account can demonstrably call — stays
+	// at the top.
+	omitted := 0
+	for _, m := range p.ListModels() {
+		vendorID := config.VendorModelID(provider, m.ID)
+		if vendorID == "" || seen[vendorID] {
+			continue
+		}
+		seen[vendorID] = true
+		omitted++
+		out = append(out, fetchedModel{
+			ID:          vendorID,
+			Name:        m.Name,
+			Known:       true,
+			BuiltinOnly: true,
+			Enabled:     s.cfg.IsModelEnabled(provider, vendorID),
+			Context:     m.ContextWindow,
+			MaxOut:      m.MaxOutputTokens,
+		})
+	}
+	out = append(out, custom...)
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"provider": provider,
 		"count":    len(out),
 		"filtered": len(s.cfg.Providers[provider].EnabledModels) > 0,
-		"models":   out,
+		// Let the UI explain why the list is longer than the vendor reported.
+		"builtin_only": omitted,
+		"models":       out,
 	})
 }
 

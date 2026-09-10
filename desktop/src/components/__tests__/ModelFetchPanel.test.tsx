@@ -103,4 +103,87 @@ describe('ModelFetchPanel', () => {
     fireEvent.click(apply);
     expect(calls.some(c => c.url.includes('/api/models/selection'))).toBe(false);
   });
+
+  it('filters the checklist as you type', async () => {
+    render(<Harness />);
+    await waitFor(() => expect(screen.getAllByRole('checkbox')).toHaveLength(2));
+
+    const box = screen.getByPlaceholderText('models.searchPlaceholder');
+    fireEvent.change(box, { target: { value: 'v4' } });
+    expect(screen.getAllByRole('checkbox')).toHaveLength(2);   // both ids contain "v4"
+
+    fireEvent.change(box, { target: { value: 'flash' } });
+    expect(screen.getAllByRole('checkbox')).toHaveLength(1);
+    expect(screen.getByText('DeepSeek V4 Flash')).toBeTruthy();
+    expect(screen.queryByText('DeepSeek V4')).toBeNull();
+  });
+
+  it('matches the display name too, not just the id', async () => {
+    render(<Harness />);
+    await waitFor(() => expect(screen.getAllByRole('checkbox')).toHaveLength(2));
+
+    // "Flash" only appears in the human-readable name; the id is all lowercase.
+    fireEvent.change(screen.getByPlaceholderText('models.searchPlaceholder'), { target: { value: 'Flash' } });
+    expect(screen.getAllByRole('checkbox')).toHaveLength(1);
+  });
+
+  it('shows an empty state instead of a blank box when nothing matches', async () => {
+    render(<Harness />);
+    await waitFor(() => expect(screen.getAllByRole('checkbox')).toHaveLength(2));
+
+    fireEvent.change(screen.getByPlaceholderText('models.searchPlaceholder'), { target: { value: 'zzz' } });
+    expect(screen.queryAllByRole('checkbox')).toHaveLength(0);
+    expect(screen.getByText('models.searchNoMatch')).toBeTruthy();
+  });
+
+  // The button acts on what is on screen, and the selection is what gets
+  // written to the vendor filter on save. A blind reset would therefore write a
+  // filter that silently drops every model the search was hiding.
+  it('scopes select-all to the visible rows and leaves hidden ticks alone', async () => {
+    render(<Harness />);
+    await waitFor(() => expect(screen.getAllByRole('checkbox')).toHaveLength(2));
+
+    fireEvent.change(screen.getByPlaceholderText('models.searchPlaceholder'), { target: { value: 'flash' } });
+    expect(screen.getAllByRole('checkbox')).toHaveLength(1);
+
+    fireEvent.click(screen.getByText('models.selectNoneShown'));
+    expect((screen.getAllByRole('checkbox')[0] as HTMLInputElement).checked).toBe(false);
+    fireEvent.click(screen.getByText('models.selectAllShown'));
+    expect((screen.getAllByRole('checkbox')[0] as HTMLInputElement).checked).toBe(true);
+
+    fireEvent.click(screen.getByText('models.applySelection'));
+    await waitFor(() => {
+      const put = calls.find(c => c.url.includes('/api/models/selection'));
+      expect(JSON.parse(String(put!.init!.body)).models.sort())
+        .toEqual(['deepseek-v4', 'deepseek-v4-flash']);
+    });
+  });
+
+  it('lists built-in models the vendor omitted, and says why they are there', async () => {
+    globalThis.fetch = vi.fn(async (input: unknown) => {
+      const url = String(input);
+      if (url.includes('/api/providers')) {
+        return jsonRes([{ name: 'deepseek', models: 3, enabled: 3, filtered: false }]);
+      }
+      if (url.includes('/api/models/fetch')) {
+        return jsonRes({
+          provider: 'deepseek', count: 3, filtered: false, builtin_only: 1,
+          models: [
+            { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', known: true, enabled: true, context_window: 128000 },
+            { id: 'deepseek-v4', name: 'DeepSeek V4', known: true, enabled: true, context_window: 128000 },
+            // Present in the build's catalogue, absent from the vendor's list.
+            { id: 'deepseek-r1', name: 'DeepSeek R1', known: true, enabled: true, builtin_only: true, context_window: 64000 },
+          ],
+        });
+      }
+      return jsonRes({ ok: true });
+    }) as unknown as typeof fetch;
+
+    render(<Harness />);
+    await waitFor(() => expect(screen.getAllByRole('checkbox')).toHaveLength(3));
+    // It is tickable like any other model...
+    expect(screen.getByText('models.builtinBadge')).toBeTruthy();
+    // ...and the header explains the longer-than-expected list.
+    expect(screen.getByText(/^models\.builtinNote/)).toBeTruthy();
+  });
 });

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"testing"
@@ -127,6 +128,24 @@ func demoProvider() *fetchProvider {
 			{ID: "demo-a", Provider: "demo", Name: "Demo A", ContextWindow: 128000, MaxOutputTokens: 8192},
 			{ID: "demo-b", Provider: "demo", Name: "Demo B", ContextWindow: 32000, MaxOutputTokens: 4096},
 			{ID: "demo-c", Provider: "demo", Name: "Demo C (new)", ContextWindow: 200000, MaxOutputTokens: 16384},
+		},
+	}
+}
+
+// A vendor whose /models listing is narrower than this build's catalogue:
+// demo-c is a built-in the vendor simply does not report. Real vendors do this
+// for entitlement, regional and plain-completeness reasons.
+func shrunkProvider() *fetchProvider {
+	return &fetchProvider{
+		name: "demo",
+		listed: []types.ModelInfo{
+			{ID: "demo-a", Provider: "demo", Name: "Demo A", ContextWindow: 128000, MaxOutputTokens: 8192},
+			{ID: "demo-b", Provider: "demo", Name: "Demo B", ContextWindow: 32000, MaxOutputTokens: 4096},
+			{ID: "demo-c", Provider: "demo", Name: "Demo C", ContextWindow: 200000, MaxOutputTokens: 16384},
+		},
+		live: []types.ModelInfo{
+			{ID: "demo-a", Provider: "demo", Name: "Demo A", ContextWindow: 128000, MaxOutputTokens: 8192},
+			{ID: "demo-b", Provider: "demo", Name: "Demo B", ContextWindow: 32000, MaxOutputTokens: 4096},
 		},
 	}
 }
@@ -439,14 +458,17 @@ func TestAddCustomModelToUncuratedVendor(t *testing.T) {
 	}
 }
 
-// Adding a model the vendor already ships would replace a fully described entry
-// (plan, pricing, context window) with a blank one, silently degrading it.
-func TestAddDuplicateOfBuiltinModelIsRejected(t *testing.T) {
+// Adding a model the vendor already ships must not replace a fully described
+// entry (plan, pricing, context window) with a blank one — but it must not be
+// refused outright either. The usual reason to reach this dialog with a
+// built-in id is that the vendor's /models omitted it, so this was the only
+// route left; a flat 409 dead-ends exactly the user who needs help.
+func TestAddingBuiltinModelEnablesItInsteadOfFailing(t *testing.T) {
 	base := newFetchTestServer(t, demoProvider())
 
 	httpDo(t, http.MethodPut, base+"/api/config/model",
 		`{"provider":"demo","model_id":"demo-a","name":"Shadow","custom":true}`,
-		http.StatusConflict, nil)
+		http.StatusOK, nil)
 
 	// The built-in entry must still be intact and listed once.
 	var all []map[string]any
@@ -465,6 +487,116 @@ func TestAddDuplicateOfBuiltinModelIsRejected(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("demo-a listed %d times, want 1", count)
+	}
+}
+
+// The concrete dead end: curate the vendor down to a subset and a built-in that
+// is not in it becomes unreachable through either route — absent from the
+// fetched checklist and rejected by the add dialog. Adding it by hand has to
+// lift the filter entry rather than refuse.
+func TestAddingBuiltinModelEscapesTheVendorFilter(t *testing.T) {
+	base := newFetchTestServer(t, demoProvider())
+
+	httpDo(t, http.MethodPut, base+"/api/models/selection",
+		`{"provider":"demo","models":["demo-b"]}`, http.StatusOK, nil)
+	if ids := providerModelIDs(t, base); hasID(ids, "demo-a") {
+		t.Fatalf("precondition failed: demo-a should be filtered out, got %v", ids)
+	}
+
+	httpDo(t, http.MethodPut, base+"/api/config/model",
+		`{"provider":"demo","model_id":"demo-a","custom":true}`, http.StatusOK, nil)
+
+	if ids := providerModelIDs(t, base); !hasID(ids, "demo-a") {
+		t.Fatalf("built-in model was not re-enabled: %v", ids)
+	}
+}
+
+// A disabled vendor is the one case where the model genuinely cannot be shown.
+// Reporting success there would be the kind of fake "saved" this codebase has
+// already been burned by, so it stays an error.
+func TestAddingBuiltinModelOnDisabledProviderStillFails(t *testing.T) {
+	base := newFetchTestServer(t, demoProvider())
+	httpDo(t, http.MethodPut, base+"/api/config/provider",
+		`{"name":"demo","disabled":true}`, http.StatusOK, nil)
+
+	httpDo(t, http.MethodPut, base+"/api/config/model",
+		`{"provider":"demo","model_id":"demo-a","custom":true}`,
+		http.StatusConflict, nil)
+}
+
+// The checklist must be the union of what the vendor reported and what this
+// build already knows. Otherwise a model the vendor happens to omit is
+// invisible here *and* refused by the add dialog: "the list doesn't have it,
+// but adding it says it already exists".
+func TestFetchModelsIncludesBuiltinsTheVendorOmitted(t *testing.T) {
+	base := newFetchTestServer(t, shrunkProvider())
+
+	var resp struct {
+		Count       int              `json:"count"`
+		BuiltinOnly int              `json:"builtin_only"`
+		Models      []map[string]any `json:"models"`
+	}
+	httpDo(t, http.MethodGet, base+"/api/models/fetch?provider=demo", "", http.StatusOK, &resp)
+
+	if resp.BuiltinOnly != 1 {
+		t.Fatalf("builtin_only = %d, want 1", resp.BuiltinOnly)
+	}
+	if resp.Count != 3 {
+		t.Fatalf("count = %d, want 3 (2 vendor + 1 built-in)", resp.Count)
+	}
+	var found bool
+	for _, m := range resp.Models {
+		if m["id"] != "demo-c" {
+			continue
+		}
+		found = true
+		if m["known"] != true {
+			t.Fatalf("demo-c known = %v, want true", m["known"])
+		}
+		if m["builtin_only"] != true {
+			t.Fatalf("demo-c builtin_only = %v, want true", m["builtin_only"])
+		}
+		// The panel has to promise the figures the app will actually use.
+		if m["context_window"] != float64(200000) {
+			t.Fatalf("demo-c context_window = %v, want 200000", m["context_window"])
+		}
+		if m["max_output_tokens"] != float64(16384) {
+			t.Fatalf("demo-c max_output_tokens = %v, want 16384", m["max_output_tokens"])
+		}
+	}
+	if !found {
+		t.Fatalf("built-in demo-c missing from the fetched checklist: %+v", resp.Models)
+	}
+}
+
+// Before the merge, ticking everything the checklist showed and saving was how
+// a built-in the vendor omitted disappeared from the model list for good — the
+// saved filter named every id except that one.
+func TestSelectAllFromFetchedListKeepsOmittedBuiltins(t *testing.T) {
+	base := newFetchTestServer(t, shrunkProvider())
+
+	var resp struct {
+		Models []struct {
+			ID string `json:"id"`
+		} `json:"models"`
+	}
+	httpDo(t, http.MethodGet, base+"/api/models/fetch?provider=demo", "", http.StatusOK, &resp)
+	ids := make([]string, 0, len(resp.Models))
+	for _, m := range resp.Models {
+		ids = append(ids, m.ID)
+	}
+
+	payload, err := json.Marshal(map[string]any{"provider": "demo", "models": ids})
+	if err != nil {
+		t.Fatalf("marshal selection: %v", err)
+	}
+	httpDo(t, http.MethodPut, base+"/api/models/selection", string(payload), http.StatusOK, nil)
+
+	got := providerModelIDs(t, base)
+	for _, want := range []string{"demo-a", "demo-b", "demo-c"} {
+		if !hasID(got, want) {
+			t.Fatalf("%s disappeared after a select-all save: %v", want, got)
+		}
 	}
 }
 
