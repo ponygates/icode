@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -79,16 +80,19 @@ func (s *Server) handleAnalytics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Persist a snapshot so the global dashboard aggregates across sessions
-	// and survives restarts. Best-effort: ignore errors when no store is wired.
+	// and survives restarts. Best-effort: when no store is wired we skip; when
+	// it is, an Upsert failure is logged so the dashboard gap is visible.
 	if s.db != nil {
-		_ = s.db.UpsertSessionStats(db.SessionStatSnapshot{
+		if uerr := s.db.UpsertSessionStats(db.SessionStatSnapshot{
 			SessionID:          sessionID,
 			TokensSaved:        stats.TokensSaved,
 			CacheHitTokens:     stats.CacheHitTokens,
 			EstimatedCost:      stats.EstimatedCost,
 			EstimatedSavedCost: stats.EstimatedSavedCost,
 			CacheHitRate:       stats.CacheHitRate,
-		})
+		}); uerr != nil {
+			log.Printf("[server] snapshot session stats for %s failed: %v", sessionID, uerr)
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats)
@@ -149,11 +153,11 @@ func (s *Server) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
 		if ws.Name == "" {
 			ws.Name = "工作区"
 		}
-		if err := s.db.CreateWorkspace(ws); err != nil {
+		created, err := s.db.CreateWorkspace(ws)
+		if err != nil {
 			writeJSON(w, 500, map[string]any{"error": err.Error()})
 			return
 		}
-		created, _ := s.db.GetWorkspace(ws.ID)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(created)

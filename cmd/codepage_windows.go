@@ -21,25 +21,33 @@ const (
 	attachParentProcess = ^uintptr(0)
 )
 
-// setupConsoleIO wires up standard I/O for the GUI-subsystem binary.
+// setupConsoleIO wires up standard I/O.
 //
-// iCode is now linked with -H windowsgui so that double-clicking the exe from
-// Explorer does NOT create a black console window (previously a console flashed
-// on screen and was hidden after the fact via FreeConsole). The trade-off of a
-// GUI-subsystem binary is that when it IS launched from a terminal the process
-// no longer automatically inherits the parent's console, so CLI output would go
-// nowhere. This function restores that:
+// The CLI is linked as a CONSOLE-subsystem app (build.bat, no -H windowsgui):
+// it automatically inherits the parent terminal's console, and double-clicking
+// it in Explorer makes Windows open a fresh terminal window — both give us
+// valid std handles, so this function returns true immediately. It only does
+// real work for GUI-subsystem builds that share this package (e.g.
+// icode-desktop.exe built with -tags desktop_only):
 //
-//   - If Go already has valid standard handles (output was redirected to a file
-//     or pipe, e.g. `icode ... > out.txt`), keep them untouched.
-//   - Otherwise try to attach to the parent process's console (the cmd/
-//     PowerShell that launched us). On success, rebind Go's os.Stdin/Stdout/
-//     Stderr to that console so the TUI and all CLI output work normally.
-//   - If there is no parent console (a genuine Explorer double-click), return
-//     false — the caller then starts desktop mode.
+//   - If Go already has valid standard handles (console inherited, or output
+//     redirected to a file/pipe), keep them untouched.
+//   - Otherwise try to attach to the parent process's console and rebind Go's
+//     os.Stdin/Stdout/Stderr to it.
+//   - If there is no parent console (a genuine Explorer double-click of a
+//     GUI-subsystem binary), return false — the caller then starts desktop
+//     mode or allocates a console.
+//
+// Historical note: the CLI was briefly linked with -H windowsgui (to avoid a
+// flashing console on double-click). That silently broke the console IME
+// bridge: conhost/ConPTY treat GUI-subsystem clients differently, so Chinese
+// IME composition leaked raw pinyin letters into stdin and the commit string
+// was echoed directly into the screen buffer — the "typed text and garbage
+// appear above the input box" bug (evidence: ~/.icode/screen-dump.txt,
+// ~/.icode/cli.log). Reverted to the console subsystem.
 //
 // Returns true when a usable console/stdio is available (CLI context), false
-// when the process has no console at all (double-click / GUI-launch context).
+// when the process has no console at all (GUI-launch context).
 func setupConsoleIO() bool {
 	// Case 1: stdout was inherited (redirect/pipe) — nothing to do.
 	if h := os.Stdout.Fd(); h != 0 && h != uintptr(syscall.InvalidHandle) {
@@ -175,8 +183,14 @@ func isFreshConsole() bool {
 // turned this helper into a no-op.
 func hideConsoleWindow() {
 	kernel32 := windows.NewLazySystemDLL("kernel32.dll")
+	user32 := windows.NewLazySystemDLL("user32.dll")
 	gcw := kernel32.NewProc("GetConsoleWindow")
-	showW := kernel32.NewProc("ShowWindow")
+	// ShowWindow is exported from user32, NOT kernel32 — looking it up in
+	// kernel32 resolves to EPROC, and LazyProc.Call surfaces that as
+	// "Failed to find ShowWindow procedure in kernel32.dll", which used to
+	// abort the whole desktop boot (see cmd/tray_windows.go, which looks it
+	// up in user32 correctly).
+	showW := user32.NewProc("ShowWindow")
 	hwnd, _, _ := gcw.Call()
 	if hwnd == 0 {
 		return
@@ -187,6 +201,9 @@ func hideConsoleWindow() {
 	// window away. SW_HIDE alone suffices for the double-click case.
 	if !isFreshConsole() {
 		return
+	}
+	if err := showW.Find(); err != nil {
+		return // best-effort helper: never let a missing export kill the boot
 	}
 	showW.Call(hwnd, 0) // SW_HIDE
 }

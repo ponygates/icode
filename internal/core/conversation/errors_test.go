@@ -49,6 +49,9 @@ func TestFriendlyModelError(t *testing.T) {
 func TestLongSessionHint(t *testing.T) {
 	st := session.NewStore()
 	e := NewEngine(nil, st, nil)
+	// The manual /compact nudge only exists as the fallback when
+	// auto-compaction is disabled (config tools.auto_compact_pct: 0).
+	e.SetAutoCompactPct(0)
 
 	short := &types.Session{ID: "short"}
 	short.Messages = []types.Message{{Role: types.RoleUser, Content: "hi"}}

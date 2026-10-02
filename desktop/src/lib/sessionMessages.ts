@@ -2,7 +2,7 @@
 //
 // The desktop UI has several local-only helpers (# memory, ! shell, fork,
 // clear) that mutate the zustand session state in memory. To keep history in
-// sync across the CLI, simpleui, and desktop (which share the same SQLite
+// sync across the CLI and desktop (which share the same SQLite
 // DB), every such mutation is also flushed through the message-level API.
 // These thin wrappers centralize that contract so the calls are testable and
 // the pages stay readable. fetch is injectable for tests.
@@ -60,8 +60,20 @@ export async function apiForkMessages(
   return Promise.all(out).catch(() => out as unknown as Response[]);
 }
 
+// Branch point: everything up to and including `throughId`. Returns null when
+// that message is no longer in the list, so a stale click can't silently fork
+// the whole session instead of the intended prefix.
+export function sliceThrough<T extends { id: string }>(
+  messages: T[],
+  throughId?: string,
+): T[] | null {
+  if (!throughId) return messages;
+  const idx = messages.findIndex((m) => m.id === throughId);
+  return idx < 0 ? null : messages.slice(0, idx + 1);
+}
+
 // Wipe a session's messages server-side so a cleared chat does not resurrect
-// in the CLI/simpleui.
+// in the CLI.
 export function apiClearSession(
   base: string,
   sessionId: string,

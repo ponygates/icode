@@ -10,7 +10,7 @@ import (
 // cleanupCmd runs disk cleanup without requiring an AI model.
 var cleanupCmd = &cobra.Command{
 	Use:   "cleanup",
-	Short: "Clean disk space (C盘清理) — no AI model required",
+	Short: "清理磁盘空间（C盘清理）— 无需 AI 模型",
 	Long: `Scan and clean temporary files, recycle bin, browser cache, 
 and Windows Update leftovers. 
 

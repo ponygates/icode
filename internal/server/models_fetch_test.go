@@ -112,7 +112,9 @@ func newFetchTestServer(t *testing.T, providers ...types.Provider) string {
 	if err != nil {
 		t.Fatalf("start server: %v", err)
 	}
-	return fmt.Sprintf("http://127.0.0.1:%d", port)
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	testTokens.Store(base, srv.APIToken())
+	return base
 }
 
 func demoProvider() *fetchProvider {

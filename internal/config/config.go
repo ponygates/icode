@@ -4,12 +4,13 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
-	"github.com/BurntSushi/toml"
 	"gopkg.in/yaml.v3"
 
 	"github.com/ponygates/icode/internal/secure"
@@ -101,6 +102,13 @@ type Config struct {
 	// It is applied to the process environment at server start and on each
 	// settings save, so it takes effect without a restart.
 	Proxy string `yaml:"proxy,omitempty" json:"proxy,omitempty"`
+
+	// layers records which settings layer contributed each last write, and
+	// rawLayers keeps the managed layer so it can be re-applied after any
+	// lower-priority source (CLI flags) mutates the config at runtime.
+	// Neither is persisted — they are runtime bookkeeping only.
+	layers    map[string]string         `yaml:"-" json:"-"`
+	rawLayers map[string]map[string]any `yaml:"-" json:"-"`
 }
 
 // HookRule mirrors hooks.Rule but lives here so config stays dependency-free.
@@ -192,6 +200,73 @@ type ProviderCfg struct {
 	// available. That keeps configs written before this feature, and vendors
 	// the user never curated, working exactly as before.
 	EnabledModels []string `yaml:"enabled_models,omitempty" json:"enabled_models,omitempty"`
+	// OAuth configures a subscription-account (OAuth 2.0 authorization-code +
+	// PKCE) login for this vendor. It carries no secrets; the tokens a
+	// successful login yields are stored in APIKey (access) and Grant (refresh).
+	// Endpoints are deliberately NOT shipped as built-in defaults: the official
+	// Anthropic/OpenAI documentation does not publish them (the Claude Code auth
+	// docs describe only the browser flow and where credentials land, and the
+	// modern flow is RFC 8414 discovery + RFC 7591 DCR), so they must be filled
+	// in from the vendor's own authorization-server metadata.
+	OAuth *OAuthCfg `yaml:"oauth,omitempty" json:"oauth,omitempty"`
+	// Grant records that this vendor was logged in with a subscription account
+	// and holds the refresh credential. nil means "API key only".
+	Grant *OAuthGrant `yaml:"grant,omitempty" json:"grant,omitempty"`
+}
+
+// OAuthCfg is the static, non-secret configuration of a provider's OAuth flow.
+type OAuthCfg struct {
+	// AuthorizeURL is where the browser is sent to grant access.
+	AuthorizeURL string `yaml:"authorize_url,omitempty" json:"authorize_url,omitempty"`
+	// TokenURL is the RFC 6749 token endpoint (authorization-code exchange and
+	// refresh_token grant both POST here).
+	TokenURL string `yaml:"token_url,omitempty" json:"token_url,omitempty"`
+	// RegisterURL is an RFC 7591 dynamic-client-registration endpoint, used only
+	// when UsesDCR is set and ClientID is empty.
+	RegisterURL string `yaml:"register_url,omitempty" json:"register_url,omitempty"`
+	// DiscoveryURL is an RFC 8414 authorization-server metadata document. When
+	// set and AuthorizeURL/TokenURL are blank, they are read from it.
+	DiscoveryURL string `yaml:"discovery_url,omitempty" json:"discovery_url,omitempty"`
+	// ClientID is a published client id. Empty with UsesDCR triggers a
+	// registration request; empty without DCR is a configuration error. It is
+	// left unset here because vendors ship different ids and iCode does not
+	// guess.
+	ClientID string `yaml:"client_id,omitempty" json:"client_id,omitempty"`
+	// Scopes to request. Empty uses whatever the discovery document declares.
+	Scopes []string `yaml:"scopes,omitempty" json:"scopes,omitempty"`
+	// RedirectBase is the loopback origin iCode listens on for the callback
+	// (e.g. "http://127.0.0.1"). The port is chosen when the listener binds.
+	RedirectBase string `yaml:"redirect_base,omitempty" json:"redirect_base,omitempty"`
+	// UsesDCR marks vendors that require dynamic client registration instead of
+	// a shipped client_id (Anthropic's documented modern flow).
+	UsesDCR bool `yaml:"uses_dcr,omitempty" json:"uses_dcr,omitempty"`
+}
+
+// OAuthGrant holds the persisted result of a subscription login. The access
+// token lives in ProviderCfg.APIKey (so any Bearer provider uses it unchanged);
+// only the refresh token is an extra secret and is encrypted at rest like the
+// API key.
+type OAuthGrant struct {
+	RefreshToken    string `yaml:"refresh_token,omitempty" json:"-"`
+	RefreshTokenEnc string `yaml:"refresh_token_enc,omitempty" json:"-"`
+	// ExpiresAt is the access-token expiry as Unix seconds; 0 means "no expiry
+	// reported", in which case no proactive refresh happens.
+	ExpiresAt int64 `yaml:"expires_at,omitempty" json:"expires_at,omitempty"`
+	// Account is the human identity the vendor returned (email/sub), shown by
+	// status as the signed-in subscription.
+	Account string `yaml:"account,omitempty" json:"account,omitempty"`
+}
+
+// Subscription returns the grant's expiry and account for status display, or
+// ok=false when the provider has no OAuth grant (API-key-only).
+func (p ProviderCfg) Subscription() (expiresAt time.Time, account string, ok bool) {
+	if p.Grant == nil || strings.TrimSpace(p.APIKey) == "" {
+		return time.Time{}, "", false
+	}
+	if p.Grant.ExpiresAt > 0 {
+		expiresAt = time.Unix(p.Grant.ExpiresAt, 0)
+	}
+	return expiresAt, p.Grant.Account, true
 }
 
 // VendorModelID strips a leading "provider/" from a model id when present, so
@@ -274,12 +349,27 @@ type TUICfg struct {
 	// ShowStatusLine controls the bottom status bar. Defaults to true; a nil
 	// pointer means "unset" → treated as true by consumers.
 	ShowStatusLine *bool `yaml:"show_status_line,omitempty" json:"show_status_line,omitempty"`
+	// Bell controls the task-completion bell: when a generation runs longer
+	// than ~30s the CLI emits BEL (\x07) so the terminal (Windows Terminal /
+	// iTerm2 / etc.) flashes its tab or raises a system notification — the
+	// user can background the window without missing the finish. Defaults to
+	// true; nil means "unset" → treated as true.
+	Bell *bool `yaml:"bell,omitempty" json:"bell,omitempty"`
+	// Mouse controls SGR mouse tracking in the CLI TUI (the /mouse toggle).
+	// Off = the terminal regains native click-drag text selection; Shift+drag
+	// always selects regardless. Defaults to true; nil means "unset" → true.
+	Mouse *bool `yaml:"mouse,omitempty" json:"mouse,omitempty"`
 }
 
 type ToolsCfg struct {
 	BashTimeout int `yaml:"bash_timeout_sec" json:"bash_timeout_sec"`
 	// MaxToolRounds caps agent tool iterations per turn (0 = default 25).
 	MaxToolRounds int `yaml:"max_tool_rounds" json:"max_tool_rounds"`
+	// AutoCompactPct is the auto-compact threshold as a percent of the active
+	// model's ContextWindow — when the estimated context reaches it, the
+	// engine compacts older turns automatically (Claude Code / Codex parity).
+	// nil = default 85; 0 = disable (manual /compact only).
+	AutoCompactPct *int `yaml:"auto_compact_pct,omitempty" json:"auto_compact_pct,omitempty"`
 	// BudgetGlobalChars caps total tool-output characters per turn
 	// (tokenopt Level 4 budget enforcer; 0 = default 200000).
 	BudgetGlobalChars int      `yaml:"budget_global_chars" json:"budget_global_chars"`
@@ -666,77 +756,55 @@ func LoadOrCreate() (*Config, error) {
 	return cfg, nil
 }
 
-// Load reads config from the standard locations.
-// Priority: env → local file → home directory → defaults.
+// Load reads config from the standard locations, one layer at a time:
+// defaults < user < project < env < cli < managed. Each later layer may only
+// change keys it actually mentions, so a personal setting can no longer
+// silently undo a repository policy (the old order merged the home file last).
 func Load() (*Config, error) {
 	cfg := Default()
+	cfg.layers = map[string]string{}
+	cfg.rawLayers = map[string]map[string]any{}
 
-	// 1. Try local project config (YAML and TOML)
-	yamlPaths := []string{
-		".icoderc.yaml",
-		".icoderc.yml",
-		".icode/config.yaml",
-		".icode/config.yml",
-		"icode.yaml",
-		"icode.yml",
-	}
-
-	for _, p := range yamlPaths {
-		if err := mergeFile(cfg, p); err != nil && !os.IsNotExist(err) {
-			return nil, fmt.Errorf("load %s: %w", p, err)
-		}
-	}
-
-	tomlPaths := []string{
-		".icoderc.toml",
-		"icode.toml",
-	}
-
-	for _, p := range tomlPaths {
-		if err := mergeTomlFile(cfg, p); err != nil && !os.IsNotExist(err) {
-			return nil, fmt.Errorf("load %s: %w", p, err)
-		}
-	}
-
-	// 2. Try home directory config
-	home, err := os.UserHomeDir()
-	if err == nil {
-		homePaths := []string{
-			filepath.Join(home, ".icoderc.yaml"),
-			filepath.Join(home, ".icode", "config.yaml"),
-			filepath.Join(home, ".config", "icode", "config.yaml"),
-		}
-		for _, p := range homePaths {
-			if err := mergeFile(cfg, p); err != nil && !os.IsNotExist(err) {
-				return nil, fmt.Errorf("load %s: %w", p, err)
+	// 1. User tier — the operator's own file, weakest of the on-disk layers.
+	if home, err := os.UserHomeDir(); err == nil {
+		for _, name := range layerFiles[LayerUser] {
+			if err := cfg.mergeLayerFile(LayerUser, filepath.Join(home, name)); err != nil {
+				return nil, err
 			}
+		}
+	}
+
+	// 2. Project tier — checked into the repository, so it wins over personal
+	//    settings (YAML then TOML, in the documented order).
+	for _, name := range layerFiles[LayerProject] {
+		if err := cfg.mergeLayerFile(LayerProject, name); err != nil {
+			return nil, err
 		}
 	}
 
 	// 3. Environment variable overrides
 	applyEnvOverrides(cfg)
+	recordEnvLayer(cfg)
 
-	// 4. Restore plaintext API keys from their encrypted disk form. Runs after
+	// 4. Command-line layer (set by the root command from its parsed flags).
+	if err := cfg.applyCLILayer(); err != nil {
+		return nil, err
+	}
+
+	// 5. Managed policy — outside every user-writable path, applied last so it
+	//    outranks all of the above. A malformed policy file is a hard error:
+	//    pretending it loaded would leave the machine unpinned in silence.
+	for _, p := range ManagedPaths() {
+		if err := cfg.mergeLayerFile(LayerManaged, p); err != nil {
+			return nil, err
+		}
+	}
+
+	// 6. Restore plaintext API keys from their encrypted disk form. Runs after
 	// env overrides so an explicit env key wins over a persisted one.
 	decryptConfigKeys(cfg)
 
 	return cfg, nil
-}
-
-func mergeFile(cfg *Config, path string) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	return yaml.Unmarshal(data, cfg)
-}
-
-func mergeTomlFile(cfg *Config, path string) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	return toml.Unmarshal(data, cfg)
 }
 
 func applyEnvOverrides(cfg *Config) {
@@ -810,6 +878,7 @@ func encryptSecretFields(data []byte) ([]byte, error) {
 		for name, v := range providers {
 			if pm, ok := v.(map[string]any); ok {
 				encryptKey(pm)
+				encryptGrant(pm)
 				providers[name] = pm
 			}
 		}
@@ -847,10 +916,36 @@ func encryptKey(m map[string]any) {
 	}
 	enc, err := secure.Encrypt(key)
 	if err != nil {
+		// The key still goes to disk in plaintext — dropping it would lose the
+		// user's credential. Say so loudly instead of failing open quietly.
+		log.Printf("[icode config] cannot encrypt api_key (%v); it will be stored in plaintext", err)
 		return
 	}
 	m["api_key_enc"] = enc
 	delete(m, "api_key")
+}
+
+// encryptGrant moves a provider's OAuth refresh token into its encrypted
+// refresh_token_enc form before it reaches disk, mirroring encryptKey. The
+// access token is not touched here — it already lives in api_key and rides the
+// same encryption path.
+func encryptGrant(pm map[string]any) {
+	g, ok := pm["grant"].(map[string]any)
+	if !ok {
+		return
+	}
+	rt, ok := g["refresh_token"].(string)
+	if !ok || rt == "" {
+		return
+	}
+	enc, err := secure.Encrypt(rt)
+	if err != nil {
+		log.Printf("[icode config] cannot encrypt refresh_token (%v); it will be stored in plaintext", err)
+		return
+	}
+	g["refresh_token_enc"] = enc
+	delete(g, "refresh_token")
+	pm["grant"] = g
 }
 
 // encryptHeaders encrypts an MCP server's request headers map (frequently
@@ -881,6 +976,12 @@ func decryptConfigKeys(cfg *Config) {
 				p.APIKey = dec
 			}
 			cfg.Providers[name] = p
+		}
+		if p.Grant != nil && p.Grant.RefreshToken == "" && p.Grant.RefreshTokenEnc != "" {
+			if dec, err := secure.Decrypt(p.Grant.RefreshTokenEnc); err == nil {
+				p.Grant.RefreshToken = dec
+				cfg.Providers[name] = p
+			}
 		}
 	}
 	if cfg.Multimodal.APIKey == "" && cfg.Multimodal.APIKeyEnc != "" {

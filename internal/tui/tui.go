@@ -10,10 +10,12 @@ import (
 	"time"
 
 	"github.com/ponygates/icode/internal/config"
+	"github.com/ponygates/icode/internal/core/checkpoint"
 	"github.com/ponygates/icode/internal/core/permission"
 	"github.com/ponygates/icode/internal/core/searchreplace"
 	"github.com/ponygates/icode/internal/core/tool"
 	"github.com/ponygates/icode/internal/core/voice"
+	"github.com/ponygates/icode/internal/notify"
 	"github.com/ponygates/icode/internal/types"
 	"golang.org/x/term"
 )
@@ -39,6 +41,13 @@ const (
 	RoleThinking  Role = "thinking"
 )
 
+// antiPoisonInterval is how often (in renders) the periodic full repaint
+// fires. During streaming the animation tick renders ~10x/s, so a stray row
+// painted into the console buffer by an outsider survives at most ~2s; while
+// idle there are no renders, but the next keystroke triggers one, so a stray
+// row disappears on the next key press.
+const antiPoisonInterval = 20
+
 type Message struct {
 	Role     Role
 	Content  string
@@ -48,6 +57,12 @@ type Message struct {
 	// style): a folded card shows the status line plus a short excerpt, an
 	// expanded card shows the full output. Non-tool messages ignore it.
 	Folded bool
+	// LiveTail holds the volatile in-flight tool output streamed via
+	// tool_progress (bash live stdout/stderr). It is kept OUT of Content so
+	// the final AppendToolResult never duplicates what already streamed —
+	// and render() shows a Claude Code-style scrolling tail window while the
+	// tool runs. Cleared as soon as the result arrives.
+	LiveTail string
 }
 
 // SessionInfo is a lightweight session descriptor for the /resume picker.
@@ -142,6 +157,11 @@ type Callback interface {
 	// OnPermissionNote delivers the reason the user attached to a rejected
 	// permission prompt (Tab note). The agent sees it on the next turn.
 	OnPermissionNote(toolPrompt, note string)
+	// OnMCPApply applies an MCP server change ("add"/"remove") to the live
+	// shared pool (connect/disconnect + registry refresh), so /mcp add|remove
+	// take effect immediately without a restart (Claude Code parity).
+	// Returns a human-readable status line.
+	OnMCPApply(action string, name string, cfg config.MCPServerCfg) string
 }
 
 // StreamWriter is the surface the backend uses to push data into the UI.
@@ -355,6 +375,10 @@ type TUI struct {
 
 	// turnStart timestamps when a generation begins (for the status bar clock).
 	turnStart time.Time
+	// bellOn toggles the task-completion bell (Claude Code parity): when a
+	// turn ran longer than bellMinTurnSec the CLI emits BEL (\x07) so the
+	// terminal flashes its tab / raises a notification. Defaults to true.
+	bellOn bool
 
 	promptTokens     int
 	completionTokens int
@@ -374,10 +398,25 @@ type TUI struct {
 	// terminal in raw mode. The main loop, drainStream and — via permKeyCh —
 	// the permission prompt consume from these channels, so exactly one
 	// goroutine ever touches t.reader (no concurrent reads, no stolen keys).
-	keyCh         chan rune
+	keyCh chan rune
+	// byteCh carries RAW bytes from rawBytePump (the only goroutine touching
+	// t.reader) to keyPump, which aggregates escape sequences and decodes
+	// UTF-8. The split lets keyPump wait on a byte WITH a timeout — bufio
+	// has no deadline reads — which is what makes sequence reassembly (see
+	// pumpEscape in raw_input.go) possible.
+	byteCh        chan byte
 	permKeyCh     chan rune
 	keyStop       chan struct{} // close to stop the key pump on session exit
 	keyReaderDone chan struct{} // closed when the key pump exits (EOF/error)
+
+	// inputTrace is a small ring of the most recent raw stdin bytes (see
+	// traceByte / dumpInputTrace in raw_input.go). When the key parser hits
+	// an anomaly — an unknown CSI that had to be drained, a truncated X10
+	// mouse report, an invalid UTF-8 burst — the ring is dumped to cli.log
+	// so the exact byte stream that produced a "garbled input" report can be
+	// reconstructed from the user's machine without a live debugger.
+	inputTrace    [256]byte
+	inputTracePos int
 
 	// raw-mode state
 	rawMode  bool
@@ -405,6 +444,13 @@ type TUI struct {
 	// pending permission prompt (agent mode, interactive approval)
 	permPending bool
 	permPrompt  string
+	// permSeverity colours the approval box by risk: "high" red, "medium"
+	// yellow, "low" cyan (see permission.RiskSeverity).
+	permSeverity string
+
+	// titleDir is the cached short workdir name for the dynamic terminal
+	// title (see setTermTitle), captured once when the raw loop starts.
+	titleDir string
 
 	// welcomeVisible controls the Claude Code-style startup banner (big ASCII
 	// logo + model/dir info). Shown on a fresh session until dismissed via
@@ -438,6 +484,12 @@ type TUI struct {
 	searchMatches []string
 	restoreInput  string // input buffer to restore when search is cancelled
 
+	// prompt is the modal one-line question used by /login and /logout. While
+	// it is set, handleKey routes every key to it and render draws the prompt
+	// box instead of the input line; a secret prompt masks its echo so an API
+	// key never reaches the input buffer, history, or the transcript.
+	prompt *promptState
+
 	// modelPickerOpen enables the interactive /model selector (Claude Code
 	// style): ↑/↓ move the highlight, Enter confirms, Esc cancels, a digit
 	// jumps to that line. The picker is rendered as a FIXED overlay (like the
@@ -458,6 +510,17 @@ type TUI struct {
 	resumePickerIdx  int
 	resumePickerTop  int
 	resumeSessions   []SessionInfo
+
+	// replayOpen enables the /replay checkpoint timeline overlay (Claude
+	// Code /replay parity): it lists the session's shadow-git checkpoints
+	// newest-first; ↑/↓ move, Enter shows what THAT step changed (a one-step
+	// diff), r rewinds the workspace back to that checkpoint (first press
+	// previews the revert diff, second press confirms), Esc closes.
+	replayOpen  bool
+	replayIdx   int
+	replayTop   int
+	replayList  []checkpoint.Entry
+	replayArmed bool // first r previews the revert; a second r executes it
 
 	// scrollbar geometry cached from the last render so mouse handlers can map
 	// a click/drag to a scroll offset without recomputing the conversation.
@@ -486,6 +549,11 @@ type TUI struct {
 	// config.Load() (disk read + YAML parse) on every frame is wasteful.
 	settingsCfg *config.Config
 
+	// mouseOn tracks whether SGR mouse tracking is enabled. When off the
+	// terminal regains native click-drag text selection; Shift+drag always
+	// selects regardless. Toggled by /mouse (session-scoped, not persisted).
+	mouseOn bool
+
 	// lastRenderW, lastRenderH track the dimensions used in the last frame
 	// so render() can detect a size change and issue a full clear.
 	lastRenderW int
@@ -495,6 +563,21 @@ type TUI struct {
 	// rewritten) — this is what eliminates the visible flicker on Win10
 	// conhost when streaming tokens repaint the whole screen every frame.
 	lastFrame []string
+
+	// renderCount ticks once per render; every antiPoisonInterval frames the
+	// next render is forced to repaint EVERY row. Rationale: incremental
+	// repaint never rewrites "unchanged" rows, so anything written into the
+	// console buffer by an outsider (a revived conhost ECHO, an IME writing
+	// its composition straight into the buffer, a zombie second instance)
+	// would stay pinned on screen forever. A periodic full repaint washes
+	// such stray rows off within a couple of seconds, single-flush and
+	// content-identical, so it is invisible to the user.
+	renderCount int
+
+	// fullRepaintSoon forces the next render() to start from a blank screen:
+	// used when conhost revived ECHO and echoed stray characters into the
+	// conversation area (incremental repaint would never cover them).
+	fullRepaintPending bool
 
 	// sessionTitle is the active session's title, shown in the status line
 	// (set by autoTitle and /rename).
@@ -519,6 +602,8 @@ func New(cfg Config) *TUI {
 	vimMode := false
 	zenMode := false
 	statusVisible := true
+	bellOn := true
+	mouseOn := true
 	if c, err := config.Load(); err == nil {
 		if c.SecurityLevel != "" {
 			secLvl = string(c.SecurityLevel)
@@ -527,6 +612,12 @@ func New(cfg Config) *TUI {
 		zenMode = c.TUI.Zen
 		if c.TUI.ShowStatusLine != nil {
 			statusVisible = *c.TUI.ShowStatusLine
+		}
+		if c.TUI.Bell != nil {
+			bellOn = *c.TUI.Bell
+		}
+		if c.TUI.Mouse != nil {
+			mouseOn = *c.TUI.Mouse
 		}
 	}
 	return &TUI{
@@ -540,8 +631,10 @@ func New(cfg Config) *TUI {
 		callback:      cfg.Callback,
 		reader:        os.Stdin,
 		writer:        os.Stdout,
+		mouseOn:       mouseOn, // /mouse toggle, persisted via config.TUI.Mouse
 		streamDone:    make(chan struct{}, 1),
 		keyCh:         make(chan rune, 32),
+		byteCh:        make(chan byte, 512),
 		permKeyCh:     make(chan rune, 8),
 		keyStop:       make(chan struct{}),
 		keyReaderDone: make(chan struct{}),
@@ -559,6 +652,7 @@ func New(cfg Config) *TUI {
 		vimInsert:      true,
 		zenMode:        zenMode,
 		statusVisible:  statusVisible,
+		bellOn:         bellOn,
 	}
 }
 
@@ -588,12 +682,26 @@ func (t *TUI) Run() error {
 
 	fd := int(os.Stdin.Fd())
 	if term.IsTerminal(fd) {
+		// Full-screen rendering is only safe when the terminal actually
+		// parses ANSI positioning/clear sequences. On legacy Windows conhost
+		// (cmd.exe / PowerShell windows) that requires the
+		// ENABLE_VIRTUAL_TERMINAL_PROCESSING bit, which cmd's fixConsole-
+		// Codepage enables — but on pre-Win10-1511 consoles (or when that
+		// call silently failed) the bit stays off and every escape sequence
+		// is dropped: frames stream out as plain text, the physical cursor
+		// wanders mid-screen, and typed characters land in the log area
+		// (the "input text runs up the screen" bug). Degrade to line mode —
+		// plain, but never misplaced.
+		if !vtProcessingActive() {
+			return t.runLine()
+		}
 		if state, err := term.MakeRaw(fd); err == nil {
 			defer term.Restore(fd, state)
 			// Belt and braces: some Windows console configurations keep the
 			// ECHO/LINE bits alive after MakeRaw — ConHost then echoes keys at
 			// the physical cursor (text landing in the log area).
 			hardenConsoleInput()
+			diagInputMode("after-MakeRaw")
 			// Remember the cooked-mode state so Ctrl+G can hand the terminal
 			// to $EDITOR and take it back afterwards (suspendRaw/resumeRaw).
 			t.rawState = state
@@ -764,6 +872,17 @@ func (t *TUI) LoadSession(msgs []Message) {
 	}
 }
 
+// Messages returns a snapshot copy of the visible message list. Hosts (CLI
+// callbacks, desktop bridge, tests) use it to inspect what the TUI rendered
+// without reaching into the guarded slice.
+func (t *TUI) Messages() []Message {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]Message, len(t.messages))
+	copy(out, t.messages)
+	return out
+}
+
 // PromptPermission shows an interactive approval dialog and blocks until the
 // user answers. It is invoked from the engine's permission handler, which runs
 // on the streaming goroutine while the main loop is parked in drainStream — so
@@ -783,7 +902,7 @@ func (t *TUI) submitPermNote() permission.Decision {
 	return permission.DecisionDeny
 }
 
-func (t *TUI) PromptPermission(prompt string) permission.Decision {
+func (t *TUI) PromptPermission(prompt, severity string) permission.Decision {
 	if !t.rawMode {
 		// Non-interactive (piped) — auto-approve to avoid a hang. This is a
 		// silent security footgun (Claude Code refuses or needs an explicit
@@ -795,8 +914,25 @@ func (t *TUI) PromptPermission(prompt string) permission.Decision {
 	t.mu.Lock()
 	t.permPending = true
 	t.permPrompt = prompt
+	t.permSeverity = severity
 	t.mu.Unlock()
 	t.render()
+
+	// Waiting-for-approval toast (Claude Code parity): the whole turn is
+	// BLOCKED until the user answers, so a backgrounded/tabbed-away terminal
+	// must be called back — this is the single most important notification
+	// moment. One toast per prompt (not repeated), gated on /bell.
+	if t.bellOn {
+		title := "iCode 正在等待你的批准"
+		if severity == permission.SeverityHigh {
+			title = "⚠ iCode 高危操作待确认"
+		}
+		firstLine := strings.SplitN(prompt, "\n", 2)[0]
+		notify.Notify(title, truncVisible(firstLine, 60))
+	}
+	// Tab title flips to the waiting state — highest priority prefix, since
+	// the turn is parked until the user answers.
+	t.setTermTitle("⚠")
 
 	// Decision keys come from permKeyCh, which the single key-pump goroutine
 	// fills while permPending is set. Reading here (instead of from t.reader
@@ -811,6 +947,7 @@ func (t *TUI) PromptPermission(prompt string) permission.Decision {
 				t.clearPerm()
 				return permission.DecisionDeny
 			}
+			traceKeySite("perm", r)
 			switch r {
 			case 0x09: // Tab — open the "explain why" note field (Claude Code)
 				if !t.permNoteOpen {
@@ -840,6 +977,40 @@ func (t *TUI) PromptPermission(prompt string) permission.Decision {
 			case '3', 'n', 'N': // '3' or 'n' → deny (with note when open)
 				return t.submitPermNote()
 			case 0x03, 0x1b: // Ctrl+C or Esc → deny
+				// 0x1b may be the start of an escape sequence (mouse wheel,
+				// arrow keys) rather than a real Esc press. The sequence's
+				// printable tail used to be fed back as DECISION keys — a
+				// wheel report contains coordinate DIGITS, so scrolling
+				// could silently answer '1' (allow) or '2' (allow-all)!
+				// The key pump now delivers sequences as one atomic burst,
+				// so a follow-up byte that arrives immediately marks a
+				// sequence: swallow it whole and keep waiting. Only a
+				// follow-up timeout (genuine lone Esc) denies.
+				if r == 0x1b {
+					select {
+					case u, ok2 := <-t.permKeyCh:
+						if !ok2 {
+							t.clearPerm()
+							return permission.DecisionDeny
+						}
+						traceKeySite("perm", u)
+						if u == '[' {
+							if c2, ok3 := readRuneTimeout(t.permKeyCh, escSwallowWait); ok3 {
+								t.swallowCSI(t.permKeyCh, c2)
+							}
+							continue // sequence swallowed — not a decision
+						}
+						if u == 'O' {
+							readRuneTimeout(t.permKeyCh, escSwallowWait)
+							continue // SS3 swallowed
+						}
+						continue // Alt+key swallowed
+					case <-time.After(escSwallowWait):
+						// No follow-up — a genuine lone Esc: fall through.
+						// escSwallowWait (not escFollowTimeout) so a ConPTY-split
+						// sequence still reassembles instead of denying.
+					}
+				}
 				if t.permNoteOpen {
 					// Esc closes the note field first (Claude Code behaviour);
 					// Ctrl+C still denies outright.
@@ -880,8 +1051,17 @@ func (t *TUI) clearPerm() {
 	t.mu.Lock()
 	t.permPending = false
 	t.permPrompt = ""
+	t.permSeverity = ""
+	streaming := t.streaming
 	t.mu.Unlock()
 	t.render()
+	// The ⚠ title prefix was set on entering the approval wait; restore the
+	// turn state (still generating, or idle).
+	if streaming {
+		t.setTermTitle("⏳")
+	} else {
+		t.setTermTitle("")
+	}
 }
 
 // termSize returns the current terminal dimensions, trying both stdin and
@@ -894,40 +1074,6 @@ func (t *TUI) termSize() (w, h int, ok bool) {
 		}
 	}
 	return 0, 0, false
-}
-
-// resizeTerminal requests the terminal to resize to a comfortable size for
-// the iCode TUI. Uses two approaches:
-//
-//  1. ANSI escape \x1b[8;H;Wt — supported by Windows Terminal, xterm, iTerm2,
-//     GNOME Terminal, etc. Silently ignored by terminals that don't support it.
-//  2. On Windows, a fallback using SetConsoleScreenBufferInfo / SetConsoleWindowInfo
-//     for legacy conhost / cmd.exe (see resize_windows.go).
-//
-// The function does nothing if the terminal is already at least 120×36.
-func (t *TUI) resizeTerminal() {
-	w, h, ok := t.termSize()
-	if !ok {
-		return
-	}
-
-	// Target: at least 120 columns × 36 rows — minimum comfortable for a TUI.
-	const wantW, wantH = 120, 36
-	if w >= wantW && h >= wantH {
-		return // already big enough
-	}
-	if w < wantW {
-		w = wantW
-	}
-	if h < wantH {
-		h = wantH
-	}
-
-	// 1. ANSI escape (works in most modern terminals).
-	fmt.Fprintf(t.writer, "\x1b[8;%d;%dt", h, w)
-
-	// 2. Windows API fallback (in resize_windows.go, compiled only on Windows).
-	resizeTerminalWindows(w, h)
 }
 
 // ── Multi-line input support (Claude Code parity) ─────────────────────────
@@ -1030,6 +1176,3 @@ func inputAbsCursor(inputBuf string, lineIdx, colIdx int) int {
 	}
 	return pos + colIdx
 }
-
-// resizeTerminalWindows is defined in resize_windows.go (Windows) and
-// resize_stub.go (all other platforms).

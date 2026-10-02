@@ -14,7 +14,7 @@ import (
 // (Reasonix `reasonix acp` parity). See docs/acp_design.md.
 var acpCmd = &cobra.Command{
 	Use:   "acp",
-	Short: "Run an ACP (Agent Client Protocol) server on stdio for editor integration",
+	Short: "以 stdio 运行 ACP 服务器（编辑器集成：Zed/Neovim 等）",
 	Long: `Start an ACP server speaking JSON-RPC 2.0 over stdin/stdout. Compatible
 editors (Zed, Neovim, …) launch this as a subprocess to use iCode as their
 coding agent.`,

@@ -1,0 +1,10 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.version.1.6.0.schema.json
+# Version manifest — the single file that ties the locale + installer manifests
+# in this folder together. Copy this whole folder into
+#   manifest/P/PonyGates.iCode/0.1.0/
+# inside a fork of microsoft/winget-pkgs and open a PR (see ../README.md).
+PackageIdentifier: PonyGates.iCode
+PackageVersion: 0.1.0
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.6.0

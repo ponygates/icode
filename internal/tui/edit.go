@@ -5,6 +5,29 @@ import (
 	"strings"
 )
 
+// setInput replaces the input buffer and cursor as one unit, synchronised
+// against concurrent render() snapshots taken on timer/streaming goroutines.
+// Callers must NOT hold t.mu (single short critical section, no reentrancy).
+//
+// Why this matters: t.inputBuf is a Go string (header + pointer). Assigning it
+// from the main goroutine while a timer-driven render() reads it under t.mu is
+// a data race — a torn read pairs a new pointer with a stale length and the
+// frame paints garbage. Every write to inputBuf/cursor outside t.mu must go
+// through setInput/moveCursor.
+func (t *TUI) setInput(buf string, cur int) {
+	t.mu.Lock()
+	t.inputBuf = buf
+	t.cursor = cur
+	t.mu.Unlock()
+}
+
+// moveCursor repositions only the edit cursor, synchronised like setInput.
+func (t *TUI) moveCursor(cur int) {
+	t.mu.Lock()
+	t.cursor = cur
+	t.mu.Unlock()
+}
+
 // insertAtCursor inserts s at the current cursor position. Used by bracketed
 // paste and Alt+key insertion.
 // pushUndo snapshots the current input state so Ctrl+_ (readline-style undo)
@@ -26,8 +49,7 @@ func (t *TUI) undoInput() bool {
 	}
 	last := t.undoStack[len(t.undoStack)-1]
 	t.undoStack = t.undoStack[:len(t.undoStack)-1]
-	t.inputBuf = last.buf
-	t.cursor = last.cursor
+	t.setInput(last.buf, last.cursor)
 	return true
 }
 
@@ -35,6 +57,7 @@ func (t *TUI) insertAtCursor(s string) {
 	if s == "" {
 		return
 	}
+	t.mu.Lock()
 	t.pushUndo()
 	runes := []rune(t.inputBuf)
 	if t.cursor >= len(runes) {
@@ -43,13 +66,16 @@ func (t *TUI) insertAtCursor(s string) {
 		t.inputBuf = string(runes[:t.cursor]) + s + string(runes[t.cursor:])
 	}
 	t.cursor += len([]rune(s))
+	t.mu.Unlock()
 }
 
 // deleteWordBackward removes the word before the cursor (Ctrl+W): it skips any
 // trailing spaces, then deletes back to the previous space boundary.
 func (t *TUI) deleteWordBackward() {
+	t.mu.Lock()
 	runes := []rune(t.inputBuf)
 	if t.cursor == 0 {
+		t.mu.Unlock()
 		return
 	}
 	t.pushUndo()
@@ -64,17 +90,21 @@ func (t *TUI) deleteWordBackward() {
 	runes = append(runes[:newCursor], runes[t.cursor:]...)
 	t.inputBuf = string(runes)
 	t.cursor = newCursor
+	t.mu.Unlock()
 }
 
 // deleteToLineStart removes everything before the cursor (Ctrl+U).
 func (t *TUI) deleteToLineStart() {
+	t.mu.Lock()
 	runes := []rune(t.inputBuf)
 	if t.cursor == 0 {
+		t.mu.Unlock()
 		return
 	}
 	t.pushUndo()
 	t.inputBuf = string(runes[t.cursor:])
 	t.cursor = 0
+	t.mu.Unlock()
 }
 
 // cycleMode rotates the agent mode: auto → plan → agent → yolo → auto
@@ -99,7 +129,7 @@ func (t *TUI) cycleMode() {
 			t.notice(msg)
 		}
 	}
-	t.notice("Mode: " + mode)
+	t.notice("模式: " + t.modeLabel(mode))
 	t.scheduleRender()
 }
 

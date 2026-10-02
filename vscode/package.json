@@ -26,6 +26,10 @@
   "contributes": {
     "commands": [
       {
+        "command": "icode.editSelection",
+        "title": "iCode: 内联编辑选中代码"
+      },
+      {
         "command": "icode.openSidebar",
         "title": "iCode: 打开聊天侧栏"
       },
@@ -111,8 +115,13 @@
           "when": "editorHasSelection"
         },
         {
-          "command": "icode.openInTerminal",
+          "command": "icode.editSelection",
           "group": "9_icode@4",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "icode.openInTerminal",
+          "group": "9_icode@5",
           "when": "editorTextFocus"
         }
       ]

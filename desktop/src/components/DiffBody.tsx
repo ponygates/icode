@@ -14,17 +14,24 @@ export function parseUnifiedDiff(diff: string): DiffFile[] {
   const files: DiffFile[] = [];
   let cur: DiffFile | null = null;
   for (const line of diff.split('\n')) {
-    if (line.startsWith('diff --git ') || line.startsWith('--- ')) {
+    // Only `diff --git` opens a new file section; the old/new path headers
+    // (`--- a/…`, `+++ b/…`) and the `index …` blob line are metadata, so we
+    // used to (wrongly) treat `--- ` as a boundary too — which pushed every
+    // file twice and leaked noise rows into the body.
+    if (line.startsWith('diff --git ')) {
       if (cur) files.push(cur);
-      if (line.startsWith('diff --git ')) {
-        cur = { header: line.replace(/^diff --git /, ''), lines: [] };
-      }
+      cur = { header: line.replace(/^diff --git /, ''), lines: [] };
+      continue;
+    }
+    if (line.startsWith('--- ') || line.startsWith('index ')) continue;
+    if (line.startsWith('+++ ')) {
+      if (!cur) cur = { header: '', lines: [] };
+      cur.lines.push({ text: line, kind: 'meta' });
       continue;
     }
     if (!cur) cur = { header: '', lines: [] };
     let kind: DiffLine['kind'] = 'ctx';
-    if (line.startsWith('+++')) kind = 'meta';
-    else if (line.startsWith('@@')) kind = 'hunk';
+    if (line.startsWith('@@')) kind = 'hunk';
     else if (line.startsWith('+')) kind = 'add';
     else if (line.startsWith('-')) kind = 'del';
     cur.lines.push({ text: line, kind });

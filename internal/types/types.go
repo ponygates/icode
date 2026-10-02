@@ -89,6 +89,11 @@ type ToolDef struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description"`
 	Parameters  map[string]any `json:"input_schema"`
+
+	// ServerName is the owning MCP server for tools discovered over MCP, and
+	// empty for built-ins. Callers must not re-derive it from Name: the
+	// namespace slug is sanitised and may be uniquified on collision.
+	ServerName string `json:"server_name,omitempty"`
 }
 
 // Tool is the executable contract every tool must fulfill.
@@ -198,6 +203,10 @@ type PermissionReq struct {
 	RequestID string `json:"request_id,omitempty"`
 	Tool      string `json:"tool"`
 	Prompt    string `json:"prompt"`
+	// Severity rates the risk of this ask ("high" | "medium" | "low", from
+	// permission.RiskSeverity) so approval UIs can colour-code: high =
+	// destructive commands (rm -rf, git push --force) render red.
+	Severity  string `json:"severity,omitempty"`
 	Strikes   int    `json:"strikes,omitempty"`   // consecutive ask/deny count (incl. this one)
 	Threshold int    `json:"threshold,omitempty"` // escalation threshold (0 = disabled)
 }
@@ -278,6 +287,29 @@ type CredentialedProvider interface {
 	SetCredentials(apiKey, apiBase string)
 }
 
+// TokenRefresher is the hot-path credential hook a provider calls at most
+// once per request after the vendor rejects it with 401. It receives the
+// credential the failed request actually carried and returns the credential
+// to retry with plus its kind. Returning the same credential of the same
+// kind means "nothing changed" — the provider must surface the original 401
+// instead of retrying, which is what keeps plain API-key users (whose
+// credential never rotates) on their exact pre-existing request path.
+type TokenRefresher func(ctx context.Context, sentToken string) (token string, bearer bool, err error)
+
+// OAuthCredentialProvider is an OPTIONAL capability implemented by providers
+// that can carry either a vendor API key or an OAuth subscription token in
+// the same key field. The credential kind changes how it travels — e.g.
+// Anthropic sends API keys in the x-api-key header but accepts subscription
+// tokens only as `Authorization: Bearer` — so internal/core/auth configures
+// every live provider it builds with both methods below.
+type OAuthCredentialProvider interface {
+	// SetSubscription records whether the key field currently holds an OAuth
+	// bearer token (true) or a plain API key (false).
+	SetSubscription(on bool)
+	// SetTokenRefresher installs the 401 renewal path (nil disables retries).
+	SetTokenRefresher(fn TokenRefresher)
+}
+
 // TimeoutSetter is an OPTIONAL capability implemented by providers whose HTTP
 // client timeout can be updated at runtime. The server uses it to apply a
 // per-provider timeout configured via the desktop UI without a restart.
@@ -319,6 +351,15 @@ type ModelInfo struct {
 	Description string `json:"description"`
 	Provider    string `json:"provider"`
 
+	// APIModelID is the model string actually sent on the wire to the
+	// provider's API. It differs from ID for user-defined custom models:
+	// ID is the canonical "provider/model_id" registry key, while the
+	// provider expects the bare model_id (e.g. ID "agnes/agnes-3.0-flash"
+	// → APIModelID "agnes-3.0-flash"). Empty means ID is already the wire
+	// name (true for all provider-built-in models, whose IDs are the raw
+	// API names, including slash-style ones like "openrouter/free").
+	APIModelID string `json:"api_model_id,omitempty"`
+
 	ContextWindow   int `json:"context_window"`
 	MaxOutputTokens int `json:"max_output_tokens"`
 
@@ -351,6 +392,19 @@ type ModelCap struct {
 	Streaming bool `json:"streaming"`
 	JSONMode  bool `json:"json_mode"`
 	Reasoning bool `json:"reasoning"`
+}
+
+// WireModel returns the model string to send on the API wire for m. Custom
+// models carry their bare provider-side id in APIModelID; provider-built-in
+// models (and any custom entry without one) use ID directly. Every ChatRequest
+// construction site must use this instead of m.ID, or custom models with a
+// "provider/model" composite ID will send the composite string to the API and
+// get a 503 model_not_found from gateways that only know the bare name.
+func (m ModelInfo) WireModel() string {
+	if m.APIModelID != "" {
+		return m.APIModelID
+	}
+	return m.ID
 }
 
 // ============================================================================

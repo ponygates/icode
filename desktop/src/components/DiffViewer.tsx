@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { X, FileDiff } from 'lucide-react';
 import { parseUnifiedDiff, DiffBody } from './DiffBody';
+import { useDialogA11y } from '../hooks/useDialogA11y';
 
 interface DiffViewerProps {
   backendUrl: string;
@@ -19,6 +20,7 @@ const DiffViewer: React.FC<DiffViewerProps> = ({ backendUrl, sessionId, steps, m
   const [diff, setDiff] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const dialogRef = useDialogA11y(true, onClose);
 
   useEffect(() => {
     let alive = true;
@@ -51,6 +53,10 @@ const DiffViewer: React.FC<DiffViewerProps> = ({ backendUrl, sessionId, steps, m
       }}
     >
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={t('diff.title')}
         onClick={(e) => e.stopPropagation()}
         style={{
           background: 'var(--bg-secondary)', borderRadius: 14,
@@ -85,6 +91,7 @@ const DiffViewer: React.FC<DiffViewerProps> = ({ backendUrl, sessionId, steps, m
           )}
           <button
             onClick={onClose}
+            aria-label={t('diff.closeAriaLabel', '关闭')}
             style={{
               background: 'transparent', border: 'none', color: 'var(--text-muted)',
               cursor: 'pointer', padding: 4, display: 'flex', borderRadius: 6,
@@ -92,7 +99,7 @@ const DiffViewer: React.FC<DiffViewerProps> = ({ backendUrl, sessionId, steps, m
             onMouseEnter={e => (e.currentTarget.style.color = 'var(--text-primary)')}
             onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-muted)')}
           >
-            <X size={16} />
+            <X size={16} aria-hidden />
           </button>
         </div>
 

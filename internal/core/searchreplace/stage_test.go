@@ -42,17 +42,28 @@ func main() {
 // TestStageForSession_Isolation verifies that two sessions stage into
 // separate areas — the multi-tab desktop regression this fix targets.
 func TestStageForSession_Isolation(t *testing.T) {
-	a := StageForSession("sess-A")
-	b := StageForSession("sess-B")
+	a, err := StageForSession("sess-A")
+	if err != nil {
+		t.Fatalf("sess-A: %v", err)
+	}
+	b, err := StageForSession("sess-B")
+	if err != nil {
+		t.Fatalf("sess-B: %v", err)
+	}
 	if a == b {
 		t.Fatal("different sessions must get different staging areas")
 	}
-	// Empty session ID falls back to the shared default area, so the
-	// UI slash commands (/apply /reject) keep working without a session.
-	if StageForSession("") != defaultStage {
-		t.Fatal("empty session ID must resolve to the default stage")
+	// Empty session ID is now an explicit error — no silent shared bucket.
+	if _, err := StageForSession(""); err != ErrNoSession {
+		t.Fatalf("empty session ID must return ErrNoSession, got %v", err)
 	}
-	if StageForSession("sess-A") != a {
+	// The no-session escape hatch is the per-process bucket, which is also
+	// isolated from every real session.
+	proc := StageForSessionOrProcess("")
+	if proc == a || proc == b {
+		t.Fatal("process bucket must be isolated from real sessions")
+	}
+	if StageForSessionOrProcess("sess-A") != a {
 		t.Fatal("same session must resolve to the same area")
 	}
 
@@ -69,6 +80,49 @@ func TestStageForSession_Isolation(t *testing.T) {
 	}
 	if a.Count() != 1 {
 		t.Fatalf("session A should have 1 staged edit, got %d", a.Count())
+	}
+}
+
+// TestStageForSession_SessionsCannotClobberEachOther proves that two
+// sessions neither see nor destroy each other's staged edits (desktop
+// multi-tab shares the process; the old empty-session default stage collided).
+func TestStageForSession_SessionsCannotClobberEachOther(t *testing.T) {
+	a, err := StageForSession("clobber-A")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := StageForSession("clobber-B")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	fpA := filepath.Join(dir, "a.txt")
+	fpB := filepath.Join(dir, "b.txt")
+	if err := os.WriteFile(fpA, []byte("aaa"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fpB, []byte("bbb"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	a.Add(fpA, "aaa", "AAA")
+	b.Add(fpB, "bbb", "BBB")
+
+	// Session B clearing its own area must leave A's staged edit intact.
+	b.Clear()
+	if a.Count() != 1 {
+		t.Fatalf("session A lost its staged edit when B cleared: %d", a.Count())
+	}
+	if got := a.List()[0].FilePath; got != fpA {
+		t.Fatalf("session A sees a foreign edit: %s", got)
+	}
+	// And applying A must only touch A's file.
+	results := a.ApplyValid()
+	if len(results) != 1 {
+		t.Fatalf("expected 1 applied result, got %d", len(results))
+	}
+	data, _ := os.ReadFile(fpB)
+	if string(data) != "bbb" {
+		t.Fatalf("session A clobbered session B's file: %s", data)
 	}
 }
 

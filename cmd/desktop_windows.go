@@ -22,7 +22,8 @@ var desktopCmd = &cobra.Command{
 桌面版使用系统内置的 WebView2 控件，无需浏览器。
 数据不会离开本机。
 
-双击 icode.exe 会自动进入桌面模式。
+提示：双击 icode.exe 默认进入增强 TUI（终端界面）；
+桌面版请显式运行 'icode desktop' 或使用 icode-desktop.exe。
 （macOS / Linux 使用系统托盘 + 默认浏览器方案，见同命令的非 Windows 实现。）`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runDesktop()

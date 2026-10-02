@@ -151,6 +151,9 @@ func runWebView(url string) {
 	// 经 newWndProc 分发。
 	procRegisterHotKey.Call(desktopHWND, hotkeyID, modControl|modShift, vkSpace)
 
+	// 恢复上次记忆的窗口位置/尺寸（记录无效或屏幕外时保持默认居中）。
+	restoreWindowState(desktopHWND)
+
 	desktopVisible.Store(true)
 	// Bind a native folder picker so the React UI can "add local directory"
 	// to a workspace without hand-typing the path (安全: only ever returns a
@@ -169,7 +172,9 @@ func runWebView(url string) {
 func newWndProc(hwnd uintptr, msg uint32, wparam, lparam uintptr) uintptr {
 	switch msg {
 	case wmClose:
-		// 关闭按钮 → 隐藏到托盘，而非退出程序。
+		// 关闭按钮 → 隐藏到托盘，而非退出程序。隐藏前记住当前几何，
+		// 崩溃/强杀也不会丢窗口位置。
+		saveWindowState(hwnd)
 		procShowWindow.Call(hwnd, swHide)
 		desktopVisible.Store(false)
 		return 0
@@ -209,12 +214,17 @@ func hideDesktop() {
 	if desktopHWND == 0 {
 		return
 	}
+	// 与 WM_CLOSE 同路径：托盘"隐藏到托盘"也经过这里，顺手持久化。
+	saveWindowState(desktopHWND)
 	procShowWindow.Call(desktopHWND, swHide)
 	desktopVisible.Store(false)
 }
 
 // onTrayQuit 由托盘"退出"菜单触发：销毁 webview 并退出托盘循环。
 func onTrayQuit() {
+	// 窗口销毁前最后保存一次几何（隐藏状态下 GetWindowRect 仍返回
+	// 正确矩形）。这是正常退出的主保存路径。
+	saveWindowState(desktopHWND)
 	if desktopWV != nil {
 		desktopWV.Terminate()
 	}

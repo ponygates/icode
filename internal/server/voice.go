@@ -1,4 +1,4 @@
-// Voice transcription endpoint backing the desktop / simpleui voice buttons.
+// Voice transcription endpoint backing the desktop voice buttons.
 // The browser captures a short WAV with the MediaRecorder API and POSTs it
 // here; the handler runs it through the configured ASR provider (zhipu, baidu,
 // or xfyun) based on the user's voice config settings.

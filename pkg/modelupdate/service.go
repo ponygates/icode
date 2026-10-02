@@ -18,6 +18,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ponygates/icode/internal/netsec"
+
 	"github.com/ponygates/icode/internal/llm/modelmeta"
 	"github.com/ponygates/icode/internal/types"
 )
@@ -361,7 +363,7 @@ func fetchOpenRouterModels(ctx context.Context) ([]types.ModelInfo, error) {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://openrouter.ai/api/v1/models", nil)
 	req.Header.Set("User-Agent", "iCode/0.1.0")
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := netsec.GuardedClient(30*time.Second, true)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("openrouter fetch: %w", err)
@@ -443,7 +445,7 @@ func fetchOpenAICompatModels(ctx context.Context, endpoint, providerName string)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	req.Header.Set("User-Agent", "iCode/0.1.0")
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := netsec.GuardedClient(30*time.Second, true)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("%s fetch: %w", providerName, err)
@@ -492,7 +494,7 @@ func fetchAnthropicModels(ctx context.Context) ([]types.ModelInfo, error) {
 	req.Header.Set("User-Agent", "iCode/0.1.0")
 	req.Header.Set("anthropic-version", "2023-06-01")
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := netsec.GuardedClient(30*time.Second, true)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("anthropic fetch: %w", err)
@@ -570,7 +572,7 @@ func fetchDocModels(ctx context.Context, docURL string) map[string]DocModelInfo 
 	}
 	req.Header.Set("User-Agent", "iCode/0.1.0")
 
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := netsec.GuardedClient(15*time.Second, true)
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("[modelupdate] doc fetch %s: %v (ignored)", docURL, err)

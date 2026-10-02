@@ -73,7 +73,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			ProviderName: orDefault(req.Provider, "openrouter"),
 			Title:        firstLine(req.Content, 40),
 		}
-		_ = s.store.Create(sess)
+		if cerr := s.store.Create(sess); cerr != nil {
+			log.Printf("[server] chat: create session %s failed: %v", req.SessionID, cerr)
+		}
 	} else {
 		// Reflect any model/provider change from the client.
 		changed := false
@@ -86,7 +88,9 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			changed = true
 		}
 		if changed {
-			_ = s.store.Update(sess)
+			if uerr := s.store.Update(sess); uerr != nil {
+				log.Printf("[server] chat: update session %s failed: %v", req.SessionID, uerr)
+			}
 		}
 	}
 

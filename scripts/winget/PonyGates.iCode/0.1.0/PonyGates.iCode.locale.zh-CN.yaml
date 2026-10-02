@@ -1,0 +1,21 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.locale.1.6.0.schema.json
+# Additional locale (zh-CN) — iCode ships full 简体中文 UI. Regenerate the whole
+# set with scripts/gen_winget_manifest.sh; this is the committed source copy.
+PackageIdentifier: PonyGates.iCode
+PackageVersion: 0.1.0
+PackageLocale: zh-CN
+Publisher: PonyGates
+PackageName: iCode
+License: Apache-2.0
+ShortDescription: 终端、桌面与 VS Code 通用的多模型 AI 编程助手。
+Description: |
+  iCode 是一款 Go 编写的 AI 编程助手，共享同一后端，提供终端 TUI、WebView 桌面
+  应用与 VS Code 扩展三种界面。内置 14 家模型服务商、60+ 模型，缓存优先的 token
+  优化，权限门控下的工具执行，SQLite 会话持久化，MCP 客户端与自更新能力。
+Tags:
+  - ai
+  - 编程助手
+  - cli
+  - tui
+ManifestType: locale
+ManifestVersion: 1.6.0

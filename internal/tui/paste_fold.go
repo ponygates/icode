@@ -23,8 +23,11 @@ const (
 
 // insertPasted routes clipboard / bracketed-paste content through the folding
 // logic. Small pastes land verbatim; large ones become a placeholder.
+// Control bytes are stripped first: clipboard text copied from a terminal can
+// carry ANSI escapes that would otherwise be executed on every repaint.
 func (t *TUI) insertPasted(content string) {
-	content = strings.TrimRight(content, "\r\n")
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	content = sanitizeInput(strings.TrimRight(content, "\r\n"))
 	if content == "" {
 		return
 	}

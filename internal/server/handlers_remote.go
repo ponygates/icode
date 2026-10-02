@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -12,6 +13,24 @@ import (
 	"github.com/ponygates/icode/internal/core/tool"
 	"github.com/ponygates/icode/internal/types"
 )
+
+// requireAPITokenForMutating guards privileged endpoints that local no-token
+// clients also reach: read-only methods (GET/HEAD/OPTIONS) pass through with
+// the pre-existing loopback trust, but every mutating method (POST/PUT/DELETE)
+// must present the per-launch Bearer apiToken — even from 127.0.0.1. This
+// closes the "any local process can drive /api/shell or rewrite provider
+// credentials / permission rules" hole while keeping GET reads and /api/chat
+// (gated at the tool layer) working for curl/CLI users.
+func (s *Server) requireAPITokenForMutating(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+			next.ServeHTTP(w, r)
+			return
+		}
+		s.requireAPIToken(next).ServeHTTP(w, r)
+	}
+}
 
 // requireAPIToken guards remote-control API endpoints with the shared Bearer
 // apiToken (same token the desktop uses for the main API).
@@ -106,12 +125,14 @@ func (s *Server) handleRemotePrompt(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, err := s.store.Get(sid); err != nil {
 		title := firstLine(content, 40)
-		_ = s.store.Create(&types.Session{
+		if cerr := s.store.Create(&types.Session{
 			ID:           sid,
 			ModelID:      "openrouter/free",
 			ProviderName: "openrouter",
 			Title:        title,
-		})
+		}); cerr != nil {
+			log.Printf("[server] remote: create session %s failed: %v", sid, cerr)
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 180*time.Second)

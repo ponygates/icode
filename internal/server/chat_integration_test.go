@@ -70,6 +70,11 @@ func (r *fakeRegistry) Deregister(name string)                              {}
 // If the List() deadlock were still present, step 2 would hang and step 3
 // would never return a reply (matching the user's "no reply" symptom).
 func TestChatStreamIntegration(t *testing.T) {
+	// Redirect TMP/TEMP: this test boots a real server, and
+	// Server.Start() would otherwise overwrite the production
+	// %TEMP%\icode\port discovery file.
+	redirectTemp(t)
+
 	// In-memory SQLite store (unique path so we don't touch the real db).
 	store, err := db.New(db.Config{Path: fmt.Sprintf("file::memory:?cache=shared&_conn=%d", time.Now().UnixNano())})
 	if err != nil {

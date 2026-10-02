@@ -23,10 +23,41 @@ var tuiStrings = map[string]map[string]string{
 		"welcome.tagline":      "你的 AI 编程伙伴",
 		"welcome.close":        "按 Esc 或回车关闭欢迎屏 · 输入即开始",
 		"welcome.reopen":       "欢迎屏仅在空对话时显示，先 /clear 再试",
-		"input.hint":           "manual mode on · ? for shortcuts · Enter for agents",
+		"welcome.greeting":     "欢迎回来！",
+		"welcome.model":        "模型",
+		"welcome.provider":     "服务商",
+		"welcome.mode":         "模式",
+		"welcome.cwd":          "目录",
+		"welcome.ctx":          "上下文",
+		"welcome.cache":        "缓存",
+		"welcome.tipsTitle":    "快速上手",
+		"welcome.tipsBody1":    "运行 /init 生成 ICODE.md 项目说明",
+		"welcome.tipsBody2":    "让 iCode 自动了解你的项目约定",
+		"welcome.newTitle":     "新功能",
+		"welcome.newBody":      "查看更新日志了解最新改进",
+		"mode.plan":            "计划",
+		"mode.agent":           "智能体",
+		"mode.yolo":            "全自动",
+		"mode.auto":            "自动",
+		"mode.ask":             "问答",
+		"status.cache":         "缓存 %.0f%%",
+		"status.bg":            "后台 %d",
+		"status.elapsed":       "%d 秒",
+		"status.tokRate":       "%d tok/秒",
+		"lang.name.zhCN":       "简体中文",
+		"lang.name.zhTW":       "繁體中文",
+		"lang.name.en":         "English",
+		"theme.name.dark":      "深色",
+		"theme.name.light":     "浅色",
+		"theme.name.auto":      "跟随系统",
+		"settings.advanced":    "高级配置…",
+		"settings.hint":        "↑↓ 选择 · ←→ / Enter 切换 · Esc 关闭",
+		"cmd.mouse":            "开关鼠标捕获（关=恢复终端原生拖选，Shift+拖动随时可选中文本）",
+		"input.hint":           "智能体模式 · 输入需求开始 · ↑↓ 历史",
 		"input.hint.streaming": "esc 中断生成",
 		"cmd.welcome":          "显示/隐藏启动欢迎屏",
 		"perm.title":           "需要授权",
+		"perm.titleHigh":       "高危操作确认",
 		"perm.allow":           "允许",
 		"perm.all":             "本次会话全部允许",
 		"perm.deny":            "拒绝",
@@ -65,7 +96,7 @@ var tuiStrings = map[string]map[string]string{
 		"cmd.compact":          "压缩上下文（摘要 + 保留近期）",
 		"cmd.clear":            "清空当前对话",
 		"cmd.export":           "导出对话为 Markdown",
-		"cmd.share":            "导出可分享 Markdown（时间戳文件并打印路径）",
+		"cmd.share":            "导出可分享的单文件 HTML（内嵌样式与代码高亮，本地生成）",
 		"cmd.diff":             "显示 git diff",
 		"cmd.lsp":              "LSP 代码智能（诊断/符号/定义/引用）",
 		"cmd.kb":               "搜索本地知识库（/kb <查询>）",
@@ -87,7 +118,7 @@ var tuiStrings = map[string]map[string]string{
 		"cmd.plugin":           "插件管理 (list/install/remove)",
 		"cmd.teams":            "列出多智能体团队",
 		"cmd.mcp":              "管理 MCP 服务器 (list/add/remove/get/restart)",
-		"cmd.hooks":            "编辑 hooks.yaml 权限规则",
+		"cmd.hooks":            "生命周期钩子管理 (list/events/add/rm/reload)",
 		"cmd.status":           "显示系统状态诊断",
 		"cmd.cost":             "显示 Token 与成本明细",
 		"cmd.token":            "查看本会话 Token 节省报告（Cache-First 五层压缩明细）",
@@ -110,9 +141,11 @@ var tuiStrings = map[string]map[string]string{
 		"cmd.memory":           "显示记忆文件路径",
 		"cmd.feedback":         "显示反馈渠道信息",
 		"cmd.wipe":             "清空对话并重置（不可恢复）",
-		"cmd.login":            "配置 API 凭据（见提示）",
+		"cmd.login":            "配置 API 凭据（交互输入，保存后自动验证）",
 		"cmd.logout":           "清除已保存的 API 凭据",
 		"cmd.copy":             "复制最近一条助手回复到剪贴板 (/copy [N])",
+		"cmd.bell":             "切换任务完成铃声（长任务结束时响铃提醒）",
+		"cmd.replay":           "检查点时间轴回放（逐步查看 diff / 回滚到任意检查点）",
 		"security.usage":       "用法: /security [local|desensitize|local-llm|foreign-llm|unrestricted]\n当前等级: %s\n\n等级说明:\n  local          [L] 所有数据仅在本地处理，不调用外部 API\n  desensitize    [D] 发送前脱敏（隐藏身份证/手机号/密钥等）\n  local-llm      [M] 仅允许本地模型（Ollama/Llama.cpp 等）\n  foreign-llm    [G] 允许国外大模型 API\n  unrestricted   [!] 无安全限制\n",
 		"security.set":         "安全等级已设为: %s",
 		"security.desc":        "安全等级 — 控制数据隐私边界",
@@ -137,10 +170,41 @@ var tuiStrings = map[string]map[string]string{
 		"welcome.tagline":      "你的 AI 程式設計夥伴",
 		"welcome.close":        "按 Esc 或 Enter 關閉歡迎屏 · 輸入即開始",
 		"welcome.reopen":       "歡迎屏僅在空對話時顯示，先 /clear 再試",
-		"input.hint":           "manual mode on · ? for shortcuts · Enter for agents",
+		"welcome.greeting":     "歡迎回來！",
+		"welcome.model":        "模型",
+		"welcome.provider":     "服務商",
+		"welcome.mode":         "模式",
+		"welcome.cwd":          "目錄",
+		"welcome.ctx":          "上下文",
+		"welcome.cache":        "快取",
+		"welcome.tipsTitle":    "快速上手",
+		"welcome.tipsBody1":    "執行 /init 產生 ICODE.md 專案說明",
+		"welcome.tipsBody2":    "讓 iCode 自動了解你的專案約定",
+		"welcome.newTitle":     "新功能",
+		"welcome.newBody":      "查看更新日誌了解最新改進",
+		"mode.plan":            "計畫",
+		"mode.agent":           "智慧體",
+		"mode.yolo":            "全自動",
+		"mode.auto":            "自動",
+		"mode.ask":             "問答",
+		"status.cache":         "快取 %.0f%%",
+		"status.bg":            "後台 %d",
+		"status.elapsed":       "%d 秒",
+		"status.tokRate":       "%d tok/秒",
+		"lang.name.zhCN":       "简体中文",
+		"lang.name.zhTW":       "繁體中文",
+		"lang.name.en":         "English",
+		"theme.name.dark":      "深色",
+		"theme.name.light":     "淺色",
+		"theme.name.auto":      "跟隨系統",
+		"settings.advanced":    "進階設定…",
+		"settings.hint":        "↑↓ 選擇 · ←→ / Enter 切換 · Esc 關閉",
+		"cmd.mouse":            "開關滑鼠捕獲（關=恢復終端原生拖選，Shift+拖動隨時可選取文字）",
+		"input.hint":           "智慧體模式 · 輸入需求開始 · ↑↓ 歷史",
 		"input.hint.streaming": "esc 中斷生成",
 		"cmd.welcome":          "顯示/隱藏啟動歡迎屏",
 		"perm.title":           "需要授權",
+		"perm.titleHigh":       "高危操作確認",
 		"perm.allow":           "允許",
 		"perm.all":             "本次工作階段全部允許",
 		"perm.deny":            "拒絕",
@@ -181,7 +245,7 @@ var tuiStrings = map[string]map[string]string{
 		"cmd.compact":          "壓縮上下文（摘要 + 保留近期）",
 		"cmd.clear":            "清空目前對話",
 		"cmd.export":           "匯出對話為 Markdown",
-		"cmd.share":            "匯出可分享 Markdown（時間戳檔案並列印路徑）",
+		"cmd.share":            "匯出可分享的單檔 HTML（內嵌樣式與程式碼高亮，本機生成）",
 		"cmd.diff":             "顯示 git diff",
 		"cmd.lsp":              "LSP 程式碼智慧（診斷/符號/定義/引用）",
 		"cmd.kb":               "搜尋本機知識庫（/kb <查詢>）",
@@ -199,7 +263,7 @@ var tuiStrings = map[string]map[string]string{
 		"cmd.init":             "產生專案 ICODE.md 骨架",
 		"cmd.agents":           "列出子 agent",
 		"cmd.mcp":              "管理 MCP 伺服器 (list/add/remove/get/restart)",
-		"cmd.hooks":            "編輯 hooks.yaml 權限規則",
+		"cmd.hooks":            "生命週期鉤子管理 (list/events/add/rm/reload)",
 		"cmd.status":           "顯示系統狀態診斷",
 		"cmd.cost":             "顯示 Token 與成本明細",
 		"cmd.token":            "查看本會話 Token 節省報告（Cache-First 五層壓縮明細）",
@@ -225,6 +289,8 @@ var tuiStrings = map[string]map[string]string{
 		"cmd.login":            "設定 API 憑證（見提示）",
 		"cmd.logout":           "清除已儲存的 API 憑證",
 		"cmd.copy":             "複製最近一條助手回覆到剪貼簿 (/copy [N])",
+		"cmd.bell":             "切換任務完成鈴聲（長任務結束時響鈴提醒）",
+		"cmd.replay":           "檢查點時間軸回放（逐步檢視 diff / 回滾到任意檢查點）",
 		"security.usage":       "用法: /security [local|desensitize|local-llm|foreign-llm|unrestricted]\n目前等級: %s\n\n等級說明:\n  local          [L] 所有資料僅在本機處理，不呼叫外部 API\n  desensitize    [D] 傳送前脫敏（隱藏身分證/手機號/金鑰等）\n  local-llm      [M] 僅允許本機模型（Ollama/Llama.cpp 等）\n  foreign-llm    [G] 允許國外大模型 API\n  unrestricted   [!] 無安全限制\n",
 		"security.set":         "安全等級已設為: %s",
 		"security.desc":        "安全等級 — 控制資料隱私邊界",
@@ -249,10 +315,41 @@ var tuiStrings = map[string]map[string]string{
 		"welcome.tagline":      "your AI coding partner",
 		"welcome.close":        "Press Esc or Enter to close · just start typing",
 		"welcome.reopen":       "Welcome shows only on an empty chat — run /clear first",
-		"input.hint":           "manual mode on · ? for shortcuts · Enter for agents",
+		"welcome.greeting":     "Welcome back!",
+		"welcome.model":        "Model",
+		"welcome.provider":     "Provider",
+		"welcome.mode":         "Mode",
+		"welcome.cwd":          "Directory",
+		"welcome.ctx":          "Context",
+		"welcome.cache":        "Cache",
+		"welcome.tipsTitle":    "Getting started",
+		"welcome.tipsBody1":    "Run /init to create an ICODE.md with",
+		"welcome.tipsBody2":    "project instructions for iCode",
+		"welcome.newTitle":     "What's new",
+		"welcome.newBody":      "Check the iCode changelog for updates",
+		"mode.plan":            "plan",
+		"mode.agent":           "agent",
+		"mode.yolo":            "yolo",
+		"mode.auto":            "auto",
+		"mode.ask":             "ask",
+		"status.cache":         "cache %.0f%%",
+		"status.bg":            "bg %d",
+		"status.elapsed":       "%ds",
+		"status.tokRate":       "%d tok/s",
+		"lang.name.zhCN":       "简体中文",
+		"lang.name.zhTW":       "繁體中文",
+		"lang.name.en":         "English",
+		"theme.name.dark":      "dark",
+		"theme.name.light":     "light",
+		"theme.name.auto":      "auto",
+		"settings.advanced":    "Advanced config…",
+		"settings.hint":        "↑↓ select · ←→ / Enter change · Esc close",
+		"cmd.mouse":            "Toggle mouse capture (off = native text selection; Shift+drag always selects)",
+		"input.hint":           "agent mode · type a task · ↑↓ history",
 		"input.hint.streaming": "esc to interrupt",
 		"cmd.welcome":          "Show/hide the startup welcome screen",
 		"perm.title":           "Needs approval",
+		"perm.titleHigh":       "High-risk action",
 		"perm.allow":           "allow",
 		"perm.all":             "allow all this session",
 		"perm.deny":            "deny",
@@ -296,7 +393,7 @@ var tuiStrings = map[string]map[string]string{
 		"cmd.compact":          "Compact context (summarize & keep recent)",
 		"cmd.clear":            "Clear conversation",
 		"cmd.export":           "Export conversation to Markdown",
-		"cmd.share":            "Export shareable Markdown (timestamped file + path)",
+		"cmd.share":            "Export a shareable single-file HTML (embedded styles + highlighting, local-only)",
 		"cmd.diff":             "Show git diff",
 		"cmd.lsp":              "LSP code intelligence (diagnostics/symbols/defs/refs)",
 		"cmd.kb":               "Search local knowledge base (/kb <query>)",
@@ -314,7 +411,7 @@ var tuiStrings = map[string]map[string]string{
 		"cmd.init":             "Generate ICODE.md project skeleton",
 		"cmd.agents":           "List sub-agents",
 		"cmd.mcp":              "Manage MCP servers (list/add/remove/get/restart)",
-		"cmd.hooks":            "Edit hooks.yaml permission rules",
+		"cmd.hooks":            "Lifecycle hooks (list/events/add/rm/reload)",
 		"cmd.status":           "Show system diagnostics",
 		"cmd.cost":             "Show token & cost breakdown",
 		"cmd.token":            "Show token savings report (Cache-First 5-layer pipeline)",
@@ -339,6 +436,8 @@ var tuiStrings = map[string]map[string]string{
 		"cmd.copy":             "Copy last assistant reply to clipboard (/copy [N])",
 		"cmd.vim":              "Toggle vim key bindings (vi-style input)",
 		"cmd.statusline":       "Toggle the bottom status bar",
+		"cmd.bell":             "Toggle the task-completion bell (rings when a long turn finishes)",
+		"cmd.replay":           "Checkpoint timeline replay (per-step diff / rewind to any point)",
 		"cmd.prcomments":       "Show pull-request comments (requires gh)",
 		"cmd.releasenotes":     "Show the latest release notes",
 		"cmd.bug":              "Open a pre-filled GitHub bug-report issue",
@@ -391,6 +490,7 @@ var slashDefs = []struct {
 	{"/kb", "cmd.kb"},
 	{"/todo", "cmd.todo"},
 	{"/rewind", "cmd.rewind"},
+	{"/replay", "cmd.replay"},
 	{"/undo", "cmd.undo"},
 	{"/checkpoint", "cmd.checkpoint"},
 	{"/apply", "cmd.apply"},
@@ -433,7 +533,9 @@ var slashDefs = []struct {
 	{"/login", "cmd.login"},
 	{"/logout", "cmd.logout"},
 	{"/vim", "cmd.vim"},
+	{"/mouse", "cmd.mouse"},
 	{"/statusline", "cmd.statusline"},
+	{"/bell", "cmd.bell"},
 	{"/pr_comments", "cmd.prcomments"},
 	{"/release-notes", "cmd.releasenotes"},
 	{"/bug", "cmd.bug"},
@@ -503,6 +605,51 @@ func (t *TUI) activeTheme() string {
 		return "light"
 	}
 	return "dark"
+}
+
+// modeLabel maps a mode code (plan/agent/yolo/auto/ask) to its localized
+// badge label; unknown codes pass through unchanged.
+func (t *TUI) modeLabel(mode string) string {
+	switch mode {
+	case "plan":
+		return t.tstr("mode.plan")
+	case "agent":
+		return t.tstr("mode.agent")
+	case "yolo":
+		return t.tstr("mode.yolo")
+	case "auto":
+		return t.tstr("mode.auto")
+	case "ask":
+		return t.tstr("mode.ask")
+	}
+	return mode
+}
+
+// langName maps a language code to its native display name (each language
+// shown in its own script — i18n convention).
+func (t *TUI) langName(code string) string {
+	switch code {
+	case langZhCN:
+		return t.tstr("lang.name.zhCN")
+	case langZhTW:
+		return t.tstr("lang.name.zhTW")
+	case langEn:
+		return t.tstr("lang.name.en")
+	}
+	return code
+}
+
+// themeName maps a theme code to its localized display name.
+func (t *TUI) themeName(code string) string {
+	switch code {
+	case "dark":
+		return t.tstr("theme.name.dark")
+	case "light":
+		return t.tstr("theme.name.light")
+	case "auto":
+		return t.tstr("theme.name.auto")
+	}
+	return code
 }
 
 func (t *TUI) c(name string) string {

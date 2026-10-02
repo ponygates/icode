@@ -8,6 +8,7 @@
 package searchreplace
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -30,60 +31,59 @@ type StagingArea struct {
 	edits []StagedEdit
 }
 
-// defaultStage is the fallback staging area used by UI slash commands
-// (/apply /reject /review) that have no session context. The search_replace
-// tool itself stages into the per-session area (see StageForSession).
-var defaultStage = &StagingArea{}
-
-// stageRegistry keeps one staging area per session so concurrent sessions
-// (desktop multi-tab, parallel sub-agents) can never pollute each other's
-// staged edits. Areas are created lazily and never pruned — a session
-// finishes a handful of staged-edit rounds, so the footprint is trivial.
+// stageRegistry keeps exactly one staging area per session. There is NO
+// shared fallback bucket: the old package-level defaultStage silently merged
+// every empty-sessionID caller into one area, which cross-contaminated staged
+// edits between desktop tabs sharing a process. Callers that legitimately
+// have no conversation session must use ProcessSessionID() (deterministic per
+// process, still isolated from every real session).
+//
+// Areas are created lazily and never pruned — a session finishes a handful
+// of staged-edit rounds, so the footprint is trivial.
 var (
 	stageMu     sync.Mutex
 	stageBySess = map[string]*StagingArea{}
 )
 
+// processStageID is the deterministic per-process staging key. pid makes it
+// stable for the lifetime of one process (restarting gives a fresh, still
+// deterministic value) and unique across processes.
+var processStageID = fmt.Sprintf("process:%d", os.Getpid())
+
+// ProcessSessionID returns the staging key for callers with no conversation
+// session (single-shot CLI exec, UI slash commands before a session exists).
+func ProcessSessionID() string { return processStageID }
+
+// ErrNoSession is returned by StageForSession for an empty session ID —
+// callers must pass a real session ID or ProcessSessionID().
+var ErrNoSession = errors.New("searchreplace: empty session ID (use a real session or ProcessSessionID)")
+
 // StageForSession returns the staging area owned by the given session ID.
-// The UI slash commands (no session context) fall back to the shared
-// default area via the bare Stage* functions.
-func StageForSession(sessionID string) *StagingArea {
+// An empty session ID is an explicit error (ErrNoSession), never a shared
+// bucket.
+func StageForSession(sessionID string) (*StagingArea, error) {
 	if sessionID == "" {
-		return defaultStage
+		return nil, ErrNoSession
 	}
 	stageMu.Lock()
 	defer stageMu.Unlock()
 	if s, ok := stageBySess[sessionID]; ok {
-		return s
+		return s, nil
 	}
 	s := &StagingArea{}
 	stageBySess[sessionID] = s
+	return s, nil
+}
+
+// StageForSessionOrProcess is the convenience for callers that may
+// legitimately lack a session ID: they get this process's deterministic
+// private area instead of an error — still never shared with any session.
+func StageForSessionOrProcess(sessionID string) *StagingArea {
+	if sessionID == "" {
+		sessionID = processStageID
+	}
+	s, _ := StageForSession(sessionID)
 	return s
-}
-
-// StageAdd adds a proposed edit, validates it, and returns the index.
-func StageAdd(filePath, search, replace string) (int, bool, string) {
-	return defaultStage.Add(filePath, search, replace)
-}
-
-// StageList returns all staged edits (copy).
-func StageList() []StagedEdit {
-	return defaultStage.List()
-}
-
-// StageCount returns the number of staged edits.
-func StageCount() int {
-	return defaultStage.Count()
-}
-
-// StageClear removes all staged edits.
-func StageClear() {
-	defaultStage.Clear()
-}
-
-// StageApplyValid applies all valid staged edits and returns results.
-func StageApplyValid() []string {
-	return defaultStage.ApplyValid()
 }
 
 // Add validates and stages a proposed edit.

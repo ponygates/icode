@@ -3,9 +3,14 @@ import ReactDOM from 'react-dom/client';
 import { HashRouter } from 'react-router-dom';
 import App from './App';
 import ErrorBoundary from './components/ErrorBoundary';
+import { initAuthFetch } from './lib/authFetch';
 import './i18n';
 import './styles/global.css';
 import 'highlight.js/styles/github-dark.min.css';
+
+// Stash the per-launch Bearer token (from ?token=) and patch fetch BEFORE
+// mounting, so the very first API call (config/models/…) already carries it.
+initAuthFetch();
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

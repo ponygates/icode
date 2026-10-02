@@ -8,11 +8,32 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/ponygates/icode/internal/db"
 	"github.com/ponygates/icode/internal/types"
 )
+
+// testTokens maps each test server's base URL to its per-launch API token so
+// the shared httpDo helper can present the Bearer token required by the
+// privileged mutating endpoints (shell/config/permission/update). Registered
+// by the test server factories; read on every httpDo call.
+var testTokens sync.Map // string base URL -> string token
+
+// tokenForURL returns the registered token for a test server base URL, if any.
+func tokenForURL(url string) (string, bool) {
+	var tok string
+	testTokens.Range(func(k, v any) bool {
+		if strings.HasPrefix(url, k.(string)) {
+			tok, _ = v.(string)
+			return false
+		}
+		return true
+	})
+	return tok, tok != ""
+}
 
 // httpDo performs a request and decodes the response body into out (when
 // non-nil), asserting the expected status code.
@@ -28,6 +49,9 @@ func httpDo(t *testing.T, method, url, body string, wantStatus int, out any) *ht
 	}
 	if body != "" {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if tok, ok := tokenForURL(url); ok {
+		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -54,6 +78,29 @@ func isolateHome(t *testing.T) string {
 	tmp := t.TempDir()
 	t.Setenv("USERPROFILE", tmp) // Windows
 	t.Setenv("HOME", tmp)        // POSIX
+	// TMP/TEMP too: os.TempDir() prefers them over USERPROFILE, and
+	// Server.Start() publishes the discovery port file (port + Bearer token)
+	// into os.TempDir()/icode/. Without this redirect every test that boots
+	// a server overwrites the REAL %TEMP%\icode\port that production
+	// desktop / VS Code clients read — a flaky "VS Code can't find the
+	// backend" failure mode that is nearly impossible to reproduce.
+	t.Setenv("TMP", tmp)
+	t.Setenv("TEMP", tmp)
+	return tmp
+}
+
+// redirectTemp points TMP/TEMP at a per-test scratch dir without touching
+// HOME — used by the test server factories so Server.Start() cannot
+// overwrite the production %TEMP%\icode\port discovery file (os.TempDir()
+// prefers TMP/TEMP over USERPROFILE). Separate from isolateHome because
+// tests that assert HOME-derived config paths call isolateHome themselves;
+// a factory must not clobber their HOME redirect, so the two helpers are
+// designed to compose in either order.
+func redirectTemp(t *testing.T) string {
+	t.Helper()
+	tmp := t.TempDir()
+	t.Setenv("TMP", tmp)
+	t.Setenv("TEMP", tmp)
 	return tmp
 }
 
@@ -154,6 +201,38 @@ func TestWorkspaceList(t *testing.T) {
 	if _, ok := body["workspaces"]; !ok {
 		t.Fatalf("GET /api/workspaces missing workspaces field: %v", body)
 	}
+}
+
+// TestWorkspaceCreateReturnsTheStoredRow pins the created workspace's identity:
+// the response must carry the generated id, not null, so the client can address
+// the workspace it just made.
+func TestWorkspaceCreateReturnsTheStoredRow(t *testing.T) {
+	_, base := newSecurityTestServer(t)
+	var created db.Workspace
+	httpDo(t, http.MethodPost, base+"/api/workspaces",
+		`{"name":"结算区","path":"/tmp/ws-test"}`, http.StatusCreated, &created)
+	if created.ID == "" {
+		t.Fatalf("POST /api/workspaces returned no id: %+v", created)
+	}
+	if created.Name != "结算区" || created.Path != "/tmp/ws-test" {
+		t.Errorf("created = %+v, want the submitted name/path", created)
+	}
+	if created.SessionIDs == nil {
+		t.Error("created.SessionIDs = nil, want an empty slice in the response")
+	}
+	if created.CreatedAt.IsZero() || created.UpdatedAt.IsZero() {
+		t.Errorf("created timestamps missing: %+v", created)
+	}
+
+	var list map[string]any
+	httpDo(t, http.MethodGet, base+"/api/workspaces", "", http.StatusOK, &list)
+	rows, _ := list["workspaces"].([]any)
+	for _, raw := range rows {
+		if m, _ := raw.(map[string]any); m != nil && m["id"] == created.ID {
+			return
+		}
+	}
+	t.Fatalf("created workspace %q not present in GET listing: %v", created.ID, list)
 }
 
 func TestConfigPUTPersists(t *testing.T) {

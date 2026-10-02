@@ -110,6 +110,10 @@ export interface Message {
   content: string;
   timestamp: number;
   attachments?: Attachment[];
+  // Files touched by file-modifying tools in this assistant turn
+  // (write_file / edit / search_replace). Set once the turn settles —
+  // drives the inline review bar (diff + rewind) under the message.
+  changedFiles?: string[];
 }
 
 export interface Session {
@@ -188,7 +192,7 @@ interface AppStore {
   // fetch in setActiveSession from clobbering a still-streaming transcript.
   streamingSessions: Record<string, boolean>;
   setStreaming: (sessionId: string, on: boolean) => void;
-  createSession: (modelId: string, provider: string) => void;
+  createSession: (modelId: string, provider: string) => string;
   setActiveSession: (id: string) => void;
   deleteSession: (id: string) => void;
   closeTab: (id: string) => void;
@@ -585,7 +589,7 @@ export const useAppStore = create<AppStore>()(
           saveToLocal(loaded);
           if (loaded.length > 0) {
             // The backend list is ordered by updated_at DESC, so the most
-            // recently used session (i.e. whatever desktop/CLI/simpleui last
+            // recently used session (i.e. whatever desktop/CLI last
             // touched) is FIRST. Resume it so all three ends land on the same
             // conversation — this is what makes history "sync" across them.
             set({ activeSessionId: loaded[0].id });
@@ -691,6 +695,7 @@ export const useAppStore = create<AppStore>()(
           )
         : state.workspaces,
     }));
+    return session.id;
   },
 
   setActiveSession: (id) => {

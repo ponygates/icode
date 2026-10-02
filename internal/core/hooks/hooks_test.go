@@ -177,3 +177,118 @@ func TestFireLifecycleEvents(t *testing.T) {
 		t.Errorf("Notification hook did not run: %v", err)
 	}
 }
+
+// jsonEchoCmd builds a cross-platform hook command that prints the given
+// single-line JSON on stdout and exits 0. On Windows a temp .cmd file is
+// used so the quoting survives cmd.exe verbatim.
+func jsonEchoCmd(t *testing.T, jsonLine string) string {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		return "printf '" + jsonLine + "'"
+	}
+	script := filepath.Join(t.TempDir(), "hook.cmd")
+	if err := os.WriteFile(script, []byte("@echo "+jsonLine), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return script
+}
+
+func TestFireJSONDecisionBlock(t *testing.T) {
+	r := NewRunner(map[string][]Rule{
+		"PreToolUse": {{Matcher: "bash", Command: jsonEchoCmd(t, `{"decision":"block","reason":"NOPE"}`)}},
+	}, ".")
+	res := r.Fire(context.Background(), PreToolUse, Input{ToolName: "bash"})
+	if !res.Block || res.Message != "NOPE" {
+		t.Fatalf("expected block with reason NOPE, got %+v", res)
+	}
+	// Matcher still applies: a non-matching tool is untouched.
+	if res := r.Fire(context.Background(), PreToolUse, Input{ToolName: "edit"}); res.Block {
+		t.Fatal("edit must not be blocked (matcher mismatch)")
+	}
+}
+
+func TestFireJSONPermissionDecision(t *testing.T) {
+	r := NewRunner(map[string][]Rule{
+		"PreToolUse": {{Command: jsonEchoCmd(t, `{"permissionDecision":"deny","reason":"not on prod"}`)}},
+	}, ".")
+	res := r.Fire(context.Background(), PreToolUse, Input{ToolName: "bash"})
+	if res.Block {
+		t.Fatal("permissionDecision must not set Block")
+	}
+	if res.PermissionDecision != "deny" {
+		t.Fatalf("expected deny, got %q", res.PermissionDecision)
+	}
+	if res.Message != "not on prod" {
+		t.Fatalf("expected reason surfaced as message, got %q", res.Message)
+	}
+	// Bogus values are ignored rather than half-applied.
+	r2 := NewRunner(map[string][]Rule{
+		"PreToolUse": {{Command: jsonEchoCmd(t, `{"permissionDecision":"maybe"}`)}},
+	}, ".")
+	if res := r2.Fire(context.Background(), PreToolUse, Input{ToolName: "bash"}); res.PermissionDecision != "" {
+		t.Fatalf("unknown permissionDecision must be ignored, got %q", res.PermissionDecision)
+	}
+}
+
+func TestFireJSONSuppressOutputAndSystemMessage(t *testing.T) {
+	r := NewRunner(map[string][]Rule{
+		"PostToolUse": {{Command: jsonEchoCmd(t, `{"suppressOutput":true,"systemMessage":"heads up"}`)}},
+	}, ".")
+	res := r.Fire(context.Background(), PostToolUse, Input{ToolName: "bash"})
+	if !res.SuppressOutput || res.SystemMessage != "heads up" {
+		t.Fatalf("expected suppress+systemMessage, got %+v", res)
+	}
+}
+
+func TestFireStopContinueFalse(t *testing.T) {
+	r := NewRunner(map[string][]Rule{
+		"Stop": {{Command: jsonEchoCmd(t, `{"continue":false,"stopReason":"tests failing"}`)}},
+	}, ".")
+	res := r.Fire(context.Background(), Stop, Input{SessionID: "s1"})
+	if !res.Block || res.Message != "tests failing" {
+		t.Fatalf("expected Stop block with stopReason, got %+v", res)
+	}
+	// continue:true (or absent) must NOT block.
+	r2 := NewRunner(map[string][]Rule{
+		"Stop": {{Command: jsonEchoCmd(t, `{"continue":true}`)}},
+	}, ".")
+	if res := r2.Fire(context.Background(), Stop, Input{SessionID: "s1"}); res.Block {
+		t.Fatalf("continue:true must not block, got %+v", res)
+	}
+}
+
+func TestFireTimeoutMarksResult(t *testing.T) {
+	// A hook that sleeps far past its 1s timeout. ping is the canonical
+	// portable-ish Windows delay; sleep everywhere else.
+	sleepCmd := "sleep 5"
+	if runtime.GOOS == "windows" {
+		sleepCmd = "ping -n 5 127.0.0.1 > nul"
+	}
+	r := NewRunner(map[string][]Rule{
+		"PreToolUse": {{Command: sleepCmd, Timeout: 1}},
+	}, ".")
+	res := r.Fire(context.Background(), PreToolUse, Input{ToolName: "bash"})
+	if res.Block {
+		t.Fatal("timeout must never block")
+	}
+	if !res.TimedOut {
+		t.Fatal("expected TimedOut=true for a killed hook")
+	}
+	if res.SystemMessage == "" {
+		t.Fatal("timeout should surface a system message for observability")
+	}
+}
+
+func TestParseHookJSON(t *testing.T) {
+	if parseHookJSON("") != nil || parseHookJSON("hello") != nil || parseHookJSON("[1,2]") != nil {
+		t.Fatal("non-JSON-object stdout must parse to nil")
+	}
+	ho := parseHookJSON(`{"decision":"block","reason":"r"}`)
+	if ho == nil || ho.Decision != "block" || ho.Reason != "r" {
+		t.Fatalf("unexpected parse: %+v", ho)
+	}
+	// Invalid JSON that still starts with '{' is treated as no output.
+	if parseHookJSON(`{"decision":`) != nil {
+		t.Fatal("truncated JSON must be nil")
+	}
+}

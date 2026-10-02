@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { apiAppendMessage, apiUpdateMessage, apiForkMessages, apiClearSession } from '../sessionMessages';
+import { apiAppendMessage, apiUpdateMessage, apiForkMessages, apiClearSession, sliceThrough } from '../sessionMessages';
 
 function mockFetch(): {
   fn: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -59,5 +59,44 @@ describe('sessionMessages persistence', () => {
     expect(bodies.map((b) => b.id)).not.toContain('old1');
     expect(bodies.map((b) => b.content)).toEqual(['one', 'two']);
     expect(bodies.every((b) => b.id.length > 0)).toBe(true);
+  });
+});
+
+describe('sliceThrough (fork branch point)', () => {
+  const msgs = [
+    { id: 'm1' },
+    { id: 'm2' },
+    { id: 'm3' },
+  ];
+
+  it('keeps the whole list when no branch point is given', () => {
+    expect(sliceThrough(msgs)).toEqual(msgs);
+  });
+
+  it('keeps everything up to and including the branch point', () => {
+    expect(sliceThrough(msgs, 'm2')).toEqual([{ id: 'm1' }, { id: 'm2' }]);
+  });
+
+  it('branching at the first message keeps exactly that message', () => {
+    expect(sliceThrough(msgs, 'm1')).toEqual([{ id: 'm1' }]);
+  });
+
+  it('returns null for a message that is no longer in the list', () => {
+    expect(sliceThrough(msgs, 'gone')).toBeNull();
+    expect(sliceThrough([], 'm1')).toBeNull();
+  });
+
+  it('the fork payload of a branch point is the prefix, not the whole session', async () => {
+    const { fn, calls } = mock();
+    const prefix = sliceThrough(
+      [
+        { id: 'm1', role: 'user', content: 'one' },
+        { id: 'm2', role: 'assistant', content: 'two' },
+        { id: 'm3', role: 'user', content: 'three' },
+      ],
+      'm2',
+    );
+    await apiForkMessages('http://x', 'fork1', prefix!, fn);
+    expect(calls().map((c) => JSON.parse(String(c.init.body)).content)).toEqual(['one', 'two']);
   });
 });

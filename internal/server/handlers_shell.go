@@ -26,7 +26,7 @@ type shellResponse struct {
 	Error    string `json:"error,omitempty"`
 }
 
-// handleShell runs a shell command with a 60s timeout (mirroring simpleui's
+// handleShell runs a shell command with a 60s timeout (mirroring the desktop
 // execShell) and returns its combined output. Local-only trust model, same as
 // the CLI's `!` shortcut — the desktop backend already executes tools.
 func (s *Server) handleShell(w http.ResponseWriter, r *http.Request) {

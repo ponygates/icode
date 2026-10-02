@@ -9,6 +9,7 @@ package checkpoint
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"strings"
@@ -113,7 +114,9 @@ func (w *Worktree) Discard() error {
 		firstErr = err
 		_ = os.RemoveAll(w.Dir) // best-effort fallback
 	}
-	_, _ = gitOut(ctx, w.RepoDir, "branch", "-D", w.Branch)
+	if _, berr := gitOut(ctx, w.RepoDir, "branch", "-D", w.Branch); berr != nil {
+		log.Printf("[checkpoint] discard: delete worktree branch %s failed: %v", w.Branch, berr)
+	}
 	return firstErr
 }
 
@@ -126,16 +129,24 @@ func CleanupWorktrees(repoDir string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_, _ = gitOut(ctx, top, "worktree", "prune")
+	if _, perr := gitOut(ctx, top, "worktree", "prune"); perr != nil {
+		log.Printf("[checkpoint] worktree prune at bootstrap failed: %v", perr)
+	}
 	branches, err := gitOut(ctx, top, "branch", "--list", "icode/wt-*")
 	if err != nil || branches == "" {
 		return
 	}
+	failed := 0
 	for _, b := range strings.Split(branches, "\n") {
 		b = strings.TrimPrefix(strings.TrimSpace(b), "* ")
 		if b == "" {
 			continue
 		}
-		_, _ = gitOut(ctx, top, "branch", "-D", b)
+		if _, derr := gitOut(ctx, top, "branch", "-D", b); derr != nil {
+			failed++
+		}
+	}
+	if failed > 0 {
+		log.Printf("[checkpoint] bootstrap worktree cleanup: failed to delete %d stale branch(es)", failed)
 	}
 }

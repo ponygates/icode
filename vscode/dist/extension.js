@@ -15,26 +15,15 @@ var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (
 }) : function(o, v) {
     o["default"] = v;
 });
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
+var __importStar = (this && this.__importStar) || function (mod) {
+    if (mod && mod.__esModule) return mod;
+    var result = {};
+    if (mod != null) for (var k in mod) if (k !== "default" && Object.prototype.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
+    __setModuleDefault(result, mod);
+    return result;
+};
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.activate = activate;
-exports.deactivate = deactivate;
+exports.deactivate = exports.activate = void 0;
 const vscode = __importStar(require("vscode"));
 const cp = __importStar(require("child_process"));
 const fs = __importStar(require("fs"));
@@ -43,6 +32,11 @@ const http = __importStar(require("http"));
 const path = __importStar(require("path"));
 // ── iCode backend discovery / lifecycle ──────────────────────────────────────
 let backendPort = null;
+// Per-launch Bearer token for the privileged mutating endpoints
+// (shell/config/permission/update). Populated from the port file written by
+// backends ≥ v0.1.3; empty for legacy plain-number port files (those
+// backends don't require a token, so sending none is compatible both ways).
+let backendToken = '';
 let serverProc = null;
 let output = null;
 let statusBar = null;
@@ -74,22 +68,51 @@ function portFilePath() {
     const tmp = process.env.TEMP || process.env.TMPDIR || os.tmpdir();
     return path.join(tmp, 'icode', 'port');
 }
-function readPortFile() {
+// The port file is a JSON document {"port":N,"token":"..."} (backends ≥
+// v0.1.3). Older backends wrote a bare port number — parse both so the
+// extension stays compatible with whichever binary is installed.
+function readPortInfo() {
     try {
         const p = portFilePath();
         if (fs.existsSync(p)) {
-            const n = parseInt(fs.readFileSync(p, 'utf8').trim(), 10);
-            if (!isNaN(n)) {
-                return n;
+            const raw = fs.readFileSync(p, 'utf8').trim();
+            try {
+                const obj = JSON.parse(raw);
+                const n = parseInt(obj?.port, 10);
+                if (!isNaN(n)) {
+                    return { port: n, token: typeof obj?.token === 'string' ? obj.token : '' };
+                }
+            }
+            catch {
+                // Not JSON — legacy plain-number file.
+                const n = parseInt(raw, 10);
+                if (!isNaN(n)) {
+                    return { port: n, token: '' };
+                }
             }
         }
     }
     catch { /* ignore */ }
     return null;
 }
+// Legacy alias: just the port number from the port file.
+function readPortFile() {
+    return readPortInfo()?.port ?? null;
+}
+// Sync the Bearer token whenever a backend port is (re)adopted: adopt the
+// port file's token when it belongs to that port, otherwise clear it (that
+// backend either predates tokens or belongs to another launch).
+function refreshTokenFor(port) {
+    const info = readPortInfo();
+    backendToken = info && info.port === port && info.token ? info.token : '';
+}
 function httpGetJSON(port, p, timeoutMs = 1500) {
     return new Promise((resolve, reject) => {
-        const req = http.get({ host: '127.0.0.1', port, path: p, headers: { Accept: 'application/json' } }, (res) => {
+        const headers = { Accept: 'application/json' };
+        if (backendToken) {
+            headers.Authorization = `Bearer ${backendToken}`;
+        }
+        const req = http.get({ host: '127.0.0.1', port, path: p, headers }, (res) => {
             let data = '';
             res.on('data', (c) => { data += c.toString(); });
             res.on('end', () => {
@@ -110,6 +133,7 @@ async function ensureBackend() {
     if (backendPort !== null) {
         try {
             await httpGetJSON(backendPort, '/api/health');
+            refreshTokenFor(backendPort);
             updateStatusBar(backendPort);
             return backendPort;
         }
@@ -124,6 +148,7 @@ async function ensureBackend() {
         try {
             await httpGetJSON(fixed, '/api/health');
             backendPort = fixed;
+            refreshTokenFor(fixed);
             updateStatusBar(fixed);
             return fixed;
         }
@@ -135,6 +160,7 @@ async function ensureBackend() {
         try {
             await httpGetJSON(port, '/api/health');
             backendPort = port;
+            refreshTokenFor(port);
             updateStatusBar(port);
             return port;
         }
@@ -145,6 +171,7 @@ async function ensureBackend() {
         try {
             await httpGetJSON(p, '/api/health');
             backendPort = p;
+            refreshTokenFor(p);
             updateStatusBar(p);
             return p;
         }
@@ -161,6 +188,7 @@ async function ensureBackend() {
             try {
                 await httpGetJSON(pp, '/api/health');
                 backendPort = pp;
+                refreshTokenFor(pp);
                 updateStatusBar(pp);
                 return pp;
             }
@@ -236,12 +264,19 @@ function startBackend() {
 function proxyJSON(port, method, p, body) {
     return new Promise((resolve, reject) => {
         const data = body ? JSON.stringify(body) : '';
+        const headers = {
+            'Content-Type': 'application/json',
+            'Content-Length': String(Buffer.byteLength(data)),
+        };
+        if (backendToken) {
+            headers.Authorization = `Bearer ${backendToken}`;
+        }
         const req = http.request({
             host: '127.0.0.1',
             port,
             path: p,
             method,
-            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) },
+            headers,
         }, (res) => {
             let d = '';
             res.on('data', (c) => { d += c.toString(); });
@@ -263,12 +298,19 @@ function proxyJSON(port, method, p, body) {
 }
 function proxyChat(port, body, webview, sessionId) {
     const data = JSON.stringify(body);
+    const chatHeaders = {
+        'Content-Type': 'application/json',
+        'Content-Length': String(Buffer.byteLength(data)),
+    };
+    if (backendToken) {
+        chatHeaders.Authorization = `Bearer ${backendToken}`;
+    }
     const req = http.request({
         host: '127.0.0.1',
         port,
         path: '/api/chat',
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) },
+        headers: chatHeaders,
     }, (res) => {
         let buf = '';
         res.on('data', (chunk) => {
@@ -297,6 +339,85 @@ function proxyChat(port, body, webview, sessionId) {
     req.on('error', (e) => webview.postMessage({ type: 'error', sessionId, message: String(e) }));
     req.write(data);
     req.end();
+}
+// ── inline edit helpers (extension host side) ────────────────────────────────
+// Resolve the cwd for a session: the workspace folder of the active document,
+// falling back to the first workspace folder (multi-root aware).
+function sessionCwd() {
+    const ed = vscode.window.activeTextEditor;
+    const folder = ed
+        ? vscode.workspace.getWorkspaceFolder(ed.document.uri)
+        : vscode.workspace.workspaceFolders?.[0];
+    return folder?.uri.fsPath;
+}
+// First model the backend advertises — used as the default for headless calls
+// (inline edit) that have no model picker.
+async function pickDefaultModel(port) {
+    try {
+        const list = await proxyJSON(port, 'GET', '/api/models');
+        const m = Array.isArray(list) ? list[0] : null;
+        if (m) {
+            return { model: m.model_id || m.id || '', provider: m.provider || '' };
+        }
+    }
+    catch { /* ignore */ }
+    return { model: '', provider: '' };
+}
+// One-shot chat: POST /api/chat, read the SSE stream, and resolve with the
+// concatenated assistant text once the stream ends. Reuses the same backend
+// endpoint the ask/explain/improve commands drive through the webview.
+function chatComplete(port, body, timeoutMs = 60000) {
+    return new Promise((resolve, reject) => {
+        const data = JSON.stringify(body);
+        const headers = {
+            'Content-Type': 'application/json',
+            'Content-Length': String(Buffer.byteLength(data)),
+        };
+        if (backendToken) {
+            headers.Authorization = `Bearer ${backendToken}`;
+        }
+        const req = http.request({
+            host: '127.0.0.1', port, path: '/api/chat', method: 'POST',
+            headers,
+        }, (res) => {
+            let buf = '';
+            let out = '';
+            res.on('data', (chunk) => {
+                buf += chunk.toString();
+                let idx;
+                while ((idx = buf.indexOf('\n\n')) >= 0) {
+                    const raw = buf.slice(0, idx);
+                    buf = buf.slice(idx + 2);
+                    const line = raw.trim();
+                    if (!line.startsWith('data:')) {
+                        continue;
+                    }
+                    try {
+                        const ev = JSON.parse(line.slice(5).trim());
+                        if (ev.type === 'text') {
+                            out += ev.content || '';
+                        }
+                    }
+                    catch { /* ignore malformed event */ }
+                }
+            });
+            res.on('end', () => resolve(out));
+            res.on('error', reject);
+        });
+        req.setTimeout(timeoutMs, () => req.destroy(new Error('timeout')));
+        req.on('error', reject);
+        req.write(data);
+        req.end();
+    });
+}
+// Pull the first fenced code block out of a model reply; null when there is
+// none (we then abort the edit rather than paste prose over the selection).
+function extractFencedCode(text) {
+    const m = text.match(/```[a-zA-Z0-9_+-]*\r?\n([\s\S]*?)```/);
+    if (m) {
+        return m[1].replace(/\r?\n$/, '');
+    }
+    return null;
 }
 class ICodeViewProvider {
     constructor(ext) {
@@ -351,6 +472,104 @@ class ICodeExtension {
         }
         await vscode.commands.executeCommand('icode.chat.focus');
     }
+    /** Inline edit: send the selection + an instruction to the backend, then
+     *  apply the returned code over the selection as a single undoable edit. */
+    async editSelection() {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor || editor.selection.isEmpty) {
+            vscode.window.showInformationMessage('请先在编辑器中选中要修改的代码。');
+            return;
+        }
+        const instruction = await vscode.window.showInputBox({
+            prompt: 'iCode 内联编辑：描述你想要的改动',
+            placeHolder: '例如：改用早返回，并为空值补充错误处理',
+            ignoreFocusOut: true,
+        });
+        if (!instruction) {
+            return;
+        }
+        const doc = editor.document;
+        const code = doc.getText(editor.selection);
+        const rel = vscode.workspace.asRelativePath(doc.uri, false);
+        let port;
+        try {
+            port = await ensureBackend();
+        }
+        catch (e) {
+            vscode.window.showErrorMessage(e.message);
+            return;
+        }
+        const { model, provider } = await pickDefaultModel(port);
+        // An isolated session keeps the edit turn out of the sidebar conversation.
+        const sid = 'edit-' + Date.now().toString(36);
+        await proxyJSON(port, 'POST', '/api/sessions', {
+            id: sid, title: 'inline edit', model, provider, cwd: sessionCwd(),
+        }).catch(() => { });
+        const content = `${instruction}\n\n下面是文件 ${rel} 中被选中的代码，请只返回修改后的完整代码` +
+            `（用 \`\`\` 代码块包裹，保持原有缩进），不要输出解释文字：\n\`\`\`\n${code}\n\`\`\``;
+        await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'iCode 正在编辑选中代码…' }, async () => {
+            let reply;
+            try {
+                reply = await chatComplete(port, { session_id: sid, content, model, provider });
+            }
+            catch (e) {
+                vscode.window.showErrorMessage('iCode 编辑失败: ' + e.message);
+                return;
+            }
+            const newCode = extractFencedCode(reply);
+            if (newCode == null) {
+                vscode.window.showWarningMessage('模型未返回代码块，已取消编辑。');
+                return;
+            }
+            // The document may have been edited while the model was thinking:
+            // re-validate the selection text so a stale replacement can never
+            // clobber the user's own keystrokes.
+            if (doc.isDirty || doc.getText(editor.selection) !== code) {
+                vscode.window.showWarningMessage('文件在生成期间已发生改动，为安全起见已取消应用。');
+                return;
+            }
+            // Cursor-style review flow: open a full-file diff (original vs
+            // edited) instead of writing directly to the document, and let the
+            // user apply or discard after inspecting the change.
+            const selStart = doc.offsetAt(editor.selection.start);
+            const selEnd = doc.offsetAt(editor.selection.end);
+            const fullText = doc.getText();
+            const fullNew = fullText.slice(0, selStart) + newCode + fullText.slice(selEnd);
+            const modified = await vscode.workspace.openTextDocument({
+                content: fullNew, language: doc.languageId,
+            });
+            await vscode.commands.executeCommand('vscode.diff', doc.uri, modified.uri, `iCode 编辑: ${rel} — 审阅后应用`);
+            const closeDiff = async () => {
+                for (const ed of vscode.window.visibleTextEditors) {
+                    if (ed.document.uri.toString() === modified.uri.toString()) {
+                        await vscode.window.showTextDocument(modified, { viewColumn: ed.viewColumn });
+                        await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+                        break;
+                    }
+                }
+            };
+            const pick = await vscode.window.showQuickPick([{ label: '$(check) 应用修改', apply: true }, { label: '$(close) 放弃', apply: false }], { placeHolder: '请在 diff 视图中审阅 AI 的修改，再选择是否应用', ignoreFocusOut: true });
+            if (!pick || !pick.apply) {
+                await closeDiff();
+                return;
+            }
+            // Re-validate once more: the user may have typed in the document
+            // while reviewing the diff side by side.
+            if (doc.getText(editor.selection) !== code) {
+                vscode.window.showWarningMessage('文件在审阅期间被修改，已取消应用。');
+                await closeDiff();
+                return;
+            }
+            // WorkspaceEdit.replace is atomic and lands on the undo stack.
+            const edit = new vscode.WorkspaceEdit();
+            edit.replace(doc.uri, editor.selection, newCode);
+            const applied = await vscode.workspace.applyEdit(edit);
+            await closeDiff();
+            if (!applied) {
+                vscode.window.showErrorMessage('应用编辑失败。');
+            }
+        });
+    }
     async activate(ctx) {
         output = vscode.window.createOutputChannel('iCode');
         const provider = new ICodeViewProvider(this);
@@ -399,6 +618,8 @@ class ICodeExtension {
             return this.sendSelectionToChat('请解释下面这段代码的作用、关键逻辑与潜在问题：', true);
         }), vscode.commands.registerCommand('icode.improveSelection', () => {
             return this.sendSelectionToChat('请优化下面这段代码（可读性/性能/健壮性），给出改进后的完整代码与说明：', true);
+        }), vscode.commands.registerCommand('icode.editSelection', () => {
+            return this.editSelection();
         }));
         log('iCode 扩展已激活');
     }
@@ -437,8 +658,21 @@ class ICodeExtension {
                         title: msg.title,
                         model_id: msg.model,
                         provider_name: msg.provider,
+                        // Multi-root aware: bind the session to the active document's
+                        // workspace folder so the backend resolves relative paths there.
+                        cwd: sessionCwd(),
                     });
                     webview.postMessage({ type: 'sessionCreated', session: sess });
+                    break;
+                }
+                case 'listFiles': {
+                    // `@`-context picker: match workspace files against the query and
+                    // echo back relative paths the backend can later resolve.
+                    const safe = String(msg.query || '').replace(/[^\w.\-/ ]/g, '');
+                    const pattern = safe ? `**/*${safe}*` : '**/*';
+                    const uris = await vscode.workspace.findFiles(pattern, '**/node_modules/**', 60);
+                    const files = uris.map((u) => vscode.workspace.asRelativePath(u, false));
+                    webview.postMessage({ type: 'files', reqId: msg.reqId, payload: files });
                     break;
                 }
                 case 'send':
@@ -447,6 +681,7 @@ class ICodeExtension {
                         content: msg.content,
                         model: msg.model,
                         provider: msg.provider,
+                        cwd: sessionCwd(),
                     }, webview, msg.sessionId);
                     break;
                 case 'stop':
@@ -478,6 +713,7 @@ function getNonce() {
 function activate(ctx) {
     new ICodeExtension().activate(ctx);
 }
+exports.activate = activate;
 function deactivate() {
     if (serverProc) {
         try {
@@ -486,4 +722,5 @@ function deactivate() {
         catch { /* ignore */ }
     }
 }
+exports.deactivate = deactivate;
 //# sourceMappingURL=extension.js.map

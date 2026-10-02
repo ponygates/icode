@@ -18,16 +18,16 @@ import (
 // working; the real command only exists in non-nogui builds.
 var desktopCmd = &cobra.Command{
 	Use:    "desktop",
-	Short:  "Launch the desktop app (not available in this build)",
+	Short:  "启动桌面版（此构建不含桌面功能）",
 	Hidden: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Println("desktop mode is not compiled into this build (built with -tags nogui)")
+		fmt.Println("此构建未编译桌面功能（-tags nogui），请使用完整版 icode 或 icode-desktop")
 		return nil
 	},
 }
 
 // runDesktop is the stub referenced by ExecuteDesktop under the nogui build.
 func runDesktop() error {
-	fmt.Println("desktop mode is not compiled into this build (built with -tags nogui)")
+	fmt.Println("此构建未编译桌面功能（-tags nogui），请使用完整版 icode 或 icode-desktop")
 	return nil
 }

@@ -29,12 +29,37 @@ type Config struct {
 	Path string
 }
 
+// parseStoredTime parses an RFC3339 timestamp read from a stored row. An empty
+// string is a legitimate "unset" marker (zero time, no log); a malformed
+// non-empty value is a data-integrity signal, so it is logged instead of
+// silently swallowed.
+func parseStoredTime(field, raw string) time.Time {
+	if raw == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		log.Printf("warning: failed to parse %s %q: %v", field, raw, err)
+	}
+	return t
+}
+
+// warnDecode logs a tolerated JSON-decode error on a stored blob instead of
+// dropping it. Pass the json.Unmarshal error directly.
+func warnDecode(what string, err error) {
+	if err != nil {
+		log.Printf("warning: failed to decode %s: %v", what, err)
+	}
+}
+
 // New creates a new SQLite-backed store.
 func New(cfg Config) (*Store, error) {
 	if cfg.Path == "" {
 		home, _ := os.UserHomeDir()
 		dir := filepath.Join(home, ".icode")
-		os.MkdirAll(dir, 0755)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			log.Printf("warning: failed to create data dir %s: %v", dir, err)
+		}
 		cfg.Path = filepath.Join(dir, "icode.db")
 	}
 
@@ -167,7 +192,9 @@ func (s *Store) migrate() error {
 	}
 	// Additive column migrations — tolerate "duplicate column" for pre-existing
 	// databases (CREATE IF NOT EXISTS above does not add columns).
-	_, _ = s.db.Exec(`ALTER TABLE automation_runs ADD COLUMN tokens INTEGER NOT NULL DEFAULT 0`)
+	if _, err := s.db.Exec(`ALTER TABLE automation_runs ADD COLUMN tokens INTEGER NOT NULL DEFAULT 0`); err != nil {
+		log.Printf("warning: additive column migration skipped: %v", err)
+	}
 	return nil
 }
 
@@ -212,7 +239,7 @@ func (s *Store) Get(id string) (*types.Session, error) {
 	}
 
 	sess.TotalTokens.TotalTokens = sess.TotalTokens.PromptTokens + sess.TotalTokens.CompletionTokens
-	json.Unmarshal([]byte(metaJSON), &sess.Metadata)
+	warnDecode("session metadata", json.Unmarshal([]byte(metaJSON), &sess.Metadata))
 	sess.CreatedAt, err = time.Parse(time.RFC3339, createdAt)
 	if err != nil {
 		log.Printf("warning: failed to parse created_at %q: %v", createdAt, err)
@@ -256,7 +283,7 @@ func (s *Store) List(limit, offset int) ([]types.Session, error) {
 		}
 
 		sess.TotalTokens.TotalTokens = sess.TotalTokens.PromptTokens + sess.TotalTokens.CompletionTokens
-		json.Unmarshal([]byte(metaJSON), &sess.Metadata)
+		warnDecode("session metadata", json.Unmarshal([]byte(metaJSON), &sess.Metadata))
 		sess.CreatedAt, err = time.Parse(time.RFC3339, createdAt)
 		if err != nil {
 			log.Printf("warning: failed to parse created_at %q: %v", createdAt, err)
@@ -335,7 +362,7 @@ func (s *Store) AppendMessage(sessionID string, msg types.Message) error {
 
 // UpdateMessage updates a single message's role/content in place. It is used
 // by the desktop "shell" helper to persist a tool message after its result
-// arrives, so the same edit shows up in the CLI and simpleui.
+// arrives, so the same edit shows up in the CLI and desktop.
 func (s *Store) UpdateMessage(sessionID string, msg types.Message) error {
 	now := msg.Timestamp.Format(time.RFC3339)
 	if msg.Timestamp.IsZero() {
@@ -403,7 +430,7 @@ func (s *Store) loadMessages(sessionID string) ([]types.Message, error) {
 		if err != nil {
 			log.Printf("warning: failed to parse message timestamp %q: %v", ts, err)
 		}
-		json.Unmarshal([]byte(tcJSON), &msg.ToolCalls)
+		warnDecode("message tool_calls", json.Unmarshal([]byte(tcJSON), &msg.ToolCalls))
 		messages = append(messages, msg)
 	}
 	if err := rows.Err(); err != nil {
@@ -439,7 +466,7 @@ func (s *Store) SearchMessages(query string, limit int) ([]types.SearchResult, e
 			&r.Role, &r.Content, &ts); err != nil {
 			return nil, fmt.Errorf("scan search result: %w", err)
 		}
-		r.Timestamp, _ = time.Parse(time.RFC3339, ts)
+		r.Timestamp = parseStoredTime("search result timestamp", ts)
 		// Find first match position (simple search)
 		lower := strings.ToLower(r.Content)
 		qLower := strings.ToLower(query)
@@ -599,22 +626,34 @@ type Workspace struct {
 	UpdatedAt  time.Time `json:"updated_at"`
 }
 
-func (s *Store) CreateWorkspace(w Workspace) error {
-	now := time.Now().UTC()
+// CreateWorkspace inserts a workspace and returns the stored row. The ID and
+// timestamps are generated here, so callers never need a read-back to learn
+// what was actually written.
+func (s *Store) CreateWorkspace(w Workspace) (Workspace, error) {
+	// RFC3339 is second-precision: truncating keeps the returned value
+	// identical to what GetWorkspace parses back on a later read. The ID keeps
+	// the full nanosecond clock so two workspaces made in the same second
+	// cannot collide.
+	wall := time.Now().UTC()
+	now := wall.Truncate(time.Second)
 	if w.ID == "" {
-		w.ID = fmt.Sprintf("ws_%x", now.UnixNano())
+		w.ID = fmt.Sprintf("ws_%x", wall.UnixNano())
 	}
 	if w.SessionIDs == nil {
 		w.SessionIDs = []string{}
 	}
 	ids, err := json.Marshal(w.SessionIDs)
 	if err != nil {
-		return fmt.Errorf("marshal session_ids: %w", err)
+		return w, fmt.Errorf("marshal session_ids: %w", err)
 	}
-	_, err = s.db.Exec(`INSERT INTO workspaces (id, name, path, session_ids, created_at, updated_at)
+	stamp := now.Format(time.RFC3339)
+	if _, err := s.db.Exec(`INSERT INTO workspaces (id, name, path, session_ids, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?)`,
-		w.ID, w.Name, w.Path, string(ids), now.Format(time.RFC3339), now.Format(time.RFC3339))
-	return err
+		w.ID, w.Name, w.Path, string(ids), stamp, stamp); err != nil {
+		return w, err
+	}
+	w.CreatedAt, w.UpdatedAt = now, now
+	return w, nil
 }
 
 func (s *Store) ListWorkspaces() ([]Workspace, error) {
@@ -631,9 +670,9 @@ func (s *Store) ListWorkspaces() ([]Workspace, error) {
 		if err := rows.Scan(&w.ID, &w.Name, &w.Path, &idsJSON, &createdAt, &updatedAt); err != nil {
 			return out, err
 		}
-		_ = json.Unmarshal([]byte(idsJSON), &w.SessionIDs)
-		w.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
-		w.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+		warnDecode("workspace session_ids", json.Unmarshal([]byte(idsJSON), &w.SessionIDs))
+		w.CreatedAt = parseStoredTime("workspace created_at", createdAt)
+		w.UpdatedAt = parseStoredTime("workspace updated_at", updatedAt)
 		out = append(out, w)
 	}
 	return out, rows.Err()
@@ -647,9 +686,9 @@ func (s *Store) GetWorkspace(id string) (*Workspace, error) {
 	if err := row.Scan(&w.ID, &w.Name, &w.Path, &idsJSON, &createdAt, &updatedAt); err != nil {
 		return nil, err
 	}
-	_ = json.Unmarshal([]byte(idsJSON), &w.SessionIDs)
-	w.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
-	w.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+	warnDecode("workspace session_ids", json.Unmarshal([]byte(idsJSON), &w.SessionIDs))
+	w.CreatedAt = parseStoredTime("workspace created_at", createdAt)
+	w.UpdatedAt = parseStoredTime("workspace updated_at", updatedAt)
 	return &w, nil
 }
 
@@ -727,10 +766,10 @@ func (s *Store) LoadAutomations() ([]scheduler.Task, error) {
 			return nil, err
 		}
 		t.Enabled = enabled != 0
-		t.LastRun, _ = time.Parse(time.RFC3339, lastRun)
-		t.NextRun, _ = time.Parse(time.RFC3339, nextRun)
-		t.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
-		t.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
+		t.LastRun = parseStoredTime("automation last_run", lastRun)
+		t.NextRun = parseStoredTime("automation next_run", nextRun)
+		t.CreatedAt = parseStoredTime("automation created_at", createdAt)
+		t.UpdatedAt = parseStoredTime("automation updated_at", updatedAt)
 		out = append(out, t)
 	}
 	return out, rows.Err()
@@ -785,8 +824,8 @@ func (s *Store) ListAutomationRuns(taskID string, limit int) ([]scheduler.RunRec
 			&r.Status, &r.Output, &r.Error, &r.Tokens); err != nil {
 			return nil, err
 		}
-		r.StartedAt, _ = time.Parse(time.RFC3339, startedAt)
-		r.FinishedAt, _ = time.Parse(time.RFC3339, finishedAt)
+		r.StartedAt = parseStoredTime("run started_at", startedAt)
+		r.FinishedAt = parseStoredTime("run finished_at", finishedAt)
 		out = append(out, r)
 	}
 	return out, rows.Err()
@@ -839,9 +878,9 @@ func (s *Store) AgentInbox(sessionID string, limit int, unreadOnly bool) ([]type
 		if err := rows.Scan(&m.ID, &m.FromID, &m.ToID, &m.Body, &created, &readAt); err != nil {
 			return nil, err
 		}
-		m.CreatedAt, _ = time.Parse(time.RFC3339, created)
+		m.CreatedAt = parseStoredTime("agent message created_at", created)
 		if readAt != "" {
-			m.ReadAt, _ = time.Parse(time.RFC3339, readAt)
+			m.ReadAt = parseStoredTime("agent message read_at", readAt)
 		}
 		out = append(out, m)
 	}
@@ -874,7 +913,7 @@ func (s *Store) PendingForwarded(limit int) ([]types.AgentMessage, error) {
 		if err := rows.Scan(&m.ID, &m.FromID, &m.ToID, &m.Body, &created); err != nil {
 			return nil, err
 		}
-		m.CreatedAt, _ = time.Parse(time.RFC3339, created)
+		m.CreatedAt = parseStoredTime("agent message created_at", created)
 		out = append(out, m)
 	}
 	return out, rows.Err()

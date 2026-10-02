@@ -1,5 +1,4 @@
-/* ═══════════════════════════════════════════════════════════════════════
-   iCode Desktop — Reasonix-inspired Apple flat design system
+/* 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?   iCode Desktop 鈥?Reasonix-inspired Apple flat design system
    
    Design principles:
    - No shadows. None. Not even subtle.
@@ -8,7 +7,7 @@
    - Large titles (SF Pro / system font, 24px+)
    - Subtle, low-contrast hover states
    - Smooth theme transitions
-   ═══════════════════════════════════════════════════════════════════════ */
+   鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?*/
 
 :root {
   /* --- Spacing scale (4px grid) --- */
@@ -38,7 +37,7 @@
   --r-xl: 20px;
   --r-full: 999px;
 
-  /* --- Colors — Dark (default) --- */
+  /* --- Colors 鈥?Dark (default) --- */
   /* Three-surface dark layering (iOS-style): --bg-app is the deepest page
      backdrop, --bg-primary the base surface, --bg-secondary elevated panels,
      --bg-elev the highest popover/modal layer. */
@@ -122,7 +121,7 @@ body {
 
 html { scroll-behavior: smooth; }
 
-/* --- Scrollbar — thin, minimal; widens on hover for easier grabbing --- */
+/* --- Scrollbar 鈥?thin, minimal; widens on hover for easier grabbing --- */
 ::-webkit-scrollbar { width: 4px; height: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: var(--r-full); }
@@ -140,12 +139,11 @@ hr { border: none; border-top: 0.5px solid var(--border-color); margin: var(--s3
 
 ::selection { background: var(--accent-soft); color: var(--accent); }
 
-/* --- Focus — subtle ring --- */
+/* --- Focus 鈥?subtle ring --- */
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 2px; }
 
-/* ═══════════════════════════════════════════════════════════════════════
-   Animations
-   ═══════════════════════════════════════════════════════════════════════ */
+/* 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?   Animations
+   鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?*/
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(2px); }
   to   { opacity: 1; transform: translateY(0); }
@@ -179,11 +177,10 @@ hr { border: none; border-top: 0.5px solid var(--border-color); margin: var(--s3
   30%           { transform: translateY(-4px); opacity: 1; }
 }
 
-/* ═══════════════════════════════════════════════════════════════════════
-   Utility classes
-   ═══════════════════════════════════════════════════════════════════════ */
+/* 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?   Utility classes
+   鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?*/
 
-/* Card — hairline border, no shadow, generous padding */
+/* Card 鈥?hairline border, no shadow, generous padding */
 .card {
   background: var(--bg-secondary);
   border: 0.5px solid var(--border-color);
@@ -205,7 +202,7 @@ hr { border: none; border-top: 0.5px solid var(--border-color); margin: var(--s3
   font-weight: 400;
 }
 
-/* Interactive surface — scales on press/hover (no shadow) */
+/* Interactive surface 鈥?scales on press/hover (no shadow) */
 .interactive {
   transition: background var(--t-fast), transform var(--t-fast);
 }
@@ -222,7 +219,7 @@ hr { border: none; border-top: 0.5px solid var(--border-color); margin: var(--s3
 .nav-item:hover  { background: var(--bg-hover); color: var(--text-primary); }
 .nav-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 500; }
 
-/* Message bubble — Reasonix: no shadow, hairline border, large radius */
+/* Message bubble 鈥?Reasonix: no shadow, hairline border, large radius */
 .msg-bubble {
   background: var(--bg-secondary);
   border: 0.5px solid var(--border-color);
@@ -230,14 +227,14 @@ hr { border: none; border-top: 0.5px solid var(--border-color); margin: var(--s3
   animation: fadeIn var(--t-slow) ease-out;
 }
 
-/* User bubble — soft accent gradient for a warm "outgoing" feel */
+/* User bubble 鈥?soft accent gradient for a warm "outgoing" feel */
 .msg-user {
   background: linear-gradient(135deg, var(--accent-soft), var(--accent-soft-2));
   border: 0.5px solid var(--accent);
   border-radius: var(--r-xl) var(--r-xl) 6px var(--r-xl);
 }
 
-/* Composer — the input row glows with the accent on focus */
+/* Composer 鈥?the input row glows with the accent on focus */
 .composer {
   transition: border-color var(--t-normal), box-shadow var(--t-normal);
 }
@@ -253,12 +250,12 @@ hr { border: none; border-top: 0.5px solid var(--border-color); margin: var(--s3
   color: #fff;
 }
 
-/* Page transition — subtle fade/slide for route content */
+/* Page transition 鈥?subtle fade/slide for route content */
 .page-enter {
   animation: slideIn var(--t-slow) ease-out;
 }
 
-/* Action buttons — hidden until parent hover */
+/* Action buttons 鈥?hidden until parent hover */
 .action-hidden { opacity: 0; transition: opacity var(--t-fast); }
 .msg-bubble:hover .action-hidden,
 .sidebar-item:hover .action-hidden { opacity: 1; }
@@ -279,7 +276,7 @@ hr { border: none; border-top: 0.5px solid var(--border-color); margin: var(--s3
   border-radius: var(--r-sm);
 }
 
-/* Boot splash progress bar — opencode-style indeterminate sweep */
+/* Boot splash progress bar 鈥?opencode-style indeterminate sweep */
 @keyframes bootsweep {
   0% { transform: translateX(-100%); }
   100% { transform: translateX(250%); }
@@ -304,7 +301,7 @@ hr { border: none; border-top: 0.5px solid var(--border-color); margin: var(--s3
   animation: bootsweep 1.15s ease-in-out infinite;
 }
 
-/* Toast notification — hairline border, minimal */
+/* Toast notification 鈥?hairline border, minimal */
 .toast {
   position: fixed; bottom: var(--s6); right: var(--s6); z-index: 3000;
   padding: var(--s2) var(--s4); border-radius: var(--r-md);
@@ -313,14 +310,14 @@ hr { border: none; border-top: 0.5px solid var(--border-color); margin: var(--s3
   font-size: var(--text-sm); color: var(--text-primary);
 }
 
-/* Elevated surface — popovers, command palette, modals. Sits one step above
+/* Elevated surface 鈥?popovers, command palette, modals. Sits one step above
    the panel layer (--bg-secondary) so layered dark mode reads correctly. */
 .elevated {
   background: var(--bg-elev);
   border: 0.5px solid var(--border-color);
 }
 
-/* Typing indicator — three breathing dots shown while the model streams */
+/* Typing indicator 鈥?three breathing dots shown while the model streams */
 .typing-dots {
   display: inline-flex; align-items: center; gap: 4px;
 }
@@ -363,7 +360,87 @@ hr { border: none; border-top: 0.5px solid var(--border-color); margin: var(--s3
   html { scroll-behavior: auto; }
 }
 
-/* ── opencode-style yellow thinking slider (SettingsPage) ── */
+/* 鈹€鈹€ Thinking-budget slider (SettingsPage, opencode-style) 鈹€鈹€
+   Real multi-stop amber鈫抔old gradient fill instead of a flat #eab308,
+   glowing spherical thumb, inset track depth and a slow light sweep
+   over the filled part. */
+.think-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 5px;
+  background: transparent;
+  cursor: pointer;
+  outline: none;
+  margin: 0;
+}
+.think-track-fill {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 5px;
+  border-radius: 3px;
+  background: linear-gradient(90deg,
+    #92400e 0%,
+    #b45309 14%,
+    #d97706 34%,
+    #ea580c 56%,
+    #f59e0b 76%,
+    #facc15 93%,
+    #fde047 100%);
+  box-shadow: 0 0 12px rgba(250, 204, 21, 0.3), inset 0 0 0 0.5px rgba(255, 255, 255, 0.1);
+  pointer-events: none;
+}
+.think-track-fill::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 34%;
+  border-radius: 3px;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.55) 50%,
+    transparent 100%);
+  animation: thinkSheen 3.4s linear infinite;
+}
+@keyframes thinkSheen {
+  0% { transform: translateX(-105%); }
+  62% { transform: translateX(250%); }
+  100% { transform: translateX(250%); }
+}
+.think-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -5.5px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 32% 28%, #fefce8, #fde047 45%, #facc15 74%, #d97706 100%);
+  border: 2px solid #fefce8;
+  box-shadow: 0 0 0 1px rgba(250,204,21,0.4), 0 0 12px rgba(250,204,21,0.32), 0 1px 4px rgba(0,0,0,0.4);
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+.think-slider::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 32% 28%, #fefce8, #fde047 45%, #facc15 74%, #d97706 100%);
+  border: 2px solid #fefce8;
+  box-shadow: 0 0 0 1px rgba(250,204,21,0.4), 0 0 12px rgba(250,204,21,0.32), 0 1px 4px rgba(0,0,0,0.4);
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+.think-slider::-moz-range-track {
+  height: 5px;
+  border-radius: 3px;
+  background: transparent;
+}
+
+/* 鈹€鈹€ opencode-style yellow thinking slider (SettingsPage) 鈹€鈹€ */
 input[type='range'] {
   -webkit-appearance: none;
   appearance: none;
@@ -371,27 +448,36 @@ input[type='range'] {
 input[type='range']::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
-  background: #eab308;
+  background: radial-gradient(circle at 32% 28%, #fefce8, #fde047 45%, #facc15 74%, #d97706 100%);
   border: 2px solid #fefce8;
-  box-shadow: 0 0 0 1px rgba(234, 179, 8, 0.5), 0 1px 3px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 0 0 1px rgba(250,204,21,0.4), 0 0 12px rgba(250,204,21,0.32), 0 1px 4px rgba(0,0,0,0.4);
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+input[type='range']::-webkit-slider-thumb:hover {
+  transform: scale(1.18);
+  box-shadow: 0 0 0 1px rgba(250,204,21,0.55), 0 0 16px rgba(250,204,21,0.42), 0 2px 6px rgba(0,0,0,0.42);
+}
+input[type='range']::-webkit-slider-thumb:active {
+  transform: scale(1.28);
+  box-shadow: 0 0 0 1.5px rgba(255,228,140,0.7), 0 0 22px rgba(250,204,21,0.58), 0 3px 9px rgba(0,0,0,0.48);
+}
+input[type='range']::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 32% 28%, #fefce8, #fde047 45%, #facc15 74%, #d97706 100%);
+  border: 2px solid #fefce8;
+  box-shadow: 0 0 0 1px rgba(250,204,21,0.4), 0 0 12px rgba(250,204,21,0.32), 0 1px 4px rgba(0,0,0,0.4);
   cursor: pointer;
   transition: transform 0.12s ease;
 }
-input[type='range']::-webkit-slider-thumb:hover {
-  transform: scale(1.15);
-}
-input[type='range']::-webkit-slider-thumb:active {
-  transform: scale(1.25);
-}
-input[type='range']::-moz-range-thumb {
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: #eab308;
-  border: 2px solid #fefce8;
-  box-shadow: 0 0 0 1px rgba(234, 179, 8, 0.5), 0 1px 3px rgba(0, 0, 0, 0.35);
-  cursor: pointer;
+input[type='range']::-moz-range-thumb:hover { transform: scale(1.18); }
+input[type='range']::-moz-range-thumb:active { transform: scale(1.28); }
+input[type='range']::-moz-range-track {
+  height: 5px;
+  border-radius: 3px;
 }

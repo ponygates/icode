@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ponygates/icode/internal/core/privacy"
 	"github.com/ponygates/icode/internal/types"
 )
 
@@ -48,12 +49,18 @@ func friendlyModelError(err error) string {
 		return "⚠ 超出模型上下文窗口。运行 `/compact` 压缩历史，或换一个窗口更大的模型。" + rawTail(msg)
 	}
 
-	return msg
+	// Unrecognised error: still surface it, but never verbatim — an unknown
+	// vendor failure is exactly the kind that echoes credentials.
+	return privacy.RedactSecrets(msg)
 }
 
 // rawTail appends a truncated raw error so the underlying detail is not lost.
 func rawTail(msg string) string {
 	const max = 160
+	// Some vendors echo the Authorization header back in a 401 body, and the key
+	// sits at the start of the tail where truncation cannot reach it. Redact
+	// first, then cut.
+	msg = privacy.RedactSecrets(msg)
 	if len(msg) <= max {
 		return ""
 	}

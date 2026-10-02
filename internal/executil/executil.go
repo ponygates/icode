@@ -21,10 +21,13 @@ import (
 )
 
 // CommandContext is like exec.CommandContext but hides the child's console
-// window on Windows.
+// window on Windows. On Windows, `cmd /C <line>` calls additionally get a
+// raw command line (see fixCmdQuote in executil_windows.go) so embedded
+// quotes survive cmd.exe's non-standard parsing.
 func CommandContext(ctx context.Context, name string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, name, args...)
 	hide(cmd)
+	fixCmdQuote(cmd, name, args)
 	return cmd
 }
 
@@ -32,5 +35,6 @@ func CommandContext(ctx context.Context, name string, args ...string) *exec.Cmd 
 func Command(name string, args ...string) *exec.Cmd {
 	cmd := exec.Command(name, args...)
 	hide(cmd)
+	fixCmdQuote(cmd, name, args)
 	return cmd
 }

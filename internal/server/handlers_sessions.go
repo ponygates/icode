@@ -168,7 +168,7 @@ func (s *Server) handleSessionImport(w http.ResponseWriter, r *http.Request) {
 
 // handleSessionMessages appends, updates or deletes a single message in a
 // session so desktop-local helpers (# memory, ! shell, fork) persist to the
-// same SQLite history the CLI and simpleui read.
+// same SQLite history the CLI and desktop read.
 //   - POST /api/sessions/{id}/messages            append a message
 //   - PUT   /api/sessions/{id}/messages/{msgID}   update a message's content
 //   - DELETE /api/sessions/{id}/messages/{msgID}  remove a message

@@ -2,6 +2,7 @@ package sessionum
 
 import (
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/ponygates/icode/internal/types"
@@ -165,13 +166,17 @@ func BudgetWarning(store types.SessionStore, sess *types.Session) (warn bool, us
 	case atThreshold && !warned:
 		sess.Metadata[WarnKey] = true
 		if store != nil {
-			_ = store.Update(sess)
+			if uerr := store.Update(sess); uerr != nil {
+				log.Printf("[sessionum] persist budget warn flag for session %s failed: %v", sess.ID, uerr)
+			}
 		}
 		return true, used, budget
 	case !atThreshold && warned:
 		delete(sess.Metadata, WarnKey)
 		if store != nil {
-			_ = store.Update(sess)
+			if uerr := store.Update(sess); uerr != nil {
+				log.Printf("[sessionum] persist budget warn flag for session %s failed: %v", sess.ID, uerr)
+			}
 		}
 	}
 	return false, used, budget

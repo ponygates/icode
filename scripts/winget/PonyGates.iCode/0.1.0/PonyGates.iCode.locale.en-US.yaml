@@ -1,0 +1,30 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+PackageIdentifier: PonyGates.iCode
+PackageVersion: 0.1.0
+PackageLocale: en-US
+Publisher: PonyGates
+PublisherUrl: https://github.com/ponygates
+PublisherSupportUrl: https://github.com/ponygates/icode/issues
+PackageName: iCode
+License: Apache-2.0
+LicenseUrl: https://raw.githubusercontent.com/ponygates/icode/master/LICENSE
+Copyright: Copyright (c) iCode contributors
+ShortDescription: Multi-model AI coding agent for the terminal, desktop and VS Code.
+Description: |
+  iCode is a Go-based AI coding assistant with a terminal UI, a WebView desktop
+  app and a VS Code extension sharing one backend. It supports 14 LLM providers
+  and 60+ models out of the box, with cache-first token optimisation, tool
+  execution behind a permission gate, session persistence in SQLite, MCP client
+  support and self-update.
+PackageUrl: https://github.com/ponygates/icode
+Tags:
+  - ai
+  - agent
+  - cli
+  - coding-assistant
+  - llm
+  - terminal
+  - tui
+ReleaseNotesUrl: https://github.com/ponygates/icode/releases
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

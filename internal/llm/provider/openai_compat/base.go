@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ponygates/icode/internal/llm/modelmeta"
+	"github.com/ponygates/icode/internal/netsec"
 	"github.com/ponygates/icode/internal/types"
 )
 
@@ -25,6 +26,8 @@ type BaseProvider struct {
 	name         string
 	apiBase      string
 	apiKey       string
+	subscription bool // key holds an OAuth token; tracked for the 401 renewal path
+	refreshFn    types.TokenRefresher
 	httpClient   *http.Client
 	models       []types.ModelInfo
 	mu           sync.RWMutex
@@ -63,12 +66,13 @@ func New(cfg Config) *BaseProvider {
 		cacheSupport: cfg.CacheSupport,
 		httpClient: &http.Client{
 			Timeout: time.Duration(cfg.TimeoutSec) * time.Second,
-			Transport: &http.Transport{
-				// Honor HTTP_PROXY / HTTPS_PROXY / NO_PROXY so users behind a
-				// proxy (e.g. reaching OpenRouter from restricted networks) work.
-				// When no proxy env is set, ProxyFromEnvironment returns nil -> direct.
-				Proxy: http.ProxyFromEnvironment,
-			},
+			// Honours HTTP_PROXY / HTTPS_PROXY / NO_PROXY so users behind a
+			// proxy (e.g. reaching OpenRouter from restricted networks) work,
+			// and refuses to dial the cloud-metadata plane: a base URL pasted
+			// from a shared config must not turn every later run into an SSRF.
+			// Loopback/private stay allowed — Ollama and internal gateways are
+			// legitimate apiBase values.
+			Transport: netsec.GuardedTransport(false),
 		},
 	}
 }
@@ -127,6 +131,23 @@ func (p *BaseProvider) SetCredentials(apiKey, apiBase string) {
 	if apiBase != "" {
 		p.apiBase = strings.TrimRight(apiBase, "/")
 	}
+}
+
+// SetSubscription implements types.OAuthCredentialProvider. An OpenAI-
+// compatible gateway always carries the credential as `Authorization: Bearer`,
+// so nothing about the wire format changes; the flag is kept only so the 401
+// renewal path can tell whether anything actually changed before retrying.
+func (p *BaseProvider) SetSubscription(on bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.subscription = on
+}
+
+// SetTokenRefresher implements types.OAuthCredentialProvider.
+func (p *BaseProvider) SetTokenRefresher(fn types.TokenRefresher) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.refreshFn = fn
 }
 
 // SetTimeout updates the HTTP client timeout at runtime (used when the desktop
@@ -334,7 +355,7 @@ func (p *BaseProvider) Chat(ctx context.Context, req types.ChatRequest) (*types.
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
-	p.setAuth(httpReq)
+	sentKey, sentSub := p.setAuth(httpReq)
 	p.setHeaders(httpReq)
 
 	resp, err := p.doRequestWithRetry(ctx, httpReq, 3)
@@ -342,6 +363,19 @@ func (p *BaseProvider) Chat(ctx context.Context, req types.ChatRequest) (*types.
 		return nil, fmt.Errorf("chat request: %w", err)
 	}
 	defer resp.Body.Close()
+
+	// Expired subscription token: renew once and replay. A second 401 falls
+	// through to the error path below — never a loop.
+	if resp.StatusCode == http.StatusUnauthorized {
+		if r2, err2, retried := p.retryAfter401(ctx, httpReq, sentKey, sentSub); retried {
+			resp.Body.Close()
+			if err2 != nil {
+				return nil, fmt.Errorf("chat request after refresh: %w", err2)
+			}
+			resp = r2
+			defer resp.Body.Close()
+		}
+	}
 
 	if resp.StatusCode >= 400 {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
@@ -372,12 +406,23 @@ func (p *BaseProvider) ChatStream(ctx context.Context, req types.ChatRequest) (<
 	if err != nil {
 		return nil, fmt.Errorf("create stream request: %w", err)
 	}
-	p.setAuth(httpReq)
+	sentKey, sentSub := p.setAuth(httpReq)
 	p.setHeaders(httpReq)
 
 	resp, err := p.doRequestWithRetry(ctx, httpReq, 3)
 	if err != nil {
 		return nil, fmt.Errorf("stream request: %w", err)
+	}
+
+	// Same one-shot renewal as Chat, decided before any SSE bytes are read.
+	if resp.StatusCode == http.StatusUnauthorized {
+		if r2, err2, retried := p.retryAfter401(ctx, httpReq, sentKey, sentSub); retried {
+			resp.Body.Close()
+			if err2 != nil {
+				return nil, fmt.Errorf("stream request after refresh: %w", err2)
+			}
+			resp = r2
+		}
 	}
 
 	if resp.StatusCode >= 400 {
@@ -788,18 +833,73 @@ func (p *BaseProvider) chatEndpoint() string {
 	return p.apiBase + "/chat/completions"
 }
 
-func (p *BaseProvider) setAuth(req *http.Request) {
+// setAuth writes the single Authorization header this transport uses (never a
+// second key header) and returns what it sent, so the 401 path can detect a
+// credential that changed underneath the failed request.
+func (p *BaseProvider) setAuth(req *http.Request) (string, bool) {
 	p.mu.RLock()
-	k := p.apiKey
+	k, sub := p.apiKey, p.subscription
 	p.mu.RUnlock()
 	if k != "" {
 		req.Header.Set("Authorization", "Bearer "+k)
 	}
+	return k, sub
 }
 
 func (p *BaseProvider) setHeaders(req *http.Request) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "iCode/0.1.0 (github.com/ponygates/icode)")
+}
+
+// tryRefreshOn401 runs the one-shot renewal for a request that came back 401.
+// It returns true only when the credential actually changed, so an API-key
+// user (whose refresher hands back the same key) never sees a retry.
+// Concurrent requests converge here; the auth-side per-provider lock keeps the
+// vendor round-trip to one.
+func (p *BaseProvider) tryRefreshOn401(ctx context.Context, sentKey string, sentSub bool) bool {
+	p.mu.RLock()
+	fn := p.refreshFn
+	p.mu.RUnlock()
+	if fn == nil {
+		return false
+	}
+	tok, sub, err := fn(ctx, sentKey)
+	if err != nil || tok == "" || (tok == sentKey && sub == sentSub) {
+		return false
+	}
+	p.mu.Lock()
+	p.apiKey = tok
+	p.subscription = sub
+	p.mu.Unlock()
+	return true
+}
+
+// retryAfter401 refreshes the credential once and re-sends the request. The
+// third return is false when no retry was attempted, meaning the caller must
+// surface the original response's error. One replay per request, ever — a
+// second 401 falls through to the caller's error path.
+func (p *BaseProvider) retryAfter401(ctx context.Context, req *http.Request, sentKey string, sentSub bool) (*http.Response, error, bool) {
+	if req.GetBody == nil {
+		return nil, nil, false
+	}
+	if !p.tryRefreshOn401(ctx, sentKey, sentSub) {
+		return nil, nil, false
+	}
+	nb, err := req.GetBody()
+	if err != nil {
+		return nil, nil, false
+	}
+	retryReq, err := http.NewRequestWithContext(ctx, req.Method, req.URL.String(), nb)
+	if err != nil {
+		return nil, nil, false
+	}
+	p.setAuth(retryReq)
+	p.setHeaders(retryReq)
+	resp, err := p.httpClient.Do(retryReq)
+	if err != nil {
+		return nil, err, true
+	}
+	return resp, nil, true
 }
 
 // ============================================================================

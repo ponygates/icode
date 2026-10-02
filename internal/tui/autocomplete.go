@@ -534,8 +534,8 @@ func (t *TUI) acceptSuggestion() {
 	// Argument completion for enumerable slash-command values: replace only
 	// the argument part after the command token ("/model " + value).
 	if it.ArgPrefix != "" {
-		t.inputBuf = it.ArgPrefix + it.Name + " "
-		t.cursor = len([]rune(t.inputBuf))
+		nb := it.ArgPrefix + it.Name + " "
+		t.setInput(nb, len([]rune(nb)))
 		t.acOpen = false
 		return
 	}
@@ -546,8 +546,8 @@ func (t *TUI) acceptSuggestion() {
 		idx := strings.LastIndex(t.inputBuf, "@")
 		path := strings.TrimPrefix(it.Name, "./")
 		// Replace the @prefix with the file path
-		t.inputBuf = t.inputBuf[:idx] + "@" + path + " "
-		t.cursor = len([]rune(t.inputBuf))
+		nb := t.inputBuf[:idx] + "@" + path + " "
+		t.setInput(nb, len([]rune(nb)))
 		t.acOpen = false
 		t.updateSuggestions()
 		// When the user sends the message, the frontend will automatically
@@ -555,20 +555,27 @@ func (t *TUI) acceptSuggestion() {
 		return
 	}
 
-	t.inputBuf = it.Name + " "
-	t.cursor = len([]rune(t.inputBuf))
+	nb := it.Name + " "
+	t.setInput(nb, len([]rune(nb)))
 	t.acOpen = false
 	t.updateSuggestions()
 }
 
 // autocompleteLines renders the suggestion panel shown above the input line.
-// Returns nil when there is nothing to show.
-func (t *TUI) autocompleteLines() []string {
+// Returns nil when there is nothing to show. W is the terminal width: every
+// row is hard-clamped to it — an over-wide suggestion row (long file path,
+// verbose description) would trigger the terminal's autowrap and shove the
+// whole frame layout down.
+func (t *TUI) autocompleteLines(W int) []string {
 	if !t.rawMode || t.streaming || !t.acOpen || len(t.acItems) == 0 {
 		return nil
 	}
+	maxW := W - 1
+	if maxW < 10 {
+		maxW = 10
+	}
 	var out []string
-	out = append(out, t.paint("dim", "  ▾"+t.tstr("ac.title")+"   ("+t.tstr("ac.hint")+")"))
+	out = append(out, t.paint("dim", truncVisible("  ▾"+t.tstr("ac.title")+"   ("+t.tstr("ac.hint")+")", maxW)))
 
 	const maxShow = 9
 	from := 0
@@ -585,19 +592,21 @@ func (t *TUI) autocompleteLines() []string {
 	for i, it := range show {
 		globalIdx := from + i
 		sel := globalIdx == t.acIdx
-		name := padEnd(it.Name, 16)
+		// padEnd counts BYTES, so a CJK command name would misalign the
+		// description column; pad by visible width instead.
+		name := padEndVisible(it.Name, 16)
 		if sel {
 			// Claude Code parity: the highlighted row carries an explicit
 			// "tab" affordance so the accept key is always discoverable.
-			out = append(out, "  "+t.c("cyan")+"> "+name+" "+it.Desc+t.paint("dim", "  (tab)")+"\x1b[0m")
+			out = append(out, truncVisible("  "+t.c("cyan")+"> "+name+" "+it.Desc+t.paint("dim", "  (tab)")+"\x1b[0m", maxW))
 		} else {
-			out = append(out, "    "+t.paint("dim", name+" "+it.Desc))
+			out = append(out, truncVisible("    "+t.paint("dim", name+" "+it.Desc), maxW))
 		}
 	}
 	// "N more" pager (Claude Code parity): tell the user the window is a
 	// filtered view and typing narrows it.
 	if hidden := len(t.acItems) - len(show); hidden > 0 {
-		out = append(out, "    "+t.paint("dim", fmt.Sprintf("(还有 %d 项 — 继续输入以过滤)", hidden)))
+		out = append(out, truncVisible("    "+t.paint("dim", fmt.Sprintf("(还有 %d 项 — 继续输入以过滤)", hidden)), maxW))
 	}
 	return out
 }

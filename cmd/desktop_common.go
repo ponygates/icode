@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/ponygates/icode/internal/app"
+	"github.com/ponygates/icode/internal/core/privacy"
 	"github.com/ponygates/icode/internal/embedded"
 	"github.com/ponygates/icode/internal/server"
 	"github.com/ponygates/icode/internal/xgo"
@@ -47,7 +48,9 @@ func (b *desktopBoot) shutdown() {
 		// desktop process hang on exit waiting forever.
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer shutdownCancel()
-		_ = b.srv.Shutdown(shutdownCtx)
+		if shErr := b.srv.Shutdown(shutdownCtx); shErr != nil {
+			log.Printf("[desktop] server shutdown failed: %v", shErr)
+		}
 	}
 	if b.cancel != nil {
 		b.cancel()
@@ -78,6 +81,12 @@ func bootDesktopBackend() (*desktopBoot, error) {
 	// runtime writes panics to it directly), so it gets a plain append file;
 	// the log package (the high-volume path) gets the rotating writer.
 	rw, logErr := xgo.NewRotatingWriter(logPath, 5*1024*1024)
+	if logErr == nil {
+		// Provider errors and MCP handshakes get logged here verbatim; without
+		// the filter a bad Authorization header would sit in desktop.log for
+		// whoever reads it later.
+		rw.SetFilter(privacy.RedactSecretsBytes)
+	}
 	stderrFile, _ := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if logErr == nil {
 		log.SetOutput(rw)
@@ -161,16 +170,18 @@ func bootDesktopBackend() (*desktopBoot, error) {
 	}
 
 	srv := server.New(server.ServerConfig{
-		Config:    a.Cfg,
-		Registry:  a.Reg,
-		Store:     a.SessStore,
-		DB:        a.DB,
-		Engine:    a.Engine,
-		Gate:      a.Gate,
-		Updater:   a.Updater,
-		Scheduler: a.Scheduler,
-		Version:   appVersion,
-		Port:      port,
+		Config:     a.Cfg,
+		Registry:   a.Reg,
+		Store:      a.SessStore,
+		DB:         a.DB,
+		Engine:     a.Engine,
+		Gate:       a.Gate,
+		Updater:    a.Updater,
+		Scheduler:  a.Scheduler,
+		MCPPool:    a.MCPPool,
+		MCPRefresh: a.RefreshMCPTools,
+		Version:    appVersion,
+		Port:       port,
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -207,7 +218,12 @@ func bootDesktopBackend() (*desktopBoot, error) {
 	}
 	log.Printf("[desktop] stage: backend healthy, opening window (t=%dms)", time.Since(bootT0).Milliseconds())
 
-	appURL := fmt.Sprintf("http://127.0.0.1:%d", actualPort)
+	// Mutating endpoints (shell/config/permission/update) require the
+	// per-launch Bearer token. Hand it to the UI via the URL query — the
+	// renderer stashes it in sessionStorage and strips it from the address
+	// bar on boot, so WebView2 (Windows) and the default browser (macOS /
+	// Linux) both work with zero platform-specific code.
+	appURL := fmt.Sprintf("http://127.0.0.1:%d/?token=%s", actualPort, srv.APIToken())
 	return &desktopBoot{app: a, srv: srv, port: actualPort, url: appURL, cancel: cancel, logFile: rw, stderrFile: stderrFile}, nil
 }
 

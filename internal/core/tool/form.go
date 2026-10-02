@@ -10,7 +10,7 @@ import (
 // AskUserFormFunc is the interactive multi-question form asker (opencode
 // AskQuestion wizard parity): the engine calls it with a batch of questions
 // and waits for the user's answers. Injected by the TUI; nil in headless /
-// simpleui / desktop HTTP degrades the tool to an error instead of hanging.
+// desktop HTTP degrades the tool to an error instead of hanging.
 type AskUserFormFunc func(questions []FormQuestion) ([]FormAnswer, error)
 
 // FormQuestion is one item of an ask_user_form call.

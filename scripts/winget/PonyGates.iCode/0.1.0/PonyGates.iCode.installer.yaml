@@ -1,0 +1,30 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+#
+# PLACEHOLDER SHAS — DO NOT DELETE THIS WARNING.
+# InstallerSha256 is 64 zeros because a checksum cannot be invented. Fill each
+# value from the release's own checksums.txt before opening the PR, otherwise
+# `winget` validation fails:
+#   sha256sum icode-cli-windows-amd64.exe
+#   winget hash --file icode-cli-windows-amd64.exe                     (Windows)
+#   (Get-FileHash -Algorithm SHA256 .\icode-cli-windows-amd64.exe).Hash  (PowerShell)
+# The sanctioned way to fill these is the generator, which reads the release's
+# own checksums.txt so all channels share one digest per asset:
+#   scripts/gen_winget_manifest.sh gen <version> <checksums.txt>
+#   scripts/gen_winget_manifest.sh check <dir>     # rejects placeholder zeros
+# Full flow (including the `wingetcreate new` shortcut): README.md one level up.
+PackageIdentifier: PonyGates.iCode
+PackageVersion: 0.1.0
+InstallerType: portable
+UpgradeBehavior: install
+ReleaseNotesUrl: https://github.com/ponygates/icode/releases/tag/v0.1.0
+Commands:
+  - icode
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/ponygates/icode/releases/download/v0.1.0/icode-cli-windows-amd64.exe
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000 # PLACEHOLDER — replace
+  - Architecture: arm64
+    InstallerUrl: https://github.com/ponygates/icode/releases/download/v0.1.0/icode-cli-windows-arm64.exe
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000 # PLACEHOLDER — replace
+ManifestType: installer
+ManifestVersion: 1.6.0

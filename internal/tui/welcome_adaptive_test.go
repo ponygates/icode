@@ -29,8 +29,8 @@ func renderAt(w, h int) string {
 // sliced in half on a short terminal. It also verifies the full screen shows on
 // a roomy terminal and degrades gracefully when cramped.
 func TestWelcomeAdaptive(t *testing.T) {
-	welcomeTop := "Welcome back!"            // first content row of the left panel
-	welcomeTip := "Tips for getting started" // right-column header
+	welcomeTop := "欢迎回来！" // first content row of the left panel
+	welcomeTip := "快速上手"  // right-column header
 
 	// Roomy terminal: the whole welcome box must be present.
 	roomy := renderAt(120, 40)
@@ -40,8 +40,8 @@ func TestWelcomeAdaptive(t *testing.T) {
 	if !strings.Contains(roomy, welcomeTip) {
 		t.Fatalf("expected tips section on a roomy terminal:\n%s", roomy)
 	}
-	if !strings.Contains(roomy, "Welcome back!") {
-		t.Fatalf("expected 'Welcome back!' on a roomy terminal:\n%s", roomy)
+	if !strings.Contains(roomy, "模型:") {
+		t.Fatalf("expected localized model row on a roomy terminal:\n%s", roomy)
 	}
 
 	// The banner must be anchored near the top (not vertically centred): on a

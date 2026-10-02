@@ -27,11 +27,30 @@ func (t *TUI) disableMouse() {
 	fmt.Fprint(t.writer, "\x1b[?1006l\x1b[?1000l\x1b[?2004l")
 }
 
+// setMouseTracking toggles ONLY mouse tracking (?1000 + SGR ?1006) for the
+// /mouse command — bracketed paste (?2004) stays on either way so large
+// multi-line pastes keep working. When tracking is off the terminal regains
+// native click-drag text selection; Shift+drag selects in both states.
+func (t *TUI) setMouseTracking(on bool) {
+	if on {
+		fmt.Fprint(t.writer, "\x1b[?1000h\x1b[?1006h")
+	} else {
+		fmt.Fprint(t.writer, "\x1b[?1006l\x1b[?1000l")
+	}
+}
+
 // handleMouse parses and acts on one SGR mouse report whose leading "ESC[<"
 // has already been consumed. r is positioned at the first byte after '<'.
 func (t *TUI) handleMouse(r io.RuneReader) {
 	button, x, y, released, ok := parseSGRMouse(r)
 	if !ok {
+		return
+	}
+
+	// /mouse off → swallow the report but take no action. Parsing must
+	// still happen (bytes are consumed off the channel); acting would
+	// hijack clicks the user expects the terminal to handle natively.
+	if !t.mouseOn {
 		return
 	}
 

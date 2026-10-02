@@ -18,7 +18,7 @@ import (
 var keydebugCmd = &cobra.Command{
 	Use:    "keydebug",
 	Hidden: true,
-	Short:  "Print raw bytes of every keypress (hex) — diagnostic for input bugs",
+	Short:  "打印每个按键的原始字节（十六进制）— 输入问题诊断",
 	RunE: func(c *cobra.Command, args []string) error {
 		var modeBefore, modeAfter uint32
 		_, _, _ = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetConsoleMode").Call(uintptr(os.Stdin.Fd()), uintptr(unsafe.Pointer(&modeBefore)))

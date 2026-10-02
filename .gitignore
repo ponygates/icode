@@ -4,6 +4,9 @@ icode
 *.exe
 *.exe~
 
+# WebView2 runtime data dir (created next to desktop binaries on run)
+*.WebView2/
+
 # Go
 vendor/
 
@@ -81,3 +84,11 @@ build-desktop-backend.js
 
 # Personal business assets (not part of iCode source)
 .wecom-news/
+
+# Release signing: the minisign PRIVATE key must never be committed.
+# (scripts/signing/icode.pub is the public half and IS committed.)
+*.sec
+!*.sec.example
+
+# Local IDE workspaces (Qoder settings carry machine-specific audit commands)
+.qoder/

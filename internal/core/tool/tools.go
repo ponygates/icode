@@ -6,13 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,6 +19,8 @@ import (
 	"time"
 
 	"github.com/ponygates/icode/internal/executil"
+	"github.com/ponygates/icode/internal/llm/tokenopt"
+	"github.com/ponygates/icode/internal/netsec"
 	"github.com/ponygates/icode/internal/types"
 )
 
@@ -227,6 +228,84 @@ func (r *Registry) Execute(ctx context.Context, name, args string) (*types.ToolR
 
 type BashTool struct{}
 
+// Bash timeout / output-cap policy. bashDefaultTimeoutSec keeps the
+// historically hardcoded 120s; a per-call "timeout" argument (seconds) may
+// override it up to bashMaxTimeoutSec. bashOutputCapChars is the TOOL-side
+// hard ceiling applied before the engine's Level-4 budget enforcer (30K for
+// bash) sees the result, so `cat` of a huge file cannot balloon the tool
+// result in the first place; the cut reuses tokenopt's head+tail elision
+// helper ("[... N chars omitted ...]").
+const (
+	bashDefaultTimeoutSec = 120
+	bashMaxTimeoutSec     = 600
+	bashOutputCapChars    = 200_000
+)
+
+// resolveBashTimeoutSec extracts the optional "timeout" (seconds) argument.
+// Missing/invalid/non-positive values keep the default; anything above the
+// cap is clamped to it.
+func resolveBashTimeoutSec(args string) int {
+	sec := bashDefaultTimeoutSec
+	if s, err := parseArg(args, "timeout"); err == nil {
+		if v, cerr := strconv.Atoi(strings.TrimSpace(s)); cerr == nil && v > 0 {
+			sec = v
+		}
+	}
+	if sec > bashMaxTimeoutSec {
+		sec = bashMaxTimeoutSec
+	}
+	return sec
+}
+
+// capBashOutput applies the tool-side head+tail output ceiling.
+func capBashOutput(s string) string {
+	return tokenopt.CompressToolResult(s, bashOutputCapChars)
+}
+
+// resolveBashShell picks the shell for a command. On Windows the model
+// almost always emits POSIX sh syntax, so — like the industry does — prefer
+// $SHELL when it points at a real shell binary, then probe for Git Bash
+// (WSL is deliberately out of scope: it adds path-translation failures),
+// and only then fall back to cmd. Non-Windows keeps the historic "sh -c".
+// The choice is internal plumbing; it is not surfaced in tool output (the
+// file has no metadata convention for shell selection).
+func resolveBashShell() (string, []string) {
+	if runtime.GOOS != "windows" {
+		return "sh", []string{"-c"}
+	}
+	return pickWindowsShell(os.Getenv, shellBinaryExists)
+}
+
+func shellBinaryExists(p string) bool {
+	info, err := os.Stat(p)
+	return err == nil && !info.IsDir()
+}
+
+// pickWindowsShell is split out (env/stat injectable) so tests can cover
+// every branch without a real Git installation.
+func pickWindowsShell(getenv func(string) string, exists func(string) bool) (string, []string) {
+	if sh := getenv("SHELL"); sh != "" && exists(sh) {
+		return sh, []string{"-c"}
+	}
+	for _, p := range gitBashCandidates(getenv) {
+		if exists(p) {
+			return p, []string{"-c"}
+		}
+	}
+	return "cmd", []string{"/C"}
+}
+
+func gitBashCandidates(getenv func(string) string) []string {
+	var out []string
+	for _, key := range []string{"ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"} {
+		if root := getenv(key); root != "" {
+			out = append(out, filepath.Join(root, "Git", "bin", "bash.exe"))
+		}
+	}
+	out = append(out, `C:\Program Files\Git\bin\bash.exe`)
+	return out
+}
+
 func (t *BashTool) Def() types.ToolDef {
 	return types.ToolDef{
 		Name:        "bash",
@@ -245,6 +324,10 @@ func (t *BashTool) Def() types.ToolDef {
 				"run_in_background": map[string]any{
 					"type":        "boolean",
 					"description": "Run the command in the background and return a task id immediately. Use the task_output tool to poll its output/status later. Use for long-running commands (builds, servers, installs).",
+				},
+				"timeout": map[string]any{
+					"type":        "integer",
+					"description": "Optional command timeout in seconds. Defaults to 120, capped at 600.",
 				},
 			},
 			"required": []string{"command"},
@@ -271,15 +354,13 @@ func (t *BashTool) Execute(ctx context.Context, args string) (*types.ToolResult,
 		}, nil
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	timeoutSec := resolveBashTimeoutSec(args)
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
 	defer cancel()
 
 	var cmd *exec.Cmd
-	if strings.Contains(os.Getenv("OS"), "Windows") {
-		cmd = executil.CommandContext(ctx, "cmd", "/C", cmdStr)
-	} else {
-		cmd = executil.CommandContext(ctx, "sh", "-c", cmdStr)
-	}
+	shellName, shellArgs := resolveBashShell()
+	cmd = executil.CommandContext(ctx, shellName, append(shellArgs, cmdStr)...)
 
 	// Apply working directory
 	if workDir != "" {
@@ -332,11 +413,11 @@ func (t *BashTool) Execute(ctx context.Context, args string) (*types.ToolResult,
 		stderrPW.mu.Unlock()
 		if waitErr != nil {
 			if ctx.Err() == context.DeadlineExceeded {
-				return &types.ToolResult{Success: false, Content: content.String(), Error: "command timed out after 120 seconds"}, nil
+				return &types.ToolResult{Success: false, Content: capBashOutput(content.String()), Error: fmt.Sprintf("command timed out after %d seconds", timeoutSec)}, nil
 			}
-			return &types.ToolResult{Success: false, Content: content.String(), Error: waitErr.Error()}, nil
+			return &types.ToolResult{Success: false, Content: capBashOutput(content.String()), Error: waitErr.Error()}, nil
 		}
-		return &types.ToolResult{Success: true, Content: content.String()}, nil
+		return &types.ToolResult{Success: true, Content: capBashOutput(content.String())}, nil
 	}
 
 	output, err := cmd.CombinedOutput()
@@ -344,18 +425,18 @@ func (t *BashTool) Execute(ctx context.Context, args string) (*types.ToolResult,
 		if ctx.Err() == context.DeadlineExceeded {
 			return &types.ToolResult{
 				Success: false,
-				Content: string(output),
-				Error:   "command timed out after 120 seconds",
+				Content: capBashOutput(string(output)),
+				Error:   fmt.Sprintf("command timed out after %d seconds", timeoutSec),
 			}, nil
 		}
 		return &types.ToolResult{
 			Success: false,
-			Content: string(output),
+			Content: capBashOutput(string(output)),
 			Error:   err.Error(),
 		}, nil
 	}
 
-	return &types.ToolResult{Success: true, Content: string(output)}, nil
+	return &types.ToolResult{Success: true, Content: capBashOutput(string(output))}, nil
 }
 
 // ============================================================================
@@ -404,6 +485,9 @@ func (t *ReadFileTool) Execute(ctx context.Context, args string) (*types.ToolRes
 	if err != nil {
 		return &types.ToolResult{Success: false, Content: "", Error: err.Error()}, nil
 	}
+	// Read-before-edit guard: the model has now seen this file, so later
+	// edit/write/search_replace calls on it pass without the escape hatch.
+	markFileRead(SessionIDFromContext(ctx), path)
 
 	// Chunked reads (large-file parity): offset/limit select a 1-based line
 	// window so the model can page through a big file without pulling the
@@ -486,6 +570,17 @@ func (t *WriteFileTool) Execute(ctx context.Context, args string) (*types.ToolRe
 		return nil, err
 	}
 
+	// Read-before-edit guard: overwriting an EXISTING file the model never
+	// read is refused (creating a new file is always allowed — there is
+	// nothing to have read). A whole-file write has no old_string to
+	// self-verify, so there is no escape hatch here.
+	sessionID := SessionIDFromContext(ctx)
+	if prev, rerr := os.ReadFile(path); rerr == nil {
+		if checkEditGuard(sessionID, path, string(prev), nil) == readGuardBlock {
+			return &types.ToolResult{Success: false, Error: readGuardBlockMessage(path)}, nil
+		}
+	}
+
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return &types.ToolResult{Success: false, Error: err.Error()}, nil
@@ -494,6 +589,9 @@ func (t *WriteFileTool) Execute(ctx context.Context, args string) (*types.ToolRe
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		return &types.ToolResult{Success: false, Error: err.Error()}, nil
 	}
+	// The session just wrote the file, so it knows its content — later edits
+	// to a session-created file must pass the guard (audit requirement).
+	markFileRead(sessionID, path)
 
 	return &types.ToolResult{Success: true, Content: fmt.Sprintf("Wrote %d bytes to %s", len(content), path)}, nil
 }
@@ -671,6 +769,9 @@ func (t *GlobTool) Execute(ctx context.Context, args string) (*types.ToolResult,
 		sb.WriteString(m)
 		sb.WriteString("\n")
 	}
+	// Read-before-edit guard: glob results reveal files the model has now
+	// "seen" (spec: glob results count toward the tracked set).
+	markFileReads(SessionIDFromContext(ctx), matches)
 	return &types.ToolResult{Success: true, Content: sb.String()}, nil
 }
 
@@ -815,6 +916,32 @@ func (t *EditTool) Execute(ctx context.Context, args string) (*types.ToolResult,
 	text := string(content)
 	original := text
 
+	// Read-before-edit guard: refuse edits to files this conversation never
+	// read, UNLESS every old_string matches the file uniquely and verbatim
+	// (self-verifying escape hatch for headless/CI/--yolo runs — see the
+	// comment on checkEditGuard). Skipped when no needle is provided so the
+	// regular "old_string is required" argument error still surfaces.
+	sessionID := SessionIDFromContext(ctx)
+	var needles []string
+	if len(in.Edits) > 0 {
+		for _, ed := range in.Edits {
+			if ed.OldString != "" {
+				needles = append(needles, ed.OldString)
+			}
+		}
+	} else if in.OldStr != "" {
+		needles = append(needles, in.OldStr)
+	}
+	guardEscape := false
+	if len(needles) > 0 {
+		switch checkEditGuard(sessionID, in.FilePath, text, needles) {
+		case readGuardBlock:
+			return &types.ToolResult{Success: false, Error: readGuardBlockMessage(in.FilePath)}, nil
+		case readGuardEscape:
+			guardEscape = true
+		}
+	}
+
 	totalReplacements := 0
 
 	// applyEdit performs one replacement on text. When the exact old_string is
@@ -873,12 +1000,19 @@ func (t *EditTool) Execute(ctx context.Context, args string) (*types.ToolResult,
 	if err := os.WriteFile(in.FilePath, []byte(text), 0644); err != nil {
 		return &types.ToolResult{Success: false, Error: fmt.Sprintf("write: %v", err)}, nil
 	}
+	// After a successful edit the result carries the unified diff, so the
+	// model has genuinely seen the file — track it like read_file does.
+	markFileRead(sessionID, in.FilePath)
 
 	diffOut := unifiedDiff(in.FilePath, original, text)
-	return &types.ToolResult{
+	res := &types.ToolResult{
 		Success: true,
 		Content: fmt.Sprintf("Edited %s (%d replacements)\n%s", in.FilePath, totalReplacements, diffOut),
-	}, nil
+	}
+	if guardEscape {
+		res.Content += readGuardEscapeWarning
+	}
+	return res, nil
 }
 
 // fuzzyFind locates oldStr in text after collapsing runs of whitespace in
@@ -1334,14 +1468,18 @@ func (t *LSTool) Execute(ctx context.Context, args string) (*types.ToolResult, e
 	}
 
 	var sb strings.Builder
+	var seen []string
 	for _, e := range entries {
 		if e.IsDir() {
 			sb.WriteString(fmt.Sprintf("DIR  %s\n", e.Name()))
 		} else {
 			info, _ := e.Info()
 			sb.WriteString(fmt.Sprintf("FILE %-30s %d bytes\n", e.Name(), info.Size()))
+			seen = append(seen, filepath.Join(dir, e.Name()))
 		}
 	}
+	// Read-before-edit guard: listing a file counts as "seen" (see GlobTool).
+	markFileReads(SessionIDFromContext(ctx), seen)
 	return &types.ToolResult{Success: true, Content: sb.String()}, nil
 }
 
@@ -1378,19 +1516,18 @@ func (t *FetchTool) Execute(ctx context.Context, args string) (*types.ToolResult
 		return &types.ToolResult{Success: false, Error: err.Error()}, nil
 	}
 
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 3 {
-				return fmt.Errorf("too many redirects")
-			}
-			// Re-validate every redirect hop so a public URL can't bounce us
-			// onto loopback/private/metadata targets (SSRF via redirect).
-			if err := validateFetchURL(req.URL.String()); err != nil {
-				return err
-			}
-			return nil
-		},
+	client := netsec.GuardedClient(30*time.Second, true)
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 3 {
+			return fmt.Errorf("too many redirects")
+		}
+		// Re-validate every redirect hop so a public URL can't bounce us onto
+		// loopback/private/metadata targets (SSRF via redirect). The guarded
+		// transport covers the case where DNS answers change between hops.
+		if err := validateFetchURL(req.URL.String()); err != nil {
+			return err
+		}
+		return nil
 	}
 
 	httpreq, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -1435,77 +1572,11 @@ func (t *FetchTool) Execute(ctx context.Context, args string) (*types.ToolResult
 	}, nil
 }
 
-// validateFetchURL blocks SSRF targets before the fetch tool dials them:
-// only http(s) schemes, and no loopback / private / link-local addresses
-// (which include cloud metadata 169.254.169.254). Every resolved IP is checked
-// so a DNS name mixing public + private records can't slip through.
-func validateFetchURL(raw string) error {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return fmt.Errorf("fetch: invalid URL %q", raw)
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("fetch: only http/https URLs are allowed (got %q)", u.Scheme)
-	}
-	host := u.Hostname()
-	if host == "" {
-		return fmt.Errorf("fetch: missing host in %q", raw)
-	}
-	ips, err := net.LookupIP(host)
-	if err != nil {
-		return fmt.Errorf("fetch: cannot resolve host %q", host)
-	}
-	if len(ips) == 0 {
-		return fmt.Errorf("fetch: no addresses for host %q", host)
-	}
-	for _, ip := range ips {
-		if blockedBySSRF(ip) {
-			return fmt.Errorf("fetch: blocked address %s (private/loopback/link-local not allowed)", ip)
-		}
-	}
-	return nil
-}
-
-func blockedBySSRF(ip net.IP) bool {
-	if ip == nil {
-		return true
-	}
-	if v4 := ip.To4(); v4 != nil {
-		switch {
-		case v4[0] == 127: // loopback
-			return true
-		case v4[0] == 0: // 0.0.0.0/8
-			return true
-		case v4[0] == 10: // 10.0.0.0/8
-			return true
-		case v4[0] == 169 && v4[1] == 254: // 169.254.0.0/16 link-local + cloud metadata
-			return true
-		case v4[0] == 172 && v4[1] >= 16 && v4[1] <= 31: // 172.16.0.0/12
-			return true
-		case v4[0] == 192 && v4[1] == 168: // 192.168.0.0/16
-			return true
-		case v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127: // CGNAT 100.64.0.0/10
-			return true
-		default:
-			return false
-		}
-	}
-	// IPv6
-	switch {
-	case ip.IsLoopback():
-		return true
-	case ip.IsLinkLocalUnicast(): // fe80::/10
-		return true
-	case ip.IsLinkLocalMulticast(): // ff02::/16
-		return true
-	case ip.IsPrivate(): // fc00::/7
-		return true
-	case ip.IsUnspecified(): // ::
-		return true
-	default:
-		return false
-	}
-}
+// validateFetchURL blocks SSRF targets before the fetch tool dials them. The
+// policy itself lives in internal/netsec so vendor /models fetches and the MCP
+// transports are checked against the same rules instead of each rolling their
+// own (or none). Redirect hops are re-validated at the call site.
+func validateFetchURL(raw string) error { return netsec.ValidatePublicURL(raw) }
 
 // ============================================================================
 // Helpers

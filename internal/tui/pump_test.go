@@ -15,7 +15,9 @@ func drivePump(t *testing.T, input []byte) []rune {
 	t.Helper()
 	tu := newTestTUI()
 	tu.reader = bufio.NewReader(iotest.OneByteReader(bytes.NewReader(input)))
-	// The pump takes t.reader; run it and collect until the input is drained.
+	// rawBytePump takes t.reader and feeds byteCh; keyPump reassembles
+	// sequences and dispatches to keyCh. Collect until the input is drained.
+	go tu.rawBytePump()
 	go tu.keyPump()
 	var out []rune
 	deadline := time.After(3 * time.Second)

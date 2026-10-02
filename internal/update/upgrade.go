@@ -1,14 +1,17 @@
 // Self-upgrade — Claude Code `claude update` / opencode `upgrade` parity.
 // Downloads the release asset matching the running platform (GOOS/GOARCH and
-// desktop vs CLI kind) from GitHub, sanity-checks it, and atomically swaps the
-// running binary (rename-based, safe on Windows where a running exe cannot be
-// overwritten but CAN be renamed).
+// desktop vs CLI kind) from GitHub, VERIFIES it (sha256 from the release's
+// checksums.txt + detached minisign signature against the embedded public key —
+// see verify.go, this replaced a magic-byte-only check that proved nothing),
+// and atomically swaps the running binary (rename-based, safe on Windows where
+// a running exe cannot be overwritten but CAN be renamed).
 package update
 
 import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -198,14 +201,26 @@ func Upgrade(ctx context.Context, current string) (*UpgradeResult, error) {
 		}
 	}
 
+	// Trust the download BEFORE executing it: sha256 from the release's
+	// checksums.txt plus the detached minisign signature against the embedded
+	// public key (internal/update/verify.go). bytesMagicOK alone proves only
+	// "this looks like a binary", which is not a supply-chain control.
+	if err := verifyDownloaded(ctx, tmpName, assetName, byName, os.Stderr); err != nil {
+		return nil, fmt.Errorf("release verification failed: %w", err)
+	}
+
 	old := exePath + ".old"
 	_ = os.Remove(old)
 	if err := os.Rename(exePath, old); err != nil {
 		return nil, fmt.Errorf("backup current binary: %w", err)
 	}
 	if err := os.Rename(tmpName, exePath); err != nil {
-		// Roll back so the installation stays runnable.
-		_ = os.Rename(old, exePath)
+		// Roll back so the installation stays runnable. A rollback failure
+		// means the user's binary was left displaced — surface it loudly so
+		// they can restore it manually instead of discovering a broken install.
+		if rbErr := os.Rename(old, exePath); rbErr != nil {
+			log.Printf("[update] rollback after failed swap failed: %v — restore %s to %s manually", rbErr, old, exePath)
+		}
 		return nil, fmt.Errorf("swap binary: %w", err)
 	}
 

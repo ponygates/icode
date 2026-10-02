@@ -201,15 +201,13 @@ func extractGoSymbols(line string, lineNum int, path string) []Symbol {
 			afterParen := line[idx+6:]
 			closeParen := strings.Index(afterParen, ")")
 			if closeParen > 0 {
+				// Report the bare receiver type: "func (s *Store)" matches
+				// "func (s Store)", so both the star and the variable drop.
 				recv := strings.TrimSpace(afterParen[:closeParen])
-				if starIdx := strings.Index(recv, "*"); starIdx >= 0 {
-					receiver = strings.TrimSpace(recv[starIdx+1:])
-				} else {
-					receiver = recv
+				if sp := strings.LastIndex(recv, " "); sp >= 0 {
+					recv = recv[sp+1:]
 				}
-				if idx2 := strings.LastIndex(recv, " "); idx2 >= 0 {
-					receiver = strings.TrimSpace(recv[idx2+1:])
-				}
+				receiver = strings.TrimPrefix(strings.TrimSpace(recv), "*")
 				if receiver != "" {
 					kind = SymbolMethod
 				}
@@ -271,7 +269,13 @@ func (g *Graph) Search(name string) []Symbol {
 func (g *Graph) SymbolsInFile(path string) []Symbol {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
-	return g.byFile[path]
+	src := g.byFile[path]
+	if len(src) == 0 {
+		return nil
+	}
+	out := make([]Symbol, len(src))
+	copy(out, src)
+	return out
 }
 
 // AllSymbols returns every indexed symbol.

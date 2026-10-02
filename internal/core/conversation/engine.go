@@ -46,7 +46,7 @@ type Engine struct {
 	// AskUser is the interactive multiple-choice asker (Claude Code
 	// AskUserQuestion parity). Injected by the TUI so ask_user_question tool
 	// calls can render options and read the user's choice; nil (headless /
-	// simpleui / desktop HTTP) degrades the tool to an error instead of
+	// desktop HTTP) degrades the tool to an error instead of
 	// hanging.
 	AskUser tool.AskUserFunc
 	// AskUserForm is the multi-question wizard asker (opencode AskQuestion
@@ -87,6 +87,13 @@ type Engine struct {
 	// doomLoops is keyed by sessionID — a process-global detector let
 	// concurrent desktop sessions trip each other's breakers.
 	doomLoops map[string]*DoomLoopDetector
+
+	// stopHookBlocks counts consecutive Stop-hook blocks per session so a
+	// misbehaving hook cannot force an infinite continuation loop (Claude
+	// Code parity: max 3 forced continues, then the turn ends anyway).
+	// Guarded by e.mu. Reset whenever a turn ends naturally or a new user
+	// message starts a fresh turn.
+	stopHookBlocks map[string]int
 
 	// maxToolRounds caps agent tool iterations per turn (configurable via
 	// tools.max_tool_rounds; 0 = default 25).
@@ -169,6 +176,18 @@ type Engine struct {
 	// long-session /compact nudge (so it never nags on every turn).
 	hintMu        sync.Mutex
 	compactHinted map[string]bool
+
+	// autoCompactPct is the threshold (percent of the model ContextWindow)
+	// at which the engine runs the optimizer's compaction pipeline
+	// automatically at the start of each user turn (Claude Code / Codex
+	// parity). <= 0 disables auto-compaction. Default DefaultAutoCompactPct.
+	autoCompactPct int
+	// autoCompactMu guards autoCompactTurn, which records the user-turn
+	// count at which each session last auto-compacted — the anti-thrash
+	// guard (a session cannot compact again until
+	// autoCompactMinTurnGapDelta turns have passed).
+	autoCompactMu   sync.Mutex
+	autoCompactTurn map[string]int
 }
 
 // NewEngine creates a conversation engine.
@@ -178,21 +197,24 @@ func NewEngine(
 	gate *permission.Gate,
 ) *Engine {
 	e := &Engine{
-		providerReg:    providerReg,
-		toolReg:        tool.NewRegistry(),
-		sessionSt:      sessionSt,
-		gate:           gate,
-		optimizers:     make(map[string]*tokenopt.Optimizer),
-		stopFns:        make(map[string]context.CancelFunc),
-		diagCache:      make(map[string]string),
-		permRespChans:  make(map[string]chan permission.Decision),
-		doomLoops:      make(map[string]*DoomLoopDetector),
-		teamRegistry:   make(map[string]*agent.TeamDef),
-		budgetEnforcer: tokenopt.NewBudgetEnforcer(tokenopt.DefaultBudgetConfig()),
-		truncDet:       NewTruncationDetector(DefaultTruncationRecoveryConfig()),
-		prefMem:        prefmem.New(prefmem.Options{}),
-		repairCounts:   make(map[string]int),
-		compactHinted:  make(map[string]bool),
+		providerReg:     providerReg,
+		toolReg:         tool.NewRegistry(),
+		sessionSt:       sessionSt,
+		gate:            gate,
+		optimizers:      make(map[string]*tokenopt.Optimizer),
+		stopFns:         make(map[string]context.CancelFunc),
+		diagCache:       make(map[string]string),
+		permRespChans:   make(map[string]chan permission.Decision),
+		doomLoops:       make(map[string]*DoomLoopDetector),
+		stopHookBlocks:  make(map[string]int),
+		teamRegistry:    make(map[string]*agent.TeamDef),
+		budgetEnforcer:  tokenopt.NewBudgetEnforcer(tokenopt.DefaultBudgetConfig()),
+		truncDet:        NewTruncationDetector(DefaultTruncationRecoveryConfig()),
+		prefMem:         prefmem.New(prefmem.Options{}),
+		repairCounts:    make(map[string]int),
+		compactHinted:   make(map[string]bool),
+		autoCompactPct:  DefaultAutoCompactPct,
+		autoCompactTurn: make(map[string]int),
 	}
 	if gate != nil {
 		slashcmd.SetShellGate(&shellGateAdapter{gate: gate})
@@ -236,7 +258,7 @@ func (e *Engine) schedulePrefSave(delay time.Duration) {
 	}
 	e.prefSaveTimer = time.AfterFunc(delay, func() {
 		if e.prefSavePath != "" && e.prefMem != nil {
-			_ = e.prefMem.SaveFile(e.prefSavePath)
+			discard("save preference memory", e.prefMem.SaveFile(e.prefSavePath))
 		}
 	})
 	e.prefSaveMu.Unlock()
@@ -254,7 +276,7 @@ func (e *Engine) FlushPreferenceSave() {
 	path := e.prefSavePath
 	e.prefSaveMu.Unlock()
 	if path != "" && e.prefMem != nil {
-		_ = e.prefMem.SaveFile(path)
+		discard("flush preference memory", e.prefMem.SaveFile(path))
 	}
 }
 
@@ -262,6 +284,75 @@ func (e *Engine) FlushPreferenceSave() {
 // can persist (Snapshot) or clear (Purge) it independently of the session.
 func (e *Engine) PreferenceMemory() *prefmem.Store {
 	return e.prefMem
+}
+
+// DefaultAutoCompactPct is the default auto-compact threshold: 85% of the
+// active model's ContextWindow (Claude Code / Codex CLI parity — competitors
+// compact at a token threshold instead of waiting for a manual /compact).
+const DefaultAutoCompactPct = 85
+
+// autoCompactMinTurnGapDelta is the anti-thrash guard: a session must see at
+// least this many new user turns between two engine-level auto-compactions.
+// Without it a session whose kept-recent window alone still exceeds the
+// threshold would re-summarize on every single turn for zero benefit.
+const autoCompactMinTurnGapDelta = 3
+
+// SetAutoCompactPct configures the auto-compact threshold in percent of the
+// model ContextWindow (1-100). 0 (or any out-of-range value) disables
+// automatic compaction — the manual /compact prompt path stays available.
+// Wired from config tools.auto_compact_pct.
+func (e *Engine) SetAutoCompactPct(pct int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if pct < 0 || pct > 100 {
+		pct = 0
+	}
+	e.autoCompactPct = pct
+}
+
+// maybeAutoCompact is the threshold-triggered automatic compaction (Claude
+// Code parity). It runs at the START of a user turn — before the new user
+// message is appended to the optimizer — so the in-flight turn is never
+// folded into the summary. It drives the existing compaction machinery
+// (tokenopt Optimizer.AutoCompact, the same pipeline /compact and
+// CompactRequest use) and never writes a second summariser. The immutable
+// cache prefix (system prompt + tool defs + cached summary) is untouched by
+// compactLocked. Returns tokens saved and the threshold percent in effect
+// (0 = nothing happened).
+func (e *Engine) maybeAutoCompact(sessionID string, sess *types.Session, opt *tokenopt.Optimizer) (int, int) {
+	e.mu.Lock()
+	pct := e.autoCompactPct
+	e.mu.Unlock()
+	if pct <= 0 || pct > 100 || opt == nil {
+		return 0, 0
+	}
+	opt.SetCompactThreshold(float64(pct) / 100.0)
+
+	userTurns := 0
+	if sess != nil {
+		for _, m := range sess.Messages {
+			if m.Role == types.RoleUser {
+				userTurns++
+			}
+		}
+	}
+	e.autoCompactMu.Lock()
+	last, seen := e.autoCompactTurn[sessionID]
+	if seen && userTurns-last < autoCompactMinTurnGapDelta {
+		e.autoCompactMu.Unlock()
+		return 0, 0 // anti-thrash: too soon after the previous auto-compaction
+	}
+	e.autoCompactTurn[sessionID] = userTurns
+	e.autoCompactMu.Unlock()
+
+	saved, did := opt.AutoCompact()
+	if !did {
+		e.autoCompactMu.Lock()
+		delete(e.autoCompactTurn, sessionID) // don't burn the gap for a no-op
+		e.autoCompactMu.Unlock()
+		return 0, 0
+	}
+	return saved, pct
 }
 
 // SetMaxToolRounds sets the agent tool-iteration cap per turn (0 = default).
@@ -304,6 +395,27 @@ func (e *Engine) doomLoopFor(sessionID string) *DoomLoopDetector {
 		e.doomLoops[sessionID] = dl
 	}
 	return dl
+}
+
+// bumpStopHookBlocks increments and returns the per-session count of
+// consecutive Stop-hook blocks. The 3-cap stops a broken hook from looping
+// the agent forever (Claude Code parity).
+func (e *Engine) bumpStopHookBlocks(sessionID string) int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.stopHookBlocks == nil {
+		e.stopHookBlocks = make(map[string]int)
+	}
+	e.stopHookBlocks[sessionID]++
+	return e.stopHookBlocks[sessionID]
+}
+
+// resetStopHookBlocks clears the consecutive-block counter — called when a
+// turn ends naturally or a fresh user message starts a new turn.
+func (e *Engine) resetStopHookBlocks(sessionID string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	delete(e.stopHookBlocks, sessionID)
 }
 
 // learnPreferences scans a user message for explicit preference statements
@@ -643,7 +755,7 @@ func (e *Engine) ExecuteTool(name string, args string) *types.ToolResult {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	tc := types.ToolCall{Name: name, Arguments: args}
-	return e.runTool(ctx, tc)
+	return e.runTool(ctx, tc, nil)
 }
 
 // GetToolRules returns persistent per-tool permission rules from the gate.
@@ -964,7 +1076,7 @@ func (e *Engine) executeTool(
 	ctx = tool.WithProgress(ctx, relay)
 
 	// Interactive ask (Claude Code AskUserQuestion parity): the TUI injects
-	// its asker via Engine.AskUser; headless/simpleui leave it nil and the
+	// its asker via Engine.AskUser; headless leave it nil and the
 	// AskUserTool degrades gracefully instead of hanging.
 	if e.AskUser != nil {
 		ctx = tool.WithAskUser(ctx, e.AskUser)
@@ -986,31 +1098,70 @@ func (e *Engine) executeTool(
 
 	// PreToolUse lifecycle hooks (Claude Code parity): an external command
 	// exiting with code 2 blocks the tool call; its stderr is fed back to
-	// the model so it can adjust course.
+	// the model so it can adjust course. The stdout JSON contract adds
+	// permissionDecision overrides (allow / deny / ask) so policy scripts
+	// can steer the gate, plus systemMessage / timeout observability.
+	var hookAskReason string
 	if hr := e.getHooksRunner(); hr.HasHooks(hooks.PreToolUse) {
-		res := hr.Fire(ctx, hooks.PreToolUse, hooks.Input{
+		hres := hr.Fire(ctx, hooks.PreToolUse, hooks.Input{
 			ToolName:  tc.Name,
 			ToolInput: json.RawMessage(tc.Arguments),
 			SessionID: sessionID,
 		})
-		if res.Block {
+		if hres.Block {
 			return &types.ToolResult{
 				Success: false,
-				Error:   "PreToolUse hook blocked this call: " + res.Message,
+				Error:   "PreToolUse hook blocked this call: " + hres.Message,
 			}
+		}
+		if hres.SystemMessage != "" {
+			select {
+			case out <- types.StreamEvent{Type: types.EventSystem, Content: "⚠ [hook] " + hres.SystemMessage}:
+			default:
+			}
+		}
+		if hres.TimedOut {
+			select {
+			case out <- types.StreamEvent{Type: types.EventSystem, Content: "ⓘ [hook] PreToolUse 钩子超时，已跳过其检查。"}:
+			default:
+			}
+		}
+		// permissionDecision override: deny short-circuits exactly like a
+		// gate denial; allow skips the gate entirely (headless automation:
+		// the hook IS the policy); ask forces the confirmation prompt.
+		switch hres.PermissionDecision {
+		case "deny":
+			return &types.ToolResult{
+				Success: false,
+				Error:   "PreToolUse hook denied this call: " + hres.Message,
+			}
+		case "allow":
+			return e.runTool(ctx, tc, out)
+		case "ask":
+			hookAskReason = hres.Message
 		}
 	}
 
 	action := buildAction(tc.Name, tc.Arguments)
 
 	if e.gate == nil {
-		return e.runTool(ctx, tc)
+		return e.runTool(ctx, tc, out)
 	}
 
 	res := e.gate.Check(sessionID, action)
+	// PreToolUse hook override: "ask" forces the confirmation prompt even
+	// when the gate would have allowed (headless policy scripts can demand
+	// human eyes on specific tool shapes).
+	if hookAskReason != "" && res.Decision == permission.DecisionAllow {
+		res.Decision = permission.DecisionAsk
+		res.Prompt = "PreToolUse hook 要求人工确认此调用。"
+		if hookAskReason != "" {
+			res.Prompt += "\n" + hookAskReason
+		}
+	}
 	switch res.Decision {
 	case permission.DecisionAllow:
-		return e.runTool(ctx, tc)
+		return e.runTool(ctx, tc, out)
 	case permission.DecisionDeny:
 		// Track tool rejection for strategy-change forcing
 		if dl := e.doomLoopFor(sessionID); dl.RecordRejection(tc.Name) {
@@ -1033,11 +1184,11 @@ func (e *Engine) executeTool(
 			threshold = e.gate.StrikeThreshold()
 		}
 		if e.permHandler != nil {
-			req := &types.PermissionReq{Tool: tc.Name, Prompt: res.Prompt, Strikes: strikes, Threshold: threshold}
-			return e.applyDecision(ctx, sessionID, tc, e.permHandler(sessionID, req, res))
+			req := &types.PermissionReq{Tool: tc.Name, Prompt: res.Prompt, Severity: res.Severity, Strikes: strikes, Threshold: threshold}
+			return e.applyDecision(ctx, sessionID, tc, e.permHandler(sessionID, req, res), out)
 		}
 		reqID := e.genPermID()
-		req := &types.PermissionReq{RequestID: reqID, Tool: tc.Name, Prompt: res.Prompt, Strikes: strikes, Threshold: threshold}
+		req := &types.PermissionReq{RequestID: reqID, Tool: tc.Name, Prompt: res.Prompt, Severity: res.Severity, Strikes: strikes, Threshold: threshold}
 		// PermissionRequest lifecycle hook — external scripts can watch
 		// every confirmation prompt (Claude Code parity).
 		if hr := e.getHooksRunner(); hr.HasHooks(hooks.PermissionRequest) {
@@ -1050,26 +1201,26 @@ func (e *Engine) executeTool(
 		e.permMu.Unlock()
 		select {
 		case decision := <-ch:
-			return e.applyDecision(ctx, sessionID, tc, decision)
+			return e.applyDecision(ctx, sessionID, tc, decision, out)
 		case <-ctx.Done():
 			return &types.ToolResult{Success: false, Error: "Permission request cancelled"}
 		}
 	default:
-		return e.runTool(ctx, tc)
+		return e.runTool(ctx, tc, out)
 	}
 }
 
-func (e *Engine) applyDecision(ctx context.Context, sessionID string, tc types.ToolCall, decision permission.Decision) *types.ToolResult {
+func (e *Engine) applyDecision(ctx context.Context, sessionID string, tc types.ToolCall, decision permission.Decision, out chan types.StreamEvent) *types.ToolResult {
 	switch decision {
 	case permission.DecisionAllow:
 		e.rememberConnectDomain(tc)
-		return e.runTool(ctx, tc)
+		return e.runTool(ctx, tc, out)
 	case permission.DecisionAllowAll:
 		if e.gate != nil {
 			e.gate.SetSessionAllow(sessionID, true)
 		}
 		e.rememberConnectDomain(tc)
-		return e.runTool(ctx, tc)
+		return e.runTool(ctx, tc, out)
 	default:
 		return &types.ToolResult{Success: false, Error: "Permission denied by user"}
 	}
@@ -1089,7 +1240,7 @@ func (e *Engine) rememberConnectDomain(tc types.ToolCall) {
 	e.gate.TrustDomain(a.URL)
 }
 
-func (e *Engine) runTool(ctx context.Context, tc types.ToolCall) *types.ToolResult {
+func (e *Engine) runTool(ctx context.Context, tc types.ToolCall, out chan types.StreamEvent) *types.ToolResult {
 	// Computer-use runaway guard: cap consecutive desktop-input operations so
 	// a confused model cannot keep clicking the user's real screen forever.
 	// sessionID comes from the ctx injected in executeTool (WithSessionID),
@@ -1174,6 +1325,8 @@ func (e *Engine) runTool(ctx context.Context, tc types.ToolCall) *types.ToolResu
 	}
 	// PostToolUse lifecycle hooks: feedback from the hook (stderr) is
 	// appended to the tool result so the model sees it on the next turn.
+	// JSON contract extras (Claude Code parity): suppressOutput hides the
+	// hook's feedback from the model; systemMessage warns the USER only.
 	if hr := e.getHooksRunner(); hr.HasHooks(hooks.PostToolUse) {
 		hres := hr.Fire(ctx, hooks.PostToolUse, hooks.Input{
 			ToolName:   tc.Name,
@@ -1181,7 +1334,13 @@ func (e *Engine) runTool(ctx context.Context, tc types.ToolCall) *types.ToolResu
 			ToolOutput: truncateForHook(res.Content),
 			SessionID:  tool.SessionIDFromContext(ctx),
 		})
-		if hres.Message != "" {
+		if hres.SystemMessage != "" && out != nil {
+			select {
+			case out <- types.StreamEvent{Type: types.EventSystem, Content: "⚠ [hook] " + hres.SystemMessage}:
+			default:
+			}
+		}
+		if hres.Message != "" && !hres.SuppressOutput {
 			res.Content += "\n\n[PostToolUse hook feedback]\n" + hres.Message
 		}
 	}
@@ -1226,7 +1385,9 @@ func (e *Engine) takeToolRepair(sessionID string) bool {
 }
 
 // longSessionThreshold is how many turns (user+assistant messages) trigger the
-// one-time /compact nudge in a session with no active compression.
+// one-time /compact nudge in a session with no active compression. The nudge
+// is the FALLBACK path: with auto-compact on (the default) longSessionHint
+// stays silent because the engine already compacts at the token threshold.
 const longSessionThreshold = 40
 
 // longSessionHint returns a one-time, non-blocking nudge suggesting /compact
@@ -1234,6 +1395,11 @@ const longSessionThreshold = 40
 // no --lite). It fires once per session so it never nags on every turn.
 func (e *Engine) longSessionHint(sess *types.Session) string {
 	if sess == nil || len(sess.Messages) < longSessionThreshold {
+		return ""
+	}
+	// With auto-compact enabled the engine already distills history at the
+	// token threshold, so the manual /compact nudge would be pure noise.
+	if e.autoCompactPct > 0 {
 		return ""
 	}
 	if sessionum.BudgetMax(sess) > 0 || sessionum.LiteN(sess) > 0 {
@@ -1354,7 +1520,7 @@ func (e *Engine) repairBrokenToolCalls(
 		ch, err := provider.ChatStream(ctx, types.ChatRequest{
 			SessionID:        sessionID,
 			Messages:         opt.CompactRequest(""),
-			Model:            modelInfo.ID,
+			Model:            modelInfo.WireModel(),
 			ProviderName:     modelInfo.Provider,
 			SystemPrompt:     opt.BuildPrefix(),
 			Tools:            e.toolReg.ListDefs(),
@@ -1427,9 +1593,11 @@ func (e *Engine) snapshotBeforeTool(ctx context.Context, tc types.ToolCall) {
 	checkpoint.BeforeTool(ctx, tc.Name, filePath)
 	store, err := checkpoint.GetOrOpen(sessionID)
 	if err != nil {
-		return // silently skip — checkpoints are best-effort
+		discardOnce("open checkpoint store", err)
+		return // checkpoints stay best-effort
 	}
-	_, _ = store.Snapshot(ctx, "before "+tc.Name)
+	_, snapErr := store.Snapshot(ctx, "before "+tc.Name)
+	discardOnce("checkpoint snapshot", snapErr)
 }
 
 // stashIfPivot inspects the session before a new user message and, if the
@@ -1474,7 +1642,10 @@ func (e *Engine) stashIfPivot(ctx context.Context, sess *types.Session, newConte
 	// is fine — the summary note below is the authoritative stash record.
 	store, err := checkpoint.GetOrOpen(sess.ID)
 	if err == nil {
-		_, _ = store.Snapshot(ctx, "stash before: "+truncStashMsg(lastUser))
+		_, snapErr := store.Snapshot(ctx, "stash before: "+truncStashMsg(lastUser))
+		discardOnce("stash snapshot", snapErr)
+	} else {
+		discardOnce("open checkpoint store", err)
 	}
 	// Refresh the archived summary so the resume layer sees the interrupted
 	// work at a glance.
@@ -1484,7 +1655,7 @@ func (e *Engine) stashIfPivot(ctx context.Context, sess *types.Session, newConte
 	}
 	if strings.TrimSpace(summary) != "" {
 		summary += fmt.Sprintf("\n\n(stash) 上个任务未完成: %s — 检查点已保存，可 /rewind 恢复。", truncStashMsg(lastUser))
-		_ = sessionum.Save(e.sessionSt, sess, summary)
+		discard("save session summary", sessionum.Save(e.sessionSt, sess, summary))
 	}
 }
 
@@ -1688,6 +1859,11 @@ func (e *Engine) finishTextTurn(
 	if e.gate != nil && e.gate.Mode() == permission.ModePlan {
 		out <- types.StreamEvent{Type: types.EventPlanProposal}
 	}
+	// finishTextTurn is the SINGLE EventDone emitter for this round: the
+	// outer loops no longer forward a second one (the old double-Done made
+	// the Stop-hook continuation rounds trip the UI's turn-end handler).
+	// Stamping the model here keeps parity with the former outer event.
+	done.Meta.Model = modelInfo.WireModel()
 	out <- done
 }
 
@@ -1729,7 +1905,7 @@ func (e *Engine) recoverTruncation(
 		ch, err := provider.ChatStream(ctx, types.ChatRequest{
 			SessionID:        sessionID,
 			Messages:         opt.CompactRequest(""),
-			Model:            modelInfo.ID,
+			Model:            modelInfo.WireModel(),
 			ProviderName:     modelInfo.Provider,
 			SystemPrompt:     opt.BuildPrefix(),
 			Tools:            e.toolReg.ListDefs(),
@@ -1875,14 +2051,14 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 			if e.gate != nil {
 				mode = string(e.gate.Mode())
 			}
-			_ = sessionum.Save(e.sessionSt, sess, sessionum.Generate(sess, modelID, sess.ProviderName, mode))
+			discard("save session summary", sessionum.Save(e.sessionSt, sess, sessionum.Generate(sess, modelID, sess.ProviderName, mode)))
 		}
 		msgs, trimmed = sessionum.TrimToBudget(msgs, budget)
 		if trimmed {
-			_ = sessionum.RecordTrim(e.sessionSt, sess)
+			discard("record budget trim", sessionum.RecordTrim(e.sessionSt, sess))
 		}
 		if warn, used, b := sessionum.BudgetWarning(e.sessionSt, sess); warn {
-			_ = sessionum.RecordWarn(e.sessionSt, sess)
+			discard("record budget warning", sessionum.RecordWarn(e.sessionSt, sess))
 			warnMsg = fmt.Sprintf("ⓘ [预算护栏] 已用约 %d/%d tokens（%d%%），接近上限，即将自动压缩。", used, b, used*100/b)
 		}
 	} else if n := sessionum.LiteN(sess); n > 0 && n < len(msgs) {
@@ -1963,8 +2139,17 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 	if len(attachments) > 0 && len(attachments[0]) > 0 {
 		userMsg.Attachments = attachments[0]
 	}
+	// Auto-compact (threshold-triggered, Claude Code / Codex parity): run the
+	// existing compaction pipeline BEFORE this turn's user message enters the
+	// optimizer, so the in-flight turn is never folded into the summary. The
+	// engine-side CompactRequest below would implicitly compact anyway —
+	// driving it here just adds a visible event and the anti-thrash guard.
+	autoSaved, autoPct := e.maybeAutoCompact(sessionID, sess, opt)
 	opt.AddMessage(userMsg)
 	e.sessionSt.AppendMessage(sessionID, userMsg)
+	// A fresh user message starts a new turn: the Stop-hook block counter
+	// applies per turn, so previous blocks must not leak into this one.
+	e.resetStopHookBlocks(sessionID)
 
 	// Preference memory: learn from what the user just said (only explicit
 	// preference statements — never code). The block is injected into the
@@ -1993,7 +2178,13 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 	if fallbackMsg != "" {
 		out <- types.StreamEvent{Type: types.EventSystem, Content: fallbackMsg}
 	}
-	if trimmed {
+	if autoSaved > 0 {
+		// Visible notification so the TUI / desktop can show what happened
+		// (auto-compaction is otherwise silent history rewriting).
+		out <- types.StreamEvent{Type: types.EventSystem, Content: fmt.Sprintf(
+			"ⓘ [自动压缩] 上下文达到阈值（%d%% × 模型窗口），已自动压缩较早对话：auto-compacted %d tokens。",
+			autoPct, autoSaved)}
+	} else if trimmed {
 		out <- types.StreamEvent{Type: types.EventSystem, Content: "ⓘ [预算护栏] 会话上下文超出预算，已自动压缩为摘要 + 最近消息（≤ 预算）。"}
 	} else if warnMsg != "" {
 		out <- types.StreamEvent{Type: types.EventSystem, Content: warnMsg}
@@ -2086,9 +2277,57 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 					} else {
 						e.finishTextTurn(ctx, sessionID, provider, opt, modelInfo, assistantMsg, event, startTime, out, 0)
 					}
-					// Stop lifecycle hook — the agent has finished responding.
+					// Stop lifecycle hook (Claude Code parity): exit 2 (or JSON
+					// {"decision":"block"} / {"continue":false}) blocks the stop
+					// and injects the reason as a continuation message so the
+					// agent keeps working — e.g. "tests must pass before you
+					// stop". Capped at 3 consecutive blocks per session so a
+					// broken hook cannot loop the agent forever.
 					if hr := e.getHooksRunner(); hr.HasHooks(hooks.Stop) {
-						hr.Fire(context.Background(), hooks.Stop, hooks.Input{SessionID: sessionID})
+						sres := hr.Fire(context.Background(), hooks.Stop, hooks.Input{SessionID: sessionID})
+						if sres.Block {
+							if n := e.bumpStopHookBlocks(sessionID); n > 3 {
+								select {
+								case out <- types.StreamEvent{Type: types.EventSystem, Content: "⚠ Stop 钩子已连续阻断 3 次仍要求继续，已强制结束本轮（防止无限循环）。"}:
+								default:
+								}
+							} else {
+								select {
+								case out <- types.StreamEvent{Type: types.EventSystem, Content: "⇄ Stop 钩子要求继续工作: " + firstN(sres.Message, 200)}:
+								default:
+								}
+								// Inject the block reason as a user-role
+								// continuation so the next round has context.
+								contMsg := types.Message{
+									Role: types.RoleUser,
+									Content: "[stop-hook] " + firstN(sres.Message, 500) +
+										"\n请根据以上反馈继续完成任务，不要重复已完成的工作。",
+									Timestamp: time.Now(),
+								}
+								opt.AddMessage(contMsg)
+								e.sessionSt.AppendMessage(sessionID, contMsg)
+								// Reset per-round state and re-open the stream.
+								assistantMsg = types.Message{Role: types.RoleAssistant, Timestamp: time.Now()}
+								toolCalls = nil
+								acc = &textAccumulator{}
+								messages := opt.CompactRequest("")
+								var fbMsg string
+								eventCh, fbMsg, err = e.chatStreamWithFallback(ctx, sessionID, messages, modelID, provider, modelInfo, opt)
+								if err != nil {
+									out <- types.StreamEvent{Type: types.EventError, Content: "Stop 钩子续跑失败: " + err.Error()}
+									return
+								}
+								if fbMsg != "" {
+									select {
+									case out <- types.StreamEvent{Type: types.EventSystem, Content: fbMsg}:
+									default:
+									}
+								}
+								continue
+							}
+						} else {
+							e.resetStopHookBlocks(sessionID)
+						}
 					}
 					// Notification hook — completion signal for external
 					// scripts (Claude Code parity).
@@ -2105,10 +2344,9 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 							ToolOutput: fmt.Sprintf("%dms", time.Since(startTime).Milliseconds()),
 						})
 					}
-					out <- types.StreamEvent{
-						Type: types.EventDone,
-						Meta: types.StreamMeta{Model: modelInfo.ID},
-					}
+					// NOTE: no second EventDone here — finishTextTurn (and the
+					// continueAgentLoop chain it anchors) already emitted the
+					// round's single EventDone with the model stamped on it.
 					return
 				case types.EventError:
 					// Notification hook — failure signal.
@@ -2160,11 +2398,15 @@ func (e *Engine) chatStreamWithFallback(
 		modelInfo    types.ModelInfo
 		provider     types.Provider // nil = reuse primary
 		isFallback   bool
+		// wire is the model string sent on the API wire. For user-defined
+		// custom models the registry key (modelID) is "provider/model_id"
+		// while the API expects the bare model_id — WireModel() translates.
+		wire string
 	}
 	// The primary entry MUST use the routed modelID: when the smart router
 	// engaged (session model ""/auto) it differs from sess.ModelID.
 	modelsToTry := []modelTry{
-		{modelID: modelID, providerName: modelInfo.Provider, modelInfo: modelInfo},
+		{modelID: modelID, providerName: modelInfo.Provider, modelInfo: modelInfo, wire: modelInfo.WireModel()},
 	}
 	for _, fb := range e.fallbackModels {
 		if fb == modelID {
@@ -2174,7 +2416,7 @@ func (e *Engine) chatStreamWithFallback(
 		if err == nil {
 			modelsToTry = append(modelsToTry, modelTry{
 				modelID: fb, providerName: mi.Provider, modelInfo: mi,
-				provider: p, isFallback: true,
+				provider: p, isFallback: true, wire: mi.WireModel(),
 			})
 		}
 	}
@@ -2184,7 +2426,7 @@ func (e *Engine) chatStreamWithFallback(
 	for _, mt := range modelsToTry {
 		if mt.isFallback && lastErr != nil {
 			// The notice travels through the event stream (a raw-mode TUI owns
-			// stdout; desktop/simpleui can only show it as an event).
+			// stdout; desktop can only show it as an event).
 			fallbackMsg = fmt.Sprintf("⚠️ 主模型不可用，已切换备用模型 %s（原因：%s）", mt.modelID, friendlyModelError(lastErr))
 		}
 		p := mt.provider
@@ -2198,7 +2440,7 @@ func (e *Engine) chatStreamWithFallback(
 			return p.ChatStream(ctx, types.ChatRequest{
 				SessionID:        sessionID,
 				Messages:         messages,
-				Model:            mt.modelID,
+				Model:            mt.wire,
 				ProviderName:     mt.providerName,
 				SystemPrompt:     opt.BuildPrefix(),
 				Tools:            e.toolReg.ListDefs(),
@@ -2754,7 +2996,7 @@ func (e *Engine) polishDenyWithLLM(ctx context.Context, sessionID, toolName, rea
 	ch, err := provider.ChatStream(pctx, types.ChatRequest{
 		SessionID:    sessionID,
 		Messages:     []types.Message{{Role: types.RoleUser, Content: prompt, Timestamp: time.Now()}},
-		Model:        mi.ID,
+		Model:        mi.WireModel(),
 		ProviderName: mi.Provider,
 		SystemPrompt: "你只输出两行中文：第一行原因，第二行以「建议：」开头。",
 		MaxTokens:    150,

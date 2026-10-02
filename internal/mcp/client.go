@@ -14,6 +14,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,6 +27,7 @@ import (
 	"time"
 
 	"github.com/ponygates/icode/internal/executil"
+	"github.com/ponygates/icode/internal/netsec"
 	"github.com/ponygates/icode/internal/types"
 	"github.com/ponygates/icode/internal/xgo"
 )
@@ -57,6 +59,7 @@ type Client struct {
 	resources []MCPResource
 
 	mu     sync.RWMutex
+	connMu sync.Mutex // lifecycle: Connect/Close/supervisor, never held over I/O
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
 	stdout io.ReadCloser
@@ -65,6 +68,39 @@ type Client struct {
 	reqID   atomic.Int64
 	pending map[int64]chan *jsonrpcResponse
 	notify  chan *jsonrpcNotification
+
+	// slug namespaces this server's tool names. It equals config.Name unless
+	// the Pool had to disambiguate a collision (see Pool.Add), in which case
+	// it differs — which is why every name mangling path uses slug and every
+	// reverse lookup goes through toolByName rather than string trimming.
+	slug string
+
+	// toolByName maps the mangled name handed to the model back to the exact
+	// name the server expects. Populated by DiscoverTools.
+	toolByName map[string]string
+
+	// dead is closed when the transport drops on its own (child exited, stream
+	// EOF). closed is set only by an explicit Close, which must not restart.
+	dead   chan struct{}
+	closed bool
+
+	// supervising marks a restart loop as running, so a double drop cannot
+	// spawn two of them. baseCtx is the lifetime context Connect was given;
+	// restarts are bounded by it, not by any single request's deadline.
+	supervising bool
+	baseCtx     context.Context
+
+	// lifeCtx is detached from any caller's context and lives as long as the
+	// client does. The child process and the supervisor are bound to it, never
+	// to the context handed to Connect: boot code connects with a 20s deadline,
+	// and os/exec kills a CommandContext child the moment that deadline expires
+	// — which used to take every stdio server down seconds after startup.
+	lifeCtx    context.Context
+	lifeCancel context.CancelFunc
+
+	// onReconnect fires after a successful automatic restart so the Pool can
+	// refresh the engine's tool registry.
+	onReconnect func()
 
 	// onNotification, when set, receives server-push notifications (method +
 	// params) such as notifications/tools/list_changed. Called from the notify
@@ -75,6 +111,18 @@ type Client struct {
 	httpClient   *http.Client
 	sseEndpoint  string // session-scoped endpoint URL for POST/GET
 	sseSessionID string
+
+	// oauth drives the HTTP authorization layer (401 challenge → PKCE code
+	// flow → bearer injection → refresh). It is nil for stdio and for SSE
+	// servers that were given a static Authorization header.
+	oauth     *OAuthManager
+	oauthOpts *oauthOptions
+
+	// serverInfo / capabilities are what the server returned from initialize.
+	// resources and prompts are optional parts of the protocol, so every call
+	// for them checks capabilities first instead of timing out.
+	serverInfo   map[string]any
+	capabilities map[string]any
 }
 
 // MCPResource represents a resource exposed by the server.
@@ -87,11 +135,34 @@ type MCPResource struct {
 
 // NewClient creates an MCP client for the given server config.
 func NewClient(cfg ServerConfig) *Client {
+	lifeCtx, lifeCancel := context.WithCancel(context.Background())
 	return &Client{
-		config:  cfg,
-		pending: make(map[int64]chan *jsonrpcResponse),
-		notify:  make(chan *jsonrpcNotification, 64),
+		config:     cfg,
+		slug:       cfg.Name,
+		pending:    make(map[int64]chan *jsonrpcResponse),
+		notify:     make(chan *jsonrpcNotification, 64),
+		dead:       make(chan struct{}),
+		toolByName: make(map[string]string),
+		lifeCtx:    lifeCtx,
+		lifeCancel: lifeCancel,
 	}
+}
+
+// SetSlug namespaces this server's tool names. The Pool calls it when two
+// configured servers would otherwise mangle to the same prefix. Safe to call
+// only before Connect/DiscoverTools, which is how Pool.Add uses it.
+func (c *Client) SetSlug(slug string) {
+	c.mu.Lock()
+	c.slug = slug
+	c.mu.Unlock()
+}
+
+// SetOnReconnect wires a handler fired after an automatic restart succeeds and
+// the catalog has been re-read, so the Pool can refresh the engine's registry.
+func (c *Client) SetOnReconnect(fn func()) {
+	c.mu.Lock()
+	c.onReconnect = fn
+	c.mu.Unlock()
 }
 
 // SetOnNotification wires a server-push notification handler (method + params).
@@ -100,6 +171,25 @@ func (c *Client) SetOnNotification(fn func(method string, params any)) {
 	c.mu.Lock()
 	c.onNotification = fn
 	c.mu.Unlock()
+}
+
+// SetOAuthBrowser wires the function used to open the OAuth authorization URL
+// in the platform browser. The desktop/server layers already own such a helper
+// (rundll32 on Windows, open on macOS, xdg-open elsewhere); passing it here keeps
+// this package free of its own platform switch. Without it the interactive flow
+// prints the URL for a TTY user to open manually.
+func (c *Client) SetOAuthBrowser(fn func(string) error) {
+	if c.oauthOpts == nil {
+		c.oauthOpts = &oauthOptions{}
+	}
+	c.oauthOpts.openBrowser = fn
+}
+
+// SetOAuthOptions injects the full OAuth configuration (store dir, clock,
+// transport, validator). Production callers use SetOAuthBrowser; tests use this
+// to point the whole layer at local httptest servers and a scratch directory.
+func (c *Client) SetOAuthOptions(opt oauthOptions) {
+	c.oauthOpts = &opt
 }
 
 // startNotifyPump drains the notify channel and dispatches to onNotification.
@@ -119,6 +209,14 @@ func (c *Client) startNotifyPump() {
 
 // Connect establishes the connection based on the transport type.
 func (c *Client) Connect(ctx context.Context) error {
+	// connMu serialises lifecycle transitions only and is never held across an
+	// RPC round-trip. connectStdio used to call initialize while holding c.mu,
+	// and stdioCall then took c.mu to register the pending id — so every stdio
+	// server deadlocked on its very first request and no stdio MCP server could
+	// finish connecting at all.
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+
 	var err error
 	switch c.config.Type {
 	case TransportStdio:
@@ -135,41 +233,17 @@ func (c *Client) Connect(ctx context.Context) error {
 }
 
 func (c *Client) connectStdio(ctx context.Context) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Create cancellable context so Close() can clean up the subprocess
-	ctx, c.cancel = context.WithCancel(ctx)
-	c.cmd = executil.CommandContext(ctx, c.config.Command, c.config.Args...)
-
-	// Merge env vars: inherit parent environment, then overlay configured vars
-	if len(c.config.Env) > 0 {
-		c.cmd.Env = append(os.Environ(), c.config.Env...)
+	if err := c.spawnStdio(); err != nil {
+		return err
 	}
-
-	var err error
-	c.stdin, err = c.cmd.StdinPipe()
-	if err != nil {
-		return fmt.Errorf("stdin pipe: %w", err)
-	}
-
-	c.stdout, err = c.cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("stdout pipe: %w", err)
-	}
-
-	if err := c.cmd.Start(); err != nil {
-		return fmt.Errorf("start server: %w", err)
-	}
-
-	// Start the JSON-RPC reader — it exits when ctx is cancelled or the pipe closes
-	xgo.GoSafe("mcp.readLoop", c.readLoop)
 
 	// Initialize the MCP session
 	resp, err := c.call(ctx, "initialize", map[string]any{
 		"protocolVersion": "2024-11-05",
 		"capabilities": map[string]any{
-			"tools": map[string]any{},
+			"tools":     map[string]any{},
+			"resources": map[string]any{},
+			"prompts":   map[string]any{},
 		},
 		"clientInfo": map[string]any{
 			"name":    "iCode",
@@ -177,6 +251,7 @@ func (c *Client) connectStdio(ctx context.Context) error {
 		},
 	})
 	if err != nil {
+		c.teardownStdio()
 		return fmt.Errorf("initialize: %w", err)
 	}
 
@@ -186,8 +261,10 @@ func (c *Client) connectStdio(ctx context.Context) error {
 		ServerInfo      map[string]any `json:"serverInfo"`
 	}
 	if err := json.Unmarshal(resp.Result, &initResult); err != nil {
+		c.teardownStdio()
 		return fmt.Errorf("parse init result: %w", err)
 	}
+	c.setServerInfo(initResult.ServerInfo, initResult.Capabilities)
 
 	// Send initialized notification
 	c.sendNotification(ctx, "notifications/initialized", nil)
@@ -195,32 +272,105 @@ func (c *Client) connectStdio(ctx context.Context) error {
 	return nil
 }
 
-func (c *Client) connectSSE(ctx context.Context) error {
+// spawnStdio starts the server process and its reader. The process handle is
+// swapped under c.mu; syscalls (Start, pipe setup) run outside the lock so no
+// file-descriptor operation is ever issued while it is held.
+func (c *Client) spawnStdio() error {
+	// The process is bound to the client's lifetime context, not the caller's:
+	// cancelling a connect deadline must not kill a healthy server.
+	runCtx, cancel := context.WithCancel(c.lifeCtx)
+	proc := executil.CommandContext(runCtx, c.config.Command, c.config.Args...)
+
+	// Merge env vars: inherit parent environment, then overlay configured vars
+	if len(c.config.Env) > 0 {
+		proc.Env = append(os.Environ(), c.config.Env...)
+	}
+
+	stdin, err := proc.StdinPipe()
+	if err != nil {
+		cancel()
+		return fmt.Errorf("stdin pipe: %w", err)
+	}
+	stdout, err := proc.StdoutPipe()
+	if err != nil {
+		cancel()
+		return fmt.Errorf("stdout pipe: %w", err)
+	}
+	if err := proc.Start(); err != nil {
+		cancel()
+		return fmt.Errorf("start server: %w", err)
+	}
+
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		cancel()
+		if proc.Process != nil {
+			_ = proc.Process.Kill()
+		}
+		return errors.New("mcp: client closed during connect")
+	}
+	// Fresh drop signal per connection: handleDrop closes it, and a restarted
+	// connection must not look already-dead to its next reader.
+	c.dead = make(chan struct{})
+	c.baseCtx = c.lifeCtx
+	c.cmd, c.stdin, c.stdout, c.cancel = proc, stdin, stdout, cancel
+	c.mu.Unlock()
+
+	// Start the JSON-RPC reader — it exits when ctx is cancelled or the pipe closes
+	xgo.GoSafe("mcp.readLoop", c.readLoop)
+	return nil
+}
+
+// teardownStdio stops a half-established connection (failed handshake) without
+// tripping the restart supervisor.
+func (c *Client) teardownStdio() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.shutdownLocked()
+}
 
-	ctx, c.cancel = context.WithCancel(ctx)
-	c.httpClient = &http.Client{Timeout: 30 * time.Second}
+func (c *Client) connectSSE(ctx context.Context) error {
+	// No lock is held across the HTTP exchange — sseCall takes c.mu per
+	// request, so a connect-time hold would stall every concurrent call for
+	// the whole handshake.
+	runCtx, cancel := context.WithCancel(c.lifeCtx)
+	// Guarded transport: the SSE endpoint event tells us where to POST next, so
+	// a hostile server could otherwise aim our requests at the cloud-metadata
+	// plane. Loopback/private stay allowed — local MCP servers are the norm.
+	client := netsec.GuardedClient(30*time.Second, false)
 
 	// Step 1: POST to the server URL to initialize an SSE session
 	initURL := c.config.URL
-	req, err := http.NewRequestWithContext(ctx, "POST", initURL, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"iCode","version":"0.1.0"}}}`))
-	if err != nil {
-		return fmt.Errorf("create init request: %w", err)
+	c.setupOAuth(initURL)
+	if c.oauth != nil {
+		// Silent pass first: reuse or refresh a stored token without ever
+		// opening a browser. Only a 401 below escalates to an interactive flow.
+		_ = c.oauth.EnsureValid(runCtx)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "text/event-stream")
-	for k, v := range c.config.Headers {
-		req.Header.Set(k, v)
-	}
-
-	resp, err := c.httpClient.Do(req)
+	const initBody = `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"iCode","version":"0.1.0"}}}`
+	resp, err := c.doWithAuth(runCtx, client, func() (*http.Request, error) {
+		req, err := http.NewRequestWithContext(runCtx, "POST", initURL, strings.NewReader(initBody))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "text/event-stream")
+		c.setAuthHeaders(req)
+		return req, nil
+	})
 	if err != nil {
+		cancel()
 		return fmt.Errorf("init request: %w", err)
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusForbidden {
+		cancel()
+		return fmt.Errorf("init 返回 403：服务器拒绝了凭据，请为该 MCP 服务器配置正确的 Authorization 头或完成 OAuth 授权")
+	}
 	if resp.StatusCode != http.StatusOK {
+		cancel()
 		return fmt.Errorf("init returned status %d", resp.StatusCode)
 	}
 
@@ -247,6 +397,7 @@ func (c *Client) connectSSE(ctx context.Context) error {
 	}
 
 	if endpoint == "" {
+		cancel()
 		return fmt.Errorf("no endpoint event received from SSE server")
 	}
 
@@ -254,25 +405,125 @@ func (c *Client) connectSSE(ctx context.Context) error {
 	if !strings.HasPrefix(endpoint, "http") {
 		base, err := url.Parse(initURL)
 		if err != nil {
+			cancel()
 			return fmt.Errorf("parse base URL: %w", err)
 		}
 		rel, err := url.Parse(endpoint)
 		if err != nil {
+			cancel()
 			return fmt.Errorf("parse endpoint URL: %w", err)
 		}
 		endpoint = base.ResolveReference(rel).String()
 	}
 
-	c.sseEndpoint = endpoint
+	// The endpoint comes from the server, not the operator: it decides where
+	// every later request of ours is POSTed. Guard it against the metadata
+	// plane (169.254.0.0/16, fe80::/10) while still allowing a local server to
+	// hand back a loopback path.
+	if err := netsec.ValidateConfiguredURL(endpoint); err != nil {
+		cancel()
+		return fmt.Errorf("SSE server supplied an unusable endpoint: %w", err)
+	}
 
-	// Step 3: Start background GET listener for SSE events
-	xgo.GoSafe("mcp.sseReadLoop", func() { c.sseReadLoop(ctx) })
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		cancel()
+		client.CloseIdleConnections()
+		return errors.New("mcp: client closed during connect")
+	}
+	c.dead = make(chan struct{})
+	c.baseCtx = c.lifeCtx
+	c.cancel, c.httpClient, c.sseEndpoint = cancel, client, endpoint
+	c.mu.Unlock()
+
+	// Step 3: Start background GET listener for SSE events. The endpoint is
+	// passed in rather than re-read from the struct, so the reader never races
+	// with a reconnect swapping it.
+	xgo.GoSafe("mcp.sseReadLoop", func() { c.sseReadLoop(runCtx, endpoint) })
 
 	return nil
 }
 
-// sseReadLoop reads SSE events from the GET endpoint and dispatches JSON-RPC messages.
-func (c *Client) sseReadLoop(ctx context.Context) {
+// setupOAuth builds the authorization layer for an SSE server. It is skipped
+// when the operator pinned an Authorization header (static credentials win, and
+// silently launching a browser behind their back would be wrong) and for stdio,
+// which has no HTTP to authenticate.
+func (c *Client) setupOAuth(resourceURL string) {
+	if c.config.Type != TransportSSE {
+		return
+	}
+	c.mu.RLock()
+	static := c.config.Headers
+	c.mu.RUnlock()
+	if _, ok := headerInsensitive(static, "Authorization"); ok {
+		return
+	}
+	opt := oauthOptions{}
+	if c.oauthOpts != nil {
+		opt = *c.oauthOpts
+	}
+	opt.server = c.config.Name
+	if opt.resourceURL == "" {
+		opt.resourceURL = resourceURL
+	}
+	c.oauth = newOAuthManager(opt)
+}
+
+// doWithAuth issues an HTTP request, and on a 401 runs the OAuth flow exactly
+// once before a single retry. A second 401 after a fresh token is reported as a
+// configuration error rather than looping — the requirement that authorization
+// be triggered, never retried forever.
+func (c *Client) doWithAuth(ctx context.Context, client *http.Client, newReq func() (*http.Request, error)) (*http.Response, error) {
+	do := func() (*http.Response, error) {
+		req, err := newReq()
+		if err != nil {
+			return nil, err
+		}
+		return client.Do(req)
+	}
+	resp, err := do()
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		return resp, nil
+	}
+	if c.oauth == nil {
+		return resp, nil
+	}
+	ch := parseChallengeFromResponse(resp)
+	resp.Body.Close()
+	if _, err := c.oauth.Authorize(ctx, ch); err != nil {
+		return nil, fmt.Errorf("MCP 服务器 %q 需要 OAuth 授权，但未完成：%v", c.config.Name, err)
+	}
+	resp, err = do()
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		resp.Body.Close()
+		return nil, fmt.Errorf("MCP 服务器 %q 在授权后仍返回 401，请检查其 OAuth 配置或改用静态 Authorization 头", c.config.Name)
+	}
+	return resp, nil
+}
+
+// headerInsensitive looks up a header key ignoring case, since operators write
+// "authorization" and "Authorization" interchangeably in config.
+func headerInsensitive(h map[string]string, key string) (string, bool) {
+	for k, v := range h {
+		if strings.EqualFold(k, key) {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// sseReadLoop keeps the SSE event stream open and dispatches JSON-RPC
+// messages. endpoint is passed in so this reader is bound to the endpoint it
+// was started with, even if a reconnect installs a new one.
+func (c *Client) sseReadLoop(ctx context.Context, endpoint string) {
+	backoff := time.Second
 	for {
 		select {
 		case <-ctx.Done():
@@ -280,28 +531,43 @@ func (c *Client) sseReadLoop(ctx context.Context) {
 		default:
 		}
 
-		req, err := http.NewRequestWithContext(ctx, "GET", c.sseEndpoint, nil)
+		req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
 		if err != nil {
 			return
 		}
 		req.Header.Set("Accept", "text/event-stream")
-		for k, v := range c.config.Headers {
-			req.Header.Set(k, v)
-		}
+		c.setAuthHeaders(req)
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
-			// Retry after a brief delay
+			if ctx.Err() != nil {
+				return
+			}
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(2 * time.Second):
-				continue
+			case <-time.After(backoff):
 			}
+			backoff = minDuration(backoff*2, 30*time.Second)
+			continue
 		}
 
+		// A closed or errored stream ends readSSEResponse immediately. Without a
+		// pause here the loop re-GETs in a tight spin, hammering a server that is
+		// already down — the historical behaviour was a 2 s sleep only on the
+		// request-failure branch, not on the stream-ending one.
 		c.readSSEResponse(resp.Body)
 		resp.Body.Close()
+
+		if ctx.Err() != nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		backoff = minDuration(backoff*2, 30*time.Second)
 	}
 }
 
@@ -382,6 +648,16 @@ func (c *Client) sseCall(ctx context.Context, method string, params any) (*jsonr
 
 	ch := make(chan *jsonrpcResponse, 1)
 	c.mu.Lock()
+	if c.closed || c.stdin == nil {
+		c.mu.Unlock()
+		return nil, fmt.Errorf("%w (%s)", errNotConnected, c.config.Name)
+	}
+	select {
+	case <-c.dead:
+		c.mu.Unlock()
+		return nil, fmt.Errorf("%w (%s)", errNotConnected, c.config.Name)
+	default:
+	}
 	c.pending[id] = ch
 	c.mu.Unlock()
 
@@ -391,16 +667,15 @@ func (c *Client) sseCall(ctx context.Context, method string, params any) (*jsonr
 		c.mu.Unlock()
 	}()
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.sseEndpoint, strings.NewReader(string(data)))
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	for k, v := range c.config.Headers {
-		httpReq.Header.Set(k, v)
-	}
-
-	resp, err := c.httpClient.Do(httpReq)
+	resp, err := c.doWithAuth(ctx, c.httpClient, func() (*http.Request, error) {
+		httpReq, err := http.NewRequestWithContext(ctx, "POST", c.sseEndpoint, strings.NewReader(string(data)))
+		if err != nil {
+			return nil, err
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+		c.setAuthHeaders(httpReq)
+		return httpReq, nil
+	})
 	if err != nil {
 		return nil, fmt.Errorf("post request: %w", err)
 	}
@@ -450,18 +725,30 @@ func (c *Client) DiscoverTools(ctx context.Context) ([]types.ToolDef, error) {
 		return nil, fmt.Errorf("parse tools: %w", err)
 	}
 
-	c.mu.Lock()
-	c.tools = make([]types.ToolDef, len(result.Tools))
+	defs := make([]types.ToolDef, len(result.Tools))
+	byName := make(map[string]string, len(result.Tools))
 	for i, t := range result.Tools {
-		c.tools[i] = types.ToolDef{
-			Name:        fmt.Sprintf("mcp_%s_%s", c.config.Name, t.Name),
-			Description: fmt.Sprintf("[MCP:%s] %s", c.config.Name, t.Description),
+		mangled := mcpToolName(c.slug, t.Name)
+		// Two servers can legitimately mangle to the same name (server "a" with
+		// tool "b_c", server "a_b" with tool "c"), and the registry would let the
+		// later one silently replace the earlier. The Pool owns that collision;
+		// here we only keep the exact server-side name so the call can be routed
+		// back without reverse-parsing the mangled form.
+		defs[i] = types.ToolDef{
+			Name:        mangled,
+			Description: fmt.Sprintf("[MCP:%s] %s", c.slug, t.Description),
 			Parameters:  t.InputSchema,
+			ServerName:  c.slug,
 		}
+		byName[mangled] = t.Name
 	}
+
+	c.mu.Lock()
+	c.tools = defs
+	c.toolByName = byName
 	c.mu.Unlock()
 
-	return c.tools, nil
+	return defs, nil
 }
 
 // DiscoverResources fetches available resources from the server.
@@ -487,8 +774,10 @@ func (c *Client) DiscoverResources(ctx context.Context) ([]MCPResource, error) {
 
 // CallTool invokes a named tool on the MCP server.
 func (c *Client) CallTool(ctx context.Context, name string, args map[string]any) (*types.ToolResult, error) {
-	// Strip the mcp_<server>_ prefix
-	actualName := strings.TrimPrefix(name, fmt.Sprintf("mcp_%s_", c.config.Name))
+	// Route by the exact server-side name recorded at discovery. Reverse-parsing
+	// the mangled name cannot work: the server slug and the tool name are both
+	// free-form and may contain underscores.
+	actualName := c.serverToolName(name)
 
 	resp, err := c.call(ctx, "tools/call", map[string]any{
 		"name":      actualName,
@@ -546,42 +835,6 @@ func (c *Client) RefreshTools(ctx context.Context) error {
 	return nil
 }
 
-// Close terminates the server connection and cleans up all resources.
-func (c *Client) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Cancel the context first — kills the subprocess via CommandContext or stops SSE loop.
-	if c.cancel != nil {
-		c.cancel()
-	}
-	// Unblock any goroutines waiting on pending RPC responses.
-	for id, ch := range c.pending {
-		ch <- &jsonrpcResponse{
-			JSONRPC: "2.0",
-			ID:      id,
-			Error: &jsonrpcError{
-				Code:    -1,
-				Message: "client closed",
-			},
-		}
-		delete(c.pending, id)
-	}
-	if c.config.Type == TransportSSE {
-		if c.httpClient != nil {
-			c.httpClient.CloseIdleConnections()
-		}
-		return nil
-	}
-	if c.stdin != nil {
-		c.stdin.Close()
-	}
-	if c.cmd != nil && c.cmd.Process != nil {
-		return c.cmd.Process.Kill()
-	}
-	return nil
-}
-
 // ============================================================================
 // JSON-RPC protocol
 // ============================================================================
@@ -635,6 +888,16 @@ func (c *Client) stdioCall(ctx context.Context, method string, params any) (*jso
 
 	ch := make(chan *jsonrpcResponse, 1)
 	c.mu.Lock()
+	if c.closed || c.stdin == nil {
+		c.mu.Unlock()
+		return nil, fmt.Errorf("%w (%s)", errNotConnected, c.config.Name)
+	}
+	select {
+	case <-c.dead:
+		c.mu.Unlock()
+		return nil, fmt.Errorf("%w (%s)", errNotConnected, c.config.Name)
+	default:
+	}
 	c.pending[id] = ch
 	c.mu.Unlock()
 
@@ -675,9 +938,7 @@ func (c *Client) sendNotification(ctx context.Context, method string, params any
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
-		for k, v := range c.config.Headers {
-			req.Header.Set(k, v)
-		}
+		c.setAuthHeaders(req)
 		resp, err := c.httpClient.Do(req)
 		if err == nil {
 			resp.Body.Close()
@@ -688,7 +949,11 @@ func (c *Client) sendNotification(ctx context.Context, method string, params any
 }
 
 func (c *Client) readLoop() {
-	scanner := bufio.NewScanner(c.stdout)
+	c.mu.RLock()
+	stdout := c.stdout
+	c.mu.RUnlock()
+
+	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 	for scanner.Scan() {
@@ -725,154 +990,30 @@ func (c *Client) readLoop() {
 		ch, ok := c.pending[resp.ID]
 		c.mu.RUnlock()
 		if ok {
-			ch <- &resp
-		}
-	}
-}
-
-// ============================================================================
-// Pool — manages multiple MCP clients
-// ============================================================================
-
-// Pool manages multiple MCP server connections, providing unified tool
-// discovery and execution across all connected servers.
-type Pool struct {
-	mu      sync.RWMutex
-	clients map[string]*Client
-	// onToolsChanged, when set, fires after a connected server signals
-	// notifications/tools/list_changed and its catalog is re-discovered.
-	onToolsChanged func(clientName string)
-}
-
-// NewPool creates an empty MCP client pool.
-func NewPool() *Pool {
-	return &Pool{
-		clients: make(map[string]*Client),
-	}
-}
-
-// SetOnToolsChanged wires a callback fired when a server's tool list changes
-// (notifications/tools/list_changed). The caller (server layer) refreshes the
-// engine's MCP tool registry from it.
-func (p *Pool) SetOnToolsChanged(fn func(clientName string)) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.onToolsChanged = fn
-}
-
-// Add registers and connects to a new MCP server.
-func (p *Pool) Add(ctx context.Context, cfg ServerConfig) error {
-	if !cfg.Enabled {
-		return nil
-	}
-
-	client := NewClient(cfg)
-	if err := client.Connect(ctx); err != nil {
-		return fmt.Errorf("connect to %s: %w", cfg.Name, err)
-	}
-
-	// Auto-refresh the catalog when the server signals a tool-list change
-	// (Reasonix parity: notifications/tools/list_changed).
-	client.SetOnNotification(func(method string, _ any) {
-		if method != "notifications/tools/list_changed" {
-			return
-		}
-		_ = client.RefreshTools(context.Background())
-		p.mu.RLock()
-		cb := p.onToolsChanged
-		p.mu.RUnlock()
-		if cb != nil {
-			cb(cfg.Name)
-		}
-	})
-
-	// Discover tools immediately
-	if _, err := client.DiscoverTools(ctx); err != nil {
-		client.Close()
-		return fmt.Errorf("discover tools for %s: %w", cfg.Name, err)
-	}
-
-	p.mu.Lock()
-	p.clients[cfg.Name] = client
-	p.mu.Unlock()
-
-	return nil
-}
-
-// AllTools returns all tools from all connected MCP servers.
-func (p *Pool) AllTools() []types.ToolDef {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	var all []types.ToolDef
-	for _, client := range p.clients {
-		all = append(all, client.Tools()...)
-	}
-	return all
-}
-
-// AllToolsByServer returns every discovered tool grouped by owning server
-// name so callers can apply per-server policy (e.g. trust modes) by tool.
-func (p *Pool) AllToolsByServer() map[string][]types.ToolDef {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	out := make(map[string][]types.ToolDef)
-	for name, client := range p.clients {
-		out[name] = append(out[name], client.Tools()...)
-	}
-	return out
-}
-
-// Execute routes a tool call to the appropriate MCP server.
-func (p *Pool) Execute(ctx context.Context, name string, args map[string]any) (*types.ToolResult, error) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	for _, client := range p.clients {
-		for _, t := range client.Tools() {
-			if t.Name == name {
-				return client.CallTool(ctx, name, args)
+			select {
+			case ch <- &resp:
+			default:
 			}
 		}
 	}
 
-	return nil, fmt.Errorf("MCP tool %q not found", name)
-}
-
-// CloseAll shuts down all MCP server connections.
-func (p *Pool) CloseAll() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	for _, client := range p.clients {
-		client.Close()
+	// The pipe reached EOF: the child exited or crashed. Without this the
+	// client kept handing out 30-second timeouts forever.
+	cause := scanner.Err()
+	if cause == nil {
+		cause = errors.New("stdout closed")
 	}
-	p.clients = make(map[string]*Client)
-}
-
-// Remove disconnects and removes a single MCP server by name.
-func (p *Pool) Remove(name string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if c, ok := p.clients[name]; ok {
-		c.Close()
-		delete(p.clients, name)
+	// Snapshot the handle: a restart may already have swapped c.cmd, and Wait
+	// on the wrong process would report nothing (or panic on a nil cmd).
+	c.mu.RLock()
+	proc := c.cmd
+	c.mu.RUnlock()
+	if proc != nil && proc.Process != nil {
+		if err := proc.Wait(); err != nil && cause != nil {
+			// The child's exit status is the actual cause; keep it ahead of the
+			// generic "stdout closed".
+			cause = fmt.Errorf("%v; %w", err, cause)
+		}
 	}
-}
-
-// Has reports whether a server with the given name is currently connected.
-func (p *Pool) Has(name string) bool {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	_, ok := p.clients[name]
-	return ok
-}
-
-// Count returns the number of connected MCP servers.
-func (p *Pool) Count() int {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return len(p.clients)
+	c.handleDrop(cause)
 }

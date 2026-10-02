@@ -92,7 +92,7 @@ Keep it under 500 words.`
 	ch, err := provider.ChatStream(ctx, types.ChatRequest{
 		SessionID:    sessionID,
 		Messages:     []types.Message{{Role: types.RoleUser, Content: prompt}},
-		Model:        modelInfo.ID,
+		Model:        modelInfo.WireModel(),
 		ProviderName: modelInfo.Provider,
 		MaxTokens:    1200,
 		Temperature:  types.Temp(0.3),

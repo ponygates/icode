@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/ponygates/icode/internal/core/searchreplace"
@@ -60,11 +61,28 @@ func (t *SearchReplaceTool) Execute(ctx context.Context, args string) (*types.To
 		return &types.ToolResult{Success: false, Error: "search is required"}, nil
 	}
 
-	idx, valid, reason := searchreplace.StageForSession(SessionIDFromContext(ctx)).Add(in.FilePath, in.Search, in.Replace)
+	// Read-before-edit guard: staging an edit for a file this conversation
+	// never read is refused unless the SEARCH text matches uniquely and
+	// verbatim (self-verifying escape hatch, see checkEditGuard).
+	sessionID := SessionIDFromContext(ctx)
+	guardEscape := false
+	if prev, rerr := os.ReadFile(in.FilePath); rerr == nil {
+		switch checkEditGuard(sessionID, in.FilePath, string(prev), []string{in.Search}) {
+		case readGuardBlock:
+			return &types.ToolResult{Success: false, Error: readGuardBlockMessage(in.FilePath)}, nil
+		case readGuardEscape:
+			guardEscape = true
+		}
+	}
+
+	idx, valid, reason := searchreplace.StageForSessionOrProcess(sessionID).Add(in.FilePath, in.Search, in.Replace)
 
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("Staged edit #%d to %s\n", idx, in.FilePath))
 	b.WriteString(reason)
+	if guardEscape {
+		b.WriteString(readGuardEscapeWarning)
+	}
 	if !valid {
 		b.WriteString("\nThis edit cannot be applied until the search text is corrected.")
 	}

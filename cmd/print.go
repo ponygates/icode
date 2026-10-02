@@ -28,7 +28,7 @@ import (
 //
 // Diagnostics (tool calls, permission auto-approvals, usage, errors) go to
 // stderr so stdout stays clean and pipeable.
-func runPrintMode(prompt, outFmt string, cont bool, resumeID, provider, model, mode string) error {
+func runPrintMode(prompt, outFmt string, cont bool, resumeID, provider, model, mode, allowedCSV, disallowedCSV string) error {
 	cfg, _ := config.Load()
 	if cfg != nil {
 		if model == "" && cfg.Defaults.Model != "" {
@@ -64,7 +64,28 @@ func runPrintMode(prompt, outFmt string, cont bool, resumeID, provider, model, m
 	// Unattended: there is no one to answer an interactive permission prompt,
 	// so approve silently and log it to stderr. Users who want a hard stop can
 	// run in plan mode (`--mode plan`), where mutating ops are denied.
+	//
+	// Tool allow/deny lists (Claude Code --allowedTools / --disallowedTools
+	// parity): disallowed tools go into the gate's HARD deny layer (denied
+	// even when the mode would auto-approve); the allow-list is enforced in
+	// the handler because the gate has no "deny everything except X"
+	// primitive. In the default agent mode every non-read tool reaches the
+	// handler, so the lists are effective; with `--mode auto`, read-tier
+	// tools are auto-approved by the gate and bypass the list.
+	disallowed := splitToolCSV(disallowedCSV)
+	for tool := range disallowed {
+		a.Gate.SetToolRule(tool, "deny")
+	}
+	allowed := splitToolCSV(allowedCSV)
 	a.Engine.SetPermissionHandler(func(sessionID string, req *types.PermissionReq, res permission.CheckResult) permission.Decision {
+		if matchToolList(disallowed, req.Tool) {
+			fmt.Fprintf(os.Stderr, "[print] 拒绝工具 %s（--disallowedTools）\n", req.Tool)
+			return permission.DecisionDeny
+		}
+		if allowed != nil && !matchToolList(allowed, req.Tool) {
+			fmt.Fprintf(os.Stderr, "[print] 拒绝工具 %s（不在 --allowedTools 白名单）\n", req.Tool)
+			return permission.DecisionDeny
+		}
 		fmt.Fprintf(os.Stderr, "[print] 自动放行工具: %s\n", req.Tool)
 		return permission.DecisionAllow
 	})
@@ -234,4 +255,41 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return string(runes[:n]) + "..."
+}
+
+// splitToolCSV parses a comma-separated tool list ("bash,write_file,mcp__*").
+// Returns nil for empty input (meaning "no restriction"); surrounding spaces
+// are trimmed and empty entries dropped.
+func splitToolCSV(csv string) map[string]bool {
+	csv = strings.TrimSpace(csv)
+	if csv == "" {
+		return nil
+	}
+	out := map[string]bool{}
+	for _, s := range strings.Split(csv, ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			out[s] = true
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// matchToolList reports whether tool is covered by a parsed list: exact name
+// or a trailing-* prefix glob ("mcp__*" matches every namespaced MCP tool).
+func matchToolList(list map[string]bool, tool string) bool {
+	if len(list) == 0 {
+		return false
+	}
+	if list[tool] {
+		return true
+	}
+	for pat := range list {
+		if strings.HasSuffix(pat, "*") && strings.HasPrefix(tool, strings.TrimSuffix(pat, "*")) {
+			return true
+		}
+	}
+	return false
 }

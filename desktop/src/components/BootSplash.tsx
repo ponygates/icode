@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import PlumBlossom from './PlumBlossom';
 
 /**
@@ -15,6 +16,7 @@ import PlumBlossom from './PlumBlossom';
  * paired with opencode-style indeterminate progress bar below.
  */
 const BootSplash: React.FC = () => {
+  const { t } = useTranslation();
   const [show, setShow] = useState(true);
   const [fade, setFade] = useState(false);
 
@@ -58,7 +60,7 @@ const BootSplash: React.FC = () => {
         iCode
       </div>
       <div className="boot-bar" />
-      <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>正在启动…</div>
+      <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{t('app.starting')}</div>
     </div>
   );
 };

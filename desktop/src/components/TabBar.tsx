@@ -27,7 +27,22 @@ const TabBar: React.FC<TabBarProps> = ({ tabs, activeId, streamingIds, onSelect,
   if (tabs.length === 0) return null;
 
   return (
-    <div style={{
+    <div
+      role="tablist"
+      aria-label={t('tab.listAriaLabel', '会话标签')}
+      aria-orientation="horizontal"
+      onKeyDown={(e) => {
+        // Left/Right/Home/End move the active tab (WAI-ARIA tabs pattern).
+        if (tabs.length === 0) return;
+        const cur = tabs.findIndex((tb) => tb.id === activeId);
+        let next = -1;
+        if (e.key === 'ArrowRight') next = (cur + 1 + tabs.length) % tabs.length;
+        else if (e.key === 'ArrowLeft') next = (cur - 1 + tabs.length) % tabs.length;
+        else if (e.key === 'Home') next = 0;
+        else if (e.key === 'End') next = tabs.length - 1;
+        if (next >= 0 && tabs[next]) { e.preventDefault(); onSelect(tabs[next].id); }
+      }}
+      style={{
       display: 'flex', alignItems: 'center', gap: 0,
       background: 'var(--bg-secondary)', borderBottom: '1px solid var(--border-color)',
       overflowX: 'auto', flexShrink: 0, height: 34,
@@ -40,7 +55,11 @@ const TabBar: React.FC<TabBarProps> = ({ tabs, activeId, streamingIds, onSelect,
         return (
           <div
             key={tab.id}
+            role="tab"
+            aria-selected={active}
+            tabIndex={active ? 0 : -1}
             onClick={() => onSelect(tab.id)}
+            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(tab.id); } }}
             onContextMenu={(e) => onContextMenu?.(e, tab.id)}
             title={active ? t('tab.ctxHint') : undefined}
             draggable={!!onReorder}
@@ -81,6 +100,7 @@ const TabBar: React.FC<TabBarProps> = ({ tabs, activeId, streamingIds, onSelect,
             </span>
             <button
               onClick={(e) => { e.stopPropagation(); onClose(tab.id); }}
+              aria-label={t('tab.closeAriaLabel', '关闭标签')}
               style={{
                 background: 'transparent', border: 'none', cursor: 'pointer',
                 color: 'var(--text-muted)', padding: 0, display: 'flex',
@@ -96,6 +116,7 @@ const TabBar: React.FC<TabBarProps> = ({ tabs, activeId, streamingIds, onSelect,
       })}
       <button
         onClick={onNew}
+        aria-label={t('tab.newTabTitle')}
         title={t('tab.newTabTitle')}
         style={{
           display: 'flex', alignItems: 'center', justifyContent: 'center',

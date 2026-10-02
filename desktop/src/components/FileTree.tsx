@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Folder, FileText, ChevronRight, ChevronDown, Search } from 'lucide-react';
 import { useAppStore } from '../stores/appStore';
+import { eventKey } from '../lib/shortcuts';
 
 type FileType = 'go' | 'ts' | 'py' | 'md' | 'json' | 'yaml' | 'toml' | 'html' | 'css' | 'sh' | 'sql' | 'proto' | 'svg' | 'image' | 'file' | 'other' | 'dir';
 type FileItem = { path: string; type: FileType; isDir: boolean; depth: number };
@@ -123,10 +124,11 @@ const FileTree: React.FC<Props> = ({ path, onInsertPath, onAction, style }) => {
     return () => { cancelled = true; };
   }, [backendUrl, path]);
 
-  // Keyboard shortcut: Ctrl+F to toggle search
+  // Keyboard shortcut: Ctrl+F to toggle search (eventKey transparently handles
+  // the Windows IME case where character keydowns report key='Process').
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+      if ((e.ctrlKey || e.metaKey) && eventKey(e) === 'f') {
         e.preventDefault();
         setSearchVisible((v) => !v);
       }

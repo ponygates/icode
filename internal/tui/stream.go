@@ -4,12 +4,19 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/ponygates/icode/internal/notify"
 )
 
 // ── StreamWriter ─────────────────────────────────────────────────
 
 // AddMessage renders a complete message (user/system/error/assistant).
+// Content is sanitized first: tool output, model echoes, and file contents
+// often carry ANSI escapes that would otherwise be EXECUTED by the terminal
+// whenever that transcript row gets repainted (cursor jumps, erased rows —
+// the "garbage above the input box" bug).
 func (t *TUI) AddMessage(role Role, content string) {
+	content = sanitizeInput(content)
 	t.mu.Lock()
 	switch role {
 	case RoleUser:
@@ -38,6 +45,7 @@ func (t *TUI) AddMessage(role Role, content string) {
 // collapsible block instead of a pile of boxes (Claude Code parity). Any
 // other role appended in between naturally starts a fresh block.
 func (t *TUI) AppendThinkingDelta(content string) {
+	content = sanitizeInput(content) // reasoning deltas may echo anything
 	t.mu.Lock()
 	n := len(t.messages)
 	if n > 0 && t.messages[n-1].Role == RoleThinking {
@@ -57,6 +65,7 @@ func (t *TUI) AppendThinkingDelta(content string) {
 
 // AddToolMessage records a tool invocation.
 func (t *TUI) AddToolMessage(tool, toolArgs, content string) {
+	content = sanitizeInput(content) // tool output may carry ANSI escapes
 	t.mu.Lock()
 	// New cards follow the global fold preference (/expand); individual clicks
 	// override per block afterwards.
@@ -77,6 +86,7 @@ func (t *TUI) AddToolMessage(tool, toolArgs, content string) {
 
 // AppendToolResult appends result text to the most recent tool message.
 func (t *TUI) AppendToolResult(content string) {
+	content = sanitizeInput(content) // results carry raw tool stdout/stderr
 	t.mu.Lock()
 	for i := len(t.messages) - 1; i >= 0; i-- {
 		if t.messages[i].Role == RoleTool {
@@ -84,6 +94,10 @@ func (t *TUI) AppendToolResult(content string) {
 				t.messages[i].Content += "\n"
 			}
 			t.messages[i].Content += content
+			// The live tail served its purpose (the authoritative result just
+			// arrived) — drop it so the card renders the clean result, never
+			// progress+result duplicated.
+			t.messages[i].LiveTail = ""
 			idx := i
 			t.curTool = "" // this invocation finished
 			t.mu.Unlock()
@@ -101,24 +115,34 @@ func (t *TUI) AppendToolResult(content string) {
 	}
 }
 
+// liveTailCap bounds the volatile progress buffer: only the trailing 64KB of
+// a chatty process is kept for the scrolling tail window, so a multi-GB log
+// dump can't grow the message without bound.
+const liveTailCap = 64 * 1024
+
 // AppendToolProgress appends live tool output (bash stdout/stderr) to the
-// most recent tool message. Repaints are throttled so a chatty process can't
-// force a full-screen redraw per line.
+// most recent tool message's LiveTail — deliberately NOT Content, so the
+// final result can't duplicate what already streamed (Claude Code renders
+// the same way: live tail while running, clean output once finished).
+// Repaints are throttled so a chatty process can't force a full-screen
+// redraw per line.
 func (t *TUI) AppendToolProgress(content string) {
+	content = sanitizeInput(content) // live bash output may be colour-coded
 	t.mu.Lock()
 	if len(t.messages) == 0 {
 		t.mu.Unlock()
 		return
 	}
-	last := t.messages[len(t.messages)-1]
-	if last.Role != RoleTool {
+	last := len(t.messages) - 1
+	if t.messages[last].Role != RoleTool {
 		// Progress arrived before the tool card (race with the tool_use
 		// event) — surface it on a fresh tool message with the tool name.
-		t.messages = append(t.messages, Message{Role: RoleTool, Tool: "…", ToolArgs: "", Content: content, Folded: !t.toolFolded})
-	} else if t.messages[len(t.messages)-1].Content != "" {
-		t.messages[len(t.messages)-1].Content += content
+		t.messages = append(t.messages, Message{Role: RoleTool, Tool: "…", ToolArgs: "", LiveTail: content, Folded: !t.toolFolded})
 	} else {
-		t.messages[len(t.messages)-1].Content = content
+		t.messages[last].LiveTail += content
+		if len(t.messages[last].LiveTail) > liveTailCap {
+			t.messages[last].LiveTail = t.messages[last].LiveTail[len(t.messages[last].LiveTail)-liveTailCap:]
+		}
 	}
 	t.mu.Unlock()
 	if t.rawMode {
@@ -222,16 +246,50 @@ func (t *TUI) scheduleRender() {
 	})
 }
 
+// bellMinTurnSec is the minimum turn duration before the completion bell
+// fires: short Q&A rounds finish while the user still watches, so ringing on
+// every reply would be noise — only long-running turns (big refactors, bash
+// builds) earn a "done" ping.
+const bellMinTurnSec = 30
+
+// formatTurnDur renders a turn duration in compact Chinese ("3 分 25 秒"),
+// for the completion toast body.
+func formatTurnDur(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%d 秒", int(d.Seconds()))
+	}
+	m := int(d.Minutes())
+	s := int(d.Seconds()) % 60
+	if s == 0 {
+		return fmt.Sprintf("%d 分钟", m)
+	}
+	return fmt.Sprintf("%d 分 %d 秒", m, s)
+}
+
 // EndStream finalizes the streaming turn.
 func (t *TUI) EndStream() {
 	t.mu.Lock()
 	final := strings.TrimSpace(sanitizeFullText(t.streamBuf.String()))
 	t.ansiPending = ""
 	bged := t.backgrounded
+	// Task-completion bell (Claude Code parity): a long turn just finished —
+	// ping the terminal so a backgrounded/tabbed-away user notices. BEL
+	// never disturbs the layout (it's not a printable cell).
+	turnDur := time.Since(t.turnStart)
 	// A turn just finished = recent user activity, so reset the idle clock
-	// (used by the 3-minute auto-recap) instead of firing it right after a reply.
+	// (used for the 3-minute auto-recap) instead of firing it right after a
+	// reply.
 	t.lastActivity = time.Now()
+	t.turnStart = time.Time{}
 	t.mu.Unlock()
+	if t.bellOn && turnDur >= bellMinTurnSec*time.Second {
+		fmt.Fprint(t.writer, "\x07")
+		// System toast alongside the BEL (Claude Code parity): a tabbed-away
+		// terminal may have the bell muted by its profile — the toast still
+		// lands. Same gate as the bell so one toggle (/bell) controls both.
+		notify.Notify("iCode 任务完成", "本轮用时 "+formatTurnDur(turnDur)+"，回到终端查看结果。")
+	}
+	t.setTermTitle("")
 	if final != "" {
 		t.messages = append(t.messages, Message{Role: RoleAssistant, Content: final})
 	}

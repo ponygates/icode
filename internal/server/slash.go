@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 
 	"github.com/ponygates/icode/internal/config"
+	"github.com/ponygates/icode/internal/core/auth"
 	"github.com/ponygates/icode/internal/core/slashui"
 	"github.com/ponygates/icode/pkg/modelupdate"
 )
@@ -82,6 +84,21 @@ func (s *Server) handleSlash(w http.ResponseWriter, r *http.Request) {
 			}
 			return ""
 		},
+		SetCredentials: func(provider, apiKey string) string {
+			pc := s.cfg.Providers[provider]
+			if s.reg.SetCredentials(provider, apiKey, pc.APIBase) {
+				return ""
+			}
+			if apiKey == "" {
+				return ""
+			}
+			// A brand-new vendor is not in the registry yet — register it from
+			// the just-saved config so /login works on the first message.
+			if err := s.reg.Register(auth.Provider(provider, config.ProviderCfg{APIKey: apiKey, APIBase: pc.APIBase})); err != nil {
+				return err.Error()
+			}
+			return ""
+		},
 	}
 	state := &slashui.State{
 		SessionID: req.SessionID,
@@ -129,7 +146,9 @@ func (s *Server) syncWorkspacePath(sessionID, newPath string) {
 					return
 				}
 				ws.Path = newPath
-				_ = s.db.UpdateWorkspace(ws)
+				if uerr := s.db.UpdateWorkspace(ws); uerr != nil {
+					log.Printf("[server] sync workspace %s path to %s failed: %v", ws.ID, newPath, uerr)
+				}
 				return
 			}
 		}

@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/ponygates/icode/internal/config"
 	"github.com/ponygates/icode/internal/mcp"
@@ -22,11 +23,10 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 			if s.mcpPool != nil {
 				if s.mcpPool.Has(mc.Name) {
 					connected = true
-					for _, t := range s.mcpPool.AllTools() {
-						if strings.HasPrefix(t.Name, "mcp_"+mc.Name+"_") {
-							toolCount++
-						}
-					}
+					// Count by owning server, not by prefix: the slug a tool was namespaced
+					// under can differ from the configured name after sanitisation or a
+					// collision rename.
+					toolCount = len(s.mcpPool.ToolsByServer(mc.Name))
 				}
 			}
 			list = append(list, map[string]any{
@@ -39,6 +39,14 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 				"trust_mode": mc.TrustMode,
 				"connected":  connected,
 				"tools":      toolCount,
+				// Capability flags come from the cached initialize result — listing
+				// the actual resources/prompts needs a round-trip and belongs on
+				// /api/mcp/capabilities, not on this frequently-polled list.
+				"supports_resources": connected && s.mcpPool.Supports(mc.Name, "resources"),
+				"supports_prompts":   connected && s.mcpPool.Supports(mc.Name, "prompts"),
+				// Values are never returned — only whether any are stored, so the
+				// UI can show "已配置" without exposing the bearer token.
+				"has_headers": len(mc.Headers) > 0,
 			})
 		}
 		writeJSON(w, http.StatusOK, list)
@@ -62,6 +70,17 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		if req.Type == "" {
 			req.Type = "stdio"
 		}
+		// The settings UI never receives stored headers back (they carry bearer
+		// tokens), so an edit round-trip comes with an empty map. Keep what is
+		// on file unless the user actually typed a new value.
+		if len(req.Headers) == 0 {
+			for i := range s.cfg.MCP {
+				if s.cfg.MCP[i].Name == req.Name && len(s.cfg.MCP[i].Headers) > 0 {
+					req.Headers = s.cfg.MCP[i].Headers
+					break
+				}
+			}
+		}
 		// Upsert into config.
 		s.cfg.UpsertMCP(req)
 		if err := s.cfg.Save(config.DefaultPath()); err != nil {
@@ -72,7 +91,7 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		if s.mcpPool != nil {
 			s.mcpPool.Remove(req.Name)
 			if req.Enabled {
-				if err := s.mcpPool.Add(context.Background(), toMCPServerConfig(req)); err != nil {
+				if err := s.mcpPool.Add(context.Background(), mcp.ServerConfigFrom(req)); err != nil {
 					writeJSON(w, http.StatusOK, map[string]any{"ok": true, "warning": "saved but connect failed: " + err.Error()})
 					return
 				}
@@ -174,7 +193,7 @@ func (s *Server) handleMCPTest(w http.ResponseWriter, r *http.Request) {
 	if req.Type == "" {
 		req.Type = "stdio"
 	}
-	client := mcp.NewClient(toMCPServerConfig(req))
+	client := mcp.NewClient(mcp.ServerConfigFrom(req))
 	if err := client.Connect(r.Context()); err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
 		return
@@ -201,6 +220,67 @@ func (s *Server) handleMCPTools(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.mcpPool.AllTools())
+}
+
+// handleMCPResources lists the resources and prompts a connected server
+// exposes. These are optional parts of MCP, so an unconnected or
+// non-supporting server returns empty lists rather than an error.
+
+func (s *Server) handleMCPResources(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	name := r.URL.Query().Get("name")
+	if s.mcpPool == nil || name == "" || !s.mcpPool.Has(name) {
+		writeJSON(w, http.StatusOK, map[string]any{"resources": []any{}, "prompts": []any{}})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	defer cancel()
+
+	resources := []mcp.MCPResource{}
+	prompts := []mcp.MCPPrompt{}
+	if rs, err := s.mcpPool.ResourcesFor(ctx, name); err == nil {
+		resources = rs
+	}
+	if ps, err := s.mcpPool.PromptsFor(ctx, name); err == nil {
+		prompts = ps
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"resources": resources, "prompts": prompts})
+}
+
+// handleMCPResourceRead fetches one resource by URI from one server.
+// The URI comes from the server's own catalog, so it is echoed back only as
+// text/blob the server already serves — the client never follows it as a URL.
+
+func (s *Server) handleMCPResourceRead(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Server string `json:"server"`
+		URI    string `json:"uri"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Server == "" || req.URI == "" {
+		_ = r.Body.Close()
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "server and uri are required"})
+		return
+	}
+	if s.mcpPool == nil || !s.mcpPool.Has(req.Server) {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "mcp server not connected: " + req.Server})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	content, err := s.mcpPool.ReadResource(ctx, req.Server, req.URI)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "content": content})
 }
 
 func orDefault(v, def string) string {

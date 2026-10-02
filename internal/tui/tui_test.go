@@ -269,7 +269,7 @@ func TestCtrlREscCancel(t *testing.T) {
 // output before/after the current view with the wheel. This is what the user
 // asked for ("CLI 版鼠标滚轮可以查看当前对话前后的对话输出内容").
 func TestMouseWheelScrollsConversation(t *testing.T) {
-	tu := &TUI{width: 80, height: 40, scrollOffset: 0}
+	tu := &TUI{width: 80, height: 40, scrollOffset: 0, mouseOn: true}
 	for i := 0; i < 200; i++ {
 		tu.messages = append(tu.messages, Message{
 			Role:    RoleUser,

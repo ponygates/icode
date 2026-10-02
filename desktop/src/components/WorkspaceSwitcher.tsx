@@ -100,6 +100,10 @@ const WorkspaceSwitcher: React.FC<{ compact?: boolean }> = ({ compact }) => {
     <div ref={ref} style={{ position: 'relative' }}>
       <button
         className="interactive"
+        aria-haspopup="true"
+        aria-expanded={open}
+        aria-controls="ws-popover"
+        aria-label={t('workspace.switchAriaLabel', '切换工作文件夹')}
         title={active?.path || label}
         onClick={() => setOpen((v) => !v)}
         style={compact ? {
@@ -124,7 +128,11 @@ const WorkspaceSwitcher: React.FC<{ compact?: boolean }> = ({ compact }) => {
       </button>
 
       {open && (
-        <div style={{
+        <div
+          id="ws-popover"
+          role="menu"
+          aria-label={t('workspace.title')}
+          style={{
           position: 'absolute', top: 'calc(100% + 6px)', left: 0, zIndex: 80,
           width: 280, maxHeight: 320, overflowY: 'auto',
           background: 'var(--bg-elev)', border: '0.5px solid var(--border-color)',
@@ -147,7 +155,11 @@ const WorkspaceSwitcher: React.FC<{ compact?: boolean }> = ({ compact }) => {
             return (
               <div
                 key={ws.id}
+                role="menuitemradio"
+                aria-checked={isActive}
+                tabIndex={0}
                 onClick={() => { setActiveWorkspace(ws.id); setOpen(false); }}
+                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setActiveWorkspace(ws.id); setOpen(false); } }}
                 title={ws.path || undefined}
                 style={{
                   display: 'flex', alignItems: 'center', gap: 8,

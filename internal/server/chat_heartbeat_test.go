@@ -77,6 +77,11 @@ func TestChatStreamHeartbeat(t *testing.T) {
 	sseHeartbeatInterval = 40 * time.Millisecond
 	defer func() { sseHeartbeatInterval = orig }()
 
+	// Redirect TMP/TEMP: this test boots a real server, and
+	// Server.Start() would otherwise overwrite the production
+	// %TEMP%\icode\port discovery file.
+	redirectTemp(t)
+
 	store, err := db.New(db.Config{Path: fmt.Sprintf("file::memory:?cache=shared&_hb=%d", time.Now().UnixNano())})
 	if err != nil {
 		t.Fatalf("open store: %v", err)

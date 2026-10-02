@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os/exec"
 	"sync"
 	"sync/atomic"
@@ -291,10 +292,14 @@ func NewClient(ctx context.Context, rootURI, command string, args ...string) (*C
 	var initResp struct {
 		Capabilities ServerCapabilities `json:"capabilities"`
 	}
-	json.Unmarshal(initResult, &initResp)
+	if uerr := json.Unmarshal(initResult, &initResp); uerr != nil {
+		log.Printf("[iCode LSP] decode initialize capabilities failed: %v", uerr)
+	}
 
 	// Send initialized notification
-	_ = transport.SendNotification("initialized", map[string]any{})
+	if serr := transport.SendNotification("initialized", map[string]any{}); serr != nil {
+		log.Printf("[iCode LSP] 'initialized' notification failed: %v", serr)
+	}
 
 	return client, nil
 }

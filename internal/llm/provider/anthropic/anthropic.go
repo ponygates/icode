@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/ponygates/icode/internal/netsec"
 	"io"
 	"net/http"
 	"strings"
@@ -29,6 +30,8 @@ type Provider struct {
 	mu         sync.RWMutex
 	apiBase    string
 	apiKey     string
+	bearer     bool // the key field holds an OAuth subscription token, not an API key
+	refreshFn  types.TokenRefresher
 	httpClient *http.Client
 	models     []types.ModelInfo
 }
@@ -43,7 +46,8 @@ func New(apiKey, apiBase string) *Provider {
 		apiBase: apiBase,
 		apiKey:  apiKey,
 		httpClient: &http.Client{
-			Timeout: 120 * time.Second,
+			Timeout:   120 * time.Second,
+			Transport: netsec.GuardedTransport(false),
 		},
 		models: DefaultModels(),
 	}
@@ -164,6 +168,22 @@ func (p *Provider) SetCredentials(apiKey, apiBase string) {
 	}
 }
 
+// SetSubscription implements types.OAuthCredentialProvider: a subscription
+// token in the key field must travel as `Authorization: Bearer`, not in
+// x-api-key, or the Messages API rejects it.
+func (p *Provider) SetSubscription(on bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.bearer = on
+}
+
+// SetTokenRefresher implements types.OAuthCredentialProvider.
+func (p *Provider) SetTokenRefresher(fn types.TokenRefresher) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.refreshFn = fn
+}
+
 // SetTimeout updates the HTTP client timeout at runtime (used when the desktop
 // UI changes a provider's per-provider timeout). Values <= 0 reset to 120s.
 func (p *Provider) SetTimeout(sec int) {
@@ -236,13 +256,26 @@ func (p *Provider) Chat(ctx context.Context, req types.ChatRequest) (*types.Mess
 	base := p.apiBase
 	p.mu.RUnlock()
 	httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, base+"/messages", body)
-	p.setHeaders(httpReq)
+	sentKey, sentBearer := p.setHeaders(httpReq)
 
 	resp, err := p.httpClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("anthropic request: %w", err)
 	}
 	defer resp.Body.Close()
+
+	// An expired subscription token surfaces here as 401: renew once and
+	// replay. A second 401 falls through to the error path below — never a loop.
+	if resp.StatusCode == http.StatusUnauthorized {
+		if r2, err2, retried := p.retryAfter401(ctx, httpReq, sentKey, sentBearer); retried {
+			resp.Body.Close()
+			if err2 != nil {
+				return nil, fmt.Errorf("anthropic request after refresh: %w", err2)
+			}
+			resp = r2
+			defer resp.Body.Close()
+		}
+	}
 
 	if resp.StatusCode >= 400 {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
@@ -266,11 +299,23 @@ func (p *Provider) ChatStream(ctx context.Context, req types.ChatRequest) (<-cha
 	base := p.apiBase
 	p.mu.RUnlock()
 	httpReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, base+"/messages", body)
-	p.setHeaders(httpReq)
+	sentKey, sentBearer := p.setHeaders(httpReq)
 
 	resp, err := p.httpClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("anthropic stream: %w", err)
+	}
+
+	// Same one-shot renewal as Chat: a 401 from an expired subscription token
+	// is refreshed and replayed once; a second 401 is reported, not retried.
+	if resp.StatusCode == http.StatusUnauthorized {
+		if r2, err2, retried := p.retryAfter401(ctx, httpReq, sentKey, sentBearer); retried {
+			resp.Body.Close()
+			if err2 != nil {
+				return nil, fmt.Errorf("anthropic stream after refresh: %w", err2)
+			}
+			resp = r2
+		}
 	}
 
 	if resp.StatusCode >= 400 {
@@ -632,14 +677,75 @@ func anthropicContent(msg types.Message) any {
 	return msg.Content
 }
 
-func (p *Provider) setHeaders(req *http.Request) {
+// setHeaders applies auth for the credential kind currently held and returns
+// what it actually sent, so the 401 path can tell whether the failed request
+// raced against a credential change made by a concurrent one.
+func (p *Provider) setHeaders(req *http.Request) (string, bool) {
 	p.mu.RLock()
-	k := p.apiKey
+	k, bearer := p.apiKey, p.bearer
 	p.mu.RUnlock()
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", k)
+	if bearer {
+		// Subscription tokens only work as Bearer; a stale x-api-key (e.g.
+		// left on a retried request) must not ride along.
+		req.Header.Set("Authorization", "Bearer "+k)
+		req.Header.Del("x-api-key")
+	} else {
+		req.Header.Set("x-api-key", k)
+		req.Header.Del("Authorization")
+	}
 	req.Header.Set("anthropic-version", AnthropicVersion)
 	req.Header.Set("User-Agent", "iCode/0.1.0")
+	return k, bearer
+}
+
+// tryRefreshOn401 runs the one-shot renewal for a request that came back 401.
+// It returns true only when the credential actually changed, so an API-key
+// user (whose refresher hands back the same key) never sees a retry.
+// Concurrent requests converge here; the auth-side per-provider lock keeps the
+// vendor round-trip to one.
+func (p *Provider) tryRefreshOn401(ctx context.Context, sentKey string, sentBearer bool) bool {
+	p.mu.RLock()
+	fn := p.refreshFn
+	p.mu.RUnlock()
+	if fn == nil {
+		return false
+	}
+	tok, bearer, err := fn(ctx, sentKey)
+	if err != nil || tok == "" || (tok == sentKey && bearer == sentBearer) {
+		return false
+	}
+	p.mu.Lock()
+	p.apiKey = tok
+	p.bearer = bearer
+	p.mu.Unlock()
+	return true
+}
+
+// retryAfter401 refreshes the credential once and re-sends the request. The
+// third return is false when no retry was attempted, meaning the caller must
+// surface the original response's error.
+func (p *Provider) retryAfter401(ctx context.Context, req *http.Request, sentKey string, sentBearer bool) (*http.Response, error, bool) {
+	if req.GetBody == nil {
+		return nil, nil, false
+	}
+	if !p.tryRefreshOn401(ctx, sentKey, sentBearer) {
+		return nil, nil, false
+	}
+	nb, err := req.GetBody()
+	if err != nil {
+		return nil, nil, false
+	}
+	retryReq, err := http.NewRequestWithContext(ctx, req.Method, req.URL.String(), nb)
+	if err != nil {
+		return nil, nil, false
+	}
+	p.setHeaders(retryReq)
+	resp, err := p.httpClient.Do(retryReq)
+	if err != nil {
+		return nil, err, true
+	}
+	return resp, nil, true
 }
 
 // ============================================================================

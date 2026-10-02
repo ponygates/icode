@@ -18,6 +18,7 @@ package checkpoint
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -150,7 +151,10 @@ func (fs *FileSnapshot) SnapshotFile(ctx context.Context, filePath string) (stri
 		_ = out
 	}
 
-	hash, _ := fs.gitCmd(ctx, "rev-parse", "HEAD")
+	hash, herr := fs.gitCmd(ctx, "rev-parse", "HEAD")
+	if herr != nil {
+		log.Printf("[checkpoint] undo: resolve HEAD after commit failed: %v", herr)
+	}
 	return strings.TrimSpace(hash), nil
 }
 
@@ -240,7 +244,9 @@ func (fs *FileSnapshot) Undo(ctx context.Context, steps int) ([]string, error) {
 		if cerr != nil {
 			// File did not exist at the target snapshot — it was created in
 			// the meantime. Remove it so /undo fully reverts the tree.
-			_ = os.Remove(dstPath)
+			if rerr := os.Remove(dstPath); rerr != nil && !os.IsNotExist(rerr) {
+				log.Printf("[checkpoint] undo: remove %s after missing blob failed: %v", dstPath, rerr)
+			}
 			restored = append(restored, relPath)
 			continue
 		}
@@ -262,7 +268,9 @@ func (fs *FileSnapshot) Undo(ctx context.Context, steps int) ([]string, error) {
 	}
 
 	// Soft-reset the shadow git to forget the undone commits
-	_, _ = fs.gitCmd(ctx, "reset", "--soft", target)
+	if _, rerr := fs.gitCmd(ctx, "reset", "--soft", target); rerr != nil {
+		log.Printf("[checkpoint] undo: shadow git reset --soft to %s failed: %v", target, rerr)
+	}
 
 	return restored, nil
 }
@@ -321,7 +329,10 @@ func (fs *FileSnapshot) SnapshotProject(ctx context.Context) (string, error) {
 		fmt.Sprintf("snapshot project before bash @ %s", time.Now().Format("2006-01-02 15:04:05"))); err != nil {
 		return "", fmt.Errorf("undo: commit: %w", err)
 	}
-	hash, _ := fs.gitCmd(ctx, "rev-parse", "HEAD")
+	hash, herr := fs.gitCmd(ctx, "rev-parse", "HEAD")
+	if herr != nil {
+		log.Printf("[checkpoint] undo: resolve HEAD after commit failed: %v", herr)
+	}
 	return strings.TrimSpace(hash), nil
 }
 
@@ -426,7 +437,9 @@ func BeforeTool(ctx context.Context, toolName, filePath string) {
 	if !mutatingTools[toolName] {
 		return
 	}
-	_, _ = DefaultUndo.SnapshotFile(ctx, filePath)
+	if _, serr := DefaultUndo.SnapshotFile(ctx, filePath); serr != nil {
+		log.Printf("[checkpoint] snapshot before %s of %s failed: %v", toolName, filePath, serr)
+	}
 }
 
 // BeforeBash snapshots the whole project before a shell command runs, so
@@ -436,5 +449,7 @@ func BeforeBash(ctx context.Context) {
 	if DefaultUndo == nil {
 		return
 	}
-	_, _ = DefaultUndo.SnapshotProject(ctx)
+	if _, serr := DefaultUndo.SnapshotProject(ctx); serr != nil {
+		log.Printf("[checkpoint] snapshot before bash failed: %v", serr)
+	}
 }

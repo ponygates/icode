@@ -4,6 +4,7 @@ package checkpoint
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,7 +63,10 @@ func (s *Store) Snapshot(ctx context.Context, msg string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("checkpoint commit: %w\n%s", err, out)
 	}
-	hash, _ := s.gitCmd(ctx, "rev-parse", "HEAD")
+	hash, herr := s.gitCmd(ctx, "rev-parse", "HEAD")
+	if herr != nil {
+		log.Printf("[checkpoint] resolve HEAD after commit failed: %v", herr)
+	}
 	return strings.TrimSpace(hash), nil
 }
 

@@ -9,11 +9,11 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// Single-instance guard for the windowed modes (desktop + simple UI). Two
-// windowed instances racing to create WebView2 runtimes on the SAME user-data
-// dir is a fast path to the dir-lock hang that froze startup; a named mutex
-// makes the second instance exit cleanly with a message instead of fighting
-// over the lock.
+// Single-instance guard for the windowed desktop mode. Two windowed
+// instances racing to create WebView2 runtimes on the SAME user-data dir is a
+// fast path to the dir-lock hang that froze startup; a named mutex makes the
+// second instance exit cleanly with a message instead of fighting over the
+// lock.
 var (
 	siKernel32      = windows.NewLazySystemDLL("kernel32.dll")
 	siCreateMutex   = siKernel32.NewProc("CreateMutexW")

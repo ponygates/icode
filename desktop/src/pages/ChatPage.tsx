@@ -10,6 +10,7 @@ import TokenBar from '../components/TokenBar';
 import TabBar from '../components/TabBar';
 import SplitPane from '../components/SplitPane';
 import CheckpointPanel from '../components/CheckpointPanel';
+import ChangedFilesBar, { toolTargetFile } from '../components/ChangedFilesBar';
 import LspPanel from '../components/LspPanel';
 import GitPanel from '../components/GitPanel';
 import KnowledgePanel from '../components/KnowledgePanel';
@@ -21,302 +22,19 @@ import ModelPicker from '../components/ModelPicker';
 import PlumBlossom from '../components/PlumBlossom';
 import WorkspaceSwitcher from '../components/WorkspaceSwitcher';
 import { executeSlash, filterSlash, type SlashCommand } from '../lib/slashCommands';
-import { apiAppendMessage, apiUpdateMessage, apiClearSession } from '../lib/sessionMessages';
+import { apiAppendMessage, apiUpdateMessage, apiClearSession, sliceThrough } from '../lib/sessionMessages';
+import { useDialogA11y } from '../hooks/useDialogA11y';
+import {
+  computeWindow, isNearBottom, distanceToBottom, computeAnchorScrollTop, shouldApplyAnchor,
+  ROW_ESTIMATE, ROW_OVERSCAN, type MessageWindow, type Anchor,
+} from '../lib/messageWindow';
+import { applyStreamEvent, initialStreamState, type StreamState } from '../lib/streamReducer';
+import { planApproval, popHead, dropSession, type Decision, type ApprovalEffect, type PermEntry } from '../lib/approval';
 
-// A permission prompt surfaced from the engine's tool gate while a session is
-// blocked waiting on the user's decision.
-interface PermissionRequest {
-  request_id: string;
-  tool: string;
-  prompt?: string;
-  sid?: string;
-  // Graded-auth escalation progress (Claude Code parity) surfaced by the
-  // engine: consecutive ask/deny count and the threshold that forces manual.
-  strikes?: number;
-  threshold?: number;
-}
-
-// Token usage as reported by the backend (snake_case) or a provider (PascalCase).
-interface UsageInfo {
-  prompt_tokens?: number;
-  completion_tokens?: number;
-  cache_hit_tokens?: number;
-  PromptTokens?: number;
-  CompletionTokens?: number;
-  TotalTokens?: number;
-  total_tokens?: number;
-}
-
-interface CostParts { input: number; output: number; }
-
-interface PlanInfo {
-  type?: string;
-  name?: string;
-  cost?: CostParts;
-}
-
-// A single server-sent event from /api/chat's SSE stream.
-type ChatEvent =
-  | { type: 'text'; content: string }
-  | { type: 'thinking'; content: string }
-  | { type: 'system'; content: string }
-  | { type: 'tool_use'; tool_call?: { name: string; arguments?: string }; ToolCall?: { Name: string; Arguments?: string } }
-  | { type: 'tool_progress'; content: string }
-  | { type: 'permission'; permission?: PermissionRequest; Permission?: PermissionRequest }
-  | { type: 'plan_proposal' }
-  | { type: 'done'; meta?: { usage?: UsageInfo } }
-  | { type: 'error'; content: string };
-
-// Request body for POST /api/chat (and the slash-command re-entry path).
-interface ChatPayload {
-  session_id: string;
-  content: string;
-  model: string;
-  provider: string;
-  attachments?: Array<{ type: string; mime: string; data: string }>;
-}
-
-// Fields worth surfacing in a tool-call chip — keeps the bubble informative
-// without dumping the full (often huge) JSON argument payload into the stream.
-const TOOL_ARG_FIELDS = ['path', 'command', 'pattern', 'query', 'file', 'directory', 'url', 'name', 'content'];
-
-function summarizeToolArgs(raw?: string): string {
-  if (!raw) return '';
-  try {
-    const obj = typeof raw === 'string' ? JSON.parse(raw) : raw;
-    const parts: string[] = [];
-    for (const k of TOOL_ARG_FIELDS) {
-      const v = obj?.[k];
-      if (v == null) continue;
-      const s = String(v).replace(/\s+/g, ' ').trim();
-      parts.push(`${k}=${s.length > 60 ? s.slice(0, 57) + '…' : s}`);
-    }
-    return parts.length ? ' ' + parts.join(' ') : '';
-  } catch {
-    return '';
-  }
-}
-
-// Renders inline multimodal attachments (image thumbnails / file chips) inside a chat bubble.
-function AttachmentView({ items, onZoom }: { items: Attachment[]; onZoom: (src: string) => void }) {  return (
-    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
-      {items.map((a, i) => {
-        const isImage = a.type === 'image' || (a.mime || '').startsWith('image/');
-        const src = a.data ? `data:${a.mime || 'image/png'};base64,${a.data}` : a.url;
-        if (!src) return null;
-        if (isImage) {
-          return (
-            <img
-              key={i}
-              src={src}
-              alt={a.alt_text || 'image'}
-              onClick={() => onZoom(src)}
-              style={{
-                maxWidth: 240, maxHeight: 240, borderRadius: 8, cursor: 'pointer',
-                border: '1px solid var(--border)', objectFit: 'cover',
-              }}
-            />
-          );
-        }
-        return (
-          <a
-            key={i}
-            href={src}
-            download={a.alt_text || 'file'}
-            style={{
-              display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 10px',
-              borderRadius: 8, border: '1px solid var(--border)', color: 'var(--text-primary)',
-              textDecoration: 'none', fontSize: 12,
-            }}
-          >
-            📎 {a.alt_text || a.mime || 'file'}
-          </a>
-        );
-      })}
-    </div>
-  );
-}
-
-// Memoized message list. Isolates message rendering from ChatPage's local
-// state (typing) and from unrelated store updates (backend health pings,
-// token usage, …) so the list only re-renders when messages actually change.
-
-// msgTime renders a message timestamp as a compact HH:MM (e.g. "14:05").
-function msgTime(ts?: number): string {
-  if (!ts) return '';
-  try {
-    return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  } catch {
-    return '';
-  }
-}
-const MessageList = React.memo(({ messages, isStreaming, onRegenerate, onEditResend, onZoom }: {
-  messages: Message[];
-  isStreaming: boolean;
-  onRegenerate: (id: string) => void;
-  onEditResend: (id: string) => void;
-  onZoom: (src: string) => void;
-}) => {
-  const { t } = useTranslation();
-  // Model display name for the per-message label row (Claude Code-style
-  // "Claude Sonnet" header). Selector returns a stable string so the memo
-  // stays effective.
-  const modelName = useAppStore((s) => {
-    const m = s.models.find((x) => x.id === s.selectedModel);
-    return m?.name || '';
-  });
-  return (
-    <>
-{messages.map((msg, idx) => {
-        // Only the final assistant message is "streaming" — passing this down
-        // lets Markdown skip expensive highlightAuto on every token frame and
-        // do it once on the final render instead.
-        const isLast = idx === messages.length - 1;
-        const msgStreaming = isStreaming && isLast && msg.role === 'assistant';
-        // System messages (engine notices) render as a centered, muted banner —
-        // not a side-aligned bubble like a user/assistant turn.
-        if (msg.role === 'system') {
-          return (
-            <div key={msg.id} className="msg-system" style={{
-              display: 'flex', justifyContent: 'center', padding: '6px 24px',
-            }}>
-              <div style={{
-                maxWidth: '85%', textAlign: 'center',
-                fontSize: 12, lineHeight: 1.6, wordBreak: 'break-word',
-                color: 'var(--text-muted)',
-                background: 'var(--bg-tertiary)',
-                border: '0.5px dashed var(--border-color)',
-                borderRadius: 'var(--r-full)',
-                padding: '5px 14px',
-                animation: 'fadeIn var(--t-slow) ease-out',
-              }}>{msg.content}</div>
-            </div>
-          );
-        }
-        return (
-        <div
-          key={msg.id}
-          style={{
-            display: 'flex', gap: 10, padding: '6px 24px',
-            justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
-            alignItems: 'flex-start',
-            animation: 'fadeIn var(--t-slow) ease-out',
-            // content-visibility: auto lets the browser skip rendering work
-            // for messages outside the viewport — the cheapest form of list
-            // virtualisation, with zero scroll/height regressions (unlike a
-            // full virtualiser with dynamic heights). contain-intrinsic-size
-            // gives the browser a height hint so the scrollbar stays stable
-            // before a row scrolls into view and is measured.
-            contentVisibility: 'auto',
-            containIntrinsicSize: 'auto 140px',
-          }}
-        >
-          {msg.role === 'assistant' && (
-            <div className="grad-avatar" style={{
-              width: 30, height: 30, borderRadius: '50%',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: 13, fontWeight: 600, flexShrink: 0,
-              boxShadow: '0 2px 8px rgba(88,166,255,0.25)',
-            }}>i</div>
-          )}
-          <div className={msg.role === 'assistant' ? 'msg-bubble' : 'msg-bubble msg-user'} style={{
-            maxWidth: '75%', padding: '12px 16px',
-            color: 'var(--text-primary)', fontSize: 13,
-            lineHeight: 1.7, wordBreak: 'break-word',
-            position: 'relative',
-          }}>
-            {msg.role === 'assistant' ? (
-              msg.content ? (
-                msg.content.startsWith('[Thinking]') ? (
-                  <details style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
-                    <summary style={{ cursor: 'pointer', color: 'var(--accent)', fontWeight: 500 }}>
-                      🧠 {t('chat.thinking')}
-                    </summary>
-                    <pre style={{ whiteSpace: 'pre-wrap', margin: '4px 0 0', color: 'var(--text-muted)' }}>
-                      {msg.content.slice(msg.content.indexOf('\n') + 1)}
-                    </pre>
-                  </details>
-                ) : msg.content.startsWith('[Tool:') ? (
-                  (() => {
-                    const tm = msg.content.match(/^\[Tool: ([^\]]+)\]/);
-                    const name = tm?.[1] || t('chat.toolCall');
-                    const afterHeader = msg.content.slice(tm?.[0].length || 0);
-                    const nl = afterHeader.indexOf('\n');
-                    const detail = (nl < 0 ? afterHeader : afterHeader.slice(0, nl)).trim();
-                    const output = nl < 0 ? '' : afterHeader.slice(nl + 1);
-                    return (
-                      <div style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
-                        <div style={{ color: 'var(--accent)', fontWeight: 500, marginBottom: 2 }}>
-                          ⏺ {name}
-                        </div>
-                        {detail && (
-                          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 2, wordBreak: 'break-all' }}>
-                            {detail}
-                          </div>
-                        )}
-                        {output && (
-                          <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{output}</pre>
-                        )}
-                      </div>
-                    );
-                  })()
-                ) : (
-                  <>
-                    {/* Per-message model label (Claude Code-style header) */}
-                    <div style={{
-                      display: 'flex', alignItems: 'center', gap: 6,
-                      fontSize: 10, color: 'var(--text-muted)', fontWeight: 500,
-                      marginBottom: 6, letterSpacing: '0.01em',
-                    }}>
-                      <span style={{ color: 'var(--accent)' }}>{modelName || 'iCode'}</span>
-                      <span style={{ opacity: 0.6 }}>·</span>
-                      <span style={{ fontWeight: 400, opacity: 0.8 }}>{msgTime(msg.timestamp)}</span>
-                    </div>
-                    <Markdown text={msg.content} streaming={msgStreaming} />
-                    {/* Action buttons — hidden until bubble hover */}
-                    <div className="action-hidden" style={{ display: 'flex', gap: 6, marginTop: 8 }}>
-                      <ActionBtn icon="📋" label={t('chat.copy')} title={t('chat.copyTitle')}
-                        onClick={() => navigator.clipboard.writeText(msg.content)} />
-                      <ActionBtn icon="🔄" label={t('chat.regenerate')} title={t('chat.regenerateTitle')}
-                        onClick={() => onRegenerate(msg.id)} />
-                    </div>
-                  </>
-                )
-              ) : (isStreaming ? (
-                <span style={{ color: 'var(--text-muted)', display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                  {t('chat.generatingShort')}
-                  <span className="typing-dots"><span /><span /><span /></span>
-                </span>
-              ) : '')
-            ) : (
-              <span style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</span>
-            )}
-            {msg.role === 'user' && (
-              <div className="action-hidden" style={{ display: 'flex', gap: 6, marginTop: 8 }}>
-                <ActionBtn icon="📋" label={t('chat.copy')} title={t('chat.copyTitle')}
-                  onClick={() => navigator.clipboard.writeText(msg.content)} />
-                <ActionBtn icon="✏️" label={t('chat.editResend')} title={t('chat.editResendTitle')}
-                  onClick={() => onEditResend(msg.id)} />
-              </div>
-            )}
-            {msg.attachments && msg.attachments.length > 0 && (
-              <AttachmentView items={msg.attachments} onZoom={onZoom} />
-            )}
-          </div>
-          {msg.role === 'user' && (
-            <div className="grad-avatar" style={{
-              width: 30, height: 30, borderRadius: '50%',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: 13, fontWeight: 600, flexShrink: 0,
-              boxShadow: '0 2px 8px rgba(210,153,29,0.3)',
-            }}>U</div>
-          )}
-        </div>
-        );
-      })}
-    </>
-  );
-});
+import {
+  type PermissionRequest, type UsageInfo, type PlanInfo, type ChatEvent, type ChatPayload,
+  summarizeToolArgs, MessageList, Pill, Stat,
+} from './ChatPage.shared';
 
 interface ChatPageProps {
   // When set, this instance renders as an embedded single-session pane (the
@@ -369,6 +87,17 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
   // Whether the user is scrolled near the bottom of the message list — used to
   // show/hide the floating "back to latest" affordance.
   const [atBottom, setAtBottom] = useState(true);
+  // ── message-list virtualisation ──
+  // A measured item-height cache drives a pure window (see lib/messageWindow).
+  // Only the rows intersecting the viewport (+overscan) are mounted, so DOM
+  // node count stays bounded regardless of session length; spacers preserve the
+  // scrollbar height and the first-visible-row anchor when rows resize.
+  const heightsRef = useRef<number[]>([]);
+  const [win, setWin] = useState<MessageWindow | null>(null);
+  const [viewportH, setViewportH] = useState(0);
+  const anchorRef = useRef<Anchor | null>(null);
+  const measuringRef = useRef(false); // suppress feedback while we compensate
+  // ── voice input refs below ──
   // Voice input: mediaRecorderRef holds the active recorder while recording;
   // chunksRef accumulates audio. A stored toggle lets the handler stay stable
   // across renders (the button click uses the latest via ref).
@@ -483,6 +212,23 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
     // Let the store update flush, then send (same pattern as the toolbar buttons).
     setTimeout(() => handleSendRef.current?.(), 60);
   }, [activeSession, activeSessionId, setInput]);
+
+  // Branch the conversation into a new session holding only the prefix up to
+  // (and including) one message — the desktop half of `/fork <session>@<n>`.
+  // Without `throughId` it forks the whole session, as the toolbar button does.
+  const handleFork = useCallback((throughId?: string) => {
+    const src = activeSession;
+    if (!src) return;
+    const keep = sliceThrough(src.messages, throughId);
+    if (!keep || keep.length === 0) return;
+    const newId = createSession(src.modelId || selectedModel, src.provider || 'openrouter');
+    keep.forEach((m) => {
+      const copy: Message = { ...m, id: Math.random().toString(36).slice(2) };
+      addMessage(newId, copy);
+      if (backendUrl) apiAppendMessage(backendUrl, newId, copy).catch(() => {});
+    });
+    renameSession(newId, t('chat.forkTitlePrefix') + src.title + ' · ' + keep.length);
+  }, [activeSession, createSession, addMessage, renameSession, backendUrl, selectedModel, t]);
 
   // Edit-and-resend: put a user message back into the input box and drop the
   // conversation after it, so the user can edit and send again. Unlike
@@ -722,6 +468,80 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
     }
   }, [activeSession?.messages]);
 
+  // ── message-list windowing (Task 1) ──
+  // Recompute the mounted row slice from the measured height cache. Reads the
+  // live DOM so the anchor row keeps a stable on-screen position.
+  const recomputeWindow = useCallback(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const count = activeSession?.messages.length ?? 0;
+    const w = computeWindow(heightsRef.current, {
+      count, scrollTop: el.scrollTop, viewport: el.clientHeight,
+      estimate: ROW_ESTIMATE, overscan: ROW_OVERSCAN,
+    });
+    const anchorEl = el.querySelector<HTMLElement>(`[data-mi="${w.first}"]`);
+    anchorRef.current = { index: w.first, offsetTop: anchorEl ? anchorEl.offsetTop : w.padTop };
+    setWin(prev =>
+      prev && prev.first === w.first && prev.last === w.last &&
+      prev.padTop === w.padTop && prev.padBottom === w.padBottom ? prev : w);
+  }, [activeSession?.messages]);
+
+  // Reset the per-session height cache when switching tabs (indices differ).
+  useEffect(() => { heightsRef.current = []; anchorRef.current = null; setWin(null); }, [activeSessionId]);
+
+  // Track viewport height so the window can recompute after layout changes.
+  useEffect(() => {
+    const el = scrollContainerRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => setViewportH(el.clientHeight));
+    ro.observe(el);
+    setViewportH(el.clientHeight);
+    return () => ro.disconnect();
+  }, [activeSessionId]);
+
+  // Measure every rendered row into the height cache; when a row ABOVE the
+  // viewport resizes (a code block collapses/expands) pin the first-visible row
+  // back to its old on-screen offset so the text under the cursor never jumps.
+  useEffect(() => {
+    const el = scrollContainerRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver((entries) => {
+      let changedAbove = false;
+      for (const en of entries) {
+        const t = en.target as HTMLElement;
+        const idx = Number(t.dataset.mi);
+        if (Number.isNaN(idx)) continue;
+        const h = Math.round(t.offsetHeight);
+        const prev = heightsRef.current[idx];
+        if (prev !== h) {
+          heightsRef.current[idx] = h;
+          const a = anchorRef.current;
+          if (a != null && idx < a.index && prev != null) changedAbove = true;
+        }
+      }
+      // Stuck-to-bottom: the growing last row should follow, not anchor-shift.
+      if (!stickToBottomRef.current && changedAbove && anchorRef.current) {
+        const a = anchorRef.current;
+        const anchorEl = el.querySelector<HTMLElement>(`[data-mi="${a.index}"]`);
+        if (anchorEl && shouldApplyAnchor(a, el.clientHeight)) {
+          const cur = el.scrollTop;
+          const target = computeAnchorScrollTop(cur, a, anchorEl.offsetTop);
+          if (Math.abs(target - cur) > 1) {
+            measuringRef.current = true;
+            el.scrollTop = target;
+            a.offsetTop = anchorEl.offsetTop; // re-pin after the correction
+            measuringRef.current = false;
+          }
+        }
+      }
+      recomputeWindow();
+    });
+    el.querySelectorAll<HTMLElement>('[data-mi]').forEach((r) => ro.observe(r));
+    return () => ro.disconnect();
+  }, [win, recomputeWindow, activeSessionId]);
+
+  useEffect(() => { recomputeWindow(); }, [recomputeWindow, viewportH, activeSession?.messages]);
+
   // Keep the runtime card ticking while a session is open (1 Hz, resets the
   // baseline whenever the active session switches).
   useEffect(() => {
@@ -852,7 +672,7 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
             content: `📝 ${t('chat.copied')}: ${memoryText}`,
             timestamp: Date.now(),
           });
-          // Persist so the CLI/simpleui see the same memory entry.
+          // Persist so the CLI see the same memory entry.
           if (activeSessionId) {
             apiAppendMessage(backendUrl, activeSessionId, {
               id: msgId, role: 'system', content: `📝 ${t('chat.copied')}: ${memoryText}`,
@@ -913,24 +733,23 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
 
     const model = currentModel?.id || selectedModel || 'openrouter/free';
     const provider = currentModel?.provider || 'openrouter';
-    let accumulated = '';
     let settled = false;
     let rafId: number | null = null;
-    // Tracks whether the most recent tool emitted live output via
-    // tool_progress, so the engine's `[Tool: name]` summary wrapper doesn't
-    // duplicate the full transcript.
-    let toolHadProgress = false;
-    // Thinking deltas arrive first and are folded into a collapsible box; they
-    // are shown but never persisted at full length or sent back to the model
-    // (iCode keeps them out of the paid context — a token saver, not a leak).
-    let thinkingBuf = '';
+    // Files touched by file-modifying tools in this turn — collected from
+    // tool_use payloads, tagged onto the settled message so the inline
+    // review bar can offer diff + one-step rewind.
+    const turnFiles = new Set<string>();
+    // Transcript accumulation state (text, buffered thinking, tool-progress
+    // de-dup, settle flag) lives in the pure reducer so those rules are unit
+    // tested; the caller keeps only the imperative side effects.
+    let streamState = initialStreamState();
 
     // Coalesce token updates into at most one store write per animation frame.
     // This prevents the whole message list + sidebar from re-rendering on every
     // single streamed token (the main source of the "laggy" feel).
     const flushNow = () => {
       if (rafId != null) { cancelAnimationFrame(rafId); rafId = null; }
-      updateMessage(sid, { ...assistantMsg, content: accumulated });
+      updateMessage(sid, { ...assistantMsg, content: streamState.accumulated });
     };
     const scheduleFlush = () => {
       if (rafId == null) {
@@ -939,110 +758,94 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
     };
 
     const onEvent = (event: ChatEvent) => {
-      if (settled) return;
+      if (streamState.settled) return;
       const ty = event?.type;
-      if (ty === 'thinking') {
-        thinkingBuf += event.content || '';
-        if (thinkingBuf.length > 3000) thinkingBuf = thinkingBuf.slice(0, 3000);
-        return;
-      }
-      if (ty === 'system') {
-        // Engine notice (e.g. budget guard) — standalone system message,
-        // never folded into the assistant reply.
-        addMessage(sid, {
-          id: (Date.now() + 1).toString(36) + 's',
-          role: 'system', content: event.content || '', timestamp: Date.now(),
-        });
-        return;
-      }
-      if (ty === 'plan_proposal') {
-        // Plan-mode turn finished — arm the confirmation bar so the user can
-        // accept the plan (switch to auto and start executing) or discard it.
-        // Tagged with the owning session: the bar only renders in that tab.
-        setPlanPending({ sid });
-        return;
-      }
-      if (ty === 'text') {
-        if (thinkingBuf) {
-          accumulated += '\n[Thinking]\n' + thinkingBuf + '\n';
-          thinkingBuf = '';
-        }
-        // The engine emits a `[Tool: <name>] <summary>` text wrapper after a
-        // tool finishes. Its body is only the first 200 chars — if we already
-        // streamed the full live output via tool_progress, appending the
-        // summary too duplicates it in the transcript. Strip the wrapper and
-        // keep just the (already-seen or compact) summary.
-        const toolWrap = accumulated.endsWith('\n') ? '' : '\n';
-        const contentStr = event.content || '';
-        const tm = contentStr.match(/^\[Tool: ([^\]]+)\](?:\n|$)/);
-        if (tm) {
-          if (!toolHadProgress) {
-            accumulated += toolWrap + contentStr.slice(tm[0].length);
-          }
-        } else {
-          accumulated += contentStr;
-        }
-        // S5 live tick: usage only arrives on 'done', so estimate from
-        // streamed chars (~4 chars/token) and write to the store at most
-        // once per second — keeps the input-bar counters moving while
-        // generating without a store write per chunk. Background sessions
-        // don't touch the visible counters.
-        const now = Date.now();
-        if (now - lastUsageTickRef.current >= 1000 && useAppStore.getState().activeSessionId === sid) {
-          lastUsageTickRef.current = now;
-          const estOut = Math.round(accumulated.length / 4);
-          const live = useAppStore.getState().tokenUsage;
-          updateTokenUsage({
-            output: Math.max(live.output, estOut),
-            cost: estimateCost(
-              { PromptTokens: live.input, CompletionTokens: estOut } as UsageInfo,
-              currentModel,
-            ),
-          });
-        }
-        scheduleFlush();
-      } else if (ty === 'tool_use') {
+
+      // Normalise raw SSE events into the reducer's vocabulary. tool_use is
+      // summarised here (needs the component's arg/target helpers) and the
+      // permission request is queued as an imperative side effect.
+      let red: ReturnType<typeof applyStreamEvent>;
+      if (ty === 'tool_use') {
         const name = event.tool_call?.name || event.ToolCall?.Name || 'tool';
         const argsRaw = event.tool_call?.arguments || event.ToolCall?.Arguments;
-        toolHadProgress = false;
-        accumulated += `\n[Tool: ${name}]${summarizeToolArgs(argsRaw)}\n`;
-        scheduleFlush();
-      } else if (ty === 'tool_progress') {
-        // Live bash output — append to the accumulated assistant text. The
-        // rAF-coalesced flush keeps chatty processes from re-rendering per line.
-        toolHadProgress = true;
-        accumulated += event.content || '';
-        scheduleFlush();
+        const target = toolTargetFile(name, argsRaw);
+        if (target) turnFiles.add(target);
+        red = applyStreamEvent(streamState, { type: 'tool_use', name, argSummary: summarizeToolArgs(argsRaw) });
       } else if (ty === 'permission') {
         const req = event.permission || event.Permission;
-        // Queue per session — a background tab's permission request waits
-        // behind (or ahead of) the visible one instead of overwriting it.
+        // Queue per session — a background tab's request waits behind (or
+        // ahead of) the visible one instead of overwriting it.
         if (req?.request_id) setPermQueue(q => [...q, { req, sid }]);
-      } else if (ty === 'done') {
-        settled = true;
-        if (thinkingBuf) {
-          accumulated += '\n[Thinking]\n' + thinkingBuf + '\n';
-          thinkingBuf = '';
-        }
-        flushNow();
-        setStreaming(sid, false);
-        setPermQueue(q => q.filter(p => p.sid !== sid));
-        setPlanPending(p => (p?.sid === sid ? null : p));
-        const u = event.meta?.usage;
-        if (useAppStore.getState().activeSessionId === sid) {
-          updateTokenUsage({
-            input: u?.prompt_tokens || u?.PromptTokens || 0,
-            output: u?.completion_tokens || u?.CompletionTokens || 0,
-            cacheHit: u?.cache_hit_tokens || 0,
-            cost: estimateCost(u, currentModel),
+        red = applyStreamEvent(streamState, { type: 'permission' });
+      } else {
+        red = applyStreamEvent(streamState, event as never);
+      }
+      streamState = red.state;
+      const accumulated = streamState.accumulated;
+
+      for (const eff of red.effects) {
+        if (eff.type === 'system-message') {
+          // Engine notice (e.g. budget guard) — standalone system message,
+          // never folded into the assistant reply.
+          addMessage(sid, {
+            id: (Date.now() + 1).toString(36) + 's',
+            role: 'system', content: eff.content, timestamp: Date.now(),
           });
+        } else if (eff.type === 'plan-proposal') {
+          // Plan-mode turn finished — arm the confirmation bar (per-session).
+          setPlanPending({ sid });
         }
-      } else if (ty === 'error') {
+      }
+
+      if (red.flush) {
+        // S5 live tick: usage only arrives on 'done', so estimate from
+        // streamed chars (~4 chars/token) and write to the store at most once
+        // per second. Background sessions don't touch the visible counters.
+        if (ty === 'text') {
+          const now = Date.now();
+          if (now - lastUsageTickRef.current >= 1000 && useAppStore.getState().activeSessionId === sid) {
+            lastUsageTickRef.current = now;
+            const estOut = Math.round(accumulated.length / 4);
+            const live = useAppStore.getState().tokenUsage;
+            updateTokenUsage({
+              output: Math.max(live.output, estOut),
+              cost: estimateCost(
+                { PromptTokens: live.input, CompletionTokens: estOut } as UsageInfo,
+                currentModel,
+              ),
+            });
+          }
+        }
+        scheduleFlush();
+      }
+
+      if (streamState.settled) {
         settled = true;
-        accumulated += '\n❌ ' + (event.content || t('chat.unknownError'));
-        flushNow();
+        // Tag the settled turn with its changed-file list (review bar data)
+        // in the same store write as the final content flush.
+        if (ty === 'done' && turnFiles.size > 0) {
+          updateMessage(sid, {
+            ...assistantMsg,
+            content: accumulated,
+            changedFiles: Array.from(turnFiles),
+          });
+        } else {
+          flushNow();
+        }
         setStreaming(sid, false);
-        setPermQueue(q => q.filter(p => p.sid !== sid));
+        setPermQueue(q => dropSession(q, sid));
+        setPlanPending(p => (p?.sid === sid ? null : p));
+        if (ty === 'done') {
+          const u = (event as { meta?: { usage?: UsageInfo } }).meta?.usage;
+          if (useAppStore.getState().activeSessionId === sid) {
+            updateTokenUsage({
+              input: u?.prompt_tokens || u?.PromptTokens || 0,
+              output: u?.completion_tokens || u?.CompletionTokens || 0,
+              cacheHit: u?.cache_hit_tokens || 0,
+              cost: estimateCost(u, currentModel),
+            });
+          }
+        }
       }
     };
 
@@ -1192,21 +995,51 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
     handleSend('计划已确认。请按上述计划立即开始执行，不要再重复或重新规划，直接动手。');
   }, [handleSend]);
 
-  const respondPermission = useCallback(async (requestId: string, decision: string) => {
-    // Pop this request off the queue; the next queued one (if any) renders.
-    setPermQueue(q => q.slice(1));
+  // Execute one backend step produced by the approval planner (lib/approval).
+  const runApprovalStep = useCallback(async (step: ApprovalEffect) => {
     try {
-      if (window.icode?.respondPermission) {
-        await window.icode.respondPermission(requestId, decision);
+      if (step.kind === 'allow-tool') {
+        if (backendUrl) {
+          await fetch(`${backendUrl}/api/permission/allow-tool`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_id: step.sessionId, tool: step.tool }),
+          });
+        }
+      } else if (window.icode?.respondPermission) {
+        await window.icode.respondPermission(step.requestId, step.decision);
       } else if (backendUrl) {
         await fetch(`${backendUrl}/api/permission/respond`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ request_id: requestId, decision }),
+          body: JSON.stringify({ request_id: step.requestId, decision: step.decision }),
         });
       }
     } catch { /* backend unreachable */ }
   }, [backendUrl]);
+
+  // Answer the head of the permission queue. `alwaysForSession` records the
+  // tool as allowed for the rest of the session *before* letting it through
+  // (planApproval orders the steps), so a fast follow-up call is already covered.
+  const submitApproval = useCallback(async (
+    entry: { req: PermissionRequest; sid: string },
+    decision: Decision,
+    alwaysForSession = false,
+  ) => {
+    // Pop this request off the queue; the next queued one (if any) renders.
+    setPermQueue(q => popHead(q).rest);
+    const perm: PermEntry = { request_id: entry.req.request_id, tool: entry.req.tool, sid: entry.sid };
+    for (const step of planApproval(perm, decision, { alwaysForSession })) {
+      await runApprovalStep(step);
+    }
+  }, [runApprovalStep]);
+
+  // Escape / focus trap for the two modal surfaces. Denying on Escape keeps the
+  // engine moving (the safest default when a keyboard user dismisses the prompt).
+  const permDialogRef = useDialogA11y(!!pendingPermission, () => {
+    if (pendingPermission) submitApproval(pendingPermission, 'deny');
+  });
+  const lightboxRef = useDialogA11y(!!lightbox, () => setLightbox(null));
 
   // stopSessionStream aborts one session's in-flight stream (no-op if it
   // isn't streaming) and tells the backend to stop generating server-side.
@@ -1331,15 +1164,21 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
   // ── layout regions (extracted for reuse between full page and embedded pane) ──
   const messagesCol = (
     <>
-        {/* Messages */}
+        {/* Messages — role="log" announces streamed turns to screen readers as
+            they are appended, without re-reading the whole transcript. */}
         <div
           ref={scrollContainerRef}
+          role="log"
+          aria-live="polite"
+          aria-relevant="additions"
+          aria-label={t('chat.messagesAriaLabel', '对话消息')}
           onScroll={() => {
             const el = scrollContainerRef.current;
             if (!el) return;
-            const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
-            stickToBottomRef.current = distance <= 80;
-            setAtBottom(distance <= 80);
+            const near = isNearBottom(distanceToBottom(el.scrollHeight, el.scrollTop, el.clientHeight));
+            stickToBottomRef.current = near;
+            setAtBottom(near);
+            recomputeWindow();
           }}
           style={{
             flex: 1, overflowY: 'auto', padding: '24px 24px',
@@ -1445,17 +1284,21 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
           <MessageList
             messages={activeSession?.messages || []}
             isStreaming={isStreaming}
+            sessionId={activeSessionId ?? ''}
             onRegenerate={handleRegenerate}
             onEditResend={handleEditResend}
+            onFork={handleFork}
             onZoom={setLightbox}
+            win={win}
           />
           <div ref={messagesEndRef} />
           {!atBottom && (
             <button
               className="scroll-down-btn"
+              aria-label={t('chat.scrollToLatest')}
               onClick={() => { stickToBottomRef.current = true; setAtBottom(true); messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }}
             >
-              <ChevronDown size={13} /> {t('chat.scrollToLatest')}
+              <ChevronDown size={13} aria-hidden /> {t('chat.scrollToLatest')}
             </button>
           )}
         </div>
@@ -1464,9 +1307,14 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
 
   const lightboxEl = (
     <>
-        {/* Lightbox — zoomed image attachment */}
+        {/* Lightbox — zoomed image attachment (a modal: role=dialog, Esc closes,
+            focus trapped via the shared a11y hook). */}
         {lightbox && (
           <div
+            ref={lightboxRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label={t('chat.imageZoomAriaLabel', '放大的图片')}
             onClick={() => setLightbox(null)}
             style={{
               position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.82)',
@@ -1474,7 +1322,7 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
               zIndex: 1000, cursor: 'zoom-out',
             }}
           >
-            <img src={lightbox} style={{ maxWidth: '92vw', maxHeight: '92vh', borderRadius: 12, boxShadow: '0 8px 40px rgba(0,0,0,0.5)' }} />
+            <img src={lightbox} alt={t('chat.imageAlt', '附件图片')} style={{ maxWidth: '92vw', maxHeight: '92vh', borderRadius: 12, boxShadow: '0 8px 40px rgba(0,0,0,0.5)' }} />
           </div>
         )}
     </>
@@ -1821,25 +1669,7 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
           {/* Branch session */}
           {activeSessionId && activeSession?.messages && activeSession.messages.length > 0 && (
             <button
-              onClick={() => {
-              // Fork: copy current session messages into a new session
-              const { createSession, addMessage } = useAppStore.getState();
-              createSession(selectedModel, currentModel?.provider || 'openrouter');
-              setTimeout(() => {
-                const st = useAppStore.getState();
-                const newId = st.sessions[st.sessions.length - 1]?.id;
-                const base = st.backendUrl;
-                if (newId && activeSession?.messages) {
-                  activeSession.messages.forEach((m: Message) => {
-                    const copy: Message = { ...m, id: Math.random().toString(36).slice(2) };
-                    addMessage(newId, copy);
-                    if (base) {
-                      apiAppendMessage(base, newId, copy).catch(() => {});
-                    }
-                  });
-                }
-              }, 100);
-            }}
+              onClick={() => handleFork()}
               title={t('chat.fork')}
               style={{
                 background: 'none', border: '0.5px solid var(--border-color)',
@@ -1867,7 +1697,7 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
             <button
               onClick={() => {
                 // Wipe messages in the shared SQLite history too, so the
-                // cleared chat does not resurrect in the CLI/simpleui.
+                // cleared chat does not resurrect in the CLI.
                 if (backendUrl && activeSessionId) {
                   apiClearSession(backendUrl, activeSessionId).catch(() => {});
                 }
@@ -2026,24 +1856,7 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
           padding: '8px 24px', background: 'var(--bg-secondary)',
           borderTop: '0.5px solid var(--border-color)',
         }}>
-          <button className="interactive" onClick={() => {
-              const { createSession, addMessage } = useAppStore.getState();
-              createSession(selectedModel, currentModel?.provider || 'openrouter');
-              setTimeout(() => {
-                const st = useAppStore.getState();
-                const newId = st.sessions[st.sessions.length - 1]?.id;
-                const base = st.backendUrl;
-                if (newId && activeSession?.messages) {
-                  activeSession.messages.forEach((m: Message) => {
-                    const copy: Message = { ...m, id: Math.random().toString(36).slice(2) };
-                    addMessage(newId, copy);
-                    if (base) {
-                      apiAppendMessage(base, newId, copy).catch(() => {});
-                    }
-                  });
-                }
-              }, 100);
-            }} style={{
+          <button className="interactive" onClick={() => handleFork()} style={{
             padding: '5px 10px', borderRadius: 6, fontSize: 11,
             background: 'var(--bg-primary)', border: '0.5px solid var(--border-color)',
             color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: 4,
@@ -2214,6 +2027,8 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
               }
             }}
             placeholder={t('chat.placeholder')}
+            aria-label={t('chat.inputAriaLabel', '消息输入框')}
+            aria-multiline="true"
             rows={1}
             style={{
               width: '100%', background: 'transparent', border: 'none',
@@ -2226,6 +2041,8 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
           <button
             onClick={toggleVoice}
             disabled={voiceBusy}
+            aria-pressed={voiceActive}
+            aria-label={voiceActive ? t('chat.voiceStop') : t('chat.voice')}
             title={voiceActive ? t('chat.voiceStop') : t('chat.voice')}
             style={{
               background: voiceActive ? 'var(--error)' : 'transparent',
@@ -2234,11 +2051,12 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
               display: 'flex', alignItems: 'center',
             }}
           >
-            <Mic size={16} />
+            <Mic size={16} aria-hidden />
           </button>
           {isStreaming ? (
             <button
               onClick={handleStop}
+              aria-label={t('chat.stop')}
               title={t('chat.stop')}
               style={{
                 background: 'var(--error)', border: 'none', color: '#fff',
@@ -2246,12 +2064,13 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
                 display: 'flex', alignItems: 'center',
               }}
             >
-              <Square size={16} />
+              <Square size={16} aria-hidden />
             </button>
           ) : (
             <button
               onClick={() => handleSend()}
               disabled={!input.trim()}
+              aria-label={t('chat.send')}
               title={t('chat.send')}
               style={{
                 background: input.trim() ? 'var(--grad-accent)' : 'var(--border-color)',
@@ -2262,21 +2081,21 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
               onMouseEnter={(e) => { if (input.trim()) (e.currentTarget as HTMLElement).style.filter = 'brightness(1.1)'; }}
               onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.filter = ''; }}
             >
-              <Send size={16} />
+              <Send size={16} aria-hidden />
             </button>
           )}
         </div>
-        {/* Mode row — iCode's own mode selector */}
-        <div style={{
+        {/* Mode row — iCode's own mode selector (a labelled toggle group) */}
+        <div role="group" aria-label={t('chat.modeGroupAriaLabel', '运行模式')} style={{
           display: 'flex', alignItems: 'center', gap: 4, marginTop: 6,
           fontSize: 10, color: 'var(--text-muted)',
         }}>
-          <button className="interactive" style={{
+          <button className="interactive" aria-label={t('chat.addAttachmentAriaLabel', '添加附件')} style={{
             padding: '3px 8px', borderRadius: 4, fontSize: 10,
             background: 'transparent', border: 'none', color: 'var(--text-muted)',
             display: 'flex', alignItems: 'center', gap: 3,
           }}>
-            <Plus size={10} />
+            <Plus size={10} aria-hidden />
           </button>
           {[
             { v: 'plan', label: t('chat.modePlan') },
@@ -2284,7 +2103,7 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
             { v: 'ask',  label: t('chat.modeAsk') },
             { v: 'yolo', label: t('chat.modeYolo') },
           ].map(m => (
-            <button key={m.v} className={mode === m.v ? 'nav-item active' : 'nav-item'} style={{
+            <button key={m.v} aria-pressed={mode === m.v} className={mode === m.v ? 'nav-item active' : 'nav-item'} style={{
               padding: '3px 10px', borderRadius: 4, fontSize: 10, fontWeight: mode === m.v ? 600 : 400,
             }} onClick={() => useAppStore.getState().setMode(m.v)}>{m.label}</button>
           ))}
@@ -2323,16 +2142,34 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
           position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)',
           display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
         }}>
-          <div className="elevated" style={{
+          <div className="elevated" ref={permDialogRef}
+            role="dialog" aria-modal="true" aria-labelledby="perm-dialog-title"
+            style={{
             width: 440, maxWidth: '90vw',
             borderRadius: 12,
             padding: 20, boxShadow: '0 20px 60px rgba(0,0,0,0.45)',
             animation: 'scaleIn 0.18s ease-out',
+            // Risk-tiered border (P2-A): high = red, low = calm accent,
+            // medium/unset = the familiar warning yellow. Mirrors the TUI's
+            // three-colour approval box (render.go).
+            border: `1px solid ${pendingPermission.req.severity === 'high'
+              ? 'var(--error)'
+              : pendingPermission.req.severity === 'low'
+                ? 'var(--accent)'
+                : 'var(--warning)'}`,
           }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
-              <ShieldAlert size={20} style={{ color: 'var(--warning)' }} />
-              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>
-                {t('permission.title')}
+              <ShieldAlert size={20} aria-hidden style={{
+                color: pendingPermission.req.severity === 'high'
+                  ? 'var(--error)'
+                  : pendingPermission.req.severity === 'low'
+                    ? 'var(--accent)'
+                    : 'var(--warning)',
+              }} />
+              <div id="perm-dialog-title" style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>
+                {pendingPermission.req.severity === 'high'
+                  ? `⚠ ${t('permission.titleHigh')}`
+                  : t('permission.title')}
               </div>
             </div>
             <div style={{
@@ -2343,7 +2180,20 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
               <div style={{ color: 'var(--text-muted)', fontSize: 11, marginBottom: 4 }}>
                 {t('permission.tool')}: <span style={{ color: 'var(--accent)' }}>{pendingPermission.req.tool}</span>
               </div>
-              <div>{pendingPermission.req.prompt || t('permission.confirm')}</div>
+              {/* Edit prompts arrive as unified-diff-ish lines ("- " old, "+ "
+                  new) from the backend; colour additions/deletions like the
+                  TUI (green/red) instead of one flat blob. */}
+              {(pendingPermission.req.prompt || t('permission.confirm')).split('\n').map((line, i) => (
+                <div key={i} style={{
+                  color: line.startsWith('+ ')
+                    ? 'var(--success)'
+                    : line.startsWith('- ')
+                      ? 'var(--error)'
+                      : undefined,
+                  whiteSpace: 'pre-wrap',
+                  fontFamily: line.startsWith('+ ') || line.startsWith('- ') ? 'var(--font-mono)' : undefined,
+                }}>{line}</div>
+              ))}
               {!!pendingPermission.req.strikes && (
                 <div style={{ color: 'var(--warning)', fontSize: 11, marginTop: 8 }}>
                   {pendingPermission.req.strikes >= (pendingPermission.req.threshold || 3)
@@ -2357,7 +2207,7 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
             </div>
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
               <button
-                onClick={() => respondPermission(pendingPermission.req.request_id, 'deny')}
+                onClick={() => submitApproval(pendingPermission, 'deny')}
                 style={{
                   padding: '7px 14px', borderRadius: 6, cursor: 'pointer', fontSize: 12,
                   border: '1px solid var(--border-color)', background: 'var(--bg-primary)',
@@ -2367,7 +2217,7 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
                 {t('permission.deny')}
               </button>
               <button
-                onClick={() => respondPermission(pendingPermission.req.request_id, 'allow_all')}
+                onClick={() => submitApproval(pendingPermission, 'allow_all')}
                 style={{
                   padding: '7px 14px', borderRadius: 6, cursor: 'pointer', fontSize: 12,
                   border: '1px solid var(--border-color)', background: 'var(--bg-primary)',
@@ -2377,18 +2227,7 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
                 {t('permission.allowAll')}
               </button>
               <button
-                onClick={async () => {
-                  // Allow this tool AND remember for this session
-                  const sid = pendingPermission.sid;
-                  if (backendUrl && sid) {
-                    await fetch(`${backendUrl}/api/permission/allow-tool`, {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ session_id: sid, tool: pendingPermission.req.tool }),
-                    }).catch(() => {});
-                  }
-                  respondPermission(pendingPermission.req.request_id, 'allow');
-                }}
+                onClick={() => submitApproval(pendingPermission, 'allow', true)}
                 style={{
                   padding: '7px 14px', borderRadius: 6, cursor: 'pointer', fontSize: 12,
                   border: '1px solid var(--accent)', background: 'var(--accent-soft)',
@@ -2398,7 +2237,7 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
                 {t('permission.allowToolAlways')}
               </button>
               <button
-                onClick={() => respondPermission(pendingPermission.req.request_id, 'allow')}
+                onClick={() => submitApproval(pendingPermission, 'allow')}
                 style={{
                   padding: '7px 14px', borderRadius: 6, cursor: 'pointer', fontSize: 12,
                   border: 'none', background: 'var(--accent)', color: '#000', fontWeight: 500,
@@ -2582,50 +2421,4 @@ function estimateCost(usage: UsageInfo | null | undefined, model: Model | null |
   }
   return '\xA5' + ((input * 0.00014 + output * 0.00028) / 1000).toFixed(4);
 }
-
-// Small presentational helpers for the status bar / stats sidebar.
-function Pill({ icon, label, onClick, title }: { icon: React.ReactNode; label: string; onClick: () => void; title?: string }) {
-  return (
-    <button
-      onClick={onClick}
-      title={title || i18n.t('chat.openSettings')}
-      style={{
-        display: 'inline-flex', alignItems: 'center', gap: 5,
-        background: 'var(--bg-tertiary)', border: '1px solid var(--border-color)',
-        color: 'var(--text-secondary)', borderRadius: 12, padding: '2px 10px',
-        fontSize: 11, cursor: 'pointer',
-      }}
-    >
-      {icon}
-      {label}
-    </button>
-  );
-}
-
-function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '5px 0', borderBottom: '1px dashed var(--border-color)' }}>
-      <span style={{ color: 'var(--text-muted)' }}>{label}</span>
-      <span style={{ color: 'var(--text-primary)', fontWeight: 500, textAlign: 'right', maxWidth: 130, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-        {value}
-      </span>
-    </div>
-  );
-}
-
-function ActionBtn({ icon, label, title, onClick }: { icon: string; label: string; title: string; onClick: () => void }) {
-  const [done, setDone] = useState(false);
-  return (
-    <button title={title} onClick={() => { onClick(); setDone(true); setTimeout(() => setDone(false), 1500); }}
-      style={{
-        background: 'transparent', border: '1px solid var(--border-color)',
-        borderRadius: 4, cursor: 'pointer', padding: '2px 8px',
-        fontSize: 11, color: done ? 'var(--success)' : 'var(--text-muted)',
-        display: 'flex', alignItems: 'center', gap: 3,
-      }}>
-      {done ? '✓' : icon} {done ? i18n.t('chat.copied') : label}
-    </button>
-  );
-}
-
 export default ChatPage;

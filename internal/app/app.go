@@ -9,10 +9,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ponygates/icode/internal/config"
 	"github.com/ponygates/icode/internal/core/agent"
+	"github.com/ponygates/icode/internal/core/auth"
 	"github.com/ponygates/icode/internal/core/checkpoint"
 	"github.com/ponygates/icode/internal/core/conversation"
 	"github.com/ponygates/icode/internal/core/hooks"
@@ -25,20 +27,8 @@ import (
 	"github.com/ponygates/icode/internal/core/tool"
 	"github.com/ponygates/icode/internal/db"
 	"github.com/ponygates/icode/internal/llm/provider"
-	"github.com/ponygates/icode/internal/llm/provider/agnes"
-	"github.com/ponygates/icode/internal/llm/provider/anthropic"
-	"github.com/ponygates/icode/internal/llm/provider/deepseek"
-	"github.com/ponygates/icode/internal/llm/provider/huawei"
-	"github.com/ponygates/icode/internal/llm/provider/kimi"
-	"github.com/ponygates/icode/internal/llm/provider/nvidia"
-	"github.com/ponygates/icode/internal/llm/provider/openai_compat"
-	"github.com/ponygates/icode/internal/llm/provider/openrouter"
-	"github.com/ponygates/icode/internal/llm/provider/scnet"
-	"github.com/ponygates/icode/internal/llm/provider/sensenova"
-	"github.com/ponygates/icode/internal/llm/provider/tencent"
-	"github.com/ponygates/icode/internal/llm/provider/volcengine"
-	"github.com/ponygates/icode/internal/llm/provider/zhipu"
 	"github.com/ponygates/icode/internal/lsp"
+	"github.com/ponygates/icode/internal/mcp"
 	"github.com/ponygates/icode/internal/mesh"
 	"github.com/ponygates/icode/internal/notify"
 	"github.com/ponygates/icode/internal/scheduler"
@@ -46,6 +36,24 @@ import (
 	"github.com/ponygates/icode/internal/xgo"
 	"github.com/ponygates/icode/pkg/modelupdate"
 )
+
+// bootstrapQuiet silences the chatty bootstrap progress logs. Interactive
+// commands (chat, server, desktop) keep them on stderr where they help
+// diagnose startup hangs; one-shot diagnostics (doctor, version, print mode)
+// mute them so their output stays clean and parseable.
+var bootstrapQuiet bool
+
+// SetBootstrapQuiet toggles bootstrap progress logging. Call before
+// Bootstrap(). Warnings and errors are always printed regardless.
+func SetBootstrapQuiet(quiet bool) { bootstrapQuiet = quiet }
+
+// blog logs a bootstrap progress line unless muted.
+func blog(format string, args ...any) {
+	if bootstrapQuiet {
+		return
+	}
+	log.Printf(format, args...)
+}
 
 // App is the top-level application container.
 type App struct {
@@ -66,13 +74,66 @@ type App struct {
 	// Scheduler runs WorkBuddy-style scheduled automations (may be nil when
 	// there is no persistence backend).
 	Scheduler *scheduler.Scheduler
+	// MCPPool is the shared MCP (Model Context Protocol) client pool wired
+	// into the engine at bootstrap, so MCP tools are available in EVERY
+	// surface — TUI, exec/print, server, desktop — not just the HTTP server
+	// path (the old gap: /mcp-configured servers that `icode chat` could
+	// never see). Nil when the engine is unavailable.
+	MCPPool *mcp.Pool
+	// mcpToolNames tracks the MCP tool names currently registered into the
+	// engine so a refresh can unregister the stale set first.
+	mcpToolNames map[string]bool
+	mcpMu        sync.Mutex
+
+	// BootTimings records CUMULATIVE milliseconds since Bootstrap() entry at
+	// each stage boundary, so `icode doctor` can surface a startup benchmark
+	// (Claude Code /doctor startup profile parity). Empty on pre-built Apps.
+	BootTimings []BootTiming
+}
+
+// BootTiming is one startup-stage checkpoint.
+type BootTiming struct {
+	Stage  string
+	Millis int64 // cumulative ms since bootstrap entry
+}
+
+// BootStageDeltas converts cumulative timings into per-stage deltas sorted
+// slowest-first (the doctor startup profile view).
+func (a *App) BootStageDeltas() []BootTiming {
+	var out []BootTiming
+	prev := int64(0)
+	for _, bt := range a.BootTimings {
+		out = append(out, BootTiming{Stage: bt.Stage, Millis: bt.Millis - prev})
+		prev = bt.Millis
+	}
+	// Slowest first so the doctor report leads with the real cost.
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && out[j].Millis > out[j-1].Millis; j-- {
+			out[j], out[j-1] = out[j-1], out[j]
+		}
+	}
+	return out
+}
+
+// BootTotalMillis returns the cumulative ms of the LAST recorded stage —
+// i.e. total bootstrap wall time.
+func (a *App) BootTotalMillis() int64 {
+	if len(a.BootTimings) == 0 {
+		return 0
+	}
+	return a.BootTimings[len(a.BootTimings)-1].Millis
 }
 
 // Bootstrap initializes all subsystems and returns a ready-to-use App.
 func Bootstrap() (*App, error) {
 	app := &App{}
 	t0 := time.Now()
-	log.Printf("[iCode] bootstrap: entering (config.Load)")
+	blog("[iCode] bootstrap: entering (config.Load)")
+	// mark records a cumulative startup checkpoint for the doctor benchmark
+	// (startup profile, Claude Code /doctor parity).
+	mark := func(stage string) {
+		app.BootTimings = append(app.BootTimings, BootTiming{Stage: stage, Millis: time.Since(t0).Milliseconds()})
+	}
 
 	// 1. Load configuration
 	cfg, err := config.Load()
@@ -81,7 +142,8 @@ func Bootstrap() (*App, error) {
 		cfg = config.Default()
 	}
 	app.Cfg = cfg
-	log.Printf("[iCode] bootstrap: config loaded (t=%dms)", time.Since(t0).Milliseconds())
+	mark("config")
+	blog("[iCode] bootstrap: config loaded (t=%dms)", time.Since(t0).Milliseconds())
 
 	// 1b. Adopt the persisted working directory (/cd), so the CLI/TUI/server
 	// start in the directory the user last moved to instead of the process
@@ -89,7 +151,7 @@ func Bootstrap() (*App, error) {
 	if cfg.Defaults.WorkingDir != "" {
 		if info, err := os.Stat(cfg.Defaults.WorkingDir); err == nil && info.IsDir() {
 			if err := os.Chdir(cfg.Defaults.WorkingDir); err == nil {
-				log.Printf("[iCode] bootstrap: cwd -> %s", cfg.Defaults.WorkingDir)
+				blog("[iCode] bootstrap: cwd -> %s", cfg.Defaults.WorkingDir)
 			}
 		}
 	}
@@ -111,12 +173,14 @@ func Bootstrap() (*App, error) {
 			app.MeshCancel = cancel
 		}
 	}
-	log.Printf("[iCode] bootstrap: SQLite ready (t=%dms)", time.Since(t0).Milliseconds())
+	mark("storage")
+	blog("[iCode] bootstrap: SQLite ready (t=%dms)", time.Since(t0).Milliseconds())
 
 	// 3. Initialize provider registry
 	app.Reg = registry.NewRegistry()
 	app.registerProviders(cfg)
-	log.Printf("[iCode] bootstrap: providers registered (t=%dms)", time.Since(t0).Milliseconds())
+	mark("providers")
+	blog("[iCode] bootstrap: providers registered (t=%dms)", time.Since(t0).Milliseconds())
 
 	// 4. Initialize permission gate with the configured security level.
 	//    NewGate defaults to SecLocal; we must apply the user's configured
@@ -162,6 +226,11 @@ func Bootstrap() (*App, error) {
 	if cfg.Tools.MaxToolRounds > 0 {
 		app.Engine.SetMaxToolRounds(cfg.Tools.MaxToolRounds)
 	}
+	// Auto-compact threshold (percent of the model context window; unset =
+	// engine default 85, 0 = disable → manual /compact only).
+	if cfg.Tools.AutoCompactPct != nil {
+		app.Engine.SetAutoCompactPct(*cfg.Tools.AutoCompactPct)
+	}
 	app.Engine.SetHumanizeLLMPolish(cfg.Permission.HumanizeLLMPolish)
 	// Auto-mode classifier (Claude Code parity): a cheap model judges
 	// Write/Execute/Connect calls in auto mode so safe ones auto-approve.
@@ -196,7 +265,8 @@ func Bootstrap() (*App, error) {
 	// mid-session does not lose newly-learned preferences.
 	app.Engine.SetPreferenceMemory(prefmem.LoadFile(prefmem.DefaultPath()))
 	app.Engine.SetPreferenceSavePath(prefmem.DefaultPath())
-	log.Printf("[iCode] bootstrap: engine ready (t=%dms)", time.Since(t0).Milliseconds())
+	mark("engine")
+	blog("[iCode] bootstrap: engine ready (t=%dms)", time.Since(t0).Milliseconds())
 
 	// 5b. Wire smart model router (simple → cheap, complex → powerful)
 	defaultModel := cfg.Defaults.Model
@@ -241,7 +311,7 @@ func Bootstrap() (*App, error) {
 						Role:    types.RoleUser,
 						Content: "Classify the coding-assistant query below as exactly one word: simple, normal, or complex.\nsimple = quick Q&A, no code changes; normal = standard coding task; complex = multi-step / large refactor / deep analysis.\nAnswer with the single word only.\n\nQuery:\n" + query,
 					}},
-					Model:        mi.ID,
+					Model:        mi.WireModel(),
 					ProviderName: mi.Provider,
 					MaxTokens:    8,
 				})
@@ -350,17 +420,16 @@ func Bootstrap() (*App, error) {
 	// 5e3. Notification policy (enable/disable + do-not-disturb window).
 	notify.SetPolicy(cfg.Notify.Enabled, cfg.Notify.QuietFrom, cfg.Notify.QuietTo)
 
+	// 5e4. MCP pool — connect configured MCP servers in the background and
+	// register their tools into the engine so every surface (TUI/exec/print,
+	// not just the HTTP server) can use them (Claude Code parity).
+	app.initMCPPool()
+
 	// 5f. Lifecycle hooks (PreToolUse/PostToolUse/UserPromptSubmit/Stop) —
 	// Claude Code parity.
 	if len(cfg.Hooks) > 0 {
-		rules := make(map[string][]hooks.Rule, len(cfg.Hooks))
-		for ev, list := range cfg.Hooks {
-			for _, hr := range list {
-				rules[ev] = append(rules[ev], hooks.Rule{Matcher: hr.Matcher, Command: hr.Command, Timeout: hr.Timeout})
-			}
-		}
 		wd, _ := os.Getwd()
-		app.Engine.SetHooksRunner(hooks.NewRunner(rules, wd))
+		app.Engine.SetHooksRunner(hooks.NewRunner(hooks.RulesFromConfig(cfg.Hooks), wd))
 	}
 
 	// 5g. Multimodal generation backend (image_gen/video_gen). Injected even
@@ -377,7 +446,8 @@ func Bootstrap() (*App, error) {
 	// 5h. Tavily web-search API key, read from the config system so it works
 	// without a shell env var (web_search/tavily engine).
 	tool.SetTavilyAPIKey(cfg.APIKey("tavily"))
-	log.Printf("[iCode] bootstrap: skills/teams/hooks/LSP/multimodal done (t=%dms)", time.Since(t0).Milliseconds())
+	mark("skills/teams/hooks")
+	blog("[iCode] bootstrap: skills/teams/hooks/LSP/multimodal done (t=%dms)", time.Since(t0).Milliseconds())
 
 	// 6. Initialize undo system (file-level snapshot /undo)
 	if err := checkpoint.InitUndo(""); err != nil {
@@ -392,7 +462,8 @@ func Bootstrap() (*App, error) {
 		p, _ := app.Reg.Get(name)
 		app.Updater.Register(p)
 	}
-	log.Printf("[iCode] bootstrap: updater ready (t=%dms)", time.Since(t0).Milliseconds())
+	mark("updater")
+	blog("[iCode] bootstrap: updater ready (t=%dms)", time.Since(t0).Milliseconds())
 
 	// 8. Scheduled automations (WorkBuddy-style). Only active when there is a
 	//    persistent store (SQLite); in-memory fallback sessions skip it.
@@ -419,33 +490,25 @@ func Bootstrap() (*App, error) {
 		sch.SetIdleWindow(cfg.Scheduler.IdleStart, cfg.Scheduler.IdleEnd)
 		app.Scheduler = sch
 		sch.Start(context.Background())
-		log.Printf("[iCode] bootstrap: scheduler ready (t=%dms)", time.Since(t0).Milliseconds())
+		blog("[iCode] bootstrap: scheduler ready (t=%dms)", time.Since(t0).Milliseconds())
 	}
+	mark("scheduler")
 
 	return app, nil
 }
 
 // registerProviders adds all built-in providers to the registry.
 func (app *App) registerProviders(cfg *config.Config) {
-	providers := []struct {
-		name string
-		fn   func(key, base string) types.Provider
-	}{
-		{"deepseek", func(k, b string) types.Provider { return deepseek.New(k, b) }},
-		{"zhipu", func(k, b string) types.Provider { return zhipu.New(k, b) }},
-		{"kimi", func(k, b string) types.Provider { return kimi.New(k, b) }},
-		{"openrouter", func(k, b string) types.Provider { return openrouter.New(k, b) }},
-		{"volcengine", func(k, b string) types.Provider { return volcengine.New(k, b) }},
-		{"tencent", func(k, b string) types.Provider { return tencent.New(k, b) }},
-		{"huawei", func(k, b string) types.Provider { return huawei.New(k, b) }},
-		{"scnet", func(k, b string) types.Provider { return scnet.New(k, b) }},
-		{"nvidia", func(k, b string) types.Provider { return nvidia.New(k, b) }},
-		{"sensenova", func(k, b string) types.Provider { return sensenova.New(k, b) }},
-		{"agnes", func(k, b string) types.Provider { return agnes.New(k, b) }},
+	names := []string{
+		"deepseek", "zhipu", "kimi", "openrouter", "volcengine", "tencent",
+		"huawei", "scnet", "nvidia", "sensenova", "agnes",
 	}
 
-	for _, entry := range providers {
-		provCfg, ok := cfg.Providers[entry.name]
+	// Built through auth.Provider so every live provider learns whether its
+	// key field holds an API key or an OAuth subscription token, and gets the
+	// 401 renewal path — the registry is shared by all surfaces.
+	for _, name := range names {
+		provCfg, ok := cfg.Providers[name]
 		if !ok {
 			provCfg = config.ProviderCfg{}
 		}
@@ -453,9 +516,8 @@ func (app *App) registerProviders(cfg *config.Config) {
 			continue
 		}
 
-		p := entry.fn(provCfg.APIKey, provCfg.APIBase)
-		if err := app.Reg.Register(p); err != nil {
-			log.Printf("[iCode] Failed to register %s: %v", entry.name, err)
+		if err := app.Reg.Register(auth.Provider(name, provCfg)); err != nil {
+			log.Printf("[iCode] Failed to register %s: %v", name, err)
 		}
 	}
 
@@ -465,8 +527,7 @@ func (app *App) registerProviders(cfg *config.Config) {
 		anthropicCfg = config.ProviderCfg{}
 	}
 	if !anthropicCfg.Disabled {
-		ap := anthropic.New(anthropicCfg.APIKey, anthropicCfg.APIBase)
-		if err := app.Reg.Register(ap); err != nil {
+		if err := app.Reg.Register(auth.Provider("anthropic", anthropicCfg)); err != nil {
 			log.Printf("[iCode] Failed to register anthropic: %v", err)
 		}
 	}
@@ -494,14 +555,7 @@ func (app *App) registerCustomProviders(cfg *config.Config) {
 		if pc.Disabled {
 			continue
 		}
-		np := openai_compat.New(openai_compat.Config{
-			Name:         name,
-			APIKey:       pc.APIKey,
-			APIBase:      pc.APIBase,
-			TimeoutSec:   pc.Timeout,
-			CacheSupport: true,
-		})
-		if err := app.Reg.Register(np); err != nil {
+		if err := app.Reg.Register(auth.Provider(name, pc)); err != nil {
 			log.Printf("[iCode] Failed to register custom provider %s: %v", name, err)
 		}
 	}
@@ -532,6 +586,11 @@ func (app *App) registerCustomModel(m config.ModelCfg) {
 		Provider:        m.Provider,
 		ContextWindow:   m.ContextWindow,
 		MaxOutputTokens: m.MaxOutput,
+	}
+	// The wire name: the provider's API expects the bare model id, not the
+	// "provider/model_id" registry key (see types.ModelInfo.WireModel).
+	if m.ModelID != "" && m.ModelID != m.ID {
+		info.APIModelID = m.ModelID
 	}
 	app.Reg.RegisterCustomModel(info, m.ModelID)
 }
@@ -576,6 +635,9 @@ func (app *App) Close() error {
 	}
 	if app.LSPManager != nil {
 		app.LSPManager.CloseAll()
+	}
+	if app.MCPPool != nil {
+		app.MCPPool.CloseAll()
 	}
 	if app.DB != nil {
 		return app.DB.Close()

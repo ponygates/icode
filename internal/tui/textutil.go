@@ -171,6 +171,13 @@ func runeWidth(r rune) int {
 	// it as width 2 made the editable cursor land past the last typed rune on
 	// every keystroke. Same fix as the block-elements / geometric-shapes /
 	// general-punctuation ranges above: match the terminal, not the locale.
+	if r == 0x2B1D {
+		return 1 // ⬝ BLACK VERY SMALL SQUARE — opencode's Knight Rider track dot
+		// renders at exactly one cell on every modern terminal (Windows
+		// Terminal, kitty, Alacritty, iTerm2); count it as 1 or the thinking
+		// slider's fixed 8-cell slot would measure 16 columns and desync the
+		// status-line layout.
+	}
 	if r >= 0x2B00 && r <= 0x2BFF {
 		return 2 // Miscellaneous Symbols and Arrows (★-adjacent ⭐⬤ etc.)
 	}

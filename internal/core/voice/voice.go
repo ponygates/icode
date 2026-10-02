@@ -1,5 +1,5 @@
 // Package voice provides speech-to-text (ASR) and microphone capture for the
-// /voice input feature, shared by all three UIs (desktop, CLI, simpleui).
+// /voice input feature, shared by both UIs (desktop and CLI).
 //
 // Transcription supports multiple providers:
 //   - Zhipu GLM-ASR (default, reuses existing zhipu key)

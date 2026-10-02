@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/ponygates/icode/internal/types"
@@ -47,7 +48,9 @@ func Import(store types.SessionStore, data []byte) (*types.Session, int, error) 
 	for _, m := range msgs {
 		m.ID = fmt.Sprintf("%x", time.Now().UnixNano()+int64(imported))
 		if err := store.AppendMessage(sess.ID, m); err != nil {
-			_ = store.Delete(sess.ID) // roll back the partial import
+			if derr := store.Delete(sess.ID); derr != nil {
+				log.Printf("[sessionum] import rollback delete session %s failed: %v", sess.ID, derr)
+			}
 			return nil, imported, fmt.Errorf("import message: %w", err)
 		}
 		imported++

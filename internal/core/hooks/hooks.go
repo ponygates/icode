@@ -10,7 +10,26 @@
 //	UserPromptSubmit — before a user message is sent to the model. Exit code 2
 //	                  blocks the message; stdout JSON {"prompt": "..."} rewrites
 //	                  the message the model sees.
-//	Stop            — when the agent finishes responding.
+//	Stop            — when the agent finishes responding. Exit code 2 (or JSON
+//	                  {"decision":"block"} / {"continue":false}) blocks the
+//	                  stop and injects the reason as a continuation message.
+//
+// In addition to the legacy exit-code contract, every hook may print a JSON
+// object on stdout (exit 0) to steer the agent (Claude Code JSON protocol):
+//
+//	{"decision":"block","reason":"..."}            // PreToolUse / PostToolUse /
+//	                                               // Stop: block, reason feeds back
+//	{"permissionDecision":"allow|deny|ask",        // PreToolUse: override the
+//	 "reason":"..."}                               // permission gate decision
+//	{"suppressOutput":true}                        // PostToolUse: hide the hook's
+//	                                               // feedback from the model
+//	{"systemMessage":"..."}                        // any event: warning shown to
+//	                                               // the USER (not fed to model)
+//	{"continue":false,"stopReason":"..."}          // Stop: force the agent to
+//	                                               // continue working
+//
+// Exit code 2 takes precedence over stdout JSON; JSON decisions only apply
+// when the hook exits 0.
 //
 // Hooks receive a JSON payload on stdin describing the event:
 //
@@ -30,6 +49,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os/exec"
 	"regexp"
 	"runtime"
@@ -102,6 +122,35 @@ type Result struct {
 	// Prompt is the rewritten user message for UserPromptSubmit hooks. Empty
 	// means "keep the original" (or, with Block=true, "drop the message").
 	Prompt string
+	// TimedOut is true when at least one matched hook was killed by its
+	// timeout. Timeout never blocks (Claude Code parity) but callers may
+	// surface it for observability.
+	TimedOut bool
+	// SuppressOutput is true when a PostToolUse hook asked to hide its
+	// feedback from the model ({"suppressOutput":true}).
+	SuppressOutput bool
+	// SystemMessage is a user-facing warning ({"systemMessage":"..."}) —
+	// shown by the UI, never fed to the model.
+	SystemMessage string
+	// PermissionDecision carries a PreToolUse hook's gate override
+	// ({"permissionDecision":"allow|deny|ask"}). Empty = no override.
+	PermissionDecision string
+}
+
+// hookOutput is the stdout JSON contract a hook may emit (exit 0). All
+// fields optional; unknown fields are ignored.
+type hookOutput struct {
+	Decision           string `json:"decision"`           // "block" — block the event
+	Reason             string `json:"reason"`             // human-readable block/override reason
+	SuppressOutput     bool   `json:"suppressOutput"`     // PostToolUse: hide feedback
+	SystemMessage      string `json:"systemMessage"`      // warning for the user
+	Continue           *bool  `json:"continue"`           // Stop: false → force continue
+	StopReason         string `json:"stopReason"`         // Stop: reason when continue=false
+	PermissionDecision string `json:"permissionDecision"` // "allow"|"deny"|"ask"
+
+	// timedOut is set internally when the hook process was killed by its
+	// timeout (never decoded from JSON) so Fire can mark Result.TimedOut.
+	timedOut bool
 }
 
 // Runner executes configured hooks. Safe for concurrent use (immutable config).
@@ -150,9 +199,53 @@ func (r *Runner) Fire(ctx context.Context, ev Event, in Input) *Result {
 		if !matches(rule.Matcher, in.ToolName) {
 			continue
 		}
-		block, msg, stdout := runOne(ctx, rule, payload, r.cwd)
+		block, msg, stdout, ho := runOne(ctx, rule, payload, r.cwd)
 		if block {
 			return &Result{Block: true, Message: msg}
+		}
+		if ho != nil {
+			if ho.timedOut {
+				agg.TimedOut = true
+			}
+			// JSON decision contract (exit 0 only): a "block" decision
+			// short-circuits exactly like exit code 2.
+			if ho.Decision == "block" {
+				reason := ho.Reason
+				if reason == "" {
+					reason = "blocked by hook: " + rule.Command
+				}
+				return &Result{Block: true, Message: reason}
+			}
+			// Stop hooks may also force a continue via {"continue":false}.
+			if ev == Stop && ho.Continue != nil && !*ho.Continue {
+				reason := ho.StopReason
+				if reason == "" {
+					reason = ho.Reason
+				}
+				if reason == "" {
+					reason = "Stop hook requested continuation"
+				}
+				return &Result{Block: true, Message: reason}
+			}
+			if ho.SuppressOutput {
+				agg.SuppressOutput = true
+			}
+			if ho.SystemMessage != "" {
+				if agg.SystemMessage != "" {
+					agg.SystemMessage += "\n"
+				}
+				agg.SystemMessage += ho.SystemMessage
+			}
+			switch ho.PermissionDecision {
+			case "allow", "deny", "ask":
+				agg.PermissionDecision = ho.PermissionDecision
+				if ho.Reason != "" {
+					if agg.Message != "" {
+						agg.Message += "\n"
+					}
+					agg.Message += ho.Reason
+				}
+			}
 		}
 		// UserPromptSubmit hooks can rewrite the prompt via stdout JSON.
 		if ev == UserPromptSubmit {
@@ -201,11 +294,13 @@ func matches(pattern, toolName string) bool {
 	return re.MatchString(toolName)
 }
 
-// runOne executes a single hook command. Returns (block, message, stdout).
-// Exit code 2 → block=true with stderr as message. Other non-zero exit
-// codes are non-blocking (stderr surfaced as informational message).
-// stdout is captured for UserPromptSubmit's JSON rewrite contract.
-func runOne(ctx context.Context, rule Rule, payload []byte, cwd string) (bool, string, string) {
+// runOne executes a single hook command. Returns (block, message, stdout,
+// parsedJSON). Exit code 2 → block=true with stderr as message. Other
+// non-zero exit codes (including timeout) are non-blocking (stderr surfaced
+// as informational message); timeouts additionally mark the result so the
+// caller can report them. stdout is parsed as the optional JSON steering
+// contract (only meaningful when the hook exited 0).
+func runOne(ctx context.Context, rule Rule, payload []byte, cwd string) (bool, string, string, *hookOutput) {
 	timeout := time.Duration(rule.Timeout) * time.Second
 	if timeout <= 0 {
 		timeout = 30 * time.Second
@@ -234,10 +329,35 @@ func runOne(ctx context.Context, rule Rule, payload []byte, cwd string) (bool, s
 			if msg == "" {
 				msg = "blocked by hook: " + rule.Command
 			}
-			return true, msg, out
+			return true, msg, out, nil
 		}
-		// Non-2 failures (including timeout) never block the agent.
-		return false, msg, out
+		// Non-2 failures never block the agent (Claude Code parity). A
+		// timeout is worth surfacing on its own so users understand why a
+		// hook silently did nothing.
+		if cctx.Err() == context.DeadlineExceeded {
+			if msg == "" {
+				msg = fmt.Sprintf("hook timed out after %s: %s", timeout, rule.Command)
+			}
+			return false, msg, out, &hookOutput{SystemMessage: msg, timedOut: true}
+		}
+		return false, msg, out, nil
 	}
-	return false, msg, out
+	// Exit 0: stdout may carry the JSON steering contract. Unparsable or
+	// plain stdout is fine — it just means the hook had nothing to say.
+	ho := parseHookJSON(out)
+	return false, msg, out, ho
+}
+
+// parseHookJSON decodes the optional stdout JSON steering object. Returns
+// nil for empty, plain-text, or invalid stdout.
+func parseHookJSON(stdout string) *hookOutput {
+	s := strings.TrimSpace(stdout)
+	if s == "" || s[0] != '{' {
+		return nil
+	}
+	var ho hookOutput
+	if err := json.Unmarshal([]byte(s), &ho); err != nil {
+		return nil
+	}
+	return &ho
 }

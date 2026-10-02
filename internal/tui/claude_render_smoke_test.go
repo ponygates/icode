@@ -47,8 +47,8 @@ func TestClaudeStyleRender(t *testing.T) {
 	if !strings.Contains(out, "●") {
 		t.Fatalf("expected opencode-style model dot '●' in output:\n%s", out)
 	}
-	if !strings.Contains(out, "▓") || !strings.Contains(out, "░") {
-		t.Fatalf("expected visual context bar (▓/░) in status bar:\n%s", out)
+	if !strings.Contains(out, "11%") {
+		t.Fatalf("expected context usage percent (11%%) in status bar:\n%s", out)
 	}
 	if !strings.Contains(out, "$0.0123") {
 		t.Fatalf("expected cost in status bar:\n%s", out)
@@ -60,13 +60,10 @@ func TestClaudeStyleRender(t *testing.T) {
 		t.Fatalf("expected task-bar dot separators '·' in output:\n%s", out)
 	}
 	// Minimal design: the model sits next to the wordmark in the header, and
-	// context remaining (1048576-120000 ≈ 89% left) lives on the status bar below
-	// prompt — no duplicated header strip.
+	// context usage (120000/1048576 ≈ 11%) lives on the status bar below
+	// prompt as a bare percent — no duplicated header strip.
 	if !strings.Contains(out, "deepseek-v4-flash") {
 		t.Fatalf("expected model in header/status output:\n%s", out)
-	}
-	if !strings.Contains(out, "89% left") {
-		t.Fatalf("expected context %%-meter ('11%%') in status bar:\n%s", out)
 	}
 
 	// Case 2: streaming with no tokens yet — should show the sliding thinking bar.
@@ -104,18 +101,18 @@ func TestWelcomeScreen(t *testing.T) {
 	// Case 1: banner should be visible on a fresh session.
 	tui.render()
 	out := buf.String()
-	if !strings.Contains(out, "Welcome back!") {
-		t.Fatalf("expected 'Welcome back!' in welcome screen:\n%s", out)
+	if !strings.Contains(out, "欢迎回来！") {
+		t.Fatalf("expected '欢迎回来！' in welcome screen:\n%s", out)
 	}
 	if !strings.Contains(out, "多模型 AI 编程助手") {
 		t.Fatalf("expected LOGO tagline '多模型 AI 编程助手' in welcome screen:\n%s", out)
 	}
 	// Two-column layout: tips on the right, info on the left
-	if !strings.Contains(out, "Tips for getting started") {
+	if !strings.Contains(out, "快速上手") {
 		t.Fatalf("expected tips section in welcome screen:\n%s", out)
 	}
-	if !strings.Contains(out, "What's new") {
-		t.Fatalf("expected 'what's new' section in welcome screen:\n%s", out)
+	if !strings.Contains(out, "新功能") {
+		t.Fatalf("expected '新功能' section in welcome screen:\n%s", out)
 	}
 	if !strings.Contains(out, "deepseek-v4-flash") {
 		t.Fatalf("expected model name in welcome screen:\n%s", out)
@@ -128,7 +125,7 @@ func TestWelcomeScreen(t *testing.T) {
 	}
 	tui.render()
 	out2 := buf.String()
-	if strings.Contains(out2, "Welcome back!") {
+	if strings.Contains(out2, "欢迎回来！") {
 		t.Fatalf("expected welcome panel to be hidden after dismiss:\n%s", out2)
 	}
 }

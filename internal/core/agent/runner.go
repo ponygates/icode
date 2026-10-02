@@ -285,7 +285,7 @@ func (r *Runner) RunWithPrefix(ctx context.Context, def *AgentDef, input string,
 		eventCh, err := provider.ChatStream(subCtx, types.ChatRequest{
 			SessionID:    r.sessionID,
 			Messages:     messages,
-			Model:        modelInfo.ID,
+			Model:        modelInfo.WireModel(),
 			ProviderName: modelInfo.Provider,
 			SystemPrompt: opt.BuildPrefix(),
 			Tools:        toolDefs,

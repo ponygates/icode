@@ -15,6 +15,7 @@ func TestRuneWidthStrEmojiSymbols(t *testing.T) {
 		{"⚠️", 2},   // symbol + VS16 → emoji presentation
 		{"❤️", 2},   // U+2764 + U+FE0F
 		{"☀", 1},    // ambiguous symbol, modern terminal renders 1
+		{"⬝", 1},    // Knight Rider track dot — width-1 on modern terminals
 		{"😀", 2},    // emoji pictograph
 		{"A✅B", 4},  // 1 + 2 + 1
 		{"标题：A", 7}, // 2+2 + fullwidth colon 2 + A 1

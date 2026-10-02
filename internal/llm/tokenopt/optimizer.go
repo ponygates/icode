@@ -290,7 +290,7 @@ func (o *Optimizer) AddMessage(msg types.Message) {
 
 	// Compress large tool results to save tokens
 	if msg.Role == types.RoleTool && len(msg.Content) > 4000 {
-		msg.Content = compressToolResult(msg.Content, 4000)
+		msg.Content = CompressToolResult(msg.Content, 4000)
 	}
 
 	o.messageLog = append(o.messageLog, msg)
@@ -767,6 +767,43 @@ func (o *Optimizer) CompactionSummary() string {
 	return o.compactionSummary
 }
 
+// SetCompactThreshold adjusts the fraction of the model context window that
+// triggers compaction (0 < f <= 1; invalid values are ignored). The engine
+// calls this from its auto-compact config (tools.auto_compact_pct) so the
+// threshold is configurable without recreating the optimizer. It only moves
+// a numeric threshold — no message bytes change, so the provider cache prefix
+// stays intact.
+func (o *Optimizer) SetCompactThreshold(f float64) {
+	if f <= 0 || f > 1 {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.compactThreshold = f
+}
+
+// AutoCompact runs the existing compaction pipeline (Level 0-3: snip is
+// applied per-request, summarize/drop by strategy) when the estimated context
+// has reached the compaction threshold. It returns the estimated tokens saved
+// and whether compaction actually happened. Like CompactRequest it never
+// touches the immutable cache prefix (system prompt + tool defs + cached
+// summary live outside messageLog), and callers should invoke it at a turn
+// boundary so the in-flight user turn is never folded into the summary.
+func (o *Optimizer) AutoCompact() (saved int, did bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if !o.shouldCompactLocked() {
+		return 0, false
+	}
+	before := o.estimateTokensLocked()
+	o.compactLocked()
+	after := o.estimateTokensLocked()
+	if after >= before {
+		return 0, false
+	}
+	return before - after, true
+}
+
 // EstimateTokens provides a more accurate token count estimate.
 func (o *Optimizer) EstimateTokens() int {
 	o.mu.Lock()
@@ -821,8 +858,11 @@ func isCJK(r rune) bool {
 		(r >= 0x3000 && r <= 0x303F) // CJK punctuation
 }
 
-// compressToolResult truncates large tool outputs, keeping head and tail.
-func compressToolResult(content string, maxLen int) string {
+// CompressToolResult truncates large tool outputs, keeping head and tail with
+// an elision marker ("[... N chars omitted ...]"). Exported so tool-side
+// output caps (bash) can reuse the same head+tail elision style as the
+// Level 4 budget pipeline before the engine-level budget enforcer sees it.
+func CompressToolResult(content string, maxLen int) string {
 	if len(content) <= maxLen {
 		return content
 	}

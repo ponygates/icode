@@ -143,7 +143,7 @@ function PageGeneral({ store }: { store: ReturnType<typeof useAppStore.getState>
     }
     localStorage.setItem('icode.theme', t);
     // Cross-UI sharing: persist to the backend config (tui.theme) so the TUI
-    // and simpleui pick the same theme on their next launch.
+    // picks the same theme on its next launch.
     if (store.backendUrl) {
       fetch(`${store.backendUrl}/api/config`, {
         method: 'PUT',
@@ -576,20 +576,26 @@ function PageModels({ store }: { store: ReturnType<typeof useAppStore.getState> 
 interface MCPServerView {
   name: string; type: string; command: string; args?: string[];
   url?: string; enabled: boolean; connected: boolean; tools: number;
-  trustMode?: string;
+  // The backend speaks snake_case (config.MCPServerCfg json tags).
+  trust_mode?: string;
+  has_headers?: boolean;
+  supports_resources?: boolean;
+  supports_prompts?: boolean;
 }
 
 // Add/edit form state (args kept as a raw string, split on save).
 interface MCPFormState {
   name: string; type: string; command: string; args: string;
-  url: string; enabled: boolean;
+  url: string; enabled: boolean; token: string; hasToken: boolean;
 }
 
 // Payload sent to PUT /api/mcp.
 interface MCPBody {
   name: string; type: string; command: string; enabled: boolean;
-  args?: string[]; url?: string;
+  args?: string[]; url?: string; headers?: Record<string, string>;
 }
+
+const NEWLINE = String.fromCharCode(10);
 
 function PageMCP({ store }: { store: ReturnType<typeof useAppStore.getState> }) {
   const { t } = useTranslation();
@@ -599,10 +605,14 @@ function PageMCP({ store }: { store: ReturnType<typeof useAppStore.getState> }) 
   const [adding, setAdding] = useState(false);
   const [testResult, setTestResult] = useState<{name:string; ok:boolean; tools?:string[]; error?:string} | null>(null);
   const [allTools, setAllTools] = useState<string[]>([]);
+  // Resources/prompts are optional MCP capabilities, fetched on demand —
+  // listing them costs a round-trip per server, so they stay off the poll path.
+  const [caps, setCaps] = useState<{ name: string; resources: { uri: string; name?: string }[]; prompts: { name: string; description?: string }[] } | null>(null);
+  const [capsFor, setCapsFor] = useState<string | null>(null);
   const [showTools, setShowTools] = useState(false);
 
   // Form state for add/edit
-  const [form, setForm] = useState({ name:'', type:'stdio', command:'', args:'', url:'', enabled:true });
+  const [form, setForm] = useState({ name:'', type:'stdio', command:'', args:'', url:'', enabled:true, token:'', hasToken:false });
 
   const api = (path: string, opts?: RequestInit) =>
     fetch(`${store.backendUrl}/api/mcp${path}`, { headers:{'Content-Type':'application/json'}, ...opts });
@@ -628,12 +638,12 @@ function PageMCP({ store }: { store: ReturnType<typeof useAppStore.getState> }) 
 
   useEffect(() => { load(); loadTools(); }, [load, loadTools]);
 
-  const resetForm = () => setForm({ name:'', type:'stdio', command:'', args:'', url:'', enabled:true });
+  const resetForm = () => setForm({ name:'', type:'stdio', command:'', args:'', url:'', enabled:true, token:'', hasToken:false });
 
   const startAdd = () => { resetForm(); setAdding(true); setEditing(null); };
 
   const startEdit = (s: MCPServerView) => {
-    setForm({ name:s.name, type:s.type, command:s.command, args:(s.args||[]).join(' '), url:s.url||'', enabled:s.enabled });
+    setForm({ name:s.name, type:s.type, command:s.command, args:(s.args||[]).join(' '), url:s.url||'', enabled:s.enabled, token:'', hasToken:!!s.has_headers });
     setEditing(s.name); setAdding(false);
   };
 
@@ -641,6 +651,9 @@ function PageMCP({ store }: { store: ReturnType<typeof useAppStore.getState> }) 
     const body: MCPBody = { name: form.name, type: form.type, command: form.command, enabled: form.enabled };
     if (form.args.trim()) body.args = form.args.trim().split(/\s+/);
     if (form.url.trim()) body.url = form.url.trim();
+    // An empty box means "keep whatever is stored" — the backend never sends the
+    // token back, so it cannot be prefilled.
+    if (form.token.trim()) body.headers = { Authorization: form.token.trim() };
     try {
       await api('', { method:'PUT', body: JSON.stringify(body) });
       setAdding(false); setEditing(null); load(); loadTools();
@@ -656,6 +669,18 @@ function PageMCP({ store }: { store: ReturnType<typeof useAppStore.getState> }) 
       load(); loadTools();
     } catch (e) {
       alert(t('settings.mcpDeleteFailed', { error: e instanceof Error ? e.message : String(e) }));
+    }
+  };
+
+  const doCaps = async (name: string) => {
+    if (capsFor === name) { setCaps(null); setCapsFor(null); return; }
+    setCapsFor(name); setCaps(null);
+    try {
+      const res = await api(`/resources?name=${encodeURIComponent(name)}`);
+      const data = await res.json();
+      setCaps({ name, resources: data.resources || [], prompts: data.prompts || [] });
+    } catch {
+      setCaps({ name, resources: [], prompts: [] });
     }
   };
 
@@ -770,7 +795,7 @@ function PageMCP({ store }: { store: ReturnType<typeof useAppStore.getState> }) 
               <div style={{ display:'flex', gap:4, alignItems:'center' }}>
                 {/* Pre-trust toggle */}
                 <select
-                  value={s.trustMode || 'ask'}
+                  value={s.trust_mode || 'ask'}
                   onChange={async (e) => {
                     const mode = e.target.value;
                     try {
@@ -789,6 +814,15 @@ function PageMCP({ store }: { store: ReturnType<typeof useAppStore.getState> }) 
                   <option value="readonly">📖 {t('settings.trustReadonly')}</option>
                   <option value="all">🔓 {t('settings.trustFull')}</option>
                 </select>
+
+                {(s.supports_resources || s.supports_prompts) && (
+                  <button onClick={() => doCaps(s.name)} title="查看资源 / 提示词" style={{
+                    width:26, height:26, borderRadius:6, border:'1px solid var(--border-color)',
+                    background: capsFor === s.name ? 'rgba(59,130,246,0.15)' : 'transparent',
+                    color:'var(--text-muted)', cursor:'pointer',
+                    display:'flex', alignItems:'center', justifyContent:'center', fontSize:11,
+                  }}>≡</button>
+                )}
 
                 <button onClick={() => doTest(s)} title={t('settings.testConnection')} style={{
                   width:26, height:26, borderRadius:6, border:'1px solid var(--border-color)',
@@ -814,6 +848,30 @@ function PageMCP({ store }: { store: ReturnType<typeof useAppStore.getState> }) 
                 </button>
               </div>
             </div>
+
+            {/* Resources / prompts (optional MCP capabilities) */}
+            {capsFor === s.name && caps && (
+              <div style={{ margin:'0 14px 10px', padding:'8px 12px', borderRadius:6, fontSize:11,
+                background:'var(--bg-secondary)', border:'1px solid var(--border-color)',
+                color:'var(--text-muted)', display:'flex', flexDirection:'column', gap:4 }}>
+                <div>资源 {caps.resources.length} · 提示词 {caps.prompts.length}
+                  <span style={{ cursor:'pointer', marginLeft:8, opacity:0.5 }} onClick={() => { setCaps(null); setCapsFor(null); }}>✕</span>
+                </div>
+                {caps.resources.length > 0 && (
+                  <div style={{ fontFamily:'var(--font-mono)', whiteSpace:'pre-wrap' }}>
+                    {caps.resources.map(r => r.uri).join(NEWLINE)}
+                  </div>
+                )}
+                {caps.prompts.length > 0 && (
+                  <div style={{ fontFamily:'var(--font-mono)', whiteSpace:'pre-wrap' }}>
+                    {caps.prompts.map(pr => pr.name + (pr.description ? ' — ' + pr.description : '')).join(NEWLINE)}
+                  </div>
+                )}
+                {caps.resources.length === 0 && caps.prompts.length === 0 && (
+                  <div>该服务器未暴露资源或提示词。</div>
+                )}
+              </div>
+            )}
 
             {/* Test result */}
             {isTesting && testResult && (
@@ -874,6 +932,15 @@ function MCPServerForm({ form, setForm }: { form: MCPFormState; setForm: (f: MCP
       {form.type === 'sse' && (
         <Field label="URL" placeholder="http://localhost:3000/mcp" value={form.url}
           onChange={v => upd('url', v)} />
+      )}
+      {form.type === 'sse' && (
+        <Field
+          label={t('settings.mcpTokenLabel')}
+          placeholder={form.hasToken ? t('settings.mcpTokenPlaceholder') : 'Bearer <token>'}
+          value={form.token}
+          onChange={v => upd('token', v)}
+          mono
+        />
       )}
       <label style={{ display:'flex', alignItems:'center', gap:8, cursor:'pointer', fontSize:12 }}>
         <input type="checkbox" checked={form.enabled}
@@ -1493,7 +1560,7 @@ function PageDesktop({ store }: { store: ReturnType<typeof useAppStore.getState>
       </Section>
 
       {/* Deep thinking (Anthropic extended thinking) — opencode-style
-          yellow slider: thin track, round thumb, preset stops */}
+          yellow slider: amber→gold gradient fill + glowing thumb, preset stops */}
       <Section title={t('settings.thinkingTitle')} desc={t('settings.thinkingDesc')}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{t('settings.thinkingLabel')}</span>
@@ -1502,24 +1569,26 @@ function PageDesktop({ store }: { store: ReturnType<typeof useAppStore.getState>
         {store.thinkingTokens > 0 && (
           <div style={{ marginTop: 12 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <input
-                type="range" min={1024} max={32768} step={1024}
-                value={store.thinkingTokens}
-                onChange={(e) => {
-                  const n = parseInt(e.target.value, 10);
-                  if (!isNaN(n)) store.setThinkingTokens(n);
-                }}
-                style={{
-                  flex: 1, height: 4, appearance: 'none', WebkitAppearance: 'none',
-                  borderRadius: 2, cursor: 'pointer', outline: 'none',
-                  background: `linear-gradient(to right, #eab308 0%, #eab308 ${((store.thinkingTokens - 1024) / (32768 - 1024)) * 100}%, var(--bg-tertiary) ${((store.thinkingTokens - 1024) / (32768 - 1024)) * 100}%, var(--bg-tertiary) 100%)`,
-                }}
-                onMouseDown={(e) => { (e.target as HTMLInputElement).style.setProperty('--thumb-scale', '1.15'); }}
-                onMouseUp={(e) => { (e.target as HTMLInputElement).style.removeProperty('--thumb-scale'); }}
-              />
+               <div style={{ position: 'relative', flex: 1, display: 'flex', alignItems: 'center' }}>
+                 <div
+                   className="think-track-fill"
+                   style={{ width: `${(store.thinkingTokens - 1024) / (32768 - 1024) * 100}%` }}
+                 />
+                 <input
+                   className="think-slider"
+                   type="range" min={1024} max={32768} step={1024}
+                   value={store.thinkingTokens}
+                   onChange={(e) => {
+                     const n = parseInt(e.target.value, 10);
+                     if (!isNaN(n)) store.setThinkingTokens(n);
+                   }}
+                   style={sliderStyle}
+                 />
+               </div>
               <span style={{
                 fontSize: 11, fontWeight: 600, minWidth: 44, textAlign: 'right',
-                color: '#eab308', fontFamily: 'var(--font-mono)',
+                color: '#fde047', fontFamily: 'var(--font-mono)',
+                textShadow: '0 0 12px rgba(250,204,21,0.35)',
               }}>
                 {(store.thinkingTokens / 1024).toFixed(0)}k
               </span>
@@ -1533,9 +1602,13 @@ function PageDesktop({ store }: { store: ReturnType<typeof useAppStore.getState>
                   style={{
                     flex: 1, padding: '3px 0', fontSize: 10, borderRadius: 5,
                     cursor: 'pointer', fontFamily: 'var(--font-mono)',
-                    background: store.thinkingTokens === v ? 'rgba(234,179,8,0.16)' : 'var(--bg-tertiary)',
-                    border: `0.5px solid ${store.thinkingTokens === v ? '#eab308' : 'var(--border-color)'}`,
-                    color: store.thinkingTokens === v ? '#eab308' : 'var(--text-muted)',
+                    background: store.thinkingTokens === v
+                      ? 'linear-gradient(90deg, rgba(245,158,11,0.30), rgba(250,204,21,0.18))'
+                      : 'var(--bg-tertiary)',
+                    border: `0.5px solid ${store.thinkingTokens === v ? 'rgba(250,204,21,0.55)' : 'var(--border-color)'}`,
+                    color: store.thinkingTokens === v ? '#fde047' : 'var(--text-muted)',
+                    boxShadow: store.thinkingTokens === v ? '0 0 8px rgba(250,204,21,0.18)' : 'none',
+                    transition: 'all 0.12s ease',
                   }}
                 >
                   {v / 1024}k
@@ -1713,6 +1786,11 @@ function VoiceSettings({ store }: { store: ReturnType<typeof useAppStore.getStat
 }
 
 // Input styles used by VoiceSettings
+const sliderStyle: React.CSSProperties = {
+  flex: 1,
+  cursor: 'pointer',
+};
+
 const inputStyle: React.CSSProperties = {
   width: '100%', padding: '8px 12px', borderRadius: 6, fontSize: 12,
   background: 'var(--bg-primary)', border: '1px solid var(--border-color)',

@@ -210,7 +210,9 @@ func (m *Manager) openFile(ctx context.Context, c *Client, filePath, lang string
 		return "", err
 	}
 	docURI := "file://" + filepath.ToSlash(abs)
-	_ = c.OpenTextDocument(docURI, lang, "")
+	if oerr := c.OpenTextDocument(docURI, lang, ""); oerr != nil {
+		log.Printf("[iCode LSP] open text document %s (%s) failed: %v", docURI, lang, oerr)
+	}
 	return docURI, nil
 }
 

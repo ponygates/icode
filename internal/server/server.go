@@ -52,6 +52,11 @@ type Server struct {
 	mcpPool      *mcp.Pool
 	mcpToolNames map[string]bool // tool names currently registered into the engine
 	mcpMu        sync.Mutex
+	// mcpRefresh delegates the engine/tool-registry refresh to the app layer
+	// (App.RefreshMCPTools) when the server runs on the shared pool. Nil when
+	// the server owns its own pool (legacy path) — then refreshMCPTools runs
+	// the local registry logic below.
+	mcpRefresh func()
 
 	httpSrv  *http.Server
 	listener net.Listener
@@ -80,8 +85,15 @@ type ServerConfig struct {
 	Updater  *modelupdate.Service
 	// Scheduler runs WorkBuddy-style scheduled automations (nil = disabled).
 	Scheduler *scheduler.Scheduler
-	Version   string // app version
-	Port      int    // 0 = auto-assign
+	// MCPPool shares the app-level MCP pool so server-mode sessions use the
+	// same connections and tools as every other surface (TUI/exec/print).
+	// Nil = the server builds and owns its own pool (legacy path).
+	MCPPool *mcp.Pool
+	// MCPRefresh refreshes the engine's MCP tool registry from the shared
+	// pool (App.RefreshMCPTools). Nil = the server refreshes locally.
+	MCPRefresh func()
+	Version    string // app version
+	Port       int    // 0 = auto-assign
 }
 
 // New creates a new API server.
@@ -94,17 +106,19 @@ func New(cfg ServerConfig) *Server {
 		tokenBytes = h[:]
 	}
 	s := &Server{
-		cfg:      cfg.Config,
-		reg:      cfg.Registry,
-		store:    cfg.Store,
-		db:       cfg.DB,
-		engine:   cfg.Engine,
-		gate:     cfg.Gate,
-		updater:  cfg.Updater,
-		sch:      cfg.Scheduler,
-		version:  cfg.Version,
-		port:     cfg.Port,
-		apiToken: hex.EncodeToString(tokenBytes),
+		cfg:        cfg.Config,
+		reg:        cfg.Registry,
+		store:      cfg.Store,
+		db:         cfg.DB,
+		engine:     cfg.Engine,
+		gate:       cfg.Gate,
+		updater:    cfg.Updater,
+		sch:        cfg.Scheduler,
+		version:    cfg.Version,
+		port:       cfg.Port,
+		apiToken:   hex.EncodeToString(tokenBytes),
+		mcpPool:    cfg.MCPPool,
+		mcpRefresh: cfg.MCPRefresh,
 	}
 	// Per-model generation overrides (temperature / top_p / max output). Bound
 	// as a method value so it reads the live config: a settings change picked
@@ -138,8 +152,8 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 
 	// App update check
 	mux.HandleFunc("/api/update/check", s.handleUpdateCheck)
-	mux.HandleFunc("/api/update/restart", s.handleUpdateRestart)
-	mux.HandleFunc("/api/update/apply", s.handleUpdateApply)
+	mux.HandleFunc("/api/update/restart", s.requireAPITokenForMutating(s.handleUpdateRestart))
+	mux.HandleFunc("/api/update/apply", s.requireAPITokenForMutating(s.handleUpdateApply))
 
 	// Provider & models
 	mux.HandleFunc("/api/providers", s.handleListProviders)
@@ -165,25 +179,25 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 	mux.HandleFunc("/api/chat", s.handleChat)
 	mux.HandleFunc("/api/chat/stop", s.handleChatStop)
 	mux.HandleFunc("/api/slash", s.handleSlash)
-	mux.HandleFunc("/api/shell", s.handleShell)
+	mux.HandleFunc("/api/shell", s.requireAPITokenForMutating(s.handleShell))
 	mux.HandleFunc("/api/codeblock/open", s.handleCodeBlockOpen)
 
 	// Config
-	mux.HandleFunc("/api/config", s.handleConfig)
-	mux.HandleFunc("/api/config/reset", s.handleConfigReset)
+	mux.HandleFunc("/api/config", s.requireAPITokenForMutating(s.handleConfig))
+	mux.HandleFunc("/api/config/reset", s.requireAPITokenForMutating(s.handleConfigReset))
 	mux.HandleFunc("/api/config/lang", s.handleSetLanguage)
 	mux.HandleFunc("/api/config/keys", s.handleListKeys)
-	mux.HandleFunc("/api/config/key", s.handleSetKey)
+	mux.HandleFunc("/api/config/key", s.requireAPITokenForMutating(s.handleSetKey))
 	mux.HandleFunc("/api/config/models", s.handleListCustomModels)
-	mux.HandleFunc("/api/config/model", s.handleConfigModel)
-	mux.HandleFunc("/api/config/provider", s.handleConfigProvider)
+	mux.HandleFunc("/api/config/model", s.requireAPITokenForMutating(s.handleConfigModel))
+	mux.HandleFunc("/api/config/provider", s.requireAPITokenForMutating(s.handleConfigProvider))
 
 	// Permission
-	mux.HandleFunc("/api/permission/mode", s.handleSetPermissionMode)
-	mux.HandleFunc("/api/permission/rules", s.handleToolRules)
-	mux.HandleFunc("/api/permission/allow-tool", s.handleSessionToolAllow)
-	mux.HandleFunc("/api/permission/respond", s.handlePermissionRespond)
-	mux.HandleFunc("/api/permission/session-allow", s.handleSessionAllow)
+	mux.HandleFunc("/api/permission/mode", s.requireAPITokenForMutating(s.handleSetPermissionMode))
+	mux.HandleFunc("/api/permission/rules", s.requireAPITokenForMutating(s.handleToolRules))
+	mux.HandleFunc("/api/permission/allow-tool", s.requireAPITokenForMutating(s.handleSessionToolAllow))
+	mux.HandleFunc("/api/permission/respond", s.requireAPITokenForMutating(s.handlePermissionRespond))
+	mux.HandleFunc("/api/permission/session-allow", s.requireAPITokenForMutating(s.handleSessionAllow))
 
 	// Mesh — cross-machine message intake (peer iCode instances POST here;
 	// auth via the shared ~/.icode/mesh.token in X-Mesh-Token).
@@ -214,7 +228,9 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 	mux.HandleFunc("/api/mcp", s.handleMCP)
 	mux.HandleFunc("/api/mcp/test", s.handleMCPTest)
 	mux.HandleFunc("/api/mcp/tools", s.handleMCPTools)
-	mux.HandleFunc("/api/mcp/trust", s.handleMCPTrust) // PUT {name, trust_mode}
+	mux.HandleFunc("/api/mcp/trust", s.handleMCPTrust)                // PUT {name, trust_mode}
+	mux.HandleFunc("/api/mcp/resources", s.handleMCPResources)        // GET ?name=<server>
+	mux.HandleFunc("/api/mcp/resource/read", s.handleMCPResourceRead) // POST {server, uri}
 
 	// Todo list (session-scoped scratchpad backing the TodoWrite tool)
 	mux.HandleFunc("/api/todos/", s.handleTodos)
@@ -244,7 +260,7 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 	// File tree
 	mux.HandleFunc("/api/files", s.handleFiles)
 
-	// Voice transcription (desktop / simpleui voice buttons)
+	// Voice transcription (desktop voice buttons)
 	mux.HandleFunc("/api/voice", s.handleVoice)
 
 	// Static frontend — serve the desktop UI at /
@@ -338,6 +354,13 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 	// Initialise the MCP pool: connect every enabled MCP server configured in
 	// the user config and surface its tools to the conversation engine.
 	//
+	// SHARED POOL PATH: when the app layer injects its pool (MCPPool), the
+	// connections, tools/list_changed auto-refresh, and trust-mode policy all
+	// live in app.initMCPPool / App.RefreshMCPTools — this block must NOT run,
+	// or it would overwrite the pool's OnToolsChanged callback with a local
+	// one. The self-built path below only serves direct server.New callers
+	// (tests/legacy) that do not pass a pool.
+	//
 	// IMPORTANT: an enabled-but-unreachable MCP server (or a stdio subprocess
 	// that never responds) can block its connect for up to the client's own
 	// 30s call timeout. Doing this synchronously on the boot path used to block
@@ -345,61 +368,63 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 	// "桌面启动卡死". Connect in the background with a bounded context so the
 	// server (and the desktop window) come up immediately; MCP tools simply
 	// populate when the connections succeed.
-	s.mcpPool = mcp.NewPool()
-	s.mcpToolNames = make(map[string]bool)
-	// Auto-refresh the engine's MCP tool registry when a connected server
-	// signals notifications/tools/list_changed (Reasonix parity).
-	s.mcpPool.SetOnToolsChanged(func(name string) {
-		log.Printf("[iCode MCP] tool list changed on %s — refreshing registry", name)
-		s.refreshMCPTools()
-	})
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("[iCode MCP] init panic: %v", r)
-			}
-		}()
-		mcpCtx, mcpCancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer mcpCancel()
-
-		mcpList := s.cfg.MCP
-		// WorkBuddy bridge: auto-import connectors from ~/.workbuddy/mcp.json so
-		// servers configured in WorkBuddy are usable here without re-configuring.
-		if s.cfg.ImportWorkBuddyEnabled() {
-			if imported, err := config.LoadWorkBuddyMCP(config.WorkBuddyMCPPath(), mcpList); err != nil {
-				log.Printf("[iCode MCP] workbuddy import skipped: %v", err)
-			} else if len(imported) > 0 {
-				log.Printf("[iCode MCP] imported %d server(s) from WorkBuddy mcp.json", len(imported))
-				mcpList = append(mcpList, imported...)
-			}
-		}
-		// Connect every enabled server CONCURRENTLY (each bounded by mcpCtx) so
-		// a slow/unreachable server can never serialise the others or the boot
-		// path. The shared 20s deadline caps total wall time even with many
-		// connectors imported from WorkBuddy.
-		var wg sync.WaitGroup
-		for _, mc := range mcpList {
-			if !mc.Enabled {
-				continue
-			}
-			wg.Add(1)
-			go func(mc config.MCPServerCfg) {
-				defer wg.Done()
-				// A panic connecting one server must not hang wg.Wait.
-				defer func() {
-					if r := recover(); r != nil {
-						log.Printf("[iCode MCP] connect %q panic recovered: %v", mc.Name, r)
-					}
-				}()
-				if err := s.mcpPool.Add(mcpCtx, toMCPServerConfig(mc)); err != nil {
-					log.Printf("[iCode MCP] failed to connect %q: %v", mc.Name, err)
+	if s.mcpPool == nil {
+		s.mcpPool = mcp.NewPool()
+		s.mcpToolNames = make(map[string]bool)
+		// Auto-refresh the engine's MCP tool registry when a connected server
+		// signals notifications/tools/list_changed (Reasonix parity).
+		s.mcpPool.SetOnToolsChanged(func(name string) {
+			log.Printf("[iCode MCP] tool list changed on %s — refreshing registry", name)
+			s.refreshMCPTools()
+		})
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[iCode MCP] init panic: %v", r)
 				}
-			}(mc)
-		}
-		wg.Wait()
-		log.Printf("[iCode MCP] background connect finished")
-		s.refreshMCPTools()
-	}()
+			}()
+			mcpCtx, mcpCancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer mcpCancel()
+
+			mcpList := s.cfg.MCP
+			// WorkBuddy bridge: auto-import connectors from ~/.workbuddy/mcp.json so
+			// servers configured in WorkBuddy are usable here without re-configuring.
+			if s.cfg.ImportWorkBuddyEnabled() {
+				if imported, err := config.LoadWorkBuddyMCP(config.WorkBuddyMCPPath(), mcpList); err != nil {
+					log.Printf("[iCode MCP] workbuddy import skipped: %v", err)
+				} else if len(imported) > 0 {
+					log.Printf("[iCode MCP] imported %d server(s) from WorkBuddy mcp.json", len(imported))
+					mcpList = append(mcpList, imported...)
+				}
+			}
+			// Connect every enabled server CONCURRENTLY (each bounded by mcpCtx) so
+			// a slow/unreachable server can never serialise the others or the boot
+			// path. The shared 20s deadline caps total wall time even with many
+			// connectors imported from WorkBuddy.
+			var wg sync.WaitGroup
+			for _, mc := range mcpList {
+				if !mc.Enabled {
+					continue
+				}
+				wg.Add(1)
+				go func(mc config.MCPServerCfg) {
+					defer wg.Done()
+					// A panic connecting one server must not hang wg.Wait.
+					defer func() {
+						if r := recover(); r != nil {
+							log.Printf("[iCode MCP] connect %q panic recovered: %v", mc.Name, r)
+						}
+					}()
+					if err := s.mcpPool.Add(mcpCtx, mcp.ServerConfigFrom(mc)); err != nil {
+						log.Printf("[iCode MCP] failed to connect %q: %v", mc.Name, err)
+					}
+				}(mc)
+			}
+			wg.Wait()
+			log.Printf("[iCode MCP] background connect finished")
+			s.refreshMCPTools()
+		}()
+	}
 
 	go func() {
 		defer func() {
@@ -535,7 +560,9 @@ func (s *Server) handleUpdateRestart(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(600 * time.Millisecond)
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		_ = s.Shutdown(ctx)
+		if shErr := s.Shutdown(ctx); shErr != nil {
+			log.Printf("[iCode Server] shutdown before relaunch failed: %v", shErr)
+		}
 		os.Exit(0)
 	}()
 }
@@ -601,10 +628,26 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// writePortFile publishes the discovery payload for local clients (VS Code
+// extension, desktop browser mode). It carries BOTH the port and the
+// per-launch Bearer token that guards privileged mutating endpoints, as JSON
+// so clients can extend fields without another format break. 0600: the file
+// now carries a secret, so it is restricted to the owning user; removing the
+// file first ensures a leftover 0644 file from an older build cannot keep the
+// looser mode.
 func (s *Server) writePortFile(port int) {
 	dir := filepath.Join(os.TempDir(), "icode")
 	os.MkdirAll(dir, 0700)
-	os.WriteFile(filepath.Join(dir, "port"), []byte(fmt.Sprintf("%d", port)), 0644)
+	payload, err := json.Marshal(struct {
+		Port  int    `json:"port"`
+		Token string `json:"token"`
+	}{port, s.apiToken})
+	if err != nil {
+		return
+	}
+	portPath := filepath.Join(dir, "port")
+	os.Remove(portPath)
+	os.WriteFile(portPath, payload, 0600)
 }
 
 func (s *Server) cleanupPortFile() {
@@ -626,43 +669,19 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // MCP (Model Context Protocol) — server management & tool integration
 // ============================================================================
 
-// mcpToolAdapter wraps a discovered MCP tool definition so it satisfies the
-// types.Tool interface and routes execution through the shared MCP pool.
-type mcpToolAdapter struct {
-	def  types.ToolDef
-	pool *mcp.Pool
-}
-
-func (a *mcpToolAdapter) Def() types.ToolDef { return a.def }
-
-func (a *mcpToolAdapter) Execute(ctx context.Context, args string) (*types.ToolResult, error) {
-	var m map[string]any
-	if err := json.Unmarshal([]byte(args), &m); err != nil {
-		// Fall back to an empty arg map so the MCP server still receives a call.
-		m = map[string]any{}
-	}
-	return a.pool.Execute(ctx, a.def.Name, m)
-}
-
-// toMCPServerConfig converts a persisted config entry to the live mcp.ServerConfig.
-func toMCPServerConfig(c config.MCPServerCfg) mcp.ServerConfig {
-	return mcp.ServerConfig{
-		Name:    c.Name,
-		Type:    mcp.Transport(c.Type),
-		Command: c.Command,
-		Args:    c.Args,
-		Env:     c.Env,
-		URL:     c.URL,
-		Headers: c.Headers,
-		Enabled: c.Enabled,
-	}
-}
-
 // refreshMCPTools re-registers every discovered MCP tool into the conversation
 // engine, replacing any previously-registered MCP tools. Tools from disabled
 // or disconnected servers are dropped.
+//
+// SHARED POOL PATH: when the server runs on the app-level pool, the refresh
+// (registry diff + trust-mode policy) is delegated to App.RefreshMCPTools via
+// the MCPRefresh callback so there is exactly one registry owner.
 func (s *Server) refreshMCPTools() {
 	if s.engine == nil {
+		return
+	}
+	if s.mcpRefresh != nil {
+		s.mcpRefresh()
 		return
 	}
 	s.mcpMu.Lock()
@@ -675,7 +694,7 @@ func (s *Server) refreshMCPTools() {
 	s.mcpToolNames = make(map[string]bool)
 
 	for _, def := range s.mcpPool.AllTools() {
-		s.engine.RegisterTool(&mcpToolAdapter{def: def, pool: s.mcpPool})
+		s.engine.RegisterTool(&mcp.ToolAdapter{ToolDef: def, Pool: s.mcpPool})
 		s.mcpToolNames[def.Name] = true
 	}
 
@@ -756,6 +775,13 @@ func (s *Server) registerCustomModel(m config.ModelCfg) {
 		Provider:        m.Provider,
 		ContextWindow:   m.ContextWindow,
 		MaxOutputTokens: m.MaxOutput,
+	}
+	// The wire name: the provider's API knows the bare model id, not the
+	// "provider/model_id" registry key. Without this, custom models on bare-
+	// name gateways (agnes/zhipu/sensenova) send the composite ID and fail
+	// with 503 model_not_found. See types.ModelInfo.WireModel.
+	if m.ModelID != "" && m.ModelID != m.ID {
+		info.APIModelID = m.ModelID
 	}
 	s.reg.RegisterCustomModel(info, m.ModelID)
 }

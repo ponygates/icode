@@ -22,7 +22,17 @@ type RotatingWriter struct {
 	path     string
 	maxBytes int64
 	f        *os.File
-	written  int64 // bytes written to current file since open
+	written  int64               // bytes written to current file since open
+	filter   func([]byte) []byte // optional pre-write transform (secret redaction)
+}
+
+// SetFilter installs a transform applied to every write before it reaches the
+// file — used to redact credentials from diagnostic logs. The filter must not
+// retain p: Write hands it a caller-owned slice. Passing nil clears it.
+func (w *RotatingWriter) SetFilter(f func([]byte) []byte) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.filter = f
 }
 
 // NewRotatingWriter opens (or creates) the log file at path. The file is
@@ -67,6 +77,9 @@ func (w *RotatingWriter) Write(p []byte) (int, error) {
 		if err := w.openExisting(); err != nil {
 			return 0, err
 		}
+	}
+	if w.filter != nil {
+		p = w.filter(p)
 	}
 	n, err := w.f.Write(p)
 	if err != nil {

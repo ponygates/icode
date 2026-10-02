@@ -3,7 +3,6 @@ package tui
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -366,7 +365,10 @@ func (c *testCallback) LSPQuery(sub string, args []string) string               
 func (c *testCallback) KnowledgeQuery(query string) string                                       { return "" }
 func (c *testCallback) CreateIdleTask(name, prompt string) string                                { return "" }
 func (c *testCallback) OnPermissionNote(toolPrompt, note string)                                 {}
-func (c *testCallback) OnListSessionsStructured(limit int) []SessionInfo                         { return nil }
+func (c *testCallback) OnMCPApply(action string, name string, cfg config.MCPServerCfg) string {
+	return ""
+}
+func (c *testCallback) OnListSessionsStructured(limit int) []SessionInfo { return nil }
 
 // feedEsc pushes an ESC sequence (leading 0x1b + follow-up bytes) into the
 // key channel — the same path the key pump uses in production — then dispatches
@@ -479,19 +481,44 @@ func TestSubmitSlashUndo(t *testing.T) {
 	}
 }
 
-// TestSubmitSlashShare verifies /share exports a timestamped Markdown file and
-// prints its absolute path. The generated file is removed afterwards.
+// TestSubmitSlashShare verifies /share writes a self-contained HTML export
+// under ~/.icode/shares/ and prints its path; empty sessions get the
+// friendly empty-conversation message instead. The generated file is removed.
 func TestSubmitSlashShare(t *testing.T) {
 	tu := newTestTUI()
+
+	// Empty session → friendly refusal, no file.
 	tu.submit("/share")
 	joined := strings.Join(messagesText(tu), "\n")
+	if !strings.Contains(joined, "当前会话为空") {
+		t.Errorf("/share on empty session did not refuse:\n%s", joined)
+	}
+
+	// With messages → HTML export + printed path.
+	tu.add(RoleUser, "你好，请帮我看看这段代码")
+	tu.add(RoleAssistant, "好的，这是分析结果：\n\n```go\nfmt.Println(\"hi\")\n```")
+	tu.submit("/share")
+	joined = strings.Join(messagesText(tu), "\n")
 	if !strings.Contains(joined, "可分享副本") {
 		t.Errorf("/share did not print the shareable path:\n%s", joined)
 	}
-	// Clean up the generated export file(s).
-	matches, _ := filepath.Glob("icode-share-*.md")
-	for _, m := range matches {
-		_ = os.Remove(m)
+	// Extract the written path from the output and clean it up. The same
+	// path can appear on two lines (the plain-text line, plus the bare link
+	// text left after sanitizing the OSC-8 hyperlink) — dedupe so the file
+	// is removed exactly once and the second sighting doesn't Stat a path
+	// the first one already deleted.
+	seen := map[string]bool{}
+	for _, line := range strings.Split(joined, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasSuffix(line, ".html") || seen[line] {
+			continue
+		}
+		seen[line] = true
+		if _, err := os.Stat(line); err != nil {
+			t.Errorf("share file missing: %v", err)
+		} else {
+			_ = os.Remove(line)
+		}
 	}
 }
 

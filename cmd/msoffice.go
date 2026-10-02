@@ -15,7 +15,7 @@ import (
 // installed and nothing else.
 var msofficeCmd = &cobra.Command{
 	Use:   "msoffice",
-	Short: "Generate Office documents (docx/xlsx/pptx) with zero dependencies",
+	Short: "零依赖生成 Office 文档（docx/xlsx/pptx）",
 }
 
 var msofficeDocx = &cobra.Command{

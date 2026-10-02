@@ -534,6 +534,66 @@ func renderTable(t *TUI, out *[]string, prefix, cont string, width int, rows []s
 			colW[ci] = 30
 		}
 	}
+	// Budget: the whole table must fit the content width. Frame cost is
+	// prefix + (colCount+1) vertical bars + 2 spaces per column; the rest
+	// is shared by the columns. Without this budget a 5-column table is
+	// 5*(30+2)+6 = 166 columns wide — far past an 80-col terminal — and the
+	// autowrapping rows shove the entire frame layout out of sync.
+	prefixW := visibleWidth(prefix)
+	// Drop trailing columns that can never fit (4-col floor each plus the
+	// frame) so an absurdly narrow terminal still shows a table of the
+	// LEADING columns that fits, instead of an over-wide one.
+	for colCount > 1 {
+		frame := prefixW + (colCount + 1) + 2*colCount + 4*colCount
+		if frame <= width {
+			break
+		}
+		colCount--
+	}
+	avail := width - prefixW - (colCount + 1) - 2*colCount
+	if avail < colCount*4 {
+		avail = colCount * 4 // absurdly narrow terminal: minimum columns
+	}
+	totalW := 0
+	for _, w := range colW[:colCount] {
+		totalW += w
+	}
+	if totalW > avail {
+		// Shrink proportionally, keeping a 4-column floor per column.
+		shrunk := make([]int, colCount)
+		sum := 0
+		for ci, w := range colW[:colCount] {
+			nw := w * avail / totalW
+			if nw < 4 {
+				nw = 4
+			}
+			shrunk[ci] = nw
+			sum += nw
+		}
+		// Distribute the rounding remainder by trimming the widest columns.
+		for sum > avail {
+			widest := 0
+			for ci, w := range shrunk {
+				if w > shrunk[widest] {
+					widest = ci
+				}
+			}
+			if shrunk[widest] <= 4 {
+				break // can't shrink further without going below the floor
+			}
+			shrunk[widest]--
+			sum--
+		}
+		copy(colW, shrunk)
+	}
+	// Clip any cell whose content is wider than its (possibly shrunken)
+	// column so it can never push the row past the table frame.
+	clipCell := func(cell string, w int) string {
+		if runeWidthStr(cell) > w {
+			return truncVisible(cell, w)
+		}
+		return cell
+	}
 
 	// Build header — cells go through inline rendering (**bold** etc.) with
 	// visible-width padding so ANSI never breaks column alignment.
@@ -542,7 +602,7 @@ func renderTable(t *TUI, out *[]string, prefix, cont string, width int, rows []s
 	for ci := 0; ci < colCount; ci++ {
 		cell := ""
 		if ci < len(parsed[0]) {
-			cell = parsed[0][ci]
+			cell = clipCell(parsed[0][ci], colW[ci])
 		}
 		styled := t.renderInline(cell)
 		pad := colW[ci] - runeWidthStr(cell)
@@ -581,7 +641,7 @@ func renderTable(t *TUI, out *[]string, prefix, cont string, width int, rows []s
 		for ci := 0; ci < colCount; ci++ {
 			cell := ""
 			if ci < len(parsed[ri]) {
-				cell = parsed[ri][ci]
+				cell = clipCell(parsed[ri][ci], colW[ci])
 			}
 			styled := t.renderInline(cell)
 			pad := colW[ci] - runeWidthStr(cell)

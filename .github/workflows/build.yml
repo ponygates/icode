@@ -7,6 +7,30 @@ name: Build & Release
 #   • Headless CLI binaries are pure-Go cross-compiles (CGO_ENABLED=0,
 #     -tags nogui) from a single Linux runner — no CGO, no GUI libs.
 #   • A version tag (v*) triggers a GitHub Release with all assets.
+#
+# ============================================================================
+# RELEASE SIGNING — read this before cutting the first signed tag
+# ============================================================================
+# Every release asset is published with:
+#   - checksums.txt            sha256 of every asset (always generated here)
+#   - <asset>.minisig          detached minisign signature of that asset
+# Both are release assets, and internal/update/verify.go refuses to self-update
+# unless the downloaded binary matches checksums.txt AND its signature verifies
+# against the public key baked into the binary. Nothing is executed on a user's
+# machine on trust of a magic byte any more.
+#
+# KEYPAIR (maintainer, once):
+#   minisign -G -p icode.pub -s icode.sec
+#     -> icode.sec  PRIVATE KEY: NEVER COMMITTED. Store it only as the repo
+#        secret MINISIGN_SECRET_KEY (base64 of the file: `base64 -w0 icode.sec`)
+#        plus MINISIGN_PASSWORD for its passphrase. Keep an offline backup.
+#     -> icode.pub  PUBLIC KEY: commit it to scripts/signing/icode.pub.
+#        The build jobs read that file and inject its base64 payload with
+#        -ldflags -X ...internal/update.MinisignPublicKey=<base64>, so the shipped
+#        binary can verify signatures. Until the file exists the placeholder in
+#        internal/update/verify.go stays in effect and the auto-updater fails
+#        closed (that is intentional, not a bug).
+# Details: scripts/sign_release.sh, ICODE.md ("发布签名与校验").
 
 on:
   push:
@@ -14,6 +38,11 @@ on:
     branches: [master, main]
   pull_request:
     branches: [master, main]
+  # Manual entry point. Needed to reach the guarded npm-publish / winget-PR
+  # steps, which additionally require their secrets to be configured (they are
+  # NOT part of the normal tag-release path on purpose — see the release-npm and
+  # release-winget jobs).
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -80,31 +109,99 @@ jobs:
         env:
           CGO_ENABLED: ${{ runner.os == 'Windows' && '0' || '1' }}
 
-      # Race detector catches data races that the plain run misses. It needs
-      # CGO_ENABLED=1, so only run it on Linux/macOS (Windows GUI build is
-      # CGO-free). Catches the goroutine/concurrent-map class of bugs that
-      # historically caused silent data corruption in iCode.
+      # Race detector catches data races that the plain run misses. It needs a C
+      # toolchain (CGO_ENABLED=1), which Windows runners have once MSYS2's gcc is
+      # installed — Go's race runtime supports windows/amd64, so there is no
+      # reason to leave the platform that ships the most iCode builds uncovered.
+      # Catches the goroutine/concurrent-map class of bugs that historically
+      # caused silent data corruption in iCode.
+      - name: Install mingw-w64 gcc (Windows, -race needs CGO)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          # MSYS2 ships with the runner image; UCRT64 gcc is what -race links
+          # against. --noconfirm keeps it unattended; a UCRT miss falls back to
+          # the classic mingw-w64-x86_64 package.
+          pacman -S --needed --noconfirm mingw-w64-ucrt-x86_64-gcc \
+            || pacman -S --needed --noconfirm mingw-w64-x86_64-gcc
+
+      - name: Put msys2 gcc on PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          if [ -x /c/msys64/ucrt64/bin/gcc.exe ]; then
+            echo 'C:/msys64/ucrt64/bin' >> "$GITHUB_PATH"
+            echo "CC=C:/msys64/ucrt64/bin/gcc.exe" >> "$GITHUB_ENV"
+          else
+            echo 'C:/msys64/mingw64/bin' >> "$GITHUB_PATH"
+            echo "CC=C:/msys64/mingw64/bin/gcc.exe" >> "$GITHUB_ENV"
+          fi
+          gcc --version | head -1
+
       - name: Run tests with race detector
-        if: runner.os != 'Windows'
         run: go test -race -count=1 -timeout=300s ./...
         env:
           CGO_ENABLED: '1'
 
-      # Coverage gate: fail the build if coverage drops below the floor.
-      # Reported as an artifact so regressions are visible in PR review.
-      - name: Generate coverage report
+      # ── COVERAGE GATE (real, enforced by scripts/check_coverage.sh) ──────
+      # Not a print: the step fails when total coverage drops under TOTAL_MIN,
+      # or when a guard package (internal/core/conversation, internal/core/tool)
+      # drops under its own per-package floor even if the total holds — and also
+      # when a guard package disappears from the profile entirely (build broke,
+      # tests deleted). Thresholds live in the script so they are reviewable.
+      - name: Coverage gate
         if: runner.os == 'Linux'
-        run: |
-          go test -count=1 -timeout=300s -coverprofile=coverage.out ./...
-          go tool cover -func=coverage.out | tail -1
+        shell: bash
         env:
           CGO_ENABLED: '1'
+        run: |
+          go test -count=1 -timeout=300s -covermode=set -coverprofile=coverage.out ./...
+          bash scripts/check_coverage.sh coverage.out
+
+      - name: Upload coverage profile
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-profile-${{ matrix.os }}
+          path: coverage.out
+          if-no-files-found: warn
 
       - name: Run govulncheck
         if: runner.os == 'Linux'
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...
+
+  # ============================================================================
+  # Lint — golangci-lint (config: .golangci.yml, errcheck/govet/staticcheck/
+  # ineffassign/unused + gofmt/goimports formatters). Green on day one by
+  # design: pre-existing debt is allowlisted per-line with a reason in the
+  # config, so any NEW finding — especially in code touched by the PR — fails.
+  # ============================================================================
+  lint:
+    name: Lint (golangci-lint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # //go:embed dist must resolve for the type-checker to load internal/embedded.
+      - name: Stub embedded frontend (lint-only)
+        run: |
+          mkdir -p internal/embedded/dist
+          echo '<!doctype html><meta charset="utf-8"><title>iCode</title><body>lint stub</body>' > internal/embedded/dist/index.html
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.14.0
+          args: --timeout=20m
 
   # ============================================================================
   # Frontend — build desktop frontend for embedding
@@ -189,12 +286,30 @@ jobs:
           name: frontend-dist
           path: internal/embedded/dist/
 
+      - name: Resolve release public key
+        id: pubkey
+        shell: bash
+        run: |
+          # The minisign PUBLIC key baked into the binary so the updater can
+          # verify what it downloads. Placeholder when scripts/signing/icode.pub
+          # has not been committed yet — the updater then fails closed.
+          PUB=scripts/signing/icode.pub
+          if [ -f "$PUB" ]; then
+            KEY="$(grep -v '^untrusted comment:' "$PUB" | tr -d '\r\n[:space:]')"
+          else
+            KEY="REPLACE_WITH_BASE64_MINISIGN_PUBLIC_KEY"
+          fi
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+
       - name: Build desktop binary
         shell: bash
         run: |
           SUFFIX=""
           if [ "${{ matrix.os }}" = "windows-latest" ]; then SUFFIX=".exe"; fi
           LDFLAGS="-s -w -X main.Version=${GITHUB_REF_NAME#v} -X main.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ) -X main.GitCommit=${GITHUB_SHA}"
+          LDFLAGS="$LDFLAGS -X github.com/ponygates/icode/internal/update.MinisignPublicKey=${{ steps.pubkey.outputs.key }}"
+          # NOTE: -H windowsgui here is for the DESKTOP build only. It must never
+          # be added to a CLI build (breaks the Chinese IME bridge — see ICODE.md).
           if [ "$SUFFIX" = ".exe" ]; then LDFLAGS="$LDFLAGS -H windowsgui"; fi
           GOARCH=${{ matrix.goarch }} CGO_ENABLED=${{ matrix.cgo }} go build -tags desktop_only -ldflags="$LDFLAGS" -o icode-desktop-${{ matrix.os }}-${{ matrix.goarch }}$SUFFIX .
 
@@ -203,41 +318,6 @@ jobs:
         with:
           name: icode-desktop-${{ matrix.os }}-${{ matrix.goarch }}
           path: icode-desktop-${{ matrix.os }}-${{ matrix.goarch }}*
-
-  # ============================================================================
-  # Simple UI (Windows WebView2 lightweight window) — the double-click-friendly
-  # "UI 版". Released as icode-simpleui-* to end the icode-cli naming collision
-  # with the headless cross-compiles below.
-  build-simpleui:
-    name: SimpleUI (windows)
-    runs-on: windows-latest
-    needs: [test, frontend]
-    if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
-
-      - name: Download frontend dist
-        uses: actions/download-artifact@v4
-        with:
-          name: frontend-dist
-          path: internal/embedded/dist
-
-      - name: Build simpleui binary
-        shell: bash
-        run: |
-          go build -tags simpleui -ldflags="-s -w -H windowsgui -X main.Version=${GITHUB_REF_NAME#v}" -o icode-simpleui-windows-amd64.exe .
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: icode-simpleui-windows-amd64
-          path: icode-simpleui-windows-amd64*
 
   # ============================================================================
   # Headless CLI binaries — pure-Go cross-compile (-tags nogui, no CGO)
@@ -275,12 +355,26 @@ jobs:
           mkdir -p internal/embedded/dist
           echo '<!doctype html><meta charset="utf-8"><title>iCode</title><body>iCode UI stub (headless CLI)</body>' > internal/embedded/dist/index.html
 
+      - name: Resolve release public key
+        id: pubkey
+        shell: bash
+        run: |
+          PUB=scripts/signing/icode.pub
+          if [ -f "$PUB" ]; then
+            KEY="$(grep -v '^untrusted comment:' "$PUB" | tr -d '\r\n[:space:]')"
+          else
+            KEY="REPLACE_WITH_BASE64_MINISIGN_PUBLIC_KEY"
+          fi
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+
       - name: Cross-compile headless CLI
         run: |
           SUFFIX=""
           if [ "${{ matrix.goos }}" = "windows" ]; then SUFFIX=".exe"; fi
+          # CLI builds are CGO_ENABLED=0 and must NOT get -H windowsgui: the GUI
+          # subsystem breaks the Chinese IME bridge (see ICODE.md).
           CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -tags nogui \
-            -ldflags="-s -w -X main.Version=${GITHUB_REF_NAME#v} -X main.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ) -X main.GitCommit=${GITHUB_SHA}" \
+            -ldflags="-s -w -X main.Version=${GITHUB_REF_NAME#v} -X main.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ) -X main.GitCommit=${GITHUB_SHA} -X github.com/ponygates/icode/internal/update.MinisignPublicKey=${{ steps.pubkey.outputs.key }}" \
             -o icode-cli-${{ matrix.goos }}-${{ matrix.goarch }}$SUFFIX .
 
       - name: Upload artifact
@@ -295,21 +389,254 @@ jobs:
   release:
     name: Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-desktop, build-cli]
+    needs: [lint, build-desktop, build-cli]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
         with:
           pattern: icode-*
           merge-multiple: true
+          path: dist
 
       - name: Make binaries executable
-        run: chmod +x icode-cli-* icode-desktop-* 2>/dev/null || true
+        run: chmod +x dist/icode-cli-* dist/icode-desktop-* 2>/dev/null || true
+
+      # ── (a) sha256 checksums over EVERY release asset ─────────────────────
+      # install.sh, the winget/scoop/homebrew channels and internal/update all
+      # consume this file, so it is generated first and covers plain binaries.
+      - name: Generate checksums.txt
+        working-directory: dist
+        run: |
+          sha256sum icode-cli-* icode-desktop-* > checksums.txt
+          echo "checksums.txt covers $(wc -l < checksums.txt) assets:"
+          cat checksums.txt
+
+      # ── (b) minisign signatures (scripts/sign_release.sh) ─────────────────
+      # The private key exists only as the MINISIGN_SECRET_KEY secret; it is
+      # decoded to a temp home and wiped afterwards. No secret ⇒ no release:
+      # shipping unsigned binaries is exactly what this gate exists to prevent.
+      - name: Install minisign
+        run: |
+          if command -v minisign >/dev/null 2>&1; then exit 0; fi
+          if sudo apt-get update -qq && sudo apt-get install -y -qq minisign; then exit 0; fi
+          # Fallback: pinned static release binary from the upstream project.
+          curl -fsSL -o /tmp/minisign.zip \
+            https://github.com/jedisct1/minisign/releases/download/0.11/minisign-0.11-Linux.zip
+          unzip -j -o /tmp/minisign.zip 'minisign-linux/x86_64/minisign' -d /usr/local/bin
+          minisign --version
+
+      - name: Sign every asset with minisign
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          set -eu
+          if [ -z "${MINISIGN_SECRET_KEY:-}" ]; then
+            echo "::error::仓库未配置 MINISIGN_SECRET_KEY，拒绝发布未签名的二进制。"
+            echo "   见 .github/workflows/build.yml 顶部说明与 scripts/sign_release.sh（私钥永不入库）。"
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/signing"
+          printf '%s' "$MINISIGN_SECRET_KEY" | base64 -d > "$RUNNER_TEMP/signing/icode.sec"
+          chmod 600 "$RUNNER_TEMP/signing/icode.sec"
+          # Signs every icode-cli-*/icode-desktop-* asset AND checksums.txt, so a
+          # tampered checksum list is caught as well.
+          bash scripts/sign_release.sh sign dist "$RUNNER_TEMP/signing/icode.sec"
+          rm -f "$RUNNER_TEMP/signing/icode.sec"
+          ls -1 dist | sed 's/^/  /'
+
+      - name: Build release body (checksums + verification instructions)
+        run: |
+          {
+            echo "## 校验与签名（务必先验证再运行）"
+            echo
+            echo "本发布附带 \`checksums.txt\`（每个资产的 sha256）与每个资产的"
+            echo "\`<asset>.minisig\` minisign 签名。公开验签公钥见仓库"
+            echo "\`scripts/signing/icode.pub\`，验证方式："
+            echo
+            echo '```'
+            echo '# 1) sha256'
+            echo 'sha256sum -c checksums.txt'
+            echo '# 2) 签名'
+            echo 'minisign -V -m <asset> -x <asset>.minisig -p icode.pub'
+            echo '```'
+            echo
+            echo '### sha256'
+            echo
+            echo '```'
+            cat dist/checksums.txt
+            echo '```'
+          } > release-body.md
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            icode-desktop-*
-            icode-cli-*
+            dist/*
+          body_path: release-body.md
           generate_release_notes: true
+
+  # ============================================================================
+  # Packaging lint — PR / push guard for the npm + winget channels (item 23).
+  # Runs WITHOUT a real release: it fabricates dummy per-platform assets, derives
+  # a checksums.txt the same way the release job does, and exercises the exact
+  # generator + structure self-checks. Catches a broken launcher, a bad package
+  # template, or a malformed manifest on the PR, not after tagging.
+  # ============================================================================
+  packaging-lint:
+    name: Packaging lint (npm + winget)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Launcher self-checks (pure node, no npm needed)
+        run: bash scripts/gen_npm_packages.sh check
+
+      - name: Fabricate placeholder CLI assets + checksums.txt
+        shell: bash
+        run: |
+          mkdir -p dist
+          ( cd dist
+            for a in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64.exe windows-arm64.exe; do
+              printf 'placeholder asset %s\n' "$a" > "icode-cli-$a"
+            done
+            sha256sum icode-cli-* > checksums.txt )
+
+      - name: Assemble npm packages + validate structure
+        run: bash scripts/gen_npm_packages.sh build 0.0.0-test dist out/npm --pack
+
+      - name: Generate + check + verify winget manifest (real hashes)
+        run: |
+          bash scripts/gen_winget_manifest.sh gen    0.0.0-test dist/checksums.txt out/winget
+          bash scripts/gen_winget_manifest.sh verify out/winget dist/checksums.txt
+
+  # ============================================================================
+  # Release: npm — assemble platform packages around the launcher.
+  #   • Always (on a tag): generate the tree + `npm pack` every package to prove
+  #     its structure, and upload it as a reviewable artifact.
+  #   • Publish to the registry ONLY behind an explicit workflow_dispatch AND a
+  #     configured NPM_TOKEN secret. A normal `git push v*` NEVER mutates npm.
+  # ============================================================================
+  release-npm:
+    name: npm packages
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-cli, release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download CLI artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: icode-cli-*
+          merge-multiple: true
+          path: dist
+
+      - name: Make executable + build checksums.txt (matches the release)
+        working-directory: dist
+        run: |
+          chmod +x icode-cli-* 2>/dev/null || true
+          sha256sum icode-cli-* > checksums.txt
+
+      - name: Assemble npm packages for the tag version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: bash scripts/gen_npm_packages.sh build "${TAG#v}" dist out/npm --pack
+
+      - name: Upload npm package tarballs (review before publishing)
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-packages
+          path: out/npm
+
+      # ── PUBLISH — manual + secret gated. Not part of the automated tag flow.
+      - name: Guard npm publish
+        id: guard
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${NPM_TOKEN:-}" ]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::跳过 npm publish — 需 workflow_dispatch 触发且配置 NPM_TOKEN secret。"
+          fi
+
+      # Platform packages MUST go first: the `icode` launcher depends on them.
+      - name: Publish to npm (REQUIRES secrets.NPM_TOKEN)
+        if: steps.guard.outputs.publish == 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          for d in out/npm/linux-x64 out/npm/linux-arm64 out/npm/darwin-x64 \
+                   out/npm/darwin-arm64 out/npm/win32-x64 out/npm/win32-arm64; do
+            ( cd "$d" && npm publish --access public )
+          done
+          ( cd out/npm/icode && npm publish --access public )
+
+  # ============================================================================
+  # Release: winget — regenerate the 4-file manifest with REAL InstallerSha256
+  #   pulled from the same release checksums.txt, then validate. Submitting the
+  #   PR to microsoft/winget-pkgs is gated behind workflow_dispatch + a
+  #   WINGET_PAT secret and is NOT performed automatically.
+  # ============================================================================
+  release-winget:
+    name: winget manifest
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-cli, release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download CLI artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: icode-cli-*
+          merge-multiple: true
+          path: dist
+
+      - name: Build checksums.txt (matches the release)
+        working-directory: dist
+        run: sha256sum icode-cli-* > checksums.txt
+
+      - name: Regenerate manifest with real hashes + structure check
+        env:
+          TAG: ${{ github.ref_name }}
+        run: bash scripts/gen_winget_manifest.sh gen "${TAG#v}" dist/checksums.txt out/winget
+
+      - name: Verify manifest hashes agree with the release
+        run: bash scripts/gen_winget_manifest.sh verify out/winget dist/checksums.txt
+
+      - name: Upload manifest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: winget-manifest
+          path: out/winget
+
+      # ── SUBMIT to microsoft/winget-pkgs — manual + PAT gated, never automatic.
+      # Opening the upstream PR needs a fork and a WINGET_PAT (public_repo) secret.
+      # The concrete manual flow (wingetcreate / gh pr create) is documented in
+      # scripts/winget/README.md; this stub only shows the wiring and is left
+      # unexecuted outside a guarded manual dispatch.
+      - name: Guard winget PR submission
+        if: false   # disabled by design — run the documented manual flow instead
+        env:
+          WINGET_PAT: ${{ secrets.WINGET_PAT }}
+        run: |
+          echo "This step intentionally does not auto-submit. Use:"
+          echo "  wingetcreate update PonyGates.iCode -v <ver> -u <urls>   (opens the PR for you)"
+          echo "Requires secrets.WINGET_PAT. See scripts/winget/README.md."

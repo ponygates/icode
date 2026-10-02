@@ -4,12 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/ponygates/icode/internal/config"
-	"github.com/ponygates/icode/internal/llm/provider/openai_compat"
+	"github.com/ponygates/icode/internal/core/auth"
 	"github.com/ponygates/icode/internal/types"
 )
 
@@ -414,14 +415,13 @@ func (s *Server) handleConfigProvider(w http.ResponseWriter, r *http.Request) {
 		// no live provider yet, register a generic OpenAI-compatible provider.
 		if !s.reg.SetCredentials(req.Name, pc.APIKey, pc.APIBase) {
 			if _, gerr := s.reg.Get(req.Name); gerr != nil {
-				np := openai_compat.New(openai_compat.Config{
-					Name:         req.Name,
-					APIKey:       pc.APIKey,
-					APIBase:      pc.APIBase,
-					TimeoutSec:   pc.Timeout,
-					CacheSupport: true,
-				})
-				_ = s.reg.Register(np)
+				// Built through auth.Provider so a brand-new custom gateway
+				// also carries the subscription credential kind and the 401
+				// renewal path, like every other live provider.
+				np := auth.Provider(req.Name, pc)
+				if rerr := s.reg.Register(np); rerr != nil {
+					log.Printf("[server] register provider %q failed: %v", req.Name, rerr)
+				}
 				// Register any custom models that already belong to this vendor.
 				for _, cm := range s.cfg.Models {
 					if cm.Custom && cm.Provider == req.Name {
@@ -810,32 +810,48 @@ func (s *Server) handleSetKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// When user adds an API key for an external provider, auto-elevate the
-	// security level from "local" to "foreign-llm" so the chat actually works.
-	// Local-only providers (ollama, llama, lmstudio) don't trigger this.
-	localProviders := map[string]bool{"ollama": true, "llama": true, "local": true, "lmstudio": true}
-	if req.APIKey != "" && !localProviders[req.Provider] {
-		if s.cfg.SecurityLevel == config.SecLocal {
-			s.cfg.SecurityLevel = config.SecForeignLLM
-			_ = s.cfg.Save(config.DefaultPath())
-		}
-		if s.gate != nil {
-			s.gate.SetSecurityLevel(s.cfg.SecurityLevel)
-		}
-	}
-
 	pc := s.cfg.Providers[req.Provider]
+	prev := pc
 	if req.APIKey != "" {
 		pc.APIKey = req.APIKey
 	}
 	if req.APIBase != "" {
 		pc.APIBase = req.APIBase
 	}
+
+	// Persist the credential before touching anything else: a failed save must
+	// leave both the security level and the in-memory config untouched,
+	// otherwise this session runs on a level the disk never agreed to.
 	s.cfg.Providers[req.Provider] = pc
 	if err := s.cfg.Save(config.DefaultPath()); err != nil {
+		s.cfg.Providers[req.Provider] = prev
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+
+	// When user adds an API key for an external provider, auto-elevate the
+	// security level from "local" to "foreign-llm" so the chat actually works.
+	// Local-only providers (ollama, llama, lmstudio) don't trigger this.
+	localProviders := map[string]bool{"ollama": true, "llama": true, "local": true, "lmstudio": true}
+	if req.APIKey != "" && !localProviders[req.Provider] && s.cfg.SecurityLevel == config.SecLocal {
+		s.cfg.SecurityLevel = config.SecForeignLLM
+		if serr := s.cfg.Save(config.DefaultPath()); serr != nil {
+			// Roll the in-memory level back so memory and disk agree, and tell
+			// the client the key landed but the level did not.
+			s.cfg.SecurityLevel = config.SecLocal
+			log.Printf("[server] persist auto-elevated security level failed: %v", serr)
+			s.reg.SetCredentials(req.Provider, pc.APIKey, pc.APIBase)
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok":      true,
+				"warning": "Key 已保存，但安全等级未能自动提升（本地磁盘写入失败）；请在设置中手动改为 foreign-llm。",
+			})
+			return
+		}
+		if s.gate != nil {
+			s.gate.SetSecurityLevel(s.cfg.SecurityLevel)
+		}
+	}
+
 	// Push the new credentials into the live provider so the change takes
 	// effect immediately (no server restart required).
 	s.reg.SetCredentials(req.Provider, pc.APIKey, pc.APIBase)

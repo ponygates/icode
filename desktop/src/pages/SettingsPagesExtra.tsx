@@ -360,12 +360,12 @@ export function PageUpdates({ store }: { store: StoreState }) {
           </button>
           {result && (
             <div style={{ fontSize:12, color:'var(--text-secondary)', display:'flex', alignItems:'center', gap:8 }}>
-              <span>当前 v{result.current || '?'}</span>
+              <span>{t('updates.currentVersion', { v: result.current || '?' })}</span>
               {result.error ? (
                 <span style={{ color:'var(--danger,#e05)' }}>{result.error}</span>
               ) : result.available ? (
                 <>
-                  <span style={{ color:'var(--accent)' }}>→ v{result.latest} 可用</span>
+                  <span style={{ color:'var(--accent)' }}>{t('updates.newAvailable', { v: result.latest })}</span>
                   <button onClick={applyUpdate} disabled={applying}
                     style={{ padding:'6px 14px', borderRadius:6, fontSize:11, cursor:'pointer', border:'none', background:'var(--accent)', color:'#000', fontWeight:600 }}>
                     {applying ? t('updates.updating') : t('updates.updateNow')}
@@ -427,6 +427,15 @@ export function PageAbout({ store }: { store: StoreState }) {
           <div><span style={{ color:'var(--text-muted)' }}>{t('about.version')}</span>{store.backendVersion || 'v0.1.0'}</div>
           <div><span style={{ color:'var(--text-muted)' }}>{t('about.engine')}</span>iCode Go + React</div>
           <div><span style={{ color:'var(--text-muted)' }}>{t('about.dataPath')}</span>~/.icode/</div>
+          <div>
+            <span style={{ color:'var(--text-muted)' }}>{t('about.license')}</span>Apache-2.0
+            <span style={{ margin: '0 4px', color: 'var(--border-color)' }}>·</span>
+            <a href="https://github.com/ponygates/icode" target="_blank" rel="noreferrer"
+              style={{ color:'var(--accent)', textDecoration:'underline' }}>{t('about.repository')}</a>
+            <span style={{ margin: '0 4px', color: 'var(--border-color)' }}>·</span>
+            <a href="https://github.com/ponygates/icode/issues" target="_blank" rel="noreferrer"
+              style={{ color:'var(--accent)', textDecoration:'underline' }}>{t('about.feedback')}</a>
+          </div>
         </div>
       </Section>
       <Section title={t('about.dataManagement')}>

@@ -158,18 +158,19 @@ const Sidebar: React.FC<Props> = ({ onToggle }) => {
         {collapsed && <PlumBlossom size={22} style={{ flexShrink: 0 }} />}
         <button
           onClick={collapsed ? toggleCollapse : onToggle}
+          aria-label={collapsed ? t('sidebar.expandAriaLabel', '展开侧栏') : t('sidebar.collapseAriaLabel', '收起侧栏')}
           className="interactive"
           style={{
             background: 'none', border: 'none', color: 'var(--text-muted)',
             padding: 4, display: 'flex', borderRadius: 4,
           }}
         >
-          <PanelLeftClose size={16} style={collapsed ? { transform: 'rotate(180deg)' } : undefined} />
+          <PanelLeftClose size={16} aria-hidden style={collapsed ? { transform: 'rotate(180deg)' } : undefined} />
         </button>
       </div>
 
       {/* Navigation */}
-      <nav style={{ padding: '8px 6px', borderBottom: '0.5px solid var(--border-color)' }}>
+      <nav role="navigation" aria-label={t('sidebar.navAriaLabel', '主导航')} style={{ padding: '8px 6px', borderBottom: '0.5px solid var(--border-color)' }}>
         {navItems.map((item) => {
           const active = isActive(item);
           return (
@@ -177,10 +178,12 @@ const Sidebar: React.FC<Props> = ({ onToggle }) => {
               key={item.path || item.action}
               onClick={() => handleNav(item)}
               title={item.label}
+              aria-label={item.label}
+              aria-current={active ? 'page' : undefined}
               className={active ? 'nav-item active' : 'nav-item'}
               style={{ width: '100%', justifyContent: collapsed ? 'center' : 'flex-start', marginBottom: 2 }}
             >
-              <item.icon size={16} style={active ? { color: 'var(--accent)' } : undefined} />
+              <item.icon size={16} aria-hidden style={active ? { color: 'var(--accent)' } : undefined} />
               {!collapsed && <span>{item.label}</span>}
             </button>
           );

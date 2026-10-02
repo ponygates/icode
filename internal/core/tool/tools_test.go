@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/ponygates/icode/internal/netsec"
 	"github.com/ponygates/icode/internal/types"
 )
 
@@ -568,6 +569,8 @@ func TestEditTool_FuzzyWhitespace(t *testing.T) {
 	dir := t.TempDir()
 	filePath := filepath.Join(dir, "fuzzy.go")
 	os.WriteFile(filePath, []byte("func main() {\n\t    fmt.Println(\"a\")\n\tfmt.Println(\"b\")\n}"), 0644)
+	// Read-before-edit guard: the fuzzy (non-exact) path needs a tracked read.
+	(&ReadFileTool{}).Execute(context.Background(), `{"path":"`+jsonEscape(filePath)+`"}`)
 
 	// Model's old_string uses 4 spaces; the file uses tabs.
 	editJSON := `{"file_path":"` + jsonEscape(filePath) + `",
@@ -597,6 +600,9 @@ func TestEditTool_FuzzyNoMatch(t *testing.T) {
 	dir := t.TempDir()
 	filePath := filepath.Join(dir, "nomatch.txt")
 	os.WriteFile(filePath, []byte("hello world"), 0644)
+	// Read first so the failure comes from the edit engine ("not found"),
+	// not from the read-before-edit guard.
+	(&ReadFileTool{}).Execute(context.Background(), `{"path":"`+jsonEscape(filePath)+`"}`)
 
 	result, _ := (&EditTool{}).Execute(context.Background(),
 		`{"file_path":"`+jsonEscape(filePath)+`","old_string":"totally different","new_string":"x"}`)
@@ -615,6 +621,8 @@ func TestEditTool_FuzzyMultiLine(t *testing.T) {
 	dir := t.TempDir()
 	filePath := filepath.Join(dir, "multi.go")
 	os.WriteFile(filePath, []byte("func a() {\n\tif x {\n\t\tfoo()\n\t}\n}"), 0644)
+	// Read-before-edit guard: the fuzzy (non-exact) path needs a tracked read.
+	(&ReadFileTool{}).Execute(context.Background(), `{"path":"`+jsonEscape(filePath)+`"}`)
 
 	// Model passes the block with different indentation.
 	editJSON := `{"file_path":"` + jsonEscape(filePath) + `",
@@ -743,11 +751,20 @@ func TestValidateFetchURL_BlocksSSRF(t *testing.T) {
 }
 
 func TestValidateFetchURL_AllowsPublic(t *testing.T) {
-	// blockedBySSRF is the network-independent core; public IPs must pass.
-	public := []string{"8.8.8.8", "1.1.1.1", "93.184.216.34", "2001:4860:4860::8888"}
+	// The network-independent core now lives in netsec; keep a call-site guard
+	// here so a regression in the delegation is caught in this package.
+	public := []string{"8.8.8.8", "1.1.1.1", "93.184.216.34", "2606:4700:4700::1111"}
 	for _, s := range public {
-		if blockedBySSRF(net.ParseIP(s)) {
-			t.Errorf("blockedBySSRF(%q) = true, want false", s)
+		if netsec.IsMetadataIP(net.ParseIP(s)) {
+			t.Errorf("netsec.IsMetadataIP(%q) = true, want false", s)
+		}
+		// Brackets are how an IPv6 literal is written in a URL authority.
+		host := s
+		if strings.Contains(s, ":") {
+			host = "[" + s + "]"
+		}
+		if err := validateFetchURL("http://" + host + "/"); err != nil {
+			t.Errorf("validateFetchURL(%q) = %v, want allow", s, err)
 		}
 	}
 }

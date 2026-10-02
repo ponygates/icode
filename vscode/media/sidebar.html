@@ -90,6 +90,14 @@
     #send { background: var(--accent); }
     #stop { background: #5a5a5a; display: none; }
     .usage { font-size: 11px; color: var(--muted); padding: 2px 10px; }
+    #inputwrap { position: relative; flex: 1; display: flex; }
+    #filepick {
+      position: absolute; bottom: 100%; left: 0; right: 0; max-height: 220px;
+      overflow-y: auto; background: #252526; border: 1px solid var(--border);
+      border-radius: 6px; margin-bottom: 6px; display: none; z-index: 20;
+    }
+    .filepick-item { padding: 4px 10px; cursor: pointer; font-family: monospace; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .filepick-item:hover, .filepick-item.sel { background: #094771; }
   </style>
 </head>
 <body>
@@ -111,7 +119,10 @@
         <div id="messages"></div>
         <div class="usage" id="usage"></div>
         <div id="inputbar">
-          <textarea id="input" placeholder="输入消息，Enter 发送 / Shift+Enter 换行"></textarea>
+          <div id="inputwrap">
+            <div id="filepick"></div>
+            <textarea id="input" placeholder="输入消息，Enter 发送 / Shift+Enter 换行，@ 选择文件"></textarea>
+          </div>
           <button id="send">发送</button>
           <button id="stop">停止</button>
         </div>
@@ -138,6 +149,39 @@
         msgs: {},     // sessionId -> [{role, content, kind}]
         assistantNode: null,
       };
+
+      const saved = (vscode.getState && vscode.getState()) || {};
+      function persist() {
+        if (vscode.setState) { vscode.setState({ active: state.active, draft: inputEl.value }); }
+      }
+
+      // @-context file picker (bridged to the extension host via findFiles).
+      const filepickEl = $('filepick');
+      let fileHits = []; let fileSel = -1; let pickReq = 0; let pickTimer = null;
+      function atQuery() {
+        const before = inputEl.value.slice(0, inputEl.selectionStart);
+        const m = before.match(/(^|s)@([^s@]*)$/);
+        return m ? m[2] : null;
+      }
+      function hidePicker() { fileHits = []; fileSel = -1; filepickEl.style.display = 'none'; }
+      function renderPicker() {
+        if (!fileHits.length || fileSel < 0) { filepickEl.style.display = 'none'; return; }
+        filepickEl.style.display = 'block';
+        filepickEl.innerHTML = '';
+        fileHits.forEach((f, i) => {
+          const d = document.createElement('div');
+          d.className = 'filepick-item' + (i === fileSel ? ' sel' : '');
+          d.textContent = f;
+          d.onmousedown = (e) => { e.preventDefault(); insertPath(f); };
+          filepickEl.appendChild(d);
+        });
+      }
+      function insertPath(p) {
+        const pos = inputEl.selectionStart;
+        const head = inputEl.value.slice(0, pos).replace(/(^|s)@([^s@]*)$/, (mm, pre) => pre + '@' + p + ' ');
+        inputEl.value = head + inputEl.value.slice(pos);
+        hidePicker(); inputEl.focus(); persist();
+      }
 
       function post(msg) { vscode.postMessage(msg); }
 
@@ -189,6 +233,7 @@
 
       function selectSession(id) {
         state.active = id;
+        persist();
         state.assistantNode = null;
         renderSessions();
         renderMessages();
@@ -254,6 +299,7 @@
 
       function doSend(text) {
         pushMsg('user', text, 'user');
+        persist();
         state.streaming = true;
         $('send').style.display = 'none';
         $('stop').style.display = 'inline-block';
@@ -331,7 +377,8 @@
             break;
           case 'sessions':
             state.sessions = m.payload || [];
-            if (!state.active && state.sessions.length) { selectSession(state.sessions[0].id); }
+            if (!state.active && saved.active && state.sessions.some((x) => x.id === saved.active)) { selectSession(saved.active); }
+            else if (!state.active && state.sessions.length) { selectSession(state.sessions[0].id); }
             renderSessions();
             break;
           case 'models':
@@ -347,6 +394,9 @@
             }
             break;
           }
+          case 'files':
+            if (m.reqId === pickReq) { fileHits = m.payload || []; fileSel = fileHits.length ? 0 : -1; renderPicker(); }
+            break;
           case 'stream':
             onStream(m.sessionId, m.event);
             break;
@@ -370,7 +420,21 @@
       $('newSession').onclick = newSession;
       $('send').onclick = send;
       $('stop').onclick = () => { post({ type: 'stop', sessionId: state.active }); };
+      inputEl.addEventListener('input', () => {
+        persist();
+        const q = atQuery();
+        if (q === null) { hidePicker(); return; }
+        if (pickTimer) { clearTimeout(pickTimer); }
+        pickTimer = setTimeout(() => { pickReq++; post({ type: 'listFiles', query: q, reqId: pickReq }); }, 180);
+      });
       inputEl.addEventListener('keydown', (e) => {
+        // @-picker keyboard navigation takes precedence over send while open.
+        if (fileHits.length && fileSel >= 0) {
+          if (e.key === 'ArrowDown') { e.preventDefault(); fileSel = (fileSel + 1) % fileHits.length; renderPicker(); return; }
+          if (e.key === 'ArrowUp') { e.preventDefault(); fileSel = (fileSel - 1 + fileHits.length) % fileHits.length; renderPicker(); return; }
+          if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); insertPath(fileHits[fileSel]); return; }
+          if (e.key === 'Escape') { e.preventDefault(); hidePicker(); return; }
+        }
         if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
         // Esc — interrupt an in-flight generation (mirrors the desktop app).
         if (e.key === 'Escape') {
@@ -382,6 +446,7 @@
       });
 
       // boot
+      if (saved.draft) { inputEl.value = saved.draft; }
       post({ type: 'ready' });
     })();
   </script>

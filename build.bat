@@ -47,11 +47,25 @@ if "%BUILD_DESKTOP%"=="1" (
         )
     )
     echo   Building Vite frontend...
-    call npx vite build 2>nul
-    if errorlevel 1 (
-        echo   WARNING: Vite build failed. Desktop UI will not be embedded.
-        echo   The --no-embedded flag will be used for CLI-only builds.
+    REM Call the local vite directly instead of "npx": on this machine npx
+    REM resolves to a pnpm shim (pnpm dlx) whose flags/behaviour differ from
+    REM npm's npx. node_modules\.bin\vite.cmd is what npm install produced,
+    REM so it always matches the installed deps. No 2^>nul either — build
+    REM errors must be visible, not silently replaced by "stale frontend".
+    set "FRONTEND_OK=1"
+    if exist "node_modules\.bin\vite.cmd" (
+        call "node_modules\.bin\vite.cmd" build
     ) else (
+        echo   ERROR: node_modules\.bin\vite.cmd not found - did npm install fail?
+        set "FRONTEND_OK=0"
+    )
+    if errorlevel 1 set "FRONTEND_OK=0"
+    REM NOTE: must use delayed expansion (!FRONTEND_OK!) here — this whole
+    REM block lives inside the outer "if BUILD_DESKTOP" parenthesized block,
+    REM and cmd expands %VAR% for the ENTIRE block at parse time, so
+    REM %FRONTEND_OK% would expand to its pre-block value (empty) and this
+   REM test could never see the vite result. !VAR! evaluates at run time.
+    if "!FRONTEND_OK!"=="1" (
         echo   Frontend built.
         REM Copy frontend dist for Go embed.
         REM  /MIR (mirror), NOT /E: Vite names its bundles by content hash, so a
@@ -63,6 +77,10 @@ if "%BUILD_DESKTOP%"=="1" (
             robocopy "dist" "%ROOT%internal\embedded\dist" /MIR /NFL /NDL /NJH /NJS /NP >nul
             echo   Frontend mirrored to embedded ^(stale chunks purged^).
         )
+    ) else (
+        echo   WARNING: Vite build failed. Building with -tags noembedded:
+        echo   this binary will have NO embedded desktop UI until the
+        echo   frontend builds again ^(icode desktop will not work^).
     )
     cd /d "%ROOT%"
 )
@@ -72,15 +90,23 @@ echo.
 echo   [2/3] Building icode.exe (single binary)...
 
 REM Determine build flags
-REM  -H windowsgui: link as a GUI-subsystem app so double-clicking icode.exe
-REM  never flashes a black CMD/console window. CLI usage still works because
-REM  the process re-attaches to the parent terminal's console at startup
-REM  (see cmd/codepage_windows.go setupConsoleIO).
-set "LDFLAGS=-s -w -H windowsgui"
+REM Console subsystem (NOT -H windowsgui): a GUI-subsystem binary breaks the
+REM console IME bridge on Windows — the conhost/ConPTY input path treats GUI
+REM clients differently, so Chinese IME composition leaks raw pinyin letters
+REM into the app AND the IME commit string gets echoed straight into the
+REM screen buffer (the "text and garbage appear above the input box" bug,
+REM confirmed via ~/.icode/screen-dump.txt + cli.log). A console-subsystem
+REM exe double-clicked in Explorer simply opens its own terminal window and
+REM runs the TUI there — which is the desired behaviour anyway.
+set "LDFLAGS=-s -w"
 set "BUILD_TAGS="
-if "%BUILD_DESKTOP%"=="0" (
-    set "BUILD_TAGS=-tags noembedded"
-)
+REM noembedded used to be a dead tag: embed.go had no build guard, so a
+REM "CLI-only" build silently embedded the frontend anyway. embed.go is now
+REM guarded by //go:build !noembedded (nil-Frontend stub in embed_stub.go),
+REM and the tag is also applied when a desktop build was requested but the
+REM frontend failed — never bake a stale UI into a "fresh" binary.
+if "%BUILD_DESKTOP%"=="0" set "BUILD_TAGS=-tags noembedded"
+if "%BUILD_DESKTOP%"=="1" if not "%FRONTEND_OK%"=="1" set "BUILD_TAGS=-tags noembedded"
 
 go build -ldflags="%LDFLAGS%" -o icode.exe %BUILD_TAGS% .
 if errorlevel 1 (

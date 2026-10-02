@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"sync"
 
@@ -136,12 +137,16 @@ func (s *Server) respond(id json.RawMessage, result any, rpcErr *rpcError) {
 	if id == nil {
 		return
 	}
-	_ = s.out.Encode(rpcResponse{JSONRPC: "2.0", ID: id, Result: result, Error: rpcErr})
+	if err := s.out.Encode(rpcResponse{JSONRPC: "2.0", ID: id, Result: result, Error: rpcErr}); err != nil {
+		log.Printf("[acp] encode RPC response failed: %v", err)
+	}
 }
 
 // notify sends a one-way JSON-RPC notification.
 func (s *Server) notify(method string, params any) {
-	_ = s.out.Encode(map[string]any{"jsonrpc": "2.0", "method": method, "params": params})
+	if err := s.out.Encode(map[string]any{"jsonrpc": "2.0", "method": method, "params": params}); err != nil {
+		log.Printf("[acp] encode RPC notification %q failed: %v", method, err)
+	}
 }
 
 // sessionNewParams mirrors ACP session/new.
@@ -153,7 +158,9 @@ type sessionNewParams struct {
 
 func (s *Server) handleSessionNew(req rpcRequest, isNotify bool) {
 	var p sessionNewParams
-	_ = json.Unmarshal(req.Params, &p)
+	if uerr := json.Unmarshal(req.Params, &p); uerr != nil {
+		log.Printf("[acp] session/new params decode failed: %v", uerr)
+	}
 	if s.Store == nil {
 		if !isNotify {
 			s.respond(req.ID, nil, &rpcError{Code: -32603, Message: "no session store"})
@@ -356,7 +363,9 @@ func (s *Server) requestPermission(sessionID string, req *types.PermissionReq, r
 // resolvePermission feeds the editor's response back to the waiting handler.
 func (s *Server) resolvePermission(id json.RawMessage, req rpcRequest) {
 	var key string
-	_ = json.Unmarshal(id, &key) // strip JSON string quotes
+	if uerr := json.Unmarshal(id, &key); uerr != nil { // strip JSON string quotes
+		log.Printf("[acp] permission response: decode id %s failed: %v", string(id), uerr)
+	}
 	s.permMu.Lock()
 	ch, ok := s.permPending[key]
 	s.permMu.Unlock()
