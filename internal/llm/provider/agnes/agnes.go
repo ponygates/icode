@@ -7,7 +7,6 @@
 // Models (text/chat, verified on agnes-ai.com 2026-08):
 //   - agnes-2.5-flash   主力文本模型：代码生成、复杂推理、agentic coding
 //   - agnes-2.0-flash   上一代快速模型，日常对话与轻量任务
-//   - agnes-large       通用对话模型（较早系列，8k 上下文）
 //
 // The API base URL is configurable in ~/.icode/config.yaml under
 // providers.agnes.api_base. Default: https://api.agnes-ai.cn/v1 (CN gateway).
@@ -59,17 +58,9 @@ func DefaultModels() []types.ModelInfo {
 				Streaming: true,
 			},
 		},
-		{
-			ID:              "agnes-large",
-			Name:            "Agnes Large",
-			Description:     "Agnes 通用对话模型（较早系列）",
-			Provider:        ProviderName,
-			ContextWindow:   8192,
-			MaxOutputTokens: 4096,
-			Capabilities: types.ModelCap{
-				Tools:     true,
-				Streaming: true,
-			},
-		},
+		// agnes-large removed 2026-10: the upstream gateway returns
+		// HTTP 503 model_not_found ("no available channel in group
+		// default"), i.e. the model is no longer routable. Do not
+		// re-add without verifying it on api.agnes-ai.cn first.
 	}
 }

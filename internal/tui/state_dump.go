@@ -153,11 +153,23 @@ var lastKeySite atomic.Value // holds string
 // and names the racing pair directly in cli.log. Nested sequence parsing
 // (nextKey/nextKeyTimeout inside handleKey) deliberately has no site: it runs
 // on the consumer's own goroutine and cannot race with it.
+//
+// The log write is gated behind ICODE_TUI_KEYTRACE=1: this trace was built to
+// diagnose a since-fixed two-consumer key race, and logging key-site switches
+// (which include the rune itself — i.e. fragments of what the user typed)
+// into a permanently-appended cli.log is both noise and a privacy liability
+// in everyday use. The state machine itself always runs so enabling the env
+// var restores the full diagnostic with no behavior change.
+var keyTraceEnabled = os.Getenv("ICODE_TUI_KEYTRACE") == "1"
+
 func traceKeySite(site string, r rune) {
 	prev, _ := lastKeySite.Load().(string)
 	if prev == site {
 		return
 	}
 	lastKeySite.Store(site)
+	if !keyTraceEnabled {
+		return
+	}
 	writeCliLog(fmt.Sprintf("[tui] key-site: %q -> %q (rune=%q)", prev, site, r))
 }

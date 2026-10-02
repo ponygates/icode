@@ -526,7 +526,11 @@ func serverStr(cfg *config.Config) string {
 }
 
 func init() {
-	execCmd.Flags().StringP("prompt", "p", "", "The prompt to execute")
+	// No -p shorthand here: the root command's persistent --provider already
+	// owns -p, and pflag panics at parse time when an inherited shorthand
+	// collides with a local one (this exact crash made `icode exec` unusable,
+	// even with --prompt). Positional args still work: `icode exec "prompt"`.
+	execCmd.Flags().String("prompt", "", "The prompt to execute")
 	execCmd.Flags().StringP("file", "f", "", "Read prompt from file")
 	execCmd.Flags().IntP("max-turns", "t", 10, "Maximum conversation turns")
 	execCmd.Flags().String("output-format", "text", "Output format: text | json | stream-json (NDJSON)")
