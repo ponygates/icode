@@ -364,8 +364,15 @@ const Sidebar: React.FC<Props> = ({ onToggle }) => {
                     onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--text-muted)'; }}
                   ><Pencil size={11} /></button>
                   <button className="action-hidden"
-                    onClick={(e) => { e.stopPropagation(); deleteSession(s.id); }}
-                    title={t('sidebar.delete')}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      // Confirm-guard: the trash is the only way back and
+                      // accidental clicks have silently eaten real sessions.
+                      const name = s.title || t('chat.sessionN', { n: s.id.slice(0, 6) });
+                      if (!window.confirm(`确定删除会话「${name}」吗？\n删除后将移入回收站，30 天后自动彻底清除。`)) return;
+                      deleteSession(s.id);
+                    }}
+                    title={t('sidebar.delete') + '（移入回收站）'}
                     style={{
                       background: 'none', border: 'none', color: 'var(--text-muted)',
                       cursor: 'pointer', padding: 2, display: 'flex', fontSize: 10,

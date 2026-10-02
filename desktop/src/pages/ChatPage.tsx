@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next';
 import i18n from '../i18n';
 import { useAppStore, Message, Attachment, type Model } from '../stores/appStore';
-import { Send, Plus, Trash2, MessageSquare, Cpu, Shield, Square, ShieldAlert, GitBranch, FileText, RefreshCw, Edit3, Download, FileJson, Upload, ChevronDown, Mic } from 'lucide-react';
+import { Send, Plus, Trash2, Eraser, MessageSquare, Cpu, Shield, Square, ShieldAlert, GitBranch, FileText, RefreshCw, Edit3, Download, FileJson, Upload, ChevronDown, Mic } from 'lucide-react';
 import Markdown from '../components/Markdown';
 import CommandPalette, { useCommandPalette } from '../components/CommandPalette';
 import TodoPanel from '../components/TodoPanel';
@@ -1267,7 +1267,13 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
                     </div>
                   </div>
                   <button
-                    onClick={(e) => { e.stopPropagation(); deleteSession(s.id); }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      // Confirm-guard: delete is reversible only via the
+                      // trash; a stray click must not drop a session.
+                      if (!window.confirm(`确定删除会话「${s.title}」吗？\n删除后将移入回收站，30 天后自动彻底清除。`)) return;
+                      deleteSession(s.id);
+                    }}
                     style={{
                       background: 'none', border: 'none', color: 'var(--text-muted)',
                       cursor: 'pointer', padding: 4,
@@ -1696,6 +1702,10 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
           {activeSessionId && (
             <button
               onClick={() => {
+                // Confirm-guard: clearing WIPES all messages of this session
+                // in the shared SQLite history — unrecoverable, and the trash
+                // cannot bring them back (only the empty shell survives).
+                if (!window.confirm('确定清空本会话的全部消息吗？\n清空后消息将彻底删除、无法恢复（会话标题保留）。')) return;
                 // Wipe messages in the shared SQLite history too, so the
                 // cleared chat does not resurrect in the CLI.
                 if (backendUrl && activeSessionId) {
@@ -1703,7 +1713,7 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
                 }
                 clearMessages(activeSessionId);
               }}
-              title={t('chat.clearChat')}
+              title={t('chat.clearChat') + '（删除全部消息，不可恢复）'}
               style={{
                 background: 'none', border: '1px solid var(--border-color)',
                 color: 'var(--text-secondary)', padding: '4px 10px',
@@ -1711,7 +1721,7 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
                 alignItems: 'center', gap: 4, fontSize: 12,
               }}
             >
-              <Trash2 size={14} />
+              <Eraser size={14} />
             </button>
           )}
         </div>

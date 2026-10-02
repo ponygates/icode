@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -131,10 +132,18 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, sess)
 
 	case http.MethodDelete:
+		// Audit BEFORE deleting — the title is gone once the row drops.
+		title := ""
+		if sess, err := s.store.Get(id); err == nil {
+			title = sess.Title
+		}
 		if err := s.store.Delete(id); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
 		}
+		// Audit trail: hard-deletes leave no other trace, so log id+title
+		// for post-mortem (a user purging sessions must be explainable).
+		log.Printf("[session] hard-delete id=%s title=%q", id, truncateForLog(title))
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 
 	default:
@@ -249,10 +258,14 @@ func (s *Server) handleSessionClear(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := s.store.ClearMessages(r.PathValue("id")); err != nil {
+	id := r.PathValue("id")
+	if err := s.store.ClearMessages(id); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	// Audit: cleared transcripts are unrecoverable and invisible afterwards —
+	// without this line a "where did my history go" report is undiagnosable.
+	log.Printf("[session] clear-messages id=%s title=%q", id, truncateForLog(s.titleOf(id)))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -290,6 +303,7 @@ func (s *Server) handleSessionRestore(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	log.Printf("[session] restore id=%s title=%q", body.SessionID, truncateForLog(sess.Title))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "restored": true})
 }
 
@@ -327,6 +341,7 @@ func (s *Server) handleSessionTrash(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	log.Printf("[session] trash id=%s title=%q", body.SessionID, truncateForLog(sess.Title))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "trashed": true})
 }
 
@@ -342,5 +357,29 @@ func (s *Server) handleTrashPurge(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	// Audit: purge is irreversible bulk destruction — the count is the only
+	// way to later explain "my old sessions disappeared".
+	log.Printf("[session] trash-purge removed=%d", removed)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed})
+}
+
+// titleOf returns the session title for audit logs, or "" when unknown
+// (missing session or store error). Never fails — logging must not block.
+func (s *Server) titleOf(id string) string {
+	sess, err := s.store.Get(id)
+	if err != nil {
+		return ""
+	}
+	return sess.Title
+}
+
+// truncateForLog caps a user-provided string so audit lines stay single-line
+// even with pathological titles (rune-safe for CJK).
+func truncateForLog(s string) string {
+	const max = 40
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "..."
 }
