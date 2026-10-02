@@ -21,12 +21,19 @@ func (t *TUI) messageLinesW(m Message, width int) []string {
 		return wrapPrefixed(t.paint("orange", "❯ ")+"  ", "    ", m.Content, width)
 	case RoleAssistant:
 		if t.rawMode {
-			return t.renderMarkdown(m.Content, "", "  ", width)
+			// Keep prefix and cont equal ("  " vs "  "): an empty first-line
+			// prefix with a 2-space continuation produced a hanging indent
+			// on every wrapped CJK paragraph — line 0 flush left, all
+			// following lines shifted right by 2 cells. Streaming (stream.go
+			// printAssistant) and the plain-text path below already align
+			// at 2/2; this must match or the same message visibly jumps
+			// between layouts when it settles.
+			return t.renderMarkdown(m.Content, "  ", "  ", width)
 		}
 		return wrapPrefixed("  ", "  ", m.Content, width)
 	case RoleSystem:
 		if t.rawMode {
-			return t.renderMarkdown(m.Content, "", "  ", width)
+			return t.renderMarkdown(m.Content, "  ", "  ", width)
 		}
 		return wrapPrefixed("  ", "  ", m.Content, width)
 	case RoleError:

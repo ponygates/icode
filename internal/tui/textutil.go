@@ -38,22 +38,70 @@ func truncate(s string, n int) string {
 }
 
 // wrapPrefixed wraps text to the terminal width, with a first-line prefix and
-// a continuation indent. prefixWidth is the display width of `prefix`.
+// a continuation indent.
+//
+// The first line carries `prefix` but every wrapped continuation carries
+// `cont`, and the two can differ in width (user prompts: "❯ " vs "    ").
+// Each output segment therefore gets its own width budget: the first wrapped
+// line is limited to width-prefixW, continuation lines to width-contW.
+// Wrapping everything against the prefix width alone made continuation lines
+// overrun the terminal by (contW-prefixW) cells, tripping the terminal's
+// implicit hard wrap and desynchronising every following row.
 func wrapPrefixed(prefix, cont, text string, width int) []string {
-	contentW := width - runeWidthStr(prefix)
-	if contentW < 10 {
-		contentW = 10
+	prefixW := runeWidthStr(prefix)
+	contW := runeWidthStr(cont)
+	firstW := width - prefixW
+	if firstW < 10 {
+		firstW = 10
 	}
-	wrapped := wrapText(text, contentW)
-	if len(wrapped) == 0 {
+	restW := width - contW
+	if restW < 10 {
+		restW = 10
+	}
+
+	var out []string
+	isFirst := true
+	for _, para := range strings.Split(text, "\n") {
+		if para == "" {
+			if isFirst {
+				out = append(out, prefix)
+			} else {
+				out = append(out, cont)
+			}
+			isFirst = false
+			continue
+		}
+		limit := restW
+		if isFirst {
+			limit = firstW
+		}
+		for k, wl := range wrapText(para, limit) {
+			if k == 0 && isFirst {
+				out = append(out, prefix+wl)
+			} else {
+				out = append(out, cont+wl)
+			}
+		}
+		isFirst = false
+	}
+	if len(out) == 0 {
 		return []string{prefix}
 	}
-	out := make([]string, len(wrapped))
-	out[0] = prefix + wrapped[0]
-	for i := 1; i < len(wrapped); i++ {
-		out[i] = cont + wrapped[i]
-	}
 	return out
+}
+
+// isLineStartProhibited reports whether r must not begin a line under CJK
+// typesetting rules (行首禁则): closing brackets, quotes and sentence-final
+// punctuation hang off the end of the previous line instead. The wrap loops
+// use it to pull the previous visible character down when a break would
+// otherwise strand one of these marks at the start of the next line.
+func isLineStartProhibited(r rune) bool {
+	switch r {
+	case '，', '。', '、', '；', '：', '？', '！', '…', '—', '·', '～',
+		'）', '】', '》', '」', '』', '〉', '〕', '”', '’', '％':
+		return true
+	}
+	return false
 }
 
 // wrapText wraps text to the given display width (counting CJK as width 2).
@@ -69,16 +117,58 @@ func wrapText(text string, width int) []string {
 		}
 		runes := []rune(para)
 		var cur []rune
-		curW := 0
-		for _, r := range runes {
-			w := runeWidth(r)
-			if curW+w > width && len(cur) > 0 {
+		var wids []int // display width of each accepted rune, parallel to cur
+		tot := 0       // running width of cur
+		i := 0
+		for i < len(runes) {
+			r := runes[i]
+			// VS16-aware width: symbol + U+FE0F (e.g. ⚠️) renders as a
+			// 2-cell emoji on modern terminals; measuring it as 1 made
+			// emoji-carrying lines overrun the wrap width by one cell.
+			var next rune
+			if i+1 < len(runes) {
+				next = runes[i+1]
+			}
+			w := runeWidthWithNext(r, next)
+			if tot+w > width && len(cur) > 0 {
+				// CJK line-start prohibition: if the break would strand a
+				// sentence-final mark (，。！？… etc.) at the start of the
+				// next line, hand the last visible character of this line
+				// down together with its zero-width tail (VS16, combining
+				// marks), so the next line starts with「字 + 标点」and this
+				// line keeps 1-2 cells of right-edge slack instead. The
+				// loop is while-style on purpose: `continue` here must NOT
+				// advance i, or the prohibited mark itself gets dropped.
+				if isLineStartProhibited(r) {
+					k := len(cur) - 1
+					for k >= 0 && wids[k] == 0 {
+						k--
+					}
+					if k >= 1 {
+						carry := append([]rune(nil), cur[k:]...)
+						cw := wids[k]
+						cur = cur[:k]
+						wids = wids[:k]
+						tot -= cw
+						lines = append(lines, string(cur))
+						cur = append(cur[:0], carry...)
+						wids = append(wids[:0], cw)
+						for range carry[1:] {
+							wids = append(wids, 0)
+						}
+						tot = cw
+						continue // re-evaluate r on the fresh line (i unchanged)
+					}
+				}
 				lines = append(lines, string(cur))
 				cur = cur[:0]
-				curW = 0
+				wids = wids[:0]
+				tot = 0
 			}
 			cur = append(cur, r)
-			curW += w
+			wids = append(wids, w)
+			tot += w
+			i++
 		}
 		lines = append(lines, string(cur))
 	}

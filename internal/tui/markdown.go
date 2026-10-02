@@ -716,40 +716,75 @@ func parseTaskItem(trim string) (taskItem, bool) {
 
 // total width, preserving inline styles across wrapped continuation lines.
 // prefix is the first-line indent; cont is the continuation indent.
+//
+// The first line carries `prefix` but every wrapped continuation carries
+// `cont`, and the two can differ in width (user prompts: "❯ " vs "    ").
+// Each segment therefore gets its own width budget: first-line content is
+// wrapped against width-prefixW, continuation content against width-contW.
+// Wrapping everything against the prefix width alone made every continuation
+// line overrun the terminal by (contW-prefixW) cells — on Windows Terminal
+// the implicit hard wrap then desynchronised all following rows ("right edge
+// truncated, left edge of next lines missing").
 func (t *TUI) wrapANSI(prefix, cont, s string, width int) []string {
 	if width < 6 {
 		width = 6
 	}
 	prefixW := runeWidthStr(prefix)
-	contentW := width - prefixW
-	if contentW < 6 {
-		contentW = 6
+	contW := runeWidthStr(cont)
+	limit := width - prefixW
+	if limit < 6 {
+		limit = 6
 	}
 
+	// cell pairs each accepted rune with its display width so the CJK
+	// line-start prohibition below can hand the last visible character (plus
+	// its zero-width tail) back to the next line — impossible with a plain
+	// Builder, which is why cur is a []cell instead.
+	type cell struct {
+		r rune
+		w int
+	}
 	var out []string
-	var cur strings.Builder
+	var cur []cell
 	curW := 0
 	active := ""     // ANSI codes currently open (since the last reset)
 	startStyle := "" // style that was open when the current fragment began
 
-	flush := func(first bool) {
-		p := prefix
-		if !first {
-			p = cont
+	// flush emits the current fragment. Whether it is the FIRST output line
+	// is decided by position (len(out)==0), not by call site: the original
+	// code passed a `first` flag that only the final call set to true, so on
+	// any text long enough to wrap, the first fragment went through the
+	// continuation branch and every message lost its first-line prefix (and
+	// gained contW extra leading cells) — assistant messages started with a
+	// phantom 2-cell indent and overran the terminal on line 0.
+	flush := func() {
+		p := cont
+		if len(out) == 0 {
+			p = prefix
 		}
 		var line strings.Builder
 		line.WriteString(p)
 		if startStyle != "" {
 			line.WriteString(startStyle)
 		}
-		line.WriteString(cur.String())
+		for _, c := range cur {
+			line.WriteRune(c.r)
+		}
 		if active != "" {
 			line.WriteString("\x1b[0m")
 		}
 		out = append(out, line.String())
-		cur.Reset()
+		cur = cur[:0]
 		curW = 0
 		startStyle = active // next fragment reopens whatever is still open
+		// The next fragment rides the continuation indent, so switch to
+		// its width budget. Only fragments after the first line use it.
+		if len(out) == 1 {
+			limit = width - contW
+			if limit < 6 {
+				limit = 6
+			}
+		}
 	}
 
 	runes := []rune(s)
@@ -767,7 +802,9 @@ func (t *TUI) wrapANSI(prefix, cont, s string, width int) []string {
 				continue
 			}
 			seq := string(runes[i : j+1])
-			cur.WriteString(seq)
+			for _, ar := range seq {
+				cur = append(cur, cell{ar, 0})
+			}
 			if seq == "\x1b[0m" {
 				active = ""
 			} else {
@@ -776,16 +813,44 @@ func (t *TUI) wrapANSI(prefix, cont, s string, width int) []string {
 			i = j + 1
 			continue
 		}
-		w := runeWidth(r)
-		if curW+w > contentW && cur.Len() > 0 {
-			flush(false)
+		// VS16-aware width: a symbol + U+FE0F (e.g. ⚠️) renders as a 2-cell
+		// emoji on modern terminals even though the bare symbol counts as 1;
+		// measuring it as 1 made emoji-carrying lines overrun by one cell.
+		var next rune
+		if i+1 < len(runes) {
+			next = runes[i+1]
+		}
+		w := runeWidthWithNext(r, next)
+		if curW+w > limit && len(cur) > 0 {
+			// CJK line-start prohibition: if the break would strand a
+			// sentence-final mark (，。！？… etc.) at the start of the next
+			// line, hand the last visible character of this line down
+			// together with its zero-width tail (VS16, combining marks,
+			// trailing ANSI), so the next line starts with「字 + 标点」and
+			// this line keeps 1-2 cells of right-edge slack instead.
+			if isLineStartProhibited(r) {
+				k := len(cur) - 1
+				for k >= 0 && cur[k].w == 0 {
+					k--
+				}
+				if k >= 1 {
+					carry := append([]cell(nil), cur[k:]...)
+					curW -= cur[k].w
+					cur = cur[:k]
+					flush()
+					cur = append(cur, carry...)
+					curW += carry[0].w
+					continue // r takes the normal accept path below
+				}
+			}
+			flush()
 			continue
 		}
-		cur.WriteRune(r)
+		cur = append(cur, cell{r, w})
 		curW += w
 		i++
 	}
-	flush(true)
+	flush()
 	return out
 }
 
