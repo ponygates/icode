@@ -176,6 +176,66 @@ func TestStore_AppendMessageAndLoad(t *testing.T) {
 	}
 }
 
+// Regression for the "CLI/desktop conversations never persisted" bug: engine
+// paths used to append messages with empty IDs, and the second empty-ID INSERT
+// violated PRIMARY KEY(id) ("UNIQUE constraint failed") while the error was
+// ignored. The store now generates IDs for empty ones, so consecutive
+// empty-ID appends must both survive with distinct IDs.
+func TestStore_AppendMessageEmptyIDGenerated(t *testing.T) {
+	s := newTestStore(t)
+	s.Create(&types.Session{ID: "e1", Title: "empty ids"})
+	for i, content := range []string{"first", "second", "third"} {
+		if err := s.AppendMessage("e1", types.Message{
+			Role: types.RoleUser, Content: content, Timestamp: time.Now(),
+		}); err != nil {
+			t.Fatalf("AppendMessage %d with empty ID: %v", i+1, err)
+		}
+	}
+	got, err := s.Get("e1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(got.Messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(got.Messages))
+	}
+	seen := map[string]bool{}
+	for _, m := range got.Messages {
+		if m.ID == "" {
+			t.Errorf("message %q still has empty ID after append", m.Content)
+		}
+		if seen[m.ID] {
+			t.Errorf("duplicate generated ID %q", m.ID)
+		}
+		seen[m.ID] = true
+	}
+}
+
+// Regression for the orphaned-messages bug: Store.Delete used to remove only
+// the sessions row, leaving every message behind (no FK). Recreating a
+// session with the same id then resurrected the old transcript, and the db
+// grew forever. Delete must cascade both tables in one transaction.
+func TestStore_DeleteCascadesMessages(t *testing.T) {
+	s := newTestStore(t)
+	s.Create(&types.Session{ID: "c1", Title: "cascade"})
+	if err := s.AppendMessage("c1", types.Message{
+		ID: "m1", Role: types.RoleUser, Content: "hello", Timestamp: time.Now(),
+	}); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+	if err := s.Delete("c1"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	// Recreating the same id must NOT resurrect the old transcript.
+	s.Create(&types.Session{ID: "c1", Title: "recreated"})
+	got, err := s.Get("c1")
+	if err != nil {
+		t.Fatalf("Get after recreate: %v", err)
+	}
+	if len(got.Messages) != 0 {
+		t.Errorf("expected 0 messages after cascade delete, got %d", len(got.Messages))
+	}
+}
+
 func TestStore_SearchMessages(t *testing.T) {
 	s := newTestStore(t)
 	s.Create(&types.Session{ID: "se1", Title: "search"})

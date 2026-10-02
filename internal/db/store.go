@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
@@ -330,8 +331,23 @@ func (s *Store) Update(sess *types.Session) error {
 }
 
 func (s *Store) Delete(id string) error {
-	_, err := s.db.Exec(`DELETE FROM sessions WHERE id = ?`, id)
-	return err
+	// Cascade: message rows reference the session by id with no FOREIGN KEY
+	// constraint, so deleting only the sessions row used to orphan every
+	// message — the db kept growing, and a recreated same-id session would
+	// resurrect the old transcript. One transaction so a crash can never
+	// leave the pair half-deleted.
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }() // no-op after Commit
+	if _, err := tx.Exec(`DELETE FROM messages WHERE session_id = ?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM sessions WHERE id = ?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ============================================================================
@@ -339,6 +355,13 @@ func (s *Store) Delete(id string) error {
 // ============================================================================
 
 func (s *Store) AppendMessage(sessionID string, msg types.Message) error {
+	// Defensive ID generation: the column is PRIMARY KEY, so two empty-ID
+	// inserts collide with "UNIQUE constraint failed" and the second row is
+	// lost. Callers normally assign IDs (engine.appendPersisted does), this
+	// backstop keeps direct store users (tests, REST fallbacks) safe too.
+	if msg.ID == "" {
+		msg.ID = fmt.Sprintf("msg-%x-%04x", time.Now().UnixNano(), rand.Uint32()&0xffff)
+	}
 	now := msg.Timestamp.Format(time.RFC3339)
 	if msg.Timestamp.IsZero() {
 		now = time.Now().UTC().Format(time.RFC3339)

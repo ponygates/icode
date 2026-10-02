@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -1795,8 +1796,7 @@ func (e *Engine) runToolTurn(
 	depth int,
 ) {
 	assistantMsg.ToolCalls = toolCalls
-	opt.AddMessage(assistantMsg)
-	e.sessionSt.AppendMessage(sessionID, assistantMsg)
+	assistantMsg = e.appendPersisted(sessionID, opt, assistantMsg)
 
 	e.executeToolBatch(ctx, sessionID, toolCalls, out)
 	for _, tc := range toolCalls {
@@ -1851,8 +1851,7 @@ func (e *Engine) finishTextTurn(
 			}
 		}
 	}
-	opt.AddMessage(assistantMsg)
-	e.sessionSt.AppendMessage(sessionID, assistantMsg)
+	assistantMsg = e.appendPersisted(sessionID, opt, assistantMsg)
 	// Plan mode: the finished reply is a proposal, so surface it as a pending
 	// plan the UI can offer to confirm (Enter) or discard (Esc). Confirmation
 	// switches the gate out of read-only plan and continues execution.
@@ -2145,8 +2144,7 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 	// engine-side CompactRequest below would implicitly compact anyway —
 	// driving it here just adds a visible event and the anti-thrash guard.
 	autoSaved, autoPct := e.maybeAutoCompact(sessionID, sess, opt)
-	opt.AddMessage(userMsg)
-	e.sessionSt.AppendMessage(sessionID, userMsg)
+	userMsg = e.appendPersisted(sessionID, opt, userMsg)
 	// A fresh user message starts a new turn: the Stop-hook block counter
 	// applies per turn, so previous blocks must not leak into this one.
 	e.resetStopHookBlocks(sessionID)
@@ -2304,8 +2302,7 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 										"\n请根据以上反馈继续完成任务，不要重复已完成的工作。",
 									Timestamp: time.Now(),
 								}
-								opt.AddMessage(contMsg)
-								e.sessionSt.AppendMessage(sessionID, contMsg)
+								contMsg = e.appendPersisted(sessionID, opt, contMsg)
 								// Reset per-round state and re-open the stream.
 								assistantMsg = types.Message{Role: types.RoleAssistant, Timestamp: time.Now()}
 								toolCalls = nil
@@ -2364,6 +2361,38 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 	return out, nil
 }
 
+// newMessageID returns a collision-resistant message ID. A nanosecond stamp
+// alone can collide when two messages are appended in the same tick, so a
+// random suffix is mixed in.
+func newMessageID() string {
+	return fmt.Sprintf("msg-%x-%04x", time.Now().UnixNano(), rand.Uint32()&0xffff)
+}
+
+// appendPersisted adds msg to the optimizer AND persists it to the session
+// store, returning the message with its ID filled in.
+//
+// Root cause fixed here: engine-built messages historically carried an empty
+// ID, and the SQLite store has PRIMARY KEY(id) — so only the FIRST empty-ID
+// insert ever succeeded ("UNIQUE constraint failed" for every later one),
+// while the error was silently discarded. Result: conversations never reached
+// ~/.icode/icode.db, which surfaced as "CLI and desktop don't share history".
+// Empty IDs are now generated here, and persistence errors are logged instead
+// of swallowed so this failure mode can never hide again.
+func (e *Engine) appendPersisted(sessionID string, opt *tokenopt.Optimizer, msg types.Message) types.Message {
+	if msg.ID == "" {
+		msg.ID = newMessageID()
+	}
+	if opt != nil {
+		opt.AddMessage(msg)
+	}
+	if e.sessionSt != nil {
+		if err := e.sessionSt.AppendMessage(sessionID, msg); err != nil {
+			log.Printf("[engine] warning: persist message %q to session %s failed: %v", msg.ID, sessionID, err)
+		}
+	}
+	return msg
+}
+
 // persistPartialTurn saves an interrupted turn's partial assistant output
 // into the optimizer and the session store so the user keeps what they
 // already saw on screen (Claude Code parity: "已完成的工作保留").
@@ -2371,8 +2400,7 @@ func (e *Engine) persistPartialTurn(sessionID string, opt *tokenopt.Optimizer, a
 	if assistantMsg.Content == "" {
 		return
 	}
-	opt.AddMessage(assistantMsg)
-	e.sessionSt.AppendMessage(sessionID, assistantMsg)
+	assistantMsg = e.appendPersisted(sessionID, opt, assistantMsg)
 }
 
 // chatStreamWithFallback opens the model stream with the full resilience
@@ -2786,8 +2814,7 @@ func (e *Engine) ingestToolAttachments(sessionID string, toolCalls []types.ToolC
 		Attachments: imgs,
 		Timestamp:   time.Now(),
 	}
-	opt.AddMessage(msg)
-	e.sessionSt.AppendMessage(sessionID, msg)
+	e.appendPersisted(sessionID, opt, msg)
 }
 
 func (e *Engine) buildSystemPrompt(sessionID string) string {
