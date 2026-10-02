@@ -191,6 +191,30 @@ const App: React.FC = () => {
     return () => clearInterval(interval);
   }, [checkBackend, loadSessions, loadWorkspaces, refreshModels, fetchMode]);
 
+  // Focus refresh: the CLI and the desktop share one session store, and the
+  // CLI keeps writing while the desktop window is in the background. Without
+  // this the sidebar only refreshed on a backend reconnect, so CLI-created
+  // sessions stayed invisible until a restart (the "两个平台不互通" report).
+  // keepActive: a focus sync must never yank the user away from the session
+  // they are currently reading — it only pulls new/updated entries in.
+  useEffect(() => {
+    const refresh = () => {
+      const st = useAppStore.getState();
+      if (st.backendConnected) {
+        loadSessions({ keepActive: true }).catch(() => {});
+      }
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') refresh();
+    };
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [loadSessions]);
+
   return (
     <div style={{ display: 'flex', height: '100vh', background: 'var(--bg-primary)', color: 'var(--text-primary)' }}>
       <ErrorBoundary>

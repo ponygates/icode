@@ -138,7 +138,10 @@ func runWebView(url string) {
 		return
 	}
 	desktopWV = w
-	desktopHWND = uintptr(w.Window())
+	// atomic store: the show-signal watcher (single_instance_windows.go) reads
+	// this from its own goroutine; every other reader runs on this or the tray
+	// thread, which cannot race this one-shot assignment.
+	atomic.StoreUintptr(&desktopHWND, uintptr(w.Window()))
 
 	// 子类化窗口过程：把 WM_CLOSE（关闭按钮）改为"隐藏到托盘"，
 	// 并把 WM_HOTKEY（全局热键）路由到显隐切换。其余消息交给原过程。

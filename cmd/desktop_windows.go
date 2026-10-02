@@ -38,10 +38,20 @@ func runDesktop() error {
 
 	release, err := acquireSingleInstance()
 	if err != nil {
-		showDesktopError("iCode", "iCode 已在运行。\n\n本机已有一个 iCode 窗口，请勿重复启动（避免 WebView2 数据目录被占用导致卡死）。")
+		// Another live instance owns the mutex. The old flow showed a
+		// dead-end "已在运行" error box while the real window sat hidden in
+		// the tray (✕ hides instead of quitting) — the user had to hunt for
+		// the tray icon every time. Instead, signal the existing instance to
+		// surface its window and exit quietly. Fall back to the error box
+		// only when the first instance predates the signal event.
+		if signalShowExisting() {
+			return nil
+		}
+		showDesktopError("iCode", "iCode 已在运行。\n\n本机已有一个 iCode 窗口（可能隐藏在系统托盘）：\n- 双击托盘图标或按 Ctrl+Shift+Space 唤起\n- 或从托盘菜单选择「退出 iCode」后重新启动")
 		return nil
 	}
 	defer release()
+	startShowSignalWatcher()
 
 	boot, err := bootDesktopBackend()
 	if err != nil {

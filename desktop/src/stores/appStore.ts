@@ -197,7 +197,7 @@ interface AppStore {
   deleteSession: (id: string) => void;
   closeTab: (id: string) => void;
   renameSession: (id: string, title: string) => void;
-  loadSessions: () => Promise<void>;
+  loadSessions: (opts?: { keepActive?: boolean }) => Promise<void>;
   loadTrash: () => Promise<void>;
   restoreSession: (id: string) => Promise<void>;
   deleteForever: (id: string) => Promise<void>;
@@ -526,7 +526,21 @@ export const useAppStore = create<AppStore>()(
   workspaces: [],
   activeWorkspaceId: loadActiveWorkspace(),
 
-  loadSessions: async () => {
+  loadSessions: async (opts?: { keepActive?: boolean }) => {
+    // keepActive (focus refresh): sync CLI-side writes into the list WITHOUT
+    // yanking the user away from the session they are reading. The default
+    // (startup) keeps the "resume the most recently used session" behavior.
+    const resumeLoaded = (loaded: Session[]) => {
+      if (loaded.length === 0) return;
+      const keepActive = !!opts?.keepActive;
+      const cur = get().activeSessionId;
+      if (keepActive && cur && loaded.some((s) => s.id === cur)) {
+        loadActive(cur);
+        return;
+      }
+      set({ activeSessionId: loaded[0].id });
+      loadActive(loaded[0].id);
+    };
     // Lazily load one session's messages (the list API returns metadata only,
     // so opening a session / restoring the last active one needs a follow-up
     // GET /api/sessions/{id}). Without this, history would render blank.
@@ -587,14 +601,7 @@ export const useAppStore = create<AppStore>()(
             openTabIds: state.openTabIds.length > 0 ? state.openTabIds : loaded.map((s) => s.id),
           }));
           saveToLocal(loaded);
-          if (loaded.length > 0) {
-            // The backend list is ordered by updated_at DESC, so the most
-            // recently used session (i.e. whatever desktop/CLI last
-            // touched) is FIRST. Resume it so all three ends land on the same
-            // conversation — this is what makes history "sync" across them.
-            set({ activeSessionId: loaded[0].id });
-            loadActive(loaded[0].id);
-          }
+          resumeLoaded(loaded);
           return;
         }
       }
@@ -612,10 +619,7 @@ export const useAppStore = create<AppStore>()(
               .filter((s): s is Session => s !== null);
             set({ sessions: loaded });
             saveToLocal(loaded);
-            if (loaded.length > 0) {
-              set({ activeSessionId: loaded[0].id });
-              loadActive(loaded[0].id);
-            }
+            resumeLoaded(loaded);
             return;
           }
         }
