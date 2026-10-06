@@ -315,12 +315,18 @@ func TestEnginePreferenceAutoSave(t *testing.T) {
 
 	// The debounce timer itself: a simulated wait should also write.
 	e.learnPreferences("优先用 Go 写后台服务")
-	time.Sleep(2200 * time.Millisecond)
-	data, err = os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("expected auto-save after debounce, err=%v", err)
-	}
-	if !strings.Contains(string(data), "优先用 Go") && !strings.Contains(string(data), "Go 写后台服务") {
-		t.Fatalf("auto-save missing second pref, got: %s", string(data))
+	// Poll instead of a single fixed sleep: the 2s debounce plus the disk
+	// write can overrun a 2.2s sleep on a loaded CI runner (flaky on the
+	// windows runner). 5s deadline keeps the assertion but tolerates lag.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		data, err = os.ReadFile(path)
+		if err == nil && (strings.Contains(string(data), "优先用 Go") || strings.Contains(string(data), "Go 写后台服务")) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("auto-save missing second pref, got: %s, err=%v", data, err)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
