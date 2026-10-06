@@ -3,9 +3,12 @@ package openai_compat
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -44,10 +47,22 @@ func TestNewProvider_Defaults(t *testing.T) {
 	if p.Name() != "defaults-test" {
 		t.Errorf("expected name 'defaults-test', got %q", p.Name())
 	}
-	// Timeout should default to 120s
-	s := p.httpClient.Timeout
-	if s != 120*time.Second {
-		t.Errorf("expected default timeout 120s, got %v", s)
+	// Timeout model (see New): no whole-request client timeout — a long
+	// streaming body must not be killed on a timer. Instead the default
+	// 120s applies as the Transport's first-response (headers) timeout,
+	// and Chat() bounds itself through the request context.
+	if p.httpClient.Timeout != 0 {
+		t.Errorf("client whole-request timeout = %v, want 0 (streaming-safe)", p.httpClient.Timeout)
+	}
+	tr, ok := p.httpClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport = %T, want *http.Transport", p.httpClient.Transport)
+	}
+	if tr.ResponseHeaderTimeout != 120*time.Second {
+		t.Errorf("ResponseHeaderTimeout = %v, want 120s", tr.ResponseHeaderTimeout)
+	}
+	if p.timeout != 120*time.Second {
+		t.Errorf("provider timeout field = %v, want 120s (Chat ctx deadline)", p.timeout)
 	}
 }
 
@@ -512,5 +527,140 @@ func TestBuildRequestBody_CacheBreakpointsShift(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+// blockingBody: first Read returns an SSE line, further Reads park until
+// Close (what a stalled connection looks like to the scanner).
+type blockingBody struct {
+	first *bool
+	mu    *sync.Mutex
+	park  *stuckBody
+}
+
+func (b *blockingBody) Read(p []byte) (int, error) {
+	b.mu.Lock()
+	f := *b.first
+	*b.first = false
+	b.mu.Unlock()
+	if f {
+		line := "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"
+		return copy(p, line), nil
+	}
+	<-b.park.closed
+	return 0, io.EOF
+}
+
+func (b *blockingBody) Close() error { return b.park.Close() }
+
+// stuckBody parks Reads on a channel released by Close.
+type stuckBody struct {
+	once   sync.Once
+	closed chan struct{}
+}
+
+func newStuckBody() *stuckBody { return &stuckBody{closed: make(chan struct{})} }
+
+func (b *stuckBody) Close() error {
+	b.once.Do(func() { close(b.closed) })
+	return nil
+}
+
+// TestReadStream_IdleWatchdog verifies the idle watchdog: a stalled stream
+// gets a friendly EventError after the idle window and the channel closes
+// without a duplicate raw scan error.
+func TestReadStream_IdleWatchdog(t *testing.T) {
+	old := streamIdleTimeout
+	streamIdleTimeout = 150 * time.Millisecond
+	defer func() { streamIdleTimeout = old }()
+
+	p := New(Config{Name: "idle-test", APIKey: "sk-test"})
+	ch := make(chan types.StreamEvent, 64)
+	first := true
+	var mu sync.Mutex
+	body := &blockingBody{first: &first, mu: &mu, park: newStuckBody()}
+	go p.readStream(context.Background(), body, ch)
+
+	// First event: the "hi" text.
+	select {
+	case ev := <-ch:
+		if ev.Type != types.EventText || ev.Content != "hi" {
+			t.Fatalf("first event = %+v, want text 'hi'", ev)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no first event")
+	}
+	// Then the watchdog fires with the friendly idle-timeout error.
+	select {
+	case ev := <-ch:
+		if ev.Type != types.EventError || !strings.Contains(ev.Content, "空闲超时") {
+			t.Fatalf("second event = %+v, want idle-timeout EventError", ev)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("watchdog never fired")
+	}
+	// And the channel closes (no duplicate raw error from the broken scan).
+	select {
+	case _, ok := <-ch:
+		if ok {
+			t.Fatal("expected channel closed after idle error")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("channel never closed")
+	}
+}
+
+// midDropBody emits one good SSE line, then returns a raw network error —
+// simulating a connection reset after partial output.
+type midDropBody struct{ read bool }
+
+func (b *midDropBody) Read(p []byte) (int, error) {
+	if !b.read {
+		b.read = true
+		line := "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n"
+		return copy(p, line), nil
+	}
+	return 0, fmt.Errorf("read tcp 1.2.3.4:443: connection reset by peer")
+}
+
+func (b *midDropBody) Close() error { return nil }
+
+// TestReadStream_MidStreamErrorSurfaced guards the regression where a scan
+// error after partial output was swallowed (no error event), silently
+// discarding the user's half reply.
+func TestReadStream_MidStreamErrorSurfaced(t *testing.T) {
+	old := streamIdleTimeout
+	streamIdleTimeout = 10 * time.Second // effectively disabled for this test
+	defer func() { streamIdleTimeout = old }()
+
+	p := New(Config{Name: "drop-test", APIKey: "sk-test"})
+	ch := make(chan types.StreamEvent, 64)
+	go p.readStream(context.Background(), &midDropBody{}, ch)
+
+	var sawText, sawErr bool
+	for i := 0; i < 2; i++ {
+		select {
+		case ev := <-ch:
+			switch ev.Type {
+			case types.EventText:
+				if ev.Content != "hello" {
+					t.Fatalf("text = %q", ev.Content)
+				}
+				sawText = true
+			case types.EventError:
+				if !strings.Contains(ev.Content, "connection reset") {
+					t.Fatalf("error = %q, want connection reset", ev.Content)
+				}
+				sawErr = true
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("stream stalled")
+		}
+	}
+	if !sawText || !sawErr {
+		t.Fatalf("sawText=%v sawErr=%v, want both", sawText, sawErr)
+	}
+	// Channel closes after the error.
+	if _, ok := <-ch; ok {
+		t.Fatal("expected channel closed")
 	}
 }

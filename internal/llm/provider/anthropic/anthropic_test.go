@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -442,5 +443,104 @@ func TestBuildMessagesBody_TopPForwardedAndSuppressedWithThinking(t *testing.T) 
 	}
 	if _, has := m["temperature"]; has {
 		t.Fatalf("temperature must be suppressed when thinking is enabled")
+	}
+}
+// stallingBody emits one Anthropic SSE event pair, then parks until Close —
+// a provider that stalls mid-stream with no EOF and no RST.
+type stallingBody struct {
+	once   sync.Once
+	closed chan struct{}
+}
+
+func (b *stallingBody) Read(p []byte) (int, error) {
+	event := "event: content_block_delta\n" +
+		"data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n"
+	return copy(p, event), nil
+}
+
+func (b *stallingBody) Close() error {
+	b.once.Do(func() { close(b.closed) })
+	return nil
+}
+
+// blockingAnthropicBody yields one event pair on the first Read and parks on
+// further Reads until Close releases it (what a stalled connection looks
+// like to the scanner).
+type blockingAnthropicBody struct {
+	first bool
+	park  *stallingBody
+}
+
+func (b *blockingAnthropicBody) Read(p []byte) (int, error) {
+	if b.first {
+		b.first = false
+		event := "event: content_block_delta\n" +
+			"data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n"
+		return copy(p, event), nil
+	}
+	<-b.park.closed
+	return 0, io.EOF
+}
+
+func (b *blockingAnthropicBody) Close() error { return b.park.Close() }
+
+// TestReadSSEStream_IdleWatchdog: a stalled SSE stream gets a friendly
+// idle-timeout EventError and the channel closes without a duplicate raw
+// scan error.
+func TestReadSSEStream_IdleWatchdog(t *testing.T) {
+	old := streamIdleTimeout
+	streamIdleTimeout = 150 * time.Millisecond
+	defer func() { streamIdleTimeout = old }()
+
+	p := New("sk-test", "")
+	ch := make(chan types.StreamEvent, 64)
+	body := &blockingAnthropicBody{first: true, park: &stallingBody{closed: make(chan struct{})}}
+	go p.readSSEStream(body, ch)
+
+	// First event: the streamed "hi" text.
+	select {
+	case ev := <-ch:
+		if ev.Type != types.EventText || ev.Content != "hi" {
+			t.Fatalf("first event = %+v, want text 'hi'", ev)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no first event")
+	}
+	// Then the watchdog fires with the friendly idle-timeout error.
+	select {
+	case ev := <-ch:
+		if ev.Type != types.EventError || !strings.Contains(ev.Content, "空闲超时") {
+			t.Fatalf("second event = %+v, want idle-timeout EventError", ev)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("watchdog never fired")
+	}
+	// And the channel closes (no duplicate raw error from the broken scan).
+	select {
+	case _, ok := <-ch:
+		if ok {
+			t.Fatal("expected channel closed after idle error")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("channel never closed")
+	}
+}
+
+// TestChat_TimeoutModel asserts the streaming-safe timeout model: no
+// whole-request client timeout; the 120s bounds the first response instead.
+func TestChat_TimeoutModel(t *testing.T) {
+	p := New("sk-test", "")
+	if p.httpClient.Timeout != 0 {
+		t.Errorf("client whole-request timeout = %v, want 0 (streaming-safe)", p.httpClient.Timeout)
+	}
+	tr, ok := p.httpClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport = %T, want *http.Transport", p.httpClient.Transport)
+	}
+	if tr.ResponseHeaderTimeout != 120*time.Second {
+		t.Errorf("ResponseHeaderTimeout = %v, want 120s", tr.ResponseHeaderTimeout)
+	}
+	if p.timeout != 120*time.Second {
+		t.Errorf("provider timeout field = %v, want 120s", p.timeout)
 	}
 }

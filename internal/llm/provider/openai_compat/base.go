@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ponygates/icode/internal/llm/modelmeta"
@@ -32,6 +33,11 @@ type BaseProvider struct {
 	models       []types.ModelInfo
 	mu           sync.RWMutex
 	cacheSupport bool
+	// timeout bounds non-streaming requests (whole-request deadline via the
+	// request context) and the streaming first-byte wait (Transport
+	// ResponseHeaderTimeout). Streaming bodies are bounded by an idle
+	// deadline instead — see New and readStream.
+	timeout time.Duration
 }
 
 // Config configures a BaseProvider.
@@ -57,6 +63,25 @@ func New(cfg Config) *BaseProvider {
 	if cfg.TimeoutSec <= 0 {
 		cfg.TimeoutSec = 120
 	}
+	timeout := time.Duration(cfg.TimeoutSec) * time.Second
+
+	// Timeout model: the client-level Timeout is a WHOLE-REQUEST deadline —
+	// including the time spent reading a streaming body. A long completion
+	// (deep-thinking models, long code generation) regularly exceeds 120s
+	// and was killed mid-stream, surfacing as a dropped reply after two
+	// minutes. Instead:
+	//   - ResponseHeaderTimeout bounds how long we wait for the response
+	//     HEADERS (first byte from the provider) — dial/stall protection.
+	//   - Streaming bodies are bounded by an idle deadline, reset on every
+	//     SSE line (see readStream): a stream dies only when it goes quiet
+	//     for streamIdleTimeout, no matter how long the total generation.
+	//   - Non-streaming Chat keeps the whole-request deadline via the
+	//     request context (see Chat).
+	// The transport also honours HTTP_PROXY/HTTPS_PROXY/NO_PROXY and blocks
+	// dials to the cloud-metadata plane (SSRF guard; loopback/private stay
+	// allowed for Ollama and internal gateways).
+	tr := netsec.GuardedTransport(false)
+	tr.ResponseHeaderTimeout = timeout
 
 	return &BaseProvider{
 		name:         cfg.Name,
@@ -64,15 +89,12 @@ func New(cfg Config) *BaseProvider {
 		apiKey:       cfg.APIKey,
 		models:       cfg.Models,
 		cacheSupport: cfg.CacheSupport,
+		timeout:      timeout,
 		httpClient: &http.Client{
-			Timeout: time.Duration(cfg.TimeoutSec) * time.Second,
-			// Honours HTTP_PROXY / HTTPS_PROXY / NO_PROXY so users behind a
-			// proxy (e.g. reaching OpenRouter from restricted networks) work,
-			// and refuses to dial the cloud-metadata plane: a base URL pasted
-			// from a shared config must not turn every later run into an SSRF.
-			// Loopback/private stay allowed — Ollama and internal gateways are
-			// legitimate apiBase values.
-			Transport: netsec.GuardedTransport(false),
+			// No whole-request timeout: streaming bodies live as long as
+			// they keep producing lines. See the comment above.
+			Timeout:   0,
+			Transport: tr,
 		},
 	}
 }
@@ -346,6 +368,15 @@ func (p *BaseProvider) Chat(ctx context.Context, req types.ChatRequest) (*types.
 		return nil, fmt.Errorf("API key not configured for %s — go to Settings (Ctrl+,) to add your API key", p.name)
 	}
 
+	// Non-streaming keeps a whole-request deadline (the classic TimeoutSec
+	// semantics). The client-level timeout is 0 now, so bound the request
+	// through its context. An earlier parent deadline still wins.
+	if p.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, p.timeout)
+		defer cancel()
+	}
+
 	body, err := p.buildRequestBody(req, false)
 	if err != nil {
 		return nil, err
@@ -556,18 +587,47 @@ func parseVendorModelIDs(body []byte) []string {
 	return out
 }
 
+// streamIdleTimeout is how long a streaming body may stay silent between two
+// SSE lines before we declare the connection dead. Generous on purpose:
+// deep-thinking models can pause between reasoning and the final answer.
+// Package-level variable (not const) so tests can shrink it.
+var streamIdleTimeout = 120 * time.Second
+
 // readStream pumps SSE lines from the response body into ch until EOF, an
 // error, or ctx cancellation. The context matters: when the user interrupts
 // (Esc / stop button) the engine cancels it, and the HTTP transport closes
 // the body — but the bufio.Scanner may still be parked on a read, so we
 // also select on ctx.Done() and abort the scan early instead of blocking
 // until the provider notices.
+//
+// The client has no whole-request timeout by design (see New), so an idle
+// watchdog bounds the stream instead: every received line resets it, and
+// when it fires — streamIdleTimeout with no data — it emits a friendly
+// EventError and closes the body, which unblocks the parked scanner.
 func (p *BaseProvider) readStream(ctx context.Context, body io.ReadCloser, ch chan types.StreamEvent) {
 	defer close(ch)
 	defer body.Close()
 
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	// done separates "main loop gone" from "watchdog still pending" so the
+	// watchdog can never block sending into an abandoned channel.
+	done := make(chan struct{})
+	defer close(done)
+	var idleFired atomic.Bool
+	watchdog := time.AfterFunc(streamIdleTimeout, func() {
+		select {
+		case ch <- types.StreamEvent{
+			Type: types.EventError,
+			Content: fmt.Sprintf("流式响应空闲超时（%s 内没有新数据），连接已断开。已生成内容见上方，可输入「继续」从断点接着生成。",
+				streamIdleTimeout),
+		}:
+			idleFired.Store(true)
+			body.Close() // unblocks the parked scanner read
+		case <-done:
+		}
+	})
 
 	toolCalls := make(map[int]*types.LiveToolCall)
 	eventsProduced := false
@@ -578,6 +638,7 @@ func (p *BaseProvider) readStream(ctx context.Context, body io.ReadCloser, ch ch
 	go func() {
 		defer close(lines)
 		for scanner.Scan() {
+			watchdog.Reset(streamIdleTimeout)
 			select {
 			case lines <- scanner.Text():
 			case <-ctx.Done():
@@ -592,10 +653,17 @@ func (p *BaseProvider) readStream(ctx context.Context, body io.ReadCloser, ch ch
 			return
 		case line, ok := <-lines:
 			if !ok {
-				// Scanner finished (EOF or error). Surface a scan error if the
-				// context is still alive; otherwise emit the no-response error
-				// for a stream that produced nothing.
-				if err := scanner.Err(); err != nil && !eventsProduced {
+				// Scanner finished (EOF or error). The idle watchdog already
+				// reported its own error (and closing the body is what broke
+				// this scan) — don't duplicate it.
+				if idleFired.Load() {
+					return
+				}
+				// ALWAYS surface a scan error — previously it was swallowed
+				// when the stream had already produced events, so a network
+				// drop ended the reply mid-sentence with no error event at
+				// all, and the engine silently discarded the partial output.
+				if err := scanner.Err(); err != nil {
 					ch <- types.StreamEvent{Type: types.EventError, Content: err.Error()}
 				} else if !eventsProduced {
 					ch <- types.StreamEvent{

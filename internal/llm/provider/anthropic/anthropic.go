@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ponygates/icode/internal/types"
@@ -33,7 +34,12 @@ type Provider struct {
 	bearer     bool // the key field holds an OAuth subscription token, not an API key
 	refreshFn  types.TokenRefresher
 	httpClient *http.Client
-	models     []types.ModelInfo
+	// timeout bounds non-streaming requests (whole-request deadline via the
+	// request context) and the streaming first-byte wait (Transport
+	// ResponseHeaderTimeout). Streaming bodies are bounded by an idle
+	// watchdog instead — see New and readSSEStream.
+	timeout time.Duration
+	models  []types.ModelInfo
 }
 
 // New creates an Anthropic provider.
@@ -42,12 +48,21 @@ func New(apiKey, apiBase string) *Provider {
 		apiBase = DefaultBase
 	}
 
+	// Same timeout model as openai_compat (see its New for the rationale):
+	// no whole-request client timeout — it kills long streaming replies —
+	// instead the 120s bounds the first response (Transport headers
+	// timeout), non-streaming Chat bounds itself via the request context,
+	// and the streaming body is bounded by an idle watchdog (readSSEStream).
+	tr := netsec.GuardedTransport(false)
+	tr.ResponseHeaderTimeout = 120 * time.Second
+
 	return &Provider{
 		apiBase: apiBase,
 		apiKey:  apiKey,
+		timeout: 120 * time.Second,
 		httpClient: &http.Client{
-			Timeout:   120 * time.Second,
-			Transport: netsec.GuardedTransport(false),
+			Timeout:   0,
+			Transport: tr,
 		},
 		models: DefaultModels(),
 	}
@@ -247,6 +262,15 @@ func (p *Provider) statusError(prefix string, resp *http.Response, errBody []byt
 // ============================================================================
 
 func (p *Provider) Chat(ctx context.Context, req types.ChatRequest) (*types.Message, error) {
+	// Non-streaming keeps a whole-request deadline (classic 120s). The
+	// client-level timeout is 0 now, so bound the request via its context.
+	// An earlier parent deadline still wins.
+	if p.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, p.timeout)
+		defer cancel()
+	}
+
 	body, err := p.buildMessagesBody(req, false)
 	if err != nil {
 		return nil, err
@@ -329,12 +353,38 @@ func (p *Provider) ChatStream(ctx context.Context, req types.ChatRequest) (<-cha
 	return ch, nil
 }
 
+// streamIdleTimeout is how long the SSE body may stay silent before we
+// declare the connection dead (mirrors openai_compat; a package-level
+// variable so tests can shrink it).
+var streamIdleTimeout = 120 * time.Second
+
 func (p *Provider) readSSEStream(body io.ReadCloser, ch chan types.StreamEvent) {
 	defer close(ch)
 	defer body.Close()
 
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 128*1024), 1024*1024)
+
+	// Idle watchdog: every received line resets it; when it fires the
+	// stream has been silent past streamIdleTimeout, so emit a friendly
+	// error and close the body to unblock the parked scanner. "done"
+	// separates "reader gone" from "watchdog still pending" so the
+	// watchdog can never block sending into an abandoned channel.
+	done := make(chan struct{})
+	defer close(done)
+	var idleFired atomic.Bool
+	watchdog := time.AfterFunc(streamIdleTimeout, func() {
+		select {
+		case ch <- types.StreamEvent{
+			Type: types.EventError,
+			Content: fmt.Sprintf("流式响应空闲超时（%s 内没有新数据），连接已断开。已生成内容见上方，可输入「继续」从断点接着生成。",
+				streamIdleTimeout),
+		}:
+			idleFired.Store(true)
+			body.Close()
+		case <-done:
+		}
+	})
 
 	var (
 		currentBlock   string // current text block being accumulated
@@ -346,6 +396,7 @@ func (p *Provider) readSSEStream(body io.ReadCloser, ch chan types.StreamEvent) 
 	)
 
 	for scanner.Scan() {
+		watchdog.Reset(streamIdleTimeout)
 		line := scanner.Text()
 
 		switch {
@@ -474,13 +525,29 @@ func (p *Provider) readSSEStream(body io.ReadCloser, ch chan types.StreamEvent) 
 						usage.OutputTokens = int(v)
 					}
 				}
-
 			case "ping":
 				// Keep-alive, ignore
 			}
 		}
 	}
 
+	// Scan loop ended without message_stop: EOF, a network error, or the
+	// idle watchdog closing the body. ALWAYS surface scan errors — the old
+	// code fell through silently, so a dropped connection ate whatever had
+	// already streamed with no error event at all.
+	if idleFired.Load() {
+		return // watchdog already reported the friendly timeout error
+	}
+	if err := scanner.Err(); err != nil {
+		ch <- types.StreamEvent{Type: types.EventError, Content: err.Error()}
+		return
+	}
+	if usage == nil && currentBlock == "" && toolName == "" {
+		ch <- types.StreamEvent{
+			Type:    types.EventError,
+			Content: "No response from Anthropic — please check your API key in Settings → Models",
+		}
+	}
 }
 
 func parseUsage(u map[string]any) *anthropicUsage {
