@@ -1,7 +1,7 @@
 # D1 · 桌面左右分屏 设计文档
 
 > 目标：两会话并排显示（Reasonix 桌面「sessions side by side」拍照级），左/右各自独立滚动、独立流式、可拖拽分隔条调宽。
-> 状态：SplitPane 地基组件已交付（v0.50.0，`desktop/src/components/SplitPane.tsx`）；**SessionPane 参数化待实施**（唯一未完成项）。
+> 状态：**已落地（方案变更）**。未采用下文「抽独立 SessionPane」路线，实际落地为 **ChatPage 自身参数化**：`ChatPageProps.sessionId` 可选入参（嵌入模式无壳、无全局副作用），分屏时右侧渲染 `<SplitPane left={chatPaneCol} right={<ChatPage sessionId={splitSessionId} />} />` —— 即 ChatPage 递归实例。行号锚点（当前实测）：prop 定义 `ChatPage.tsx:43`，SplitPane 渲染 `:2295`。下文「零、精确实施清单」保留作历史参考，其中 36 处 `activeSessionId` 引用的参数化目标已由 `sessionId ?? storeActiveId` 模式达成。
 
 ---
 

@@ -1,7 +1,7 @@
 # C3 · ACP（Agent Client Protocol）编辑器接入 设计文档
 
 > 目标：`icode acp` 子命令启动一个 stdio JSON-RPC 服务端，让 Zed / Neovim 等任意 ACP 兼容编辑器接入 iCode——一份协议覆盖 N 个编辑器（对标 Reasonix `reasonix acp`）。
-> 状态：设计定稿，待实施。工程量 3-5 天。
+> 状态：baseline 已落地（`internal/acp`：stdio JSON-RPC 服务端 + 测试，能力协商首版仅声明 baseline）。权限走编辑器、session/load 等后续项见改进建议清单 #21。
 
 ---
 

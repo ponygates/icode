@@ -2,6 +2,44 @@
 
 > **版本说明**：v0.1.0 是一次**版本归零与结构整理**——将历史迭代（v0.2.x–v0.53.x）的全部成果整合为统一的 0.1.0 功能基线。完整的历史版本记录见 [docs/archive/CHANGELOG_HISTORY.md](docs/archive/CHANGELOG_HISTORY.md)，历次对标审查与差距分析见 [docs/archive/](docs/archive/)。
 
+## v0.1.4 — 五批次落地：技能生态市场化 / 多会话协作 / 流式健壮性 / 桌面后台任务视图 (2026-10-06)
+
+> 依据竞品研究（Claude Code v2.1.289 / opencode v2 / Reasonix / WorkBuddy）制定五批次方案并全部落地：A 生态市场化 → B 多会话协作 → C 健壮性 → D 体验 → E 质量债。全项目 57 包测试绿。
+
+### A · 技能生态市场化
+
+- **技能 Category 分组**：SKILL.md frontmatter 新增 `category`（coding / office / general），市场页按分类稳定分组展示。
+- **保险技能剥离**：保险话术/异议处理等 5 个垂直技能迁至 `industry-packs/insurance/`，与「开源编码助手」定位解耦（改进清单 #20）；产品决策记录于 A 批报告。
+- **远程技能源**：`POST /api/skills/source/list` 探测 GitHub repo / SKILL.md 直链（marketplace.json / skills 目录自动发现），`source/install` 一键安装；`/api/skills/sources` 管理已存源（GET/POST/DELETE）。
+- **零成本市场索引**：skills 包新增 GitHub 免鉴权索引（`ghAPIBase`/`ghRawBase` 可测钩子），支持 `GITHUB_TOKEN`/`GH_TOKEN` 提额。
+- **`/skill-doctor` 体检**（TUI）：加载路径 / 分类缺失 / 触发词冲突逐项检查。
+- TUI i18n en 段补齐历史未翻译项。
+
+### B · 多会话协作
+
+- **后台任务可取消**：`task_output` 的 `kill=true` 现对子代理（agt-N）同样生效（原仅 shell bg-N）；新增 `CancelAgentTask`，取消态与失败态明确区分（不再把用户取消误报为 failed）。
+- **TUI `/tasks` 增强**：运行计数摘要（N 个代理 + M 条命令）+ 运行中时提示可用 `task_output kill=true` 取消。
+- **团队黑板通信**（B3，默认关闭）：`team:` 多代理编排升级为两阶段——specialist 并行产出写入黑板 → reviewer 注入同侪输出评审 → leader 汇总评审结论。`TeamRunner` 依赖抽象为 `memberRunner` 最小接口，团队测试从零覆盖（team_test.go，4 用例）。默认团队 `team:review` 的 security 角色回归 specialist 以保持既有默认行为，reviewer 黑板为 opt-in。
+
+### C · 流式健壮性
+
+- **断流保留半截输出**：Send / continueAgentLoop 主循环收到 `EventError` 时先 `persistPartialTurn` 落盘，已生成内容非空则追加「已保留，输入『继续』可从断点接着生成」提示——断流不再丢半截回答。
+- **流式超时模型修正**（openai_compat 全家 + anthropic 双修）：根因是 `http.Client.Timeout` 属**含流式 body 读取的整请求超时**，长回答 2 分钟被误杀。改为 `Timeout: 0` + `Transport.ResponseHeaderTimeout`（首字节等待保留）+ 非流式 `Chat()` 用 ctx 显式超时 + **120s 流式空闲 watchdog**（`streamIdleTimeout` 包级 var，AfterFunc → 友好错误 → `body.Close()` 解锁 scanner；done chan + atomic 防重复上报）。
+- **修复 scanner 吞错**：连接中断时 `scanner.Err()` 一律上报（原 `err != nil && !eventsProduced` 条件会静默吞掉有输出后的错误）。
+
+### D · 桌面后台任务视图（Agents）
+
+- **后端**：`GET /api/bgtasks` 返回结构化快照（`tool.BgTaskInfo`：id/kind/status/elapsed/label/brief/tokens/tail，rune-safe 尾部截取）；`POST /api/bgtasks/{id}/cancel` 收进 Bearer token 门禁（与 /api/shell 同级防护）。shell 侧补 `cancelled` 标志，取消不再误显示为失败。
+- **桌面**：新增 `/agents` 页面（Sidebar 🤖 入口）——5 秒轮询、四色状态徽章、耗时格式化、输出尾部点击展开、运行中一键取消、空态引导；三语言 i18n。
+- 远程控制（`server.remote_listen` 手机页 + token 门）经侦察确认已有，未重复建设。
+
+### E · 质量债收口
+
+- `desktop/package.json` 增加 `pnpm.onlyBuiltDependencies: ["esbuild"]`（pnpm v10+ 默认拦截依赖构建脚本，vite 构建依赖 esbuild postinstall）；修复 description 等 3 处历史 GBK 转码乱码（`鈥?` → `—`）。
+- skills `Load()` 目录内并发读取（`sync.WaitGroup`，结果按序合并，排序保持确定性）。
+- 文档对齐（改进清单 #15/#17/#23）：ICODE.md 热键改 `Ctrl+Shift+Space`（代码实况）、vscode/README vsix 版本对齐 `0.22.0`、acp_design.md 状态改「baseline 已落地」。
+- 巨型文件拆分（ChatPage 107KB / engine.go 112KB 等，改进清单 #2/#6）**本轮明确不做**：改动面与回归风险大于收益，留待专项批次。
+
 ## v0.1.3 — 提权端点 Token 收权：本机进程也不能再裸调 shell/config/permission (2026-10-02)
 
 > 背景审计（docs/改进建议清单_2026-09-29.md #19）确认：CSRF/同源守卫、fetch SSRF 阻断（internal/netsec）、目录沙箱（AllowedPaths）、registry 锁、密钥脱敏**均已落地**（README Roadmap 旧条目过时，本轮已勾选）。真正残余的边界是 **G1：loopback 上任意本机进程可免鉴权调用全部 API**——包括 `/api/shell` 任意命令执行。本轮把所有「改变系统状态」的端点收进 Bearer token 门禁，**本机也不豁免**。

@@ -1,9 +1,9 @@
-﻿// @vitest-environment jsdom
+// @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { initAuthFetch } from '../authFetch';
 
 // Storage key is part of the (unexported) contract with the backend's URL
-// handoff 鈥?hardcoded here on purpose so a rename cannot silently pass.
+// handoff —hardcoded here on purpose so a rename cannot silently pass.
 const TOKEN_KEY = 'icode_token';
 
 // initAuthFetch wraps window.fetch in place; keep the pristine reference so
@@ -91,7 +91,7 @@ describe('initAuthFetch', () => {
 
     await window.fetch('https://evil.example/api/config', { method: 'PUT' });
     const { init } = lastCall();
-    // Cross-origin branch passes init through untouched 鈥?no headers object
+    // Cross-origin branch passes init through untouched —no headers object
     // is created, let alone an Authorization one.
     expect(authHeader(init)).toBeNull();
     expect(init && (init as Record<string, unknown>).headers).toBeUndefined();
@@ -118,7 +118,7 @@ describe('initAuthFetch', () => {
 
   it('injects into Request objects targeting the same origin', async () => {
     if (typeof Request === 'undefined') {
-      // Very old jsdom builds 鈥?skip rather than fake the platform API.
+      // Very old jsdom builds —skip rather than fake the platform API.
       return;
     }
     setURL('/?token=req-token');

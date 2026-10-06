@@ -1,0 +1,6 @@
+# pnpm 11 build-script allowlist (deny-by-default for dependency lifecycle
+# scripts). Written by `pnpm approve-builds esbuild` — this is the key the
+# install flow actually reads in v11; package.json's "pnpm" field is dead.
+# esbuild needs its postinstall to fetch the platform binary.
+allowBuilds:
+  esbuild: true

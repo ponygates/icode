@@ -2,7 +2,7 @@
   "name": "icode-desktop",
   "version": "0.1.2",
   "private": true,
-  "description": "iCode Desktop UI 鈥?React frontend for the native WebView2 desktop app",
+  "description": "iCode Desktop UI — React frontend for the native WebView2 desktop app",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

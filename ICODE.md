@@ -37,11 +37,11 @@ iCode 是一个多模型 AI 编码助手，提供 CLI（TUI）、桌面版（Web
 - `scripts/winget/PonyGates.iCode/0.1.0/*.yaml`（winget 清单源副本，schema 1.6.0）：真实清单必须 PR 到 microsoft/winget-pkgs，流程见 `scripts/winget/README.md`；`InstallerSha256` 是标注清楚的占位零值，发布后用 `checksums.txt` 的真实值回填。
 
 ## 功能亮点
-- **系统托盘 + 全局热键**：`icode desktop` 启动后常驻系统托盘，右键菜单「显示/隐藏/退出」；`Ctrl+Alt+I` 全局唤起或隐藏窗口；关闭窗口默认最小化到托盘（仅托盘退出才真正关闭）。
+- **系统托盘 + 全局热键**：`icode desktop` 启动后常驻系统托盘，右键菜单「显示/隐藏/退出」；`Ctrl+Shift+Space` 全局唤起或隐藏窗口；关闭窗口默认最小化到托盘（仅托盘退出才真正关闭）。
 - **Token 节省仪表盘**：分析页「会话/全局」双 Tab。全局视图跨会话、跨重启聚合累计节省 Token / 缓存命中 / 花费 / 节省金额，并展示按日趋势（数据落库 `session_stats` 表）。
 - **多标签会话 + 工作区**：聊天页编辑器式标签条（切换/关闭/新建会话）；侧栏新增「工作区」面板，可创建/切换工作区（后端 `workspaces` 表 + `GET/POST/PUT/DELETE /api/workspaces`）。
 - **技能 / MCP / 连接器管理**：设置页「技能」展示真实技能列表并支持启用/禁用（`/api/skills/{name}/enable`）；MCP 信任模式可正常保存（`PUT /api/mcp/trust`）；连接器（WorkBuddy）状态可查看。
-- **技能市场（对标 WorkBuddy 优点）**：设置「技能」页增加「市场」子标签，列出内置 5 个通用技能（代码审查 / 提交信息 / 解释代码 / 单元测试 / 文档生成）与「已安装」状态，一键安装 / 卸载；并支持从本地绝对路径导入社区技能（`POST /api/skills/import`）。技能以内置 catalog 形式（embed 进二进制）随 `icode` 分发。
+- **技能市场（对标 WorkBuddy 优点）**：设置「技能」页增加「市场」子标签，列出内置 13 个技能（编码 5：代码审查 / 提交信息 / 解释代码 / 单元测试 / 文档生成；办公 4：docx 报告 / pptx 幻灯片 / xlsx 表格 / 周报；通用 4：邮件 / 会议纪要 / 翻译 / 公众号文章）与「已安装」状态，一键安装 / 卸载；支持从本地绝对路径导入社区技能（`POST /api/skills/import`）、添加远程技能源（GitHub 仓库 backed）、行业包独立目录分发（`industry-packs/insurance/` 含 5 个保险技能）；`/skill-doctor` 一键体检技能安装状态。技能以内置 catalog 形式（embed 进二进制）随 `icode` 分发。
 
 > 以下各小节按引入批次排列，历史版本对应关系见 `docs/archive/CHANGELOG_HISTORY.md`。
 
@@ -51,7 +51,7 @@ iCode 是一个多模型 AI 编码助手，提供 CLI（TUI）、桌面版（Web
 - **路由默认升级**：`routing.mode` 默认从 `keyword` 改为 `embedding`（本地零 token 语义分类，只增不减），存量空配置也映射为 embedding。
 
 ### 技能市场（桌面）
-- **技能市场（对标 WorkBuddy 优点）**：内置 `skills/catalog/`（5 个通用技能，embed 进二进制）构成本地市场；后端 `GET /api/skills/market` + `POST /api/skills/market/install` + `DELETE /api/skills/market/{name}` + `POST /api/skills/import`；`Install` 复制进 `~/.icode/skills`，`Uninstall` 仅删用户目录技能，`Import` 从本地路径导入。修复 embed 在 Windows 须用 `path.Join`（正斜杠）的坑。
+- **技能市场（对标 WorkBuddy 优点）**：内置 `skills/catalog/`（13 个技能：编码 5 / 办公 4 / 通用 4，embed 进二进制）构成本地市场；后端 `GET /api/skills/market` + `POST /api/skills/market/install` + `DELETE /api/skills/market/{name}` + `POST /api/skills/import`；`Install` 复制进 `~/.icode/skills`，`Uninstall` 仅删用户目录技能，`Import` 从本地路径导入。修复 embed 在 Windows 须用 `path.Join`（正斜杠）的坑。后续扩展：技能按 `Category` 分组展示；行业技能（保险 5 个）剥离到 `industry-packs/insurance/`；远程技能源（`internal/core/skills/remote.go`，GitHub 仓库 backed）与零成本市场索引（`sources.go`，`ghAPIBase/ghRawBase` 可测钩子）；`/skill-doctor` 安装体检。
 - **桌面技能市场 Tab**：设置「技能」改「已安装/市场」双子标签，市场支持一键安装/卸载 + 本地导入；修正侧栏「技能」误显「记忆」的遗留 bug；i18n 补 `skillMarket.*` 三语言。
 
 ### 多模态生成结果回灌

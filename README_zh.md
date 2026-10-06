@@ -1,4 +1,4 @@
-# iCode · [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE) [![Go Version](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go)](https://go.dev) [![Version](https://img.shields.io/badge/version-0.1.0-blue)](CHANGELOG.md)
+# iCode · [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE) [![Go Version](https://img.shields.io/badge/Go-1.26%2B-00ADD8?logo=go)](https://go.dev) [![Version](https://img.shields.io/badge/version-0.1.4-blue)](CHANGELOG.md)
 
 > **多模型 AI 编程 Agent** — 终端原生、多厂商支持、缓存优先的编程助手。
 

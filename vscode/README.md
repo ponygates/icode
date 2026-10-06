@@ -38,7 +38,7 @@ npm run compile        # 输出到 dist/extension.js
 
 ```bash
 npx @vscode/vsce package   # 需安装 vsce
-code --install-extension icode-vscode-0.1.0.vsix
+code --install-extension icode-vscode-0.22.0.vsix
 ```
 
 ## 架构

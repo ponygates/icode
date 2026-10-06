@@ -15,6 +15,7 @@ node_modules/
 desktop/dist/
 desktop/release/
 internal/embedded/dist/
+vscode/dist/
 
 # Scratch / one-shot codemod scripts — these are throwaway patch drivers and
 # must never be committed (five of them reached the repo once already).

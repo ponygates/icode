@@ -242,6 +242,39 @@ jobs:
           path: desktop/dist/
 
   # ============================================================================
+  # VS Code extension — compile check on every push / PR.
+  #   vscode/dist is a build artifact (git-ignored since v0.1.4): this job is
+  #   what proves the extension still type-checks and builds after any change
+  #   to vscode/src, so the checked-in-bundle rot cannot come back silently.
+  # ============================================================================
+  vscode:
+    name: Build VS Code Extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: vscode/package-lock.json
+
+      - name: Install dependencies
+        working-directory: vscode
+        run: npm ci
+
+      - name: Compile extension (tsc)
+        working-directory: vscode
+        run: npm run compile
+
+      - name: Upload extension dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: vscode-extension
+          path: vscode/dist/
+
+  # ============================================================================
   # Desktop GUI binaries — native runners, CGO for systray / hotkey
   # ============================================================================
   build-desktop:

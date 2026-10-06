@@ -2,7 +2,7 @@ package main
 
 // Version information — set via ldflags at build time.
 var (
-	Version   = "0.1.3"
+	Version   = "0.1.4"
 	BuildTime = "unknown"
 	GitCommit = "unknown"
 )

@@ -1,4 +1,4 @@
-﻿// @vitest-environment jsdom
+// @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
 import ChangedFilesBar, { toolTargetFile } from '../ChangedFilesBar';
@@ -15,7 +15,7 @@ vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string, opts?: any) => key.replace('{{count}}', String(opts?.count ?? '')) }),
   initReactI18next: { type: '3rdParty', init: () => {} },
 }));
-// DiffViewer issues a real fetch 鈥?stub the whole viewer behind a marker div.
+// DiffViewer issues a real fetch —stub the whole viewer behind a marker div.
 vi.mock('../DiffViewer', () => ({
   default: ({ steps }: { steps: number }) => <div data-testid="diff-viewer">steps:{steps}</div>,
 }));
