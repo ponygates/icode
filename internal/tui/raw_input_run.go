@@ -213,7 +213,7 @@ func (t *TUI) suspendRaw() {
 		return
 	}
 	fmt.Fprint(t.writer, "\x1b[?25h\x1b[?1049l")
-	term.Restore(int(os.Stdin.Fd()), t.rawState)
+	_ = term.Restore(int(os.Stdin.Fd()), t.rawState)
 }
 
 // resumeRaw re-enters raw mode and the alternate screen after suspendRaw, and

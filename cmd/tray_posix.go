@@ -72,7 +72,7 @@ func registerGlobalHotkeyPOSIX(boot *desktopBoot) {
 		log.Printf("[desktop] 全局热键注册失败（可改用托盘菜单唤起）：%v", err)
 		return
 	}
-	defer hk.Unregister()
+	defer func() { _ = hk.Unregister() }()
 	log.Printf("[desktop] 全局热键已注册：Ctrl+Shift+Space")
 	for range hk.Keydown() {
 		_ = openBrowser(boot.url)

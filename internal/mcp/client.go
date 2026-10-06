@@ -945,7 +945,7 @@ func (c *Client) sendNotification(ctx context.Context, method string, params any
 		}
 		return
 	}
-	c.stdin.Write(append(data, '\n'))
+	_, _ = c.stdin.Write(append(data, '\n'))
 }
 
 func (c *Client) readLoop() {

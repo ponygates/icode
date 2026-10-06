@@ -211,7 +211,7 @@ func hideConsoleWindow() {
 // showCLIMessage displays a native message box telling the user this is a
 // command-line tool, then waits for a key press before exiting.
 func showCLIMessage() {
-	windows.MessageBox(windows.HWND(0),
+	_, _ = windows.MessageBox(windows.HWND(0),
 		windows.StringToUTF16Ptr("This is a command line tool.\r\n\r\n"+
 			"You need to open cmd.exe / PowerShell and run it from there:\r\n\r\n"+
 			"  cd \\path\\to\\icode\r\n"+
@@ -224,6 +224,6 @@ func showCLIMessage() {
 	fmt.Println("You need to open cmd.exe / PowerShell and run icode.exe from there.")
 	fmt.Println("For the desktop app, double-click iCode.exe instead.")
 	fmt.Print("\n按 Enter 键退出...")
-	fmt.Scanln()
+	_, _ = fmt.Scanln()
 	os.Exit(0)
 }

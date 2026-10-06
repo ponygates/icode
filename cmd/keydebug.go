@@ -31,7 +31,7 @@ var keydebugCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer term.Restore(int(os.Stdin.Fd()), old)
+		defer func() { _ = term.Restore(int(os.Stdin.Fd()), old) }()
 		fmt.Println("按键诊断：按任意键查看原始字节（Esc 退出）")
 		buf := make([]byte, 64)
 		for {

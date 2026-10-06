@@ -149,7 +149,6 @@ func wrapText(text string, width int) []string {
 						cw := wids[k]
 						cur = cur[:k]
 						wids = wids[:k]
-						tot -= cw
 						lines = append(lines, string(cur))
 						cur = append(cur[:0], carry...)
 						wids = append(wids[:0], cw)

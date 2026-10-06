@@ -54,7 +54,7 @@ func writeCliLog(s string) {
 		return
 	}
 	if rw := cliLogWriter(); rw != nil {
-		rw.Write([]byte(s))
+		_, _ = rw.Write([]byte(s))
 		return
 	}
 	// Fallback (home dir unavailable or rotator init failed): stderr.

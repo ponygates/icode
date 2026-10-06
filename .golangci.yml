@@ -129,17 +129,25 @@ linters:
       # desktop_only / nogui / in-refactor path look dead. Named explicitly so a
       # genuinely orphaned new symbol still fails.
       - linters: [unused]
-        text: "(showCLIMessage|openBrowser|siMutex|mu|calculateCost|procMapVirtualKey|point|pluralS|sseSessionID|errDropped|saveInputHistory|enableMouse|restoreVimUndo|scrollToTop|scrollToBottom|scrollUp|scrollDown|fit|padEnd) is unused"
+        text: "(showCLIMessage|openBrowser|siMutex|mu|calculateCost|procMapVirtualKey|point|pluralS|sseSessionID|errDropped|saveInputHistory|enableMouse|restoreVimUndo|scrollToTop|scrollToBottom|scrollUp|scrollDown|fit|padEnd|isFreshConsole|killStaleWebViewProcesses) is unused"
         reason: "重构中/其他构建标签下才可达的 TUI 与 cmd 辅助符号，删除会丢功能"
 
       # ── ineffectual assignments that need a semantic decision ─────────────
-      - linters: [ineffassign]
+      - linters: [ineffassign, staticcheck]
         text: "ineffectual assignment to (candidates|cwd|style|maxChars)"
         reason: "赋值意图本身待判定（是用初值还是补计算），修复要连上下文一起改，登记待清理"
 
-      - linters: [ineffassign]
+      - linters: [staticcheck]
+        text: "this value of (candidates|cwd|style|maxChars) is never used"
+        reason: "SA4006 与 ineffassign 同源：赋值意图待判定，登记待清理"
+
+      - linters: [ineffassign, staticcheck]
         text: "absCmd"
         reason: "命令归一化的末次赋值属于安全判定路径，改动需配回归用例，另行专项处理"
+
+      - linters: [staticcheck]
+        text: "SA4017"
+        reason: "bashsec absCmd 同一行的 ReplaceAll 返回值债务，随 absCmd 专项一并处理"
 
       - linters: [ineffassign, staticcheck]
         text: "maxChars"

@@ -47,7 +47,7 @@ func warnIfGUISubsystem() {
 	}
 	fmt.Fprint(os.Stderr, guiSubsystemWarning)
 	fmt.Fprintln(os.Stderr, "按 Enter 键仍要继续（不推荐）...")
-	bufio.NewReader(os.Stdin).ReadBytes('\n')
+	_, _ = bufio.NewReader(os.Stdin).ReadBytes('\n')
 }
 
 const guiSubsystemWarning = `

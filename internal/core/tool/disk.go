@@ -160,7 +160,7 @@ func (t *DiskCleanupTool) Execute(ctx context.Context, args string) (*types.Tool
 			totalCleaned += cleanPath("Win Update Downloads", filepath.Join(systemRoot, "SoftwareDistribution", "Download"))
 			if !dryRun {
 				cmd := executil.CommandContext(ctx, "dism", "/online", "/cleanup-image", "/startcomponentcleanup", "/resetbase", "/quiet")
-				cmd.Run() // best-effort, ignore errors
+				_ = cmd.Run() // best-effort, ignore errors
 				output.WriteString("  DISM component cleanup: completed (best-effort)\n")
 			}
 		}

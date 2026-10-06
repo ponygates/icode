@@ -103,7 +103,7 @@ func teePipe(real *os.File, log io.Writer, name string) {
 				teeMu.Lock()
 				fmt.Fprintf(log, "\n[%s %s %dB] ", name,
 					time.Now().Format("15:04:05.000"), n)
-				log.Write(buf[:n])
+				_, _ = log.Write(buf[:n])
 				teeMu.Unlock()
 			}
 			if rerr != nil {
@@ -130,7 +130,7 @@ func teeDrain() {
 	if fl, ok := teeMirror.(interface{ Flush() error }); ok {
 		_ = fl.Flush()
 	}
-	teeLog.Sync()
+	_ = teeLog.Sync()
 	teeLog.Close()
 	teeLog = nil
 	teeMirror = nil

@@ -569,7 +569,7 @@ func (e *Engine) Send(ctx context.Context, sessionID, content string, attachment
 										"\n请根据以上反馈继续完成任务，不要重复已完成的工作。",
 									Timestamp: time.Now(),
 								}
-								contMsg = e.appendPersisted(sessionID, opt, contMsg)
+								_ = e.appendPersisted(sessionID, opt, contMsg)
 								// Reset per-round state and re-open the stream.
 								assistantMsg = types.Message{Role: types.RoleAssistant, Timestamp: time.Now()}
 								toolCalls = nil

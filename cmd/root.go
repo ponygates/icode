@@ -80,7 +80,7 @@ func Execute(version, build, commit string) (err error) {
 		teeDrain()
 		if err != nil && weAllocatedConsole {
 			fmt.Fprintln(os.Stderr, "\n按 Enter 键退出...")
-			bufio.NewReader(os.Stdin).ReadBytes('\n')
+			_, _ = bufio.NewReader(os.Stdin).ReadBytes('\n')
 		}
 	}()
 

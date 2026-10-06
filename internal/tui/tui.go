@@ -696,7 +696,7 @@ func (t *TUI) Run() error {
 			return t.runLine()
 		}
 		if state, err := term.MakeRaw(fd); err == nil {
-			defer term.Restore(fd, state)
+			defer func() { _ = term.Restore(fd, state) }()
 			// Belt and braces: some Windows console configurations keep the
 			// ECHO/LINE bits alive after MakeRaw — ConHost then echoes keys at
 			// the physical cursor (text landing in the log area).

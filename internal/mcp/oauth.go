@@ -631,7 +631,7 @@ func (m *OAuthManager) clientLocked(ctx context.Context, meta asMetadata, ch oau
 	if resp.ClientID == "" {
 		return tokenClient{}, errors.New("mcp: 动态注册未返回 client_id")
 	}
-	return tokenClient{ClientID: resp.ClientID, ClientSecret: resp.ClientSecret}, nil
+	return tokenClient(resp), nil
 }
 
 // codeFlowLocked runs PKCE authorization-code grant over a loopback callback.
@@ -693,7 +693,7 @@ func (m *OAuthManager) codeFlowLocked(ctx context.Context, meta asMetadata, cli 
 	})
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = srv.Serve(ln) }()
-	defer srv.Shutdown(context.Background())
+	defer func() { _ = srv.Shutdown(context.Background()) }()
 
 	m.publishAuthURL(authURL)
 

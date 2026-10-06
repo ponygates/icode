@@ -55,7 +55,7 @@ func (c *chatCallback) OnSend(text string, attachments []types.Attachment) {
 			if sess.ModelID != model || sess.ProviderName != provider {
 				sess.ModelID = model
 				sess.ProviderName = provider
-				c.app.SessStore.Update(sess)
+				_ = c.app.SessStore.Update(sess)
 			}
 		}
 	}

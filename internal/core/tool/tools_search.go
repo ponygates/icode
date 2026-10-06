@@ -70,7 +70,7 @@ func (t *GrepTool) Execute(ctx context.Context, args string) (*types.ToolResult,
 
 	// Use Go-native grep (cross-platform, no external dependency)
 	var results []string
-	filepath.Walk(searchPath, func(path string, info os.FileInfo, err error) error {
+	_ = filepath.Walk(searchPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			// Skip common directories
 			if info != nil && info.IsDir() {

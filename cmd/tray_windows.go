@@ -329,14 +329,14 @@ func makeIcon() ([]byte, error) {
 	// ICONDIR
 	ico.Write([]byte{0, 0, 1, 0, 1, 0})
 	// ICONDIRENTRY
-	ico.WriteByte(byte(size))                                     // bWidth
-	ico.WriteByte(byte(size))                                     // bHeight
-	ico.WriteByte(0)                                              // bColorCount
-	ico.WriteByte(0)                                              // bReserved
-	binary.Write(&ico, binary.LittleEndian, uint16(1))            // wPlanes
-	binary.Write(&ico, binary.LittleEndian, uint16(32))           // wBitCount
-	binary.Write(&ico, binary.LittleEndian, uint32(len(pngData))) // dwBytesInRes
-	binary.Write(&ico, binary.LittleEndian, uint32(22))           // dwImageOffset
+	ico.WriteByte(byte(size))                                         // bWidth
+	ico.WriteByte(byte(size))                                         // bHeight
+	ico.WriteByte(0)                                                  // bColorCount
+	ico.WriteByte(0)                                                  // bReserved
+	_ = binary.Write(&ico, binary.LittleEndian, uint16(1))            // wPlanes
+	_ = binary.Write(&ico, binary.LittleEndian, uint16(32))           // wBitCount
+	_ = binary.Write(&ico, binary.LittleEndian, uint32(len(pngData))) // dwBytesInRes
+	_ = binary.Write(&ico, binary.LittleEndian, uint32(22))           // dwImageOffset
 	ico.Write(pngData)
 	return ico.Bytes(), nil
 }

@@ -327,7 +327,7 @@ func (s *Server) requestPermission(sessionID string, req *types.PermissionReq, r
 	s.permPending[id] = ch
 	s.permMu.Unlock()
 
-	s.out.Encode(map[string]any{
+	_ = s.out.Encode(map[string]any{
 		"jsonrpc": "2.0",
 		"id":      id,
 		"method":  "session/request_permission",
