@@ -1,6 +1,6 @@
 # Binaries
 icode.exe
-icode
+/icode
 *.exe
 *.exe~
 

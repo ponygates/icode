@@ -75,7 +75,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libgtk-3-dev libayatana-appindicator3-dev libayatana-indicator3-dev
+          sudo apt-get install -y pkg-config libgtk-3-dev libayatana-appindicator3-dev libayatana-indicator3-dev xvfb
 
       # internal/embedded/dist is git-ignored (real bundle built in the frontend
       # job). These compile-only jobs just need //go:embed dist to have a file.
@@ -96,6 +96,7 @@ jobs:
           CGO_ENABLED: ${{ runner.os == 'Windows' && '0' || '1' }}
 
       - name: Check gofmt
+        shell: bash
         run: |
           UNFORMATTED="$(gofmt -l .)"
           if [ -n "$UNFORMATTED" ]; then
@@ -105,9 +106,18 @@ jobs:
           fi
 
       - name: Run all tests
+        if: runner.os != 'Linux'
         run: go test -count=1 -timeout=180s ./...
         env:
           CGO_ENABLED: ${{ runner.os == 'Windows' && '0' || '1' }}
+
+      # cmd-package tests import the systray/hotkey chain whose X11 init
+      # panics on a headless runner; give them a virtual display.
+      - name: Run all tests (Xvfb)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a go test -count=1 -timeout=180s ./...
+        env:
+          CGO_ENABLED: 1
 
       # Race detector catches data races that the plain run misses. It needs a C
       # toolchain (CGO_ENABLED=1), which Windows runners have once MSYS2's gcc is

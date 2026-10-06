@@ -1,0 +1,36 @@
+{
+  "name": "icode",
+  "version": "0.0.0-REPLACED_BY_CI",
+  "description": "iCode — Multi-Model AI Coding Agent (platform launcher)",
+  "homepage": "https://github.com/ponygates/icode",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ponygates/icode.git"
+  },
+  "license": "Apache-2.0",
+  "bin": {
+    "icode": "bin/icode.js"
+  },
+  "files": [
+    "bin/icode.js"
+  ],
+  "os": [
+    "linux",
+    "darwin",
+    "win32"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "optionalDependencies": {
+    "icode-linux-x64": "0.0.0-REPLACED_BY_CI",
+    "icode-linux-arm64": "0.0.0-REPLACED_BY_CI",
+    "icode-darwin-x64": "0.0.0-REPLACED_BY_CI",
+    "icode-darwin-arm64": "0.0.0-REPLACED_BY_CI",
+    "icode-win32-x64": "0.0.0-REPLACED_BY_CI",
+    "icode-win32-arm64": "0.0.0-REPLACED_BY_CI"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
