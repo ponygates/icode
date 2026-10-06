@@ -87,6 +87,9 @@ func TestBashTool_TimeoutArgAllowsQuickCommand(t *testing.T) {
 }
 
 func TestPickWindowsShell(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("pickWindowsShell resolves Windows-specific shell candidates")
+	}
 	// $SHELL wins when it points at an existing binary.
 	sh, args := pickWindowsShell(
 		func(k string) string { return `C:\msys64\usr\bin\bash.exe` },
@@ -172,7 +175,7 @@ func TestBashTool_OutputCapEndToEnd(t *testing.T) {
 	f.Close()
 
 	name, _ := resolveBashShell()
-	cmdStr := fmt.Sprintf(`cat "%s"`, fp)
+	var cmdStr string
 	if name == "cmd" {
 		cmdStr = fmt.Sprintf(`type "%s"`, fp)
 	} else {

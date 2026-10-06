@@ -36,11 +36,17 @@ func TestCmdCD_ChangesDirectory(t *testing.T) {
 		t.Fatalf("unexpected error: %s", res.Output)
 	}
 	got, _ := os.Getwd()
-	if got != dir {
-		t.Fatalf("cwd = %q, want %q", got, dir)
+	// macOS: after chdir into a symlinked t.TempDir() path, Getwd reports the
+	// resolved /private/var physical path — compare against the real path.
+	want := dir
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		want = resolved
 	}
-	if res.CWD != dir {
-		t.Fatalf("res.CWD = %q, want %q", res.CWD, dir)
+	if got != want {
+		t.Fatalf("cwd = %q, want %q", got, want)
+	}
+	if res.CWD != want {
+		t.Fatalf("res.CWD = %q, want %q", res.CWD, want)
 	}
 }
 

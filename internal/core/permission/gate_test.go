@@ -73,6 +73,12 @@ func TestClaudeAllowMatch(t *testing.T) {
 // agent cannot escape the workspace with write_file/edit/read_file in YOLO mode.
 func TestAllowedPathsContainmentForFileTools(t *testing.T) {
 	base := t.TempDir()
+	// macOS anchors t.TempDir() under /var/folders — a symlink into
+	// /private/var. The Gate normalizes paths, so anchor the sandbox on the
+	// resolved real path or every containment prefix check mis-compares.
+	if resolved, err := filepath.EvalSymlinks(base); err == nil {
+		base = resolved
+	}
 	inside := filepath.Join(base, "src", "main.go")
 	outside := filepath.Join(base, "..", "escape.txt")
 
