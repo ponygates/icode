@@ -570,9 +570,9 @@ func (b *stuckBody) Close() error {
 // gets a friendly EventError after the idle window and the channel closes
 // without a duplicate raw scan error.
 func TestReadStream_IdleWatchdog(t *testing.T) {
-	old := streamIdleTimeout
-	streamIdleTimeout = 150 * time.Millisecond
-	defer func() { streamIdleTimeout = old }()
+	old := streamIdleTimeout.Load()
+	streamIdleTimeout.Store(int64(150 * time.Millisecond))
+	defer func() { streamIdleTimeout.Store(old) }()
 
 	p := New(Config{Name: "idle-test", APIKey: "sk-test"})
 	ch := make(chan types.StreamEvent, 64)
@@ -629,9 +629,9 @@ func (b *midDropBody) Close() error { return nil }
 // error after partial output was swallowed (no error event), silently
 // discarding the user's half reply.
 func TestReadStream_MidStreamErrorSurfaced(t *testing.T) {
-	old := streamIdleTimeout
-	streamIdleTimeout = 10 * time.Second // effectively disabled for this test
-	defer func() { streamIdleTimeout = old }()
+	old := streamIdleTimeout.Load()
+	streamIdleTimeout.Store(int64(10 * time.Second)) // effectively disabled for this test
+	defer func() { streamIdleTimeout.Store(old) }()
 
 	p := New(Config{Name: "drop-test", APIKey: "sk-test"})
 	ch := make(chan types.StreamEvent, 64)

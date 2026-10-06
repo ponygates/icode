@@ -3,6 +3,7 @@ package tui
 import (
 	"bufio"
 	"io"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -257,8 +258,8 @@ func TestDrainStreamWheelNoGarbage(t *testing.T) {
 	tu.rawMode = true
 	tu.streaming = true
 	tu.writer = io.Discard
-	interrupted := false
-	tu.callback = &testCallback{onInterrupt: func() { interrupted = true }}
+	var interrupted atomic.Bool
+	tu.callback = &testCallback{onInterrupt: func() { interrupted.Store(true) }}
 	// Simulate the key pump's atomic delivery: wheel burst, then typing.
 	for _, r := range "\x1b[<64;1;1M" { // coords contain digits 1/6/4
 		tu.keyCh <- r
@@ -267,7 +268,7 @@ func TestDrainStreamWheelNoGarbage(t *testing.T) {
 	tu.keyCh <- 'k'
 	waitFor, finish := drainStreamRunner(t, tu)
 	waitFor("ok")
-	if interrupted {
+	if interrupted.Load() {
 		t.Error("wheel sequence must not fire OnInterrupt")
 	}
 	finish()
@@ -281,14 +282,14 @@ func TestDrainStreamX10WheelNoGarbage(t *testing.T) {
 	tu.rawMode = true
 	tu.streaming = true
 	tu.writer = io.Discard
-	interrupted := false
-	tu.callback = &testCallback{onInterrupt: func() { interrupted = true }}
+	var interrupted atomic.Bool
+	tu.callback = &testCallback{onInterrupt: func() { interrupted.Store(true) }}
 	for _, r := range "\x1b[M\x60\xc2\xc5" {
 		tu.keyCh <- r
 	}
 	waitFor, finish := drainStreamRunner(t, tu)
 	waitFor("")
-	if interrupted {
+	if interrupted.Load() {
 		t.Error("X10 wheel sequence must not fire OnInterrupt")
 	}
 	finish()
@@ -316,8 +317,8 @@ func TestDrainStreamWheelThenLoneEsc(t *testing.T) {
 	tu.rawMode = true
 	tu.streaming = true
 	tu.writer = io.Discard
-	interrupted := false
-	tu.callback = &testCallback{onInterrupt: func() { interrupted = true }}
+	var interrupted atomic.Bool
+	tu.callback = &testCallback{onInterrupt: func() { interrupted.Store(true) }}
 	for _, r := range "\x1b[<64;1;1M" {
 		tu.keyCh <- r
 	}
@@ -325,10 +326,10 @@ func TestDrainStreamWheelThenLoneEsc(t *testing.T) {
 	waitFor("")
 	tu.keyCh <- 0x1b // nothing follows → genuine lone Esc
 	deadline := time.Now().Add(2 * time.Second)
-	for !interrupted && time.Now().Before(deadline) {
+	for !interrupted.Load() && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if !interrupted {
+	if !interrupted.Load() {
 		t.Fatal("lone Esc after a wheel sequence must call OnInterrupt")
 	}
 	// End the stream to let drainStream return and the test goroutine exit.

@@ -590,8 +590,13 @@ func parseVendorModelIDs(body []byte) []string {
 // streamIdleTimeout is how long a streaming body may stay silent between two
 // SSE lines before we declare the connection dead. Generous on purpose:
 // deep-thinking models can pause between reasoning and the final answer.
-// Package-level variable (not const) so tests can shrink it.
-var streamIdleTimeout = 120 * time.Second
+// Package-level atomic (not const) so tests can shrink it. Atomic, not a
+// plain var: the watchdog timer callback and test teardown read/write it
+// from different goroutines, which the race detector rightly flags.
+var streamIdleTimeout = func() (v atomic.Int64) {
+	v.Store(int64(120 * time.Second))
+	return
+}()
 
 // readStream pumps SSE lines from the response body into ch until EOF, an
 // error, or ctx cancellation. The context matters: when the user interrupts
@@ -616,12 +621,12 @@ func (p *BaseProvider) readStream(ctx context.Context, body io.ReadCloser, ch ch
 	done := make(chan struct{})
 	defer close(done)
 	var idleFired atomic.Bool
-	watchdog := time.AfterFunc(streamIdleTimeout, func() {
+	watchdog := time.AfterFunc(time.Duration(streamIdleTimeout.Load()), func() {
 		select {
 		case ch <- types.StreamEvent{
 			Type: types.EventError,
 			Content: fmt.Sprintf("流式响应空闲超时（%s 内没有新数据），连接已断开。已生成内容见上方，可输入「继续」从断点接着生成。",
-				streamIdleTimeout),
+				time.Duration(streamIdleTimeout.Load())),
 		}:
 			idleFired.Store(true)
 			body.Close() // unblocks the parked scanner read
@@ -638,7 +643,7 @@ func (p *BaseProvider) readStream(ctx context.Context, body io.ReadCloser, ch ch
 	go func() {
 		defer close(lines)
 		for scanner.Scan() {
-			watchdog.Reset(streamIdleTimeout)
+			watchdog.Reset(time.Duration(streamIdleTimeout.Load()))
 			select {
 			case lines <- scanner.Text():
 			case <-ctx.Done():
