@@ -1,6 +1,7 @@
 ---
 name: translate-zh
 description: 中英互译与润色：保持原意、贴合语境，输出直译版 + 自然版，并标注术语处理。
+category: office
 triggers:
   - 翻译
   - 中译英

@@ -1,6 +1,7 @@
 ---
 name: docx-report
 description: 生成规范的中文 Word 报告（.docx）：保单检视报告、财务规划建议书、工作总结等。用 Python(python-docx) 或 pandoc 从结构化内容产出排版规范的文档。
+category: office
 triggers:
   - 生成Word
   - docx报告

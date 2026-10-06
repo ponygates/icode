@@ -1,6 +1,7 @@
 ---
 name: pptx-deck
 description: 从大纲生成幻灯片（.pptx）：展业演示、产品讲解、培训课件、方案汇报。用 Python(python-pptx) 产出结构清晰的演示文稿。
+category: office
 triggers:
   - 生成PPT
   - pptx幻灯片

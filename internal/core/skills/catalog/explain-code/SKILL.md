@@ -1,6 +1,7 @@
 ---
 name: explain-code
 description: 用中文由浅入深地解释代码：整体意图、关键流程、关键数据结构与易错点，适配不同熟悉度。
+category: coding
 triggers:
   - 解释代码
   - 这段代码做什么

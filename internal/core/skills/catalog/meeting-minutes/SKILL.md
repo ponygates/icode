@@ -1,6 +1,7 @@
 ---
 name: meeting-minutes
 description: 把会议记录/对话整理成结构化会议纪要（议题、结论、待办、责任人、截止时间），突出行动项。
+category: office
 triggers:
   - 会议纪要
   - 会议记录

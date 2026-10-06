@@ -1,6 +1,7 @@
 ---
 name: wechat-article
 description: 撰写微信公众号文章：选题标题、结构大纲、正文（含金句/案例/引导关注），提升阅读量与转发，符合公众号运营规范。
+category: office
 triggers:
   - 公众号
   - 文章

@@ -1,6 +1,7 @@
 ---
 name: code-review
 description: 对变更或 PR 进行结构化代码审查，覆盖正确性、安全性、性能、可读性与测试覆盖，并给出可执行建议。
+category: coding
 triggers:
   - 代码审查
   - 审查 PR

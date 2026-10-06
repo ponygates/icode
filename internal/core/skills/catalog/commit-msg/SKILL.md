@@ -1,6 +1,7 @@
 ---
 name: commit-msg
 description: 根据当前 git 改动生成规范、可读的 Conventional Commits 提交信息，可附带中英文版本与正文。
+category: coding
 triggers:
   - 提交信息
   - commit message

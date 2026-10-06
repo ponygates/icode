@@ -1,6 +1,7 @@
 ---
 name: email-writer
 description: 撰写/润色商务邮件（客户跟进、汇报、请假、邀约、致谢），区分语气（正式/友好），突出目的与行动点。
+category: office
 triggers:
   - 邮件
   - 商务邮件

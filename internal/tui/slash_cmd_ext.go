@@ -19,6 +19,8 @@ func (t *TUI) handleSlashExt(cmd string, args []string) bool {
 		t.slashSkills()
 	case "/skill-eval":
 		t.skillEvalCommand(args)
+	case "/skill-doctor":
+		t.skillDoctorCommand()
 	case "/plugin":
 		t.pluginCommand(args)
 	case "/mesh":

@@ -1,6 +1,7 @@
 ---
 name: doc-gen
 description: 为代码生成或更新文档：函数/模块注释、README 用法、API 说明，保持与代码一致。
+category: coding
 triggers:
   - 生成文档
   - 写注释

@@ -965,6 +965,7 @@ interface SkillView {
 interface MarketSkill {
   name: string;
   description?: string;
+  category?: string; // coding | office | general — server groups the market by it
   triggers?: string[];
   installed?: boolean;
 }
@@ -1153,8 +1154,27 @@ function PageSkills() {
           ) : market.length === 0 ? (
             <div style={{ padding: 16, textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>市场为空</div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {market.map((m) => (
+            (() => {
+              // Group by category (coding / office / general), mirroring the
+              // standalone market page.
+              const catOrder = ['coding', 'office', 'general'];
+              const catLabel = (c: string) =>
+                c === 'coding' ? t('settings.skillMarket.catCoding')
+                  : c === 'office' ? t('settings.skillMarket.catOffice')
+                    : t('settings.skillMarket.catGeneral');
+              const grouped = catOrder
+                .map((cat) => ({ cat, items: market.filter((m) => (m.category || 'general') === cat) }))
+                .filter((g) => g.items.length > 0);
+              return (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              {grouped.map((g) => (
+                <div key={g.cat} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-primary)', letterSpacing: '0.04em', textTransform: 'uppercase' }}>{catLabel(g.cat)}</span>
+                    <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>{g.items.length}</span>
+                    <div style={{ flex: 1, height: '0.5px', background: 'var(--border-color)' }} />
+                  </div>
+                  {g.items.map((m) => (
                 <div key={m.name} style={cardStyle}>
                   <div style={{ minWidth: 0 }}>
                     <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{m.name}</div>
@@ -1177,8 +1197,12 @@ function PageSkills() {
                     {busy === m.name ? t('settings.skillMarket.loading') : m.installed ? t('settings.skillMarket.uninstall') : t('settings.skillMarket.install')}
                   </button>
                 </div>
+                  ))}
+                </div>
               ))}
             </div>
+              );
+            })()
           )
         )}
 

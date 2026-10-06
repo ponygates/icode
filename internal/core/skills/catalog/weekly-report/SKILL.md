@@ -1,6 +1,7 @@
 ---
 name: weekly-report
 description: 把一周的工作/进展整理成结构化周报（本周完成、数据亮点、问题阻塞、下周计划），支持中文汇报风格。
+category: office
 triggers:
   - 周报
   - 周总结

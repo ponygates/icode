@@ -1,6 +1,7 @@
 ---
 name: unit-tests
 description: 为函数 / 模块生成高质量单元测试，覆盖正常路径、边界、错误与并发场景，遵循项目既有测试风格。
+category: coding
 triggers:
   - 生成测试
   - 写单测

@@ -2,7 +2,9 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/ponygates/icode/internal/core/skills"
@@ -121,6 +123,108 @@ func (s *Server) handleSkillImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "imported": body.Path})
+}
+
+// handleSkillSourceList probes a remote skill source (GitHub repo, GitHub
+// tree URL or a direct SKILL.md URL) and returns the installable skills it
+// advertises. POST /api/skills/source/list {source}.
+
+func (s *Server) handleSkillSourceList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Source string `json:"source"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Source == "" {
+		_ = r.Body.Close()
+		http.Error(w, "source required", http.StatusBadRequest)
+		return
+	}
+	list, err := skills.ListFromSource(body.Source)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "skills": list})
+}
+
+// handleSkillSourceInstall downloads and installs a skill from a remote
+// source. POST /api/skills/source/install {source, path} — path comes from a
+// prior list call (repo-internal path); direct file URLs ignore it.
+
+func (s *Server) handleSkillSourceInstall(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Source string `json:"source"`
+		Path   string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Source == "" {
+		_ = r.Body.Close()
+		http.Error(w, "source required", http.StatusBadRequest)
+		return
+	}
+	name, err := skills.InstallFromSource(body.Source, body.Path)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "installed": name})
+}
+
+// handleSkillSources manages the user's saved remote sources (A3):
+// GET    /api/skills/sources        → list
+// POST   /api/skills/sources        → add {source, alias?}
+// DELETE /api/skills/sources/{src}  → remove (src may contain slashes)
+
+func (s *Server) handleSkillSources(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "sources": skills.ListSources()})
+	case http.MethodPost:
+		var body struct {
+			Source string `json:"source"`
+			Alias  string `json:"alias"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Source == "" {
+			_ = r.Body.Close()
+			http.Error(w, "source required", http.StatusBadRequest)
+			return
+		}
+		added, err := skills.AddSource(body.Source, body.Alias)
+		if err != nil {
+			status := http.StatusBadRequest
+			if errors.Is(err, os.ErrExist) {
+				status = http.StatusConflict
+			}
+			writeJSON(w, status, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "added": added})
+	case http.MethodDelete:
+		// The source string itself may contain slashes (owner/repo, URLs),
+		// so the whole remaining path — URL-decoded by net/http — is the key.
+		src := strings.TrimPrefix(r.URL.Path, "/api/skills/sources/")
+		if src == "" {
+			http.Error(w, "source required", http.StatusBadRequest)
+			return
+		}
+		if err := skills.RemoveSource(src); err != nil {
+			status := http.StatusBadRequest
+			if errors.Is(err, os.ErrNotExist) {
+				status = http.StatusNotFound
+			}
+			writeJSON(w, status, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "removed": src})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // ── Teams ──

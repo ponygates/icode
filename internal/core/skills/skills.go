@@ -13,6 +13,7 @@
 //	---
 //	name: my-skill
 //	description: Does something useful
+//	category: coding   # optional: coding | office | general (market grouping)
 //	triggers:
 //	  - keyword1
 //	  - keyword2
@@ -29,6 +30,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/ponygates/icode/internal/core/plugins"
 	"gopkg.in/yaml.v3"
@@ -38,6 +40,7 @@ import (
 type Skill struct {
 	Name        string   `yaml:"name"`
 	Description string   `yaml:"description"`
+	Category    string   `yaml:"category,omitempty" json:"category,omitempty"` // coding | office | general — used for market grouping
 	Triggers    []string `yaml:"triggers,omitempty"`
 	Source      string   // absolute path of the SKILL.md
 	Body        string   // markdown body after frontmatter
@@ -57,7 +60,9 @@ func NewRegistry() *Registry {
 }
 
 // Load walks directories and loads all SKILL.md files.
-// Later directories override earlier ones.
+// Later directories override earlier ones. Reading is concurrent per
+// directory (skills can carry sizeable SKILL.md bodies, and remote installs
+// reload the whole registry) — results are merged deterministically.
 func Load(dirs ...string) *Registry {
 	r := NewRegistry()
 	for _, dir := range dirs {
@@ -68,16 +73,36 @@ func Load(dirs ...string) *Registry {
 		if err != nil {
 			continue
 		}
+		// Collect candidate paths first, then read them in parallel.
+		type candidate struct {
+			name string
+			path string
+		}
+		var cands []candidate
 		for _, ent := range entries {
 			if !ent.IsDir() {
 				continue
 			}
-			skillPath := filepath.Join(dir, ent.Name(), "SKILL.md")
-			data, err := os.ReadFile(skillPath)
-			if err != nil {
-				continue
-			}
-			skill := parseSkill(ent.Name(), skillPath, string(data))
+			cands = append(cands, candidate{
+				name: ent.Name(),
+				path: filepath.Join(dir, ent.Name(), "SKILL.md"),
+			})
+		}
+		results := make([]*Skill, len(cands))
+		var wg sync.WaitGroup
+		for i, c := range cands {
+			wg.Add(1)
+			go func(i int, c candidate) {
+				defer wg.Done()
+				data, err := os.ReadFile(c.path)
+				if err != nil {
+					return
+				}
+				results[i] = parseSkill(c.name, c.path, string(data))
+			}(i, c)
+		}
+		wg.Wait()
+		for _, skill := range results {
 			if skill != nil {
 				r.byName[skill.Name] = skill
 			}
@@ -103,6 +128,7 @@ func parseSkill(name, path, content string) *Skill {
 	var meta struct {
 		Name        string   `yaml:"name"`
 		Description string   `yaml:"description"`
+		Category    string   `yaml:"category"`
 		Triggers    []string `yaml:"triggers,omitempty"`
 	}
 
@@ -125,9 +151,24 @@ func parseSkill(name, path, content string) *Skill {
 	return &Skill{
 		Name:        meta.Name,
 		Description: meta.Description,
+		Category:    normalizeCategory(meta.Category),
 		Triggers:    meta.Triggers,
 		Source:      path,
 		Body:        strings.TrimSpace(body),
+	}
+}
+
+// normalizeCategory maps a skill's frontmatter category to one of the known
+// market groups. Unknown or empty values fall back to "general" so the market
+// UI always has a bucket to render a skill under.
+func normalizeCategory(c string) string {
+	switch strings.ToLower(strings.TrimSpace(c)) {
+	case "coding":
+		return "coding"
+	case "office":
+		return "office"
+	default:
+		return "general"
 	}
 }
 
@@ -300,6 +341,7 @@ var catalogFS embed.FS
 type CatalogSkill struct {
 	Name        string   `json:"name" yaml:"name"`
 	Description string   `json:"description" yaml:"description"`
+	Category    string   `json:"category"` // coding | office | general — market grouping
 	Triggers    []string `json:"triggers,omitempty" yaml:"triggers,omitempty"`
 	Installed   bool     `json:"installed"`
 }
@@ -337,6 +379,7 @@ func ListCatalog() []CatalogSkill {
 		out = append(out, CatalogSkill{
 			Name:        s.Name,
 			Description: s.Description,
+			Category:    s.Category,
 			Triggers:    s.Triggers,
 			Installed:   IsInstalled(s.Name),
 		})

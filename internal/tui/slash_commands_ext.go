@@ -328,6 +328,49 @@ func (t *TUI) skillEvalCommand(args []string) {
 	t.add(RoleSystem, b.String())
 }
 
+// skillDoctorCommand runs the /skill-doctor health check (A4): frontmatter
+// completeness, trigger coverage, name shadowing across interop dirs,
+// orphaned user skills and eval-suite status — the Claude Code convention.
+func (t *TUI) skillDoctorCommand() {
+	reg := skills.Load(skills.DefaultDirs()...)
+	rep := skills.Doctor(reg)
+
+	var b strings.Builder
+	b.WriteString("技能体检 (Skill Doctor):\n")
+	if len(rep.Findings) == 0 {
+		b.WriteString("  （无已加载技能。在 ~/.icode/skills/ 或 .icode/skills/ 下放置 SKILL.md 即可启用）\n")
+		t.add(RoleSystem, b.String())
+		return
+	}
+	b.WriteString("\n")
+	for _, f := range rep.Findings {
+		mark := t.paint("green", "✓")
+		if f.Sev == skills.SevWarn {
+			mark = t.paint("yellow", "!")
+		} else if f.Sev == skills.SevError {
+			mark = t.paint("red", "✗")
+		}
+		fmt.Fprintf(&b, "  %s %-22s %s\n", mark, f.Skill, f.Issue)
+		if f.Hint != "" {
+			fmt.Fprintf(&b, "      └ %s\n", f.Hint)
+		}
+	}
+	if len(rep.Shadowed) > 0 {
+		b.WriteString("\n遮蔽（同名技能，后者生效）:\n")
+		for _, s := range rep.Shadowed {
+			fmt.Fprintf(&b, "  ⚑ %s\n", s)
+		}
+	}
+	if len(rep.Orphans) > 0 {
+		fmt.Fprintf(&b, "\n孤儿技能（不在内置市场，来源：导入/远程/历史版本）: %s\n", strings.Join(rep.Orphans, ", "))
+	}
+	fmt.Fprintf(&b, "\n%s\n", rep.EvalSummary)
+	if rep.CatalogNotInstalled > 0 {
+		fmt.Fprintf(&b, "市场提示: 还有 %d 个内置技能未安装（桌面端技能市场可一键安装）。\n", rep.CatalogNotInstalled)
+	}
+	t.add(RoleSystem, b.String())
+}
+
 // renderEvalReport formats a single-skill eval run for the chat pane.
 func renderEvalReport(rep skills.EvalReport) string {
 	var b strings.Builder

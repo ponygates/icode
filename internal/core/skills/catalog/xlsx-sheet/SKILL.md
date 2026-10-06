@@ -1,6 +1,7 @@
 ---
 name: xlsx-sheet
 description: 生成/整理 Excel 表格（.xlsx）：客户信息表、保单清单、产品对比表、统计报表等。用 Python(openpyxl) 或 pandas 产出带格式的表格。
+category: office
 triggers:
   - 生成Excel
   - xlsx表格
