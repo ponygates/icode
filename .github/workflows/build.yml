@@ -175,7 +175,7 @@ jobs:
         env:
           CGO_ENABLED: '1'
         run: |
-          go test -count=1 -timeout=300s -covermode=set -coverprofile=coverage.out ./...
+          xvfb-run -a go test -count=1 -timeout=300s -covermode=set -coverprofile=coverage.out ./...
           bash scripts/check_coverage.sh coverage.out
 
       - name: Upload coverage profile
