@@ -79,6 +79,15 @@ func TestStaleEntryAgesOut(t *testing.T) {
 func TestCapacityEvictsOldest(t *testing.T) {
 	s := New(Options{MaxEntries: 2})
 	s.Remember("pref one")
+	// Windows clock granularity: consecutive time.Now() calls can return
+	// identical values, which makes the eviction scan (strict Before, no
+	// tie-break) fall back to map-iteration order — i.e. flaky. Age the
+	// first entry so it is unambiguously the oldest at any clock resolution.
+	s.mu.Lock()
+	for _, e := range s.entries {
+		e.SeenAt = e.SeenAt.Add(-time.Hour)
+	}
+	s.mu.Unlock()
 	s.Remember("pref two")
 	s.Remember("pref three")
 	live := s.List()
