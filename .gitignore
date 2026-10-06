@@ -16,6 +16,7 @@ desktop/dist/
 desktop/release/
 internal/embedded/dist/
 vscode/dist/
+vscode/*.vsix
 
 # Scratch / one-shot codemod scripts — these are throwaway patch drivers and
 # must never be committed (five of them reached the repo once already).

@@ -57,5 +57,5 @@ WebView 与扩展通过 `postMessage` 双向通信；扩展用 Node `http` 模�
 
 ## 已知限制
 
-- 本扩展在**无头构建环境仅做了 TypeScript 编译验证**，尚未在真实 VS Code 中加载点测；首次在真机使用时请确认 `icode` 后端可被发现。
+- 本扩展在**无头构建环境做了 TypeScript 编译验证 + vsce 打包**（CI 每次推送产出 `vscode-extension-vsix` artifact，可直接下载安装；本地打包：`cd vscode && npx @vscode/vsce package --no-dependencies`），尚未在真实 VS Code 中加载点测；首次在真机使用时请确认 `icode` 后端可被发现。
 - 文件选择等依赖 Electron 原生桥（`window.icode`）的能力在 VS Code WebView 中不可用；需要完整桌面能力时请使用 `iCode: 在终端启动 CLI` 或独立桌面版。

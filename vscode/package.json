@@ -4,6 +4,11 @@
   "description": "在 VS Code 侧栏使用 iCode 多模型 AI 编程助手（复用本机已运行的 iCode 后端）",
   "version": "0.22.0",
   "publisher": "ponygates",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ponygates/icode.git",
+    "directory": "vscode"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },

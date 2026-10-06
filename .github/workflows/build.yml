@@ -268,11 +268,21 @@ jobs:
         working-directory: vscode
         run: npm run compile
 
+      - name: Package VSIX (vsce)
+        working-directory: vscode
+        run: npx @vscode/vsce package --no-dependencies
+
       - name: Upload extension dist
         uses: actions/upload-artifact@v4
         with:
           name: vscode-extension
           path: vscode/dist/
+
+      - name: Upload extension VSIX
+        uses: actions/upload-artifact@v4
+        with:
+          name: vscode-extension-vsix
+          path: vscode/*.vsix
 
   # ============================================================================
   # Desktop GUI binaries — native runners, CGO for systray / hotkey
