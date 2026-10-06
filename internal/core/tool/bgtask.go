@@ -30,12 +30,22 @@ type bgTask struct {
 	command string
 	start   time.Time
 
-	mu     sync.Mutex
-	buf    bytes.Buffer
-	done   bool
-	errMsg string
-	cancel context.CancelFunc
-	cmd    *exec.Cmd
+	mu        sync.Mutex
+	buf       bytes.Buffer
+	done      bool
+	errMsg    string
+	cancelled bool // set when the user/model explicitly killed this run
+	cancel    context.CancelFunc
+	cmd       *exec.Cmd
+}
+
+// cancelTask flags the run as cancelled (so the UI shows "cancelled", not
+// "failed") and cancels the process context.
+func (t *bgTask) cancelTask() {
+	t.mu.Lock()
+	t.cancelled = true
+	t.mu.Unlock()
+	t.cancel()
 }
 
 func (t *bgTask) Write(p []byte) (int, error) {
@@ -77,6 +87,12 @@ func (t *bgTask) newSince(pos int) (string, int) {
 		pos = 0
 	}
 	return data[pos:], len(data)
+}
+
+func (t *bgTask) isCancelled() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.cancelled
 }
 
 // bgTaskManager tracks all background tasks for the process lifetime.
@@ -207,7 +223,9 @@ func (m *bgTaskManager) List() []string {
 		status := "running"
 		if done {
 			status = "finished"
-			if errMsg != "" {
+			if t.isCancelled() {
+				status = "cancelled"
+			} else if errMsg != "" {
 				status = "failed"
 			}
 		}
@@ -238,7 +256,7 @@ type TaskOutputTool struct{}
 func (t *TaskOutputTool) Def() types.ToolDef {
 	return types.ToolDef{
 		Name:        "task_output",
-		Description: "Get the output and status of a background task started by bash with run_in_background=true. Omit task_id to list all background tasks. Set kill=true to terminate the task.",
+		Description: "Get the output and status of a background task (shell bg-N or sub-agent agt-N). Omit task_id to list all background tasks. Set kill=true to cancel a running task — works for both shell commands and background sub-agents.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -279,11 +297,16 @@ func (t *TaskOutputTool) Execute(ctx context.Context, args string) (*types.ToolR
 		if task == nil {
 			return &types.ToolResult{Success: false, Error: fmt.Sprintf("no such task: %s", id)}, nil
 		}
+		if parseBoolArgWithDefault(args, "kill", false) {
+			CancelAgentTask(id)
+		}
 		output, tokens, done, errMsg, elapsed := task.snapshot()
 		status := "running"
 		if done {
 			status = "finished"
-			if errMsg != "" {
+			if task.isCancelled() {
+				status = "cancelled"
+			} else if errMsg != "" {
 				status = "failed (" + errMsg + ")"
 			}
 		}
@@ -299,13 +322,15 @@ func (t *TaskOutputTool) Execute(ctx context.Context, args string) (*types.ToolR
 		return &types.ToolResult{Success: false, Error: fmt.Sprintf("no such task: %s", id)}, nil
 	}
 	if parseBoolArgWithDefault(args, "kill", false) {
-		task.cancel()
+		task.cancelTask()
 	}
 	output, done, errMsg, elapsed := task.snapshot()
 	status := "running"
 	if done {
 		status = "finished"
-		if errMsg != "" {
+		if task.isCancelled() {
+			status = "cancelled"
+		} else if errMsg != "" {
 			status = "failed (" + errMsg + ")"
 		}
 	}

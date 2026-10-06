@@ -222,7 +222,13 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 	mux.HandleFunc("/api/skills/market", s.handleSkillMarket)      // GET built-in market/catalog
 	mux.HandleFunc("/api/skills/market/", s.handleSkillMarketItem) // POST install / DELETE {name}
 	mux.HandleFunc("/api/skills/import", s.handleSkillImport)      // POST import local path
+	mux.HandleFunc("/api/skills/source/list", s.handleSkillSourceList)      // POST probe remote skill source
+	mux.HandleFunc("/api/skills/source/install", s.handleSkillSourceInstall) // POST install from remote source
+	mux.HandleFunc("/api/skills/sources", s.handleSkillSources)       // GET list / POST add saved sources
+	mux.HandleFunc("/api/skills/sources/", s.handleSkillSources)      // DELETE /api/skills/sources/{src}
 	mux.HandleFunc("/api/teams", s.handleTeams)
+	mux.HandleFunc("/api/bgtasks", s.handleBgTasks)                    // GET structured task list (Agents view)
+	mux.HandleFunc("/api/bgtasks/", s.requireAPITokenForMutating(s.handleBgTaskCancel)) // POST /api/bgtasks/{id}/cancel
 
 	// MCP (Model Context Protocol) server management — Reasonix-style tool integration
 	mux.HandleFunc("/api/mcp", s.handleMCP)

@@ -25,12 +25,28 @@ type agentBgTask struct {
 	start  time.Time
 	cancel context.CancelFunc
 
-	mu      sync.Mutex
-	output  string
-	tokens  int
-	done    bool
-	errMsg  string
-	elapsed time.Duration
+	mu        sync.Mutex
+	output    string
+	tokens    int
+	done      bool
+	errMsg    string
+	elapsed   time.Duration
+	cancelled bool // set when the user/model explicitly killed this run
+}
+
+// markCancelled flags the run as cancelled (only meaningful while running)
+// and signals the context so the underlying runner stops.
+func (t *agentBgTask) markCancelled() {
+	t.mu.Lock()
+	t.cancelled = true
+	t.mu.Unlock()
+	t.cancel()
+}
+
+func (t *agentBgTask) isCancelled() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.cancelled
 }
 
 func (t *agentBgTask) finish(output string, tokens int, errMsg string) {
@@ -83,6 +99,24 @@ func KillAllAgentTasks() {
 	for _, t := range agentBGTasks.tasks {
 		t.cancel()
 	}
+}
+
+// CancelAgentTask cancels one running background sub-agent by id (agt-N).
+// Returns false when the id is unknown or the task already finished —
+// cancelling a completed run is a no-op, not an error.
+func CancelAgentTask(id string) bool {
+	task := agentBGTasks.get(id)
+	if task == nil {
+		return false
+	}
+	task.mu.Lock()
+	alreadyDone := task.done
+	task.mu.Unlock()
+	if alreadyDone {
+		return false
+	}
+	task.markCancelled()
+	return true
 }
 
 func (m *agentBgManager) launch(runner SubAgentRunner, name, prompt string) (string, error) {
@@ -193,7 +227,9 @@ func (m *agentBgManager) list() []string {
 			status := "running"
 			if done {
 				status = "finished"
-				if errMsg != "" {
+				if t.isCancelled() {
+					status = "cancelled"
+				} else if errMsg != "" {
 					status = "failed (" + errMsg + ")"
 				}
 			}

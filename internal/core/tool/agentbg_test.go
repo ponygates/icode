@@ -143,3 +143,59 @@ func TestKillAllAgentTasks(t *testing.T) {
 		t.Fatal("task vanished after kill")
 	}
 }
+
+func TestCancelAgentTask(t *testing.T) {
+	slow := &fakeRunner{delay: 10 * time.Second}
+	id, _ := launchBackgroundAgent(slow, "explore", "endless crawl")
+	task := agentBGTasks.get(id)
+
+	// Cancelling a running task succeeds and flags it.
+	if !CancelAgentTask(id) {
+		t.Fatal("CancelAgentTask(running) = false, want true")
+	}
+	waitFor(t, 2*time.Second, func() bool {
+		_, _, d, _, _ := task.snapshot()
+		return d
+	})
+	if !task.isCancelled() {
+		t.Error("task not flagged cancelled")
+	}
+	// The listing shows the cancelled status (not "failed").
+	lines := strings.Join(agentBGTasks.list(), "\n")
+	if !strings.Contains(lines, "cancelled") {
+		t.Errorf("list missing cancelled status: %s", lines)
+	}
+
+	// Cancelling again after completion is a no-op, not an error.
+	if CancelAgentTask(id) {
+		t.Error("CancelAgentTask(finished) = true, want false")
+	}
+	// Unknown ids report false.
+	if CancelAgentTask("agt-99999") {
+		t.Error("CancelAgentTask(unknown) = true, want false")
+	}
+}
+
+func TestTaskOutputToolKillsAgentTask(t *testing.T) {
+	slow := &fakeRunner{delay: 10 * time.Second}
+	id, _ := launchBackgroundAgent(slow, "general", "stuck work")
+
+	out := &TaskOutputTool{}
+	res, err := out.Execute(context.Background(), `{"task_id":"`+id+`","kill":true}`)
+	if err != nil || !res.Success {
+		t.Fatalf("Execute(kill): %v / %+v", err, res)
+	}
+	task := agentBGTasks.get(id)
+	waitFor(t, 2*time.Second, func() bool {
+		_, _, d, _, _ := task.snapshot()
+		return d
+	})
+	if !task.isCancelled() {
+		t.Error("task not cancelled via task_output kill=true")
+	}
+	// A follow-up poll reports the cancelled status.
+	res2, _ := out.Execute(context.Background(), `{"task_id":"`+id+`"}`)
+	if res2 == nil || !strings.Contains(res2.Content, "cancelled") {
+		t.Errorf("post-kill poll = %+v", res2)
+	}
+}

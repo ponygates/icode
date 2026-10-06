@@ -16,6 +16,7 @@ const ModelsPage = React.lazy(() => import('./pages/ModelsPage'));
 const AnalyticsPage = React.lazy(() => import('./pages/AnalyticsPage'));
 const ModelCompare = React.lazy(() => import('./pages/ModelCompare'));
 const SkillMarketPage = React.lazy(() => import('./pages/SkillMarketPage'));
+const AgentsPage = React.lazy(() => import('./pages/AgentsPage'));
 const SettingsModal = React.lazy(() => import('./pages/SettingsPage'));
 
 function hasAnyKey(): boolean {
@@ -253,6 +254,7 @@ const App: React.FC = () => {
             <Route path="/analytics" element={<AnalyticsPage />} />
             <Route path="/compare" element={<ModelCompare />} />
             <Route path="/market" element={<SkillMarketPage />} />
+            <Route path="/agents" element={<AgentsPage />} />
             <Route path="/settings" element={<Navigate to="/" replace />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

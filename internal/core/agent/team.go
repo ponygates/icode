@@ -49,9 +49,15 @@ type TeamResult struct {
 	Errors        []string
 }
 
+// memberRunner is the minimal contract a team needs from its underlying
+// single-agent runner. *Runner satisfies it; tests inject fakes.
+type memberRunner interface {
+	Run(ctx context.Context, def *AgentDef, input string) (string, int, error)
+}
+
 // TeamRunner orchestrates multi-agent teams.
 type TeamRunner struct {
-	runner *Runner
+	runner memberRunner
 	mu     sync.Mutex
 }
 
@@ -84,6 +90,11 @@ Description: %s
 Your team members:
 %s
 
+Note on roles: "reviewer" members automatically receive all specialist
+outputs after they finish and run a review pass on top — you may leave a
+reviewer untasked (it will review everything), or give it a specific review
+focus. Assign concrete work to specialists only.
+
 User request: %s
 
 Decompose this task into subtasks that can be worked on in parallel.
@@ -110,13 +121,27 @@ MEMBER: <member_name> | TASK: <detailed instructions>`,
 		return result, nil
 	}
 
-	// Step 3: Run specialists in parallel.
-	report("👥 团队 %s 并行执行 %d 名成员…\n", def.Name, len(memberTasks))
+	// Step 3: Run specialists in parallel. Reviewers are held back — they
+	// run in step 3.5 with the peer blackboard injected, which is the
+	// cross-member communication channel.
+	specTasks, revTasks := splitTasksByRole(memberTasks, def.Members)
+	if len(revTasks) == 0 {
+		// A reviewer the leader never tasked still reviews by default.
+		for _, m := range def.Members {
+			if m.Role == RoleReviewer {
+				if _, tasked := memberTasks[m.Name]; !tasked {
+					revTasks[m.Name] = "Review the team's outputs above. Check for errors, gaps, and contradictions. Provide corrections and additions."
+				}
+			}
+		}
+	}
+
+	report("👥 团队 %s 并行执行 %d 名成员…\n", def.Name, len(specTasks))
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var errs []string
 
-	for memberName, task := range memberTasks {
+	for memberName, task := range specTasks {
 		memberDef := findMember(def.Members, memberName)
 		if memberDef == nil {
 			continue
@@ -144,6 +169,41 @@ MEMBER: <member_name> | TASK: <detailed instructions>`,
 	}
 	wg.Wait()
 
+	// Step 3.5: Reviewers read the blackboard (all specialist outputs so
+	// far) and run their review on top of it.
+	if len(revTasks) > 0 && len(result.MemberOutputs) > 0 {
+		report("👥 团队 %s 评审阶段（%d 名评审读取同伴产出）…\n", def.Name, len(revTasks))
+		blackboard := formatMemberOutputs(result.MemberOutputs)
+		var revWg sync.WaitGroup
+		for memberName, task := range revTasks {
+			memberDef := findMember(def.Members, memberName)
+			if memberDef == nil {
+				continue
+			}
+			revWg.Add(1)
+			go func(name, tsk string, ad *AgentDef) {
+				defer revWg.Done()
+				defer func() {
+					if r := recover(); r != nil {
+						mu.Lock()
+						errs = append(errs, fmt.Sprintf("%s: agent panic（已恢复）: %v", name, r))
+						mu.Unlock()
+					}
+				}()
+				prompt := fmt.Sprintf("Peer outputs from your team:\n%s\n\nYour task: %s", blackboard, tsk)
+				output, _, err := tr.runner.Run(ctx, ad, prompt)
+				mu.Lock()
+				if err != nil {
+					errs = append(errs, fmt.Sprintf("%s: %v", name, err))
+				} else {
+					result.MemberOutputs[name] = output
+				}
+				mu.Unlock()
+			}(memberName, task, memberDef)
+		}
+		revWg.Wait()
+	}
+
 	result.Errors = errs
 	result.Duration = time.Since(start)
 
@@ -167,6 +227,32 @@ Synthesize a final, coherent response for the user.`,
 	}
 
 	return result, nil
+}
+
+// splitTasksByRole partitions the leader-assigned tasks into specialist
+// work (run first, in parallel) and reviewer work (run after, with the
+// blackboard injected).
+func splitTasksByRole(memberTasks map[string]string, members []TeamMember) (spec, rev map[string]string) {
+	spec = make(map[string]string)
+	rev = make(map[string]string)
+	for name, task := range memberTasks {
+		if m := findTeamMember(members, name); m != nil && m.Role == RoleReviewer {
+			rev[name] = task
+		} else {
+			spec[name] = task
+		}
+	}
+	return spec, rev
+}
+
+// findTeamMember locates a member definition by name (nil when absent).
+func findTeamMember(members []TeamMember, name string) *TeamMember {
+	for i := range members {
+		if members[i].Name == name {
+			return &members[i]
+		}
+	}
+	return nil
 }
 
 func formatMemberList(members []TeamMember) string {
@@ -429,7 +515,7 @@ func DefaultTeamDefs() []*TeamDef {
 			Members: []TeamMember{
 				{
 					Name: "security",
-					Role: RoleReviewer,
+					Role: RoleSpecialist,
 					AgentDef: AgentDef{
 						Name:         "security",
 						Description:  "安全审查专家",

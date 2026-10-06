@@ -180,6 +180,10 @@ func (t *TUI) slashTasks() {
 	if len(agentLines) == 0 && len(shellLines) == 0 {
 		b.WriteString("当前没有后台任务。\n后台子代理：task 工具传 background=true；\n后台命令：bash 工具传 run_in_background=true。")
 	} else {
+		running := tool.RunningAgentTaskCount() + tool.RunningShellTaskCount()
+		if running > 0 {
+			fmt.Fprintf(&b, "⏳ %d 个任务运行中\n\n", running)
+		}
 		if len(agentLines) > 0 {
 			b.WriteString("后台子代理 (agt-N):\n")
 			for _, l := range agentLines {
@@ -196,6 +200,9 @@ func (t *TUI) slashTasks() {
 			}
 		}
 		b.WriteString("\n查询输出：让模型调用 task_output(task_id=...)，或直接问「bg-1 输出是什么」。")
+		if running > 0 {
+			b.WriteString("\n取消任务：task_output(task_id=..., kill=true)（agt-N 与 bg-N 均可取消）。")
+		}
 	}
 	t.add(RoleSystem, b.String())
 }
