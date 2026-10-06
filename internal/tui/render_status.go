@@ -67,9 +67,15 @@ func listCwd() []string {
 // Segment ORDER is the drop priority: slice heads (mode, model, cost)
 // survive to the bitter end; slice tails (bg, security, skills, PR,
 // notice) are dropped first when the terminal is too narrow. The
-// context-usage percent lives HERE now (right zone, after the token
-// flow) — the standalone gradient contextBar row was removed to keep
-// the prompt block one row shorter; the percent is the whole display.
+//
+//	context-usage percent lives HERE now (right zone, after the token
+//	flow) — the standalone gradient contextBar row was removed to keep
+//	the prompt block one row shorter; the percent is the whole display.
+//
+// CONTRACT: callers must hold t.mu — render() snapshots state under it,
+// and the lazy segment refresh goroutines (branchSegment/prSegment)
+// write their cached fields back under t.mu too. Tests that call this
+// directly must take the lock for the same reason.
 func (t *TUI) statusParts() (left, right []string) {
 	d := func(s string) string { return t.paint("dim", s) }
 

@@ -442,7 +442,9 @@ func TestStatusPartsZonesAndCtxPct(t *testing.T) {
 	tui.contextTokens = 50000
 	tui.cost = "$0.05"
 
+	tui.mu.Lock()
 	left, right := tui.statusParts()
+	tui.mu.Unlock()
 
 	// Zone split: mode badge on the left, model + cost on the right.
 	// (Compare plain text — segments carry SGR colour codes internally.)
@@ -528,7 +530,9 @@ func TestThinkingSlider(t *testing.T) {
 func TestThinkingSliderInStatusBar(t *testing.T) {
 	// Idle: no slider in either zone.
 	idle := newLayoutTUI(80, 24)
+	idle.mu.Lock()
 	left, _ := idle.statusParts()
+	idle.mu.Unlock()
 	if joined := strings.Join(left, "|"); strings.Contains(stripANSI(joined), "■") {
 		t.Errorf("idle status line must not show the thinking slider: %q", joined)
 	}
@@ -537,7 +541,9 @@ func TestThinkingSliderInStatusBar(t *testing.T) {
 	busy := newLayoutTUI(80, 24)
 	busy.streaming = true
 	busy.turnStart = time.Now().Add(-3 * time.Second)
+	busy.mu.Lock()
 	left, _ = busy.statusParts()
+	busy.mu.Unlock()
 	if len(left) < 2 {
 		t.Fatalf("streaming left zone too short: %q", left)
 	}
@@ -553,7 +559,9 @@ func TestThinkingSliderInStatusBar(t *testing.T) {
 	toolbusy := newLayoutTUI(80, 24)
 	toolbusy.curTool = "bash"
 	toolbusy.turnStart = time.Now()
+	toolbusy.mu.Lock()
 	left, _ = toolbusy.statusParts()
+	toolbusy.mu.Unlock()
 	if len(left) < 2 || !strings.Contains(stripANSI(strings.Join(left, "|")), "■") {
 		t.Errorf("slider missing while a tool runs without streaming: %q", left)
 	}
