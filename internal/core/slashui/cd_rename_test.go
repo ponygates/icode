@@ -36,17 +36,21 @@ func TestCmdCD_ChangesDirectory(t *testing.T) {
 		t.Fatalf("unexpected error: %s", res.Output)
 	}
 	got, _ := os.Getwd()
-	// macOS: after chdir into a symlinked t.TempDir() path, Getwd reports the
-	// resolved /private/var physical path — compare against the real path.
-	want := dir
-	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
-		want = resolved
+	// Compare by file identity, not by string: macOS Getwd reports the
+	// resolved /private/var physical path after chdir through a symlinked
+	// t.TempDir(), and Windows CI temp dirs surface as 8.3 short names
+	// (RUNNER~1) that EvalSymlinks does not expand. os.SameFile handles
+	// every path-form difference on all three platforms.
+	same := func(p string) bool {
+		fi, err1 := os.Stat(p)
+		want, err2 := os.Stat(dir)
+		return err1 == nil && err2 == nil && os.SameFile(fi, want)
 	}
-	if got != want {
-		t.Fatalf("cwd = %q, want %q", got, want)
+	if !same(got) {
+		t.Fatalf("cwd = %q, want %q (same file)", got, dir)
 	}
-	if res.CWD != want {
-		t.Fatalf("res.CWD = %q, want %q", res.CWD, want)
+	if !same(res.CWD) {
+		t.Fatalf("res.CWD = %q, want %q (same file)", res.CWD, dir)
 	}
 }
 
