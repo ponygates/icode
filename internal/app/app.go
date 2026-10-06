@@ -26,7 +26,7 @@ import (
 	"github.com/ponygates/icode/internal/core/skills"
 	"github.com/ponygates/icode/internal/core/tool"
 	"github.com/ponygates/icode/internal/db"
-	"github.com/ponygates/icode/internal/llm/provider"
+	registry "github.com/ponygates/icode/internal/llm/provider"
 	"github.com/ponygates/icode/internal/lsp"
 	"github.com/ponygates/icode/internal/mcp"
 	"github.com/ponygates/icode/internal/mesh"

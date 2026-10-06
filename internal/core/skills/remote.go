@@ -10,11 +10,11 @@
 //
 // Repo discovery order (first hit wins):
 //
-//   1. .claude-plugin/marketplace.json — the Claude plugin-market manifest;
-//      plugins whose source points inside the repo are listed.
-//   2. skills/ directory — one sub-directory per skill (the most common
-//      community layout, mirrors iCode's own ~/.icode/skills layout).
-//   3. repository root — any top-level <dir>/SKILL.md.
+//  1. .claude-plugin/marketplace.json — the Claude plugin-market manifest;
+//     plugins whose source points inside the repo are listed.
+//  2. skills/ directory — one sub-directory per skill (the most common
+//     community layout, mirrors iCode's own ~/.icode/skills layout).
+//  3. repository root — any top-level <dir>/SKILL.md.
 //
 // Downloads go through the GitHub contents API for listings and the returned
 // download_url (raw.githubusercontent.com) for file bodies. Defensive limits

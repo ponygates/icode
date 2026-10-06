@@ -18,9 +18,9 @@ import (
 type Severity int
 
 const (
-	SevOK Severity = iota // explicit pass, shown as ✓
-	SevWarn               // suboptimal, shown as !
-	SevError              // broken, shown as ✗
+	SevOK    Severity = iota // explicit pass, shown as ✓
+	SevWarn                  // suboptimal, shown as !
+	SevError                 // broken, shown as ✗
 )
 
 // DoctorFinding is one health observation about one skill.

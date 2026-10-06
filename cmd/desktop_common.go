@@ -17,12 +17,13 @@ import (
 	"runtime"
 	"time"
 
+	"os/exec"
+
 	"github.com/ponygates/icode/internal/app"
 	"github.com/ponygates/icode/internal/core/privacy"
 	"github.com/ponygates/icode/internal/embedded"
 	"github.com/ponygates/icode/internal/server"
 	"github.com/ponygates/icode/internal/xgo"
-	"os/exec"
 )
 
 // desktopBoot holds a running desktop backend (embedded HTTP server + app) so

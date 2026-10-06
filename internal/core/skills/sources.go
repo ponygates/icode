@@ -24,8 +24,8 @@ var errNoHome = errors.New("cannot resolve user home dir")
 
 // SkillSource is one saved remote source entry.
 type SkillSource struct {
-	Source string `json:"source"`           // owner/repo or https URL
-	Alias  string `json:"alias,omitempty"`  // optional display label
+	Source string `json:"source"`          // owner/repo or https URL
+	Alias  string `json:"alias,omitempty"` // optional display label
 }
 
 // defaultSources seeds skill_sources.json on first use. Only entries we are

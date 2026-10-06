@@ -445,6 +445,7 @@ func TestBuildMessagesBody_TopPForwardedAndSuppressedWithThinking(t *testing.T) 
 		t.Fatalf("temperature must be suppressed when thinking is enabled")
 	}
 }
+
 // stallingBody emits one Anthropic SSE event pair, then parks until Close —
 // a provider that stalls mid-stream with no EOF and no RST.
 type stallingBody struct {

@@ -529,6 +529,7 @@ func TestBuildRequestBody_CacheBreakpointsShift(t *testing.T) {
 		})
 	}
 }
+
 // blockingBody: first Read returns an SSE line, further Reads park until
 // Close (what a stalled connection looks like to the scanner).
 type blockingBody struct {

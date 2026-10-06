@@ -9,6 +9,9 @@ import (
 	"sync"
 	"time"
 
+	"math/rand"
+	"runtime/debug"
+
 	"github.com/ponygates/icode/internal/config"
 	"github.com/ponygates/icode/internal/core/agent"
 	"github.com/ponygates/icode/internal/core/hooks"
@@ -24,8 +27,6 @@ import (
 	"github.com/ponygates/icode/internal/llm/tokenopt"
 	"github.com/ponygates/icode/internal/lsp"
 	"github.com/ponygates/icode/internal/types"
-	"math/rand"
-	"runtime/debug"
 )
 
 // PermissionHandler resolves an interactive "ask" decision (agent mode) and
