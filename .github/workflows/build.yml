@@ -127,13 +127,14 @@ jobs:
       # caused silent data corruption in iCode.
       - name: Install mingw-w64 gcc (Windows, -race needs CGO)
         if: runner.os == 'Windows'
-        shell: msys2 {0}
-        run: |
-          # MSYS2 ships with the runner image; UCRT64 gcc is what -race links
-          # against. --noconfirm keeps it unattended; a UCRT miss falls back to
-          # the classic mingw-w64-x86_64 package.
-          pacman -S --needed --noconfirm mingw-w64-ucrt-x86_64-gcc \
-            || pacman -S --needed --noconfirm mingw-w64-x86_64-gcc
+        # The runner image ships MSYS2 at C:\msys64, but the "msys2" shell
+        # name only exists when the msys2/setup-msys2 action registers it —
+        # this workflow never installs that action, so shell: msys2 fails
+        # with "msys2: command not found". Call the bundled pacman.exe
+        # directly instead. UCRT64 gcc is what -race links against; a UCRT
+        # miss falls back to the classic mingw-w64-x86_64 package.
+        shell: cmd
+        run: C:\msys64\usr\bin\pacman.exe -S --needed --noconfirm mingw-w64-ucrt-x86_64-gcc || C:\msys64\usr\bin\pacman.exe -S --needed --noconfirm mingw-w64-x86_64-gcc
 
       - name: Put msys2 gcc on PATH (Windows)
         if: runner.os == 'Windows'
