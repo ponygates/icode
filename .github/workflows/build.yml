@@ -148,8 +148,17 @@ jobs:
           fi
           gcc --version | head -1
 
+      # Same X11 constraint as the plain test run: the cmd package tests
+      # pull in the systray chain, and -race does not exempt them.
       - name: Run tests with race detector
+        if: runner.os != 'Linux'
         run: go test -race -count=1 -timeout=300s ./...
+        env:
+          CGO_ENABLED: '1'
+
+      - name: Run tests with race detector (Xvfb)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a go test -race -count=1 -timeout=300s ./...
         env:
           CGO_ENABLED: '1'
 
