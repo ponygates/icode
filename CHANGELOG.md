@@ -2,6 +2,35 @@
 
 > **版本说明**：v0.1.0 是一次**版本归零与结构整理**——将历史迭代（v0.2.x–v0.53.x）的全部成果整合为统一的 0.1.0 功能基线。完整的历史版本记录见 [docs/archive/CHANGELOG_HISTORY.md](docs/archive/CHANGELOG_HISTORY.md)，历次对标审查与差距分析见 [docs/archive/](docs/archive/)。
 
+## v0.2.2 — ChatPage 拆分第二批：Composer 独立 + 键盘行为测试 (2026-10-17)
+
+> 承接 v0.2.1 的拆分。上批只搬了「没有 JSX」的传输层，这批把输入区整体搬成受控组件，并补上此前一条都没有的键盘行为回归测试。
+
+### A · `Composer` 独立成组件
+
+- 输入区（附件预览 / ctx 进度条 / 文本框 / 语音 / 发送停止 / 模式行 / token 行 / 计划确认条）从 `ChatPage.tsx` 移入 `components/Composer.tsx`。
+- **边界选择**：输入历史、slash 菜单高亮索引、浏览前草稿留在组件内部——它们只描述"打字手感"，页面从不需要读；附件、流式标志、语音、计划确认保持受控——发送路径要读附件，语音还持有 `AudioContext` 与后端调用。
+- `filterSlash` / `slashSel` / `handleKeyDown` 从页面移除，键盘规则（Enter、Shift+Enter、Tab 补全、↑↓ 历史、Tab 切模式、@ 唤起选择器）集中在组件内。
+- 页面侧净减 325 行（2,345 → 2,020），`Composer` 477 行。
+
+### B · 修掉拆分过程中暴露的一个真实回退
+
+- 原页面注释写着「Allow image-only sends: a pasted screenshot with no caption is valid」，但发送按钮的 `disabled` 只看文本，**只有附件的状态下按钮是灰的**，只能靠 Enter 发送。
+- 初版 `Composer` 把 `submit` 写成空白即返回，导致"粘贴截图 + 直接回车"彻底失效——由测试 `sends an image with no caption` 捕获。
+- 现以 `canSend = 文本非空 || 有附件` 统一门控 Enter 与按钮，图片无文字也能发。
+
+### C · 测试
+
+| 范围 | 条数 | 覆盖 |
+|---|---|---|
+| 发送 | 6 | 空白拦截、Enter 提交并清空、Shift+Enter 换行、按钮态、↑ 历史召回 |
+| 流式与语音 | 3 | 发送↔停止切换、`aria-pressed` 跟随、转写中禁用麦克风 |
+| 附件 | 4 | 图片内联预览、PDF 名称卡片、精确删除、无文字图片可发 |
+| slash 与模式 | 3 | `/clear` 补全、Tab 循环模式、`@` 唤起选择器 |
+| 计划确认 | 2 | 条件渲染、接受/放弃回调 |
+
+前端测试总数 197 → **215**；`ChatPage.tsx` 与 `Composer.tsx` 合计 2,503 行（拆分前单文件 2,477，净增的是 props 声明与注释，用于换取可测试性）。
+
 ## v0.2.1 — ChatPage 拆分第一批：传输层与后端发现独立成模块 (2026-10-17)
 
 > v0.2.0 的「未完成」表里写着「先抽 `useChatStream`/`MessageList`/`Composer`，配 10 条关键测试」。本版完成其中**风险最低、覆盖收益最大**的一块：把流式传输与后端发现从 2,477 行的页面里搬出来，并补上此前完全缺失的测试。

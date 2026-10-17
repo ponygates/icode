@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useAppStore, Message, Attachment } from '../stores/appStore';
-import { Send, Plus, Trash2, Eraser, MessageSquare, Cpu, Shield, Square, ShieldAlert, GitBranch, FileText, RefreshCw, Edit3, Download, FileJson, Upload, ChevronDown, Mic } from 'lucide-react';
+import { Plus, Trash2, Eraser, MessageSquare, Cpu, Shield, ShieldAlert, GitBranch, FileText, RefreshCw, Edit3, Download, FileJson, Upload, ChevronDown } from 'lucide-react';
 import Markdown from '../components/Markdown';
 import CommandPalette, { useCommandPalette } from '../components/CommandPalette';
 import TodoPanel from '../components/TodoPanel';
@@ -18,9 +18,10 @@ import McpPanel from '../components/McpPanel';
 import FilePicker from '../components/FilePicker';
 import FileTree from '../components/FileTree';
 import ModelPicker from '../components/ModelPicker';
+import Composer from '../components/Composer';
 import PlumBlossom from '../components/PlumBlossom';
 import WorkspaceSwitcher from '../components/WorkspaceSwitcher';
-import { executeSlash, filterSlash, type SlashCommand } from '../lib/slashCommands';
+import { executeSlash } from '../lib/slashCommands';
 import { apiAppendMessage, apiUpdateMessage, apiClearSession, sliceThrough } from '../lib/sessionMessages';
 import { useDialogA11y } from '../hooks/useDialogA11y';
 import {
@@ -77,15 +78,9 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
   const [now, setNow] = useState(() => Date.now());
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  // Per-session input history for ↑/↓ browsing (mirrors the TUI). The draft
-  // holds whatever the user typed before starting to browse so ↓ can restore it.
-  const historyRef = useRef<string[]>([]);
-  const [historyIdx, setHistoryIdx] = useState(-1);
-  const draftRef = useRef('');
-  // Slash-command autocomplete (visible while the input starts with "/" and no
-  // args have been typed yet). Selected index for ↑/↓/Tab navigation.
-  const [slashSel, setSlashSel] = useState(0);
+  // Input history, slash-menu highlight and the pre-browse draft now live in
+  // <Composer>: they describe how typing feels and no other part of the page
+  // needs to read them.
   // Session-tab context menu (right-click a tab → 重命名/复制ID/关闭).
   const [tabMenu, setTabMenu] = useState<{ x: number; y: number; id: string } | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -650,10 +645,9 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
     // (The caption check used to block it — Ctrl+V → Enter did nothing.)
     if ((!text && attachedFiles.length === 0) || isStreaming) return;
 
-    // Record the submitted text in the input history (↑/↓ browser).
-    historyRef.current.push(text);
-    if (historyRef.current.length > 200) historyRef.current.shift();
-    setHistoryIdx(-1);
+    // Input history (↑/↓) is recorded by <Composer> for text the user typed.
+    // Programmatic sends — plan confirmation, regenerate, slash buttons — go
+    // through this same path and must NOT pollute that history.
 
     // Handle # memory append (like TUI)
     if (text.startsWith('#')) {
@@ -1083,71 +1077,9 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
 
   // Slash autocomplete list — derived from the input, empty once args are typed.
-  const slashMenu = useMemo(() => filterSlash(input), [input]);
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
-      return;
-    }
-    // While the slash menu is open, ↑/↓ navigate it (instead of history) and
-    // Tab accepts the highlighted command.
-    if (slashMenu.length > 0) {
-      if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
-        e.preventDefault();
-        setSlashSel((i) => (i + (e.key === 'ArrowDown' ? 1 : -1) + slashMenu.length) % slashMenu.length);
-        return;
-      }
-      if (e.key === 'Tab') {
-        e.preventDefault();
-        setInput('/' + slashMenu[slashSel].name + ' ');
-        setSlashSel(0);
-        return;
-      }
-    }
-    // Tab / Shift+Tab cycle the agent mode (Claude Code style): Tab moves to
-    // the next mode, Shift+Tab to the previous. Order matches the TUI's
-    // cycleMode exactly (plan → agent → yolo → auto). The slash-menu
-    // completion above already claims Tab while a slash command is open.
-    if (e.key === 'Tab' && !e.altKey) {
-      e.preventDefault();
-      const modes = ['plan', 'agent', 'yolo', 'auto'];
-      const idx = modes.indexOf(mode);
-      const next = modes[(idx + (e.shiftKey ? -1 : 1) + modes.length) % modes.length];
-      useAppStore.getState().setMode(next);
-      return;
-    }
-    // ↑/↓ browse the input history — only in single-line input, where the
-    // arrows don't need to move the caret (multi-line keeps native behaviour).
-    if (!e.shiftKey && !e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
-      if (input.includes('\n')) return;
-      const list = historyRef.current;
-      if (e.key === 'ArrowUp') {
-        if (list.length === 0) return;
-        e.preventDefault();
-        if (historyIdx === -1) draftRef.current = input;
-        const next = Math.min(historyIdx + 1, list.length - 1);
-        setHistoryIdx(next);
-        setInput(list[list.length - 1 - next]);
-        return;
-      }
-      if (historyIdx === -1) return;
-      e.preventDefault();
-      if (historyIdx === 0) {
-        setHistoryIdx(-1);
-        setInput(draftRef.current);
-        return;
-      }
-      const next = historyIdx - 1;
-      setHistoryIdx(next);
-      setInput(list[list.length - 1 - next]);
-      return;
-    }
-    if (e.key === '@' && (input || '').trim() === '') {
-      setPickerOpen(true);
-    }
-  };
+  // Slash autocomplete, key handling (Enter / Shift+Enter / Tab / ↑↓ / @) all
+  // live in <Composer>; that component calls back for send, stop and the
+  // file picker.
 
   const handleFileSelect = (path: string) => {
     setInput(prev => prev ? `${prev} @${path}` : `@${path}`);
@@ -1890,287 +1822,30 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
         </div>
       )}
 
-      {/* Attached image previews */}
-      {attachedFiles.length > 0 && (
-        <div style={{
-          padding: '8px 16px', display: 'flex', gap: 8, flexWrap: 'wrap',
-          borderTop: '1px solid var(--border-color)', background: 'var(--bg-secondary)',
-        }}>
-          {attachedFiles.map((img, i) => (
-            <div key={i} style={{ position: 'relative', display: 'inline-block' }}>
-              {img.mime === 'application/pdf' ? (
-                <div style={{
-                  height: 64, minWidth: 120, maxWidth: 200, padding: '0 10px',
-                  borderRadius: 6, border: '1px solid var(--border-color)',
-                  display: 'flex', alignItems: 'center', gap: 6,
-                  background: 'var(--bg-primary)', fontSize: 11, color: 'var(--text-secondary)',
-                }}>
-                  <FileText size={16} aria-hidden />
-                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {img.name || 'PDF'}
-                  </span>
-                </div>
-              ) : (
-                <img
-                  src={`data:${img.mime};base64,${img.data}`}
-                  alt={img.name || 'pasted'}
-                  style={{ height: 64, borderRadius: 6, border: '1px solid var(--border-color)' }}
-                />
-              )}
-              <button
-                onClick={() => setAttachedFiles(prev => prev.filter((_, j) => j !== i))}
-                style={{
-                  position: 'absolute', top: -6, right: -6, width: 18, height: 18,
-                  borderRadius: '50%', border: 'none', background: 'var(--error)',
-                  color: '#fff', fontSize: 11, cursor: 'pointer', lineHeight: '18px',
-                  textAlign: 'center', padding: 0,
-                }}
-              >×</button>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Input — Apple-style clean input bar */}
-      <div
+      <Composer
+        inputRef={inputRef}
+        value={input}
+        onChange={setInput}
+        onSubmit={(text) => handleSend(text)}
+        onStop={handleStop}
+        isStreaming={isStreaming}
+        attachments={attachedFiles}
+        onAttachmentsChange={setAttachedFiles}
+        onOpenPicker={() => setPickerOpen(true)}
+        voiceActive={voiceActive}
+        voiceBusy={voiceBusy}
+        onToggleVoice={toggleVoice}
+        planPending={!!planPending && planPending.sid === activeSessionId}
+        onConfirmPlan={confirmPlan}
+        onDiscardPlan={() => setPlanPending(null)}
+        ctxWindow={ctxWindow}
+        ctxWindowLabel={ctxWindowLabel}
+        modelLabel={currentModel?.name || selectedModel}
+        dragOver={dragOver}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
-        style={{
-        padding: '12px 24px', borderTop: '0.5px solid var(--border-color)',
-        background: dragOver ? 'var(--accent-soft)' : 'var(--bg-secondary)',
-      }}>
-        {planPending && planPending.sid === activeSessionId && (
-          <div style={{
-            display: 'flex', alignItems: 'center', gap: 10,
-            marginBottom: 10, padding: '8px 12px', borderRadius: 8,
-            background: 'var(--accent-soft)', border: '1px solid var(--accent)',
-          }}>
-            <span style={{ fontSize: 12, color: 'var(--text-primary)', flex: 1 }}>
-              📋 {t('chat.planReady', '计划已生成')} — {t('chat.planHint', '接受后开始执行')}
-            </span>
-            <button
-              onClick={confirmPlan}
-              style={{
-                background: 'var(--grad-accent)', border: 'none', color: '#fff',
-                padding: '4px 12px', borderRadius: 6, fontSize: 12, cursor: 'pointer',
-              }}
-            >
-              {t('chat.planAccept', '接受并执行')}
-            </button>
-            <button
-              onClick={() => setPlanPending(null)}
-              style={{
-                background: 'transparent', border: '1px solid var(--border-color)',
-                color: 'var(--text-muted)', padding: '4px 10px', borderRadius: 6,
-                fontSize: 12, cursor: 'pointer',
-              }}
-            >
-              {t('chat.planDiscard', '放弃')}
-            </button>
-          </div>
-        )}
-        {/* Context bar — Claude Code style context meter right above the input */}
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: 8,
-          marginBottom: 6, padding: '0 4px',
-        }}>
-          <span style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>ctx</span>
-          <div style={{
-            flex: 1, height: 3, borderRadius: 999,
-            background: 'var(--border-color)', overflow: 'hidden',
-          }}>
-            <div style={{
-              width: `${Math.min((tokenUsage.input / ctxWindow) * 100, 100)}%`,
-              height: '100%', borderRadius: 999,
-              background: Math.min((tokenUsage.input / ctxWindow) * 100, 100) > 80 ? 'var(--error)' : 'var(--success)',
-              transition: 'width 0.3s ease',
-            }} />
-          </div>
-          <span style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
-            {Math.min((tokenUsage.input / ctxWindow) * 100, 100).toFixed(0)}% · {ctxWindowLabel}
-          </span>
-        </div>
-        <div style={{
-          display: 'flex', gap: 10, alignItems: 'flex-end',
-          background: 'var(--bg-primary)', borderRadius: 10,
-          border: '1px solid var(--border-color)', padding: '6px 8px',
-        }} className="composer">
-          <div style={{ position: 'relative', flex: 1 }}>
-            {slashMenu.length > 0 && (
-              <div style={{
-                position: 'absolute', bottom: '100%', left: 0, right: 0, marginBottom: 4,
-                background: 'var(--bg-primary)', border: '0.5px solid var(--border-color)',
-                borderRadius: 8, boxShadow: '0 8px 24px rgba(0,0,0,0.25)', zIndex: 50,
-                maxHeight: 240, overflowY: 'auto', padding: 4,
-              }}>
-                {slashMenu.map((c, i) => (
-                  <div
-                    key={c.name}
-                    onMouseEnter={() => setSlashSel(i)}
-                    onClick={() => { setInput('/' + c.name + ' '); setSlashSel(0); }}
-                    style={{
-                      padding: '5px 10px', borderRadius: 6, cursor: 'pointer',
-                      background: i === slashSel ? 'var(--accent-soft)' : 'transparent',
-                    }}
-                  >
-                    <span style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent)' }}>/{c.name}</span>
-                    {c.usage && <span style={{ color: 'var(--text-muted)', fontSize: 11 }}> {c.usage}</span>}
-                    <span style={{ color: 'var(--text-muted)', fontSize: 11, marginLeft: 8 }}>{t(c.descKey)}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          <textarea
-            ref={inputRef}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            onPaste={(e) => {
-              const items = e.clipboardData?.items;
-              if (!items) return;
-              for (let i = 0; i < items.length; i++) {
-                const mime = items[i].type;
-                if (!mime.startsWith('image/') && mime !== 'application/pdf') continue;
-                const file = items[i].getAsFile();
-                if (!file) continue;
-                const reader = new FileReader();
-                reader.onload = () => {
-                  const base64 = (reader.result as string).split(',')[1];
-                  setAttachedFiles(prev => [...prev, { mime, data: base64, name: file.name || undefined }]);
-                };
-                reader.readAsDataURL(file);
-              }
-            }}
-            placeholder={t('chat.placeholder')}
-            aria-label={t('chat.inputAriaLabel', '消息输入框')}
-            aria-multiline="true"
-            rows={1}
-            style={{
-              width: '100%', background: 'transparent', border: 'none',
-              color: 'var(--text-primary)', resize: 'none',
-              outline: 'none', padding: '6px 4px', maxHeight: 200,
-              lineHeight: 1.5,
-            }}
-          />
-          </div>
-          <button
-            onClick={toggleVoice}
-            disabled={voiceBusy}
-            aria-pressed={voiceActive}
-            aria-label={voiceActive ? t('chat.voiceStop') : t('chat.voice')}
-            title={voiceActive ? t('chat.voiceStop') : t('chat.voice')}
-            style={{
-              background: voiceActive ? 'var(--error)' : 'transparent',
-              border: 'none', color: voiceActive ? '#fff' : 'var(--text-muted)',
-              padding: '6px 10px', borderRadius: 8, cursor: 'pointer',
-              display: 'flex', alignItems: 'center',
-            }}
-          >
-            <Mic size={16} aria-hidden />
-          </button>
-          {isStreaming ? (
-            <button
-              onClick={handleStop}
-              aria-label={t('chat.stop')}
-              title={t('chat.stop')}
-              style={{
-                background: 'var(--error)', border: 'none', color: '#fff',
-                padding: '6px 10px', borderRadius: 8, cursor: 'pointer',
-                display: 'flex', alignItems: 'center',
-              }}
-            >
-              <Square size={16} aria-hidden />
-            </button>
-          ) : (
-            <button
-              onClick={() => handleSend()}
-              disabled={!input.trim()}
-              aria-label={t('chat.send')}
-              title={t('chat.send')}
-              style={{
-                background: input.trim() ? 'var(--grad-accent)' : 'var(--border-color)',
-                border: 'none', color: input.trim() ? '#fff' : 'var(--text-muted)',
-                padding: '7px 12px', borderRadius: 999, cursor: input.trim() ? 'pointer' : 'default',
-                display: 'flex', alignItems: 'center', transition: 'filter 0.15s, opacity 0.15s',
-              }}
-              onMouseEnter={(e) => { if (input.trim()) (e.currentTarget as HTMLElement).style.filter = 'brightness(1.1)'; }}
-              onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.filter = ''; }}
-            >
-              <Send size={16} aria-hidden />
-            </button>
-          )}
-        </div>
-        {/* Mode row — iCode's own mode selector (a labelled toggle group) */}
-        <div role="group" aria-label={t('chat.modeGroupAriaLabel', '运行模式')} style={{
-          display: 'flex', alignItems: 'center', gap: 4, marginTop: 6,
-          fontSize: 10, color: 'var(--text-muted)',
-        }}>
-          <button className="interactive" aria-label={t('chat.addAttachmentAriaLabel', '添加附件')}
-            onClick={() => fileInputRef.current?.click()}
-            style={{
-              padding: '3px 8px', borderRadius: 4, fontSize: 10,
-              background: 'transparent', border: 'none', color: 'var(--text-muted)',
-              display: 'flex', alignItems: 'center', gap: 3,
-            }}>
-            <Plus size={10} aria-hidden />
-          </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*,application/pdf"
-            multiple
-            style={{ display: 'none' }}
-            onChange={(e) => {
-              const files = Array.from(e.target.files || []);
-              for (const file of files) {
-                const reader = new FileReader();
-                reader.onload = () => {
-                  const base64 = (reader.result as string).split(',')[1];
-                  setAttachedFiles(prev => [...prev, { mime: file.type || 'application/octet-stream', data: base64, name: file.name }]);
-                };
-                reader.readAsDataURL(file);
-              }
-              e.target.value = '';
-            }}
-          />
-          {[
-            { v: 'plan', label: t('chat.modePlan') },
-            { v: 'auto', label: t('chat.modeNormal') },
-            { v: 'ask',  label: t('chat.modeAsk') },
-            { v: 'yolo', label: t('chat.modeYolo') },
-          ].map(m => (
-            <button key={m.v} aria-pressed={mode === m.v} className={mode === m.v ? 'nav-item active' : 'nav-item'} style={{
-              padding: '3px 10px', borderRadius: 4, fontSize: 10, fontWeight: mode === m.v ? 600 : 400,
-            }} onClick={() => useAppStore.getState().setMode(m.v)}>{m.label}</button>
-          ))}
-          <div style={{ flex: 1 }} />
-          <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
-            {currentModel?.name || selectedModel} · {mode}
-          </span>
-        </div>
-        {/* Live token/cost — updates on every streamed token (session totals) */}
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: 14, marginTop: 6,
-          fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)',
-        }}>
-          <span>↑ {(tokenUsage.input / 1000).toFixed(1)}K</span>
-          <span>↓ {(tokenUsage.output / 1000).toFixed(1)}K</span>
-          {tokenUsage.cacheHit > 0 && (
-            <span style={{ color: 'var(--success)' }}>
-              cache {((tokenUsage.cacheHit / (tokenUsage.input + tokenUsage.output + 1)) * 100).toFixed(0)}%
-            </span>
-          )}
-          <span style={{ color: 'var(--accent)' }}>{tokenUsage.cost}</span>
-          <div style={{ flex: 1 }} />
-          {isStreaming && (
-            <span style={{ color: 'var(--text-secondary)', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-              {t('chat.generatingShort')}
-              <span className="typing-dots"><span /><span /><span /></span>
-            </span>
-          )}
-        </div>
-      </div>
+      />
 
       {/* Permission request modal — the engine is paused server-side until the
           user answers. Respond via the backend /api/permission/respond call. */}
