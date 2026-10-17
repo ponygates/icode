@@ -244,6 +244,27 @@ func (t *BashTool) Execute(ctx context.Context, args string) (*types.ToolResult,
 	return &types.ToolResult{Success: true, Content: capBashOutput(string(output))}, nil
 }
 
+// resolveConfinedDir picks the working directory for a confined process.
+//
+// An unconfined child inherits its parent's cwd, so an empty Dir used to be
+// harmless. A confined child cannot: the AppContainer token holds no rights on
+// the inherited directory, and CreateProcess fails with "the directory name is
+// invalid" before the command even starts. Every confined call site therefore
+// resolves the directory explicitly, through this one function.
+func resolveConfinedDir(preferred string) string {
+	if preferred != "" {
+		if absDir, err := filepath.Abs(preferred); err == nil {
+			if info, err := os.Stat(absDir); err == nil && info.IsDir() {
+				return absDir
+			}
+		}
+	}
+	if wd, err := os.Getwd(); err == nil {
+		return wd
+	}
+	return ""
+}
+
 // runConfined executes cmdStr inside the installed sandbox backend. It mirrors
 // the unconfined path's timeout, output cap and live streaming so the model
 // sees the same shape of result — the only difference is that an escape
@@ -252,19 +273,7 @@ func (t *BashTool) Execute(ctx context.Context, args string) (*types.ToolResult,
 // A launch failure is surfaced as a tool error. Falling back to an unconfined
 // retry would make the sandbox look present while being optional in practice.
 func runConfined(ctx context.Context, r sandbox.Runner, cmdStr, workDir string, timeoutSec int) (*types.ToolResult, error) {
-	dir := ""
-	if workDir != "" {
-		if absDir, err := filepath.Abs(workDir); err == nil {
-			if info, err := os.Stat(absDir); err == nil && info.IsDir() {
-				dir = absDir
-			}
-		}
-	}
-	if dir == "" {
-		if wd, err := os.Getwd(); err == nil {
-			dir = wd
-		}
-	}
+	dir := resolveConfinedDir(workDir)
 
 	shellName, shellArgs := resolveBashShell()
 	argv := append([]string{shellName}, shellArgs...)

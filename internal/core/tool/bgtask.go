@@ -11,15 +11,15 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/ponygates/icode/internal/executil"
 	"github.com/ponygates/icode/internal/notify"
+	"github.com/ponygates/icode/internal/sandbox"
 	"github.com/ponygates/icode/internal/types"
 	"github.com/ponygates/icode/internal/xgo"
 )
@@ -36,15 +36,40 @@ type bgTask struct {
 	errMsg    string
 	cancelled bool // set when the user/model explicitly killed this run
 	cancel    context.CancelFunc
-	cmd       *exec.Cmd
+	// A task is held either as an *exec.Cmd (unconfined) or as a sandbox
+	// Handle (confined). Confinement cannot go through os/exec because
+	// SysProcAttr cannot express SECURITY_CAPABILITIES, so there is no single
+	// type covering both. Exactly one of the two is set.
+	cmd *exec.Cmd
+	h   sandbox.Handle
+}
+
+// killProcess terminates the child. It is separate from cancelTask because
+// KillAll needs the process gone without marking the run cancelled.
+func (t *bgTask) killProcess() {
+	t.mu.Lock()
+	cmd, h := t.cmd, t.h
+	t.mu.Unlock()
+	if h != nil {
+		_ = h.Kill()
+		return
+	}
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
 }
 
 // cancelTask flags the run as cancelled (so the UI shows "cancelled", not
-// "failed") and cancels the process context.
+// "failed") and terminates the process.
+//
+// The handle is killed explicitly rather than relying on the backend watching
+// ctx: that keeps "stop means stopped" true even for a backend whose context
+// plumbing is missing or slow.
 func (t *bgTask) cancelTask() {
 	t.mu.Lock()
 	t.cancelled = true
 	t.mu.Unlock()
+	t.killProcess()
 	t.cancel()
 }
 
@@ -224,32 +249,16 @@ func (m *bgTaskManager) Start(cmdStr, workDir string) (string, error) {
 		return "", err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-
-	var cmd *exec.Cmd
-	if strings.Contains(os.Getenv("OS"), "Windows") {
-		cmd = executil.CommandContext(ctx, "cmd", "/C", cmdStr)
-	} else {
-		cmd = executil.CommandContext(ctx, "sh", "-c", cmdStr)
-	}
-	if workDir != "" {
-		if absDir, err := filepath.Abs(workDir); err == nil {
-			if info, err := os.Stat(absDir); err == nil && info.IsDir() {
-				cmd.Dir = absDir
-			}
-		}
-	}
+	dir := resolveConfinedDir(workDir)
 
 	m.mu.Lock()
 	m.seq++
 	id := fmt.Sprintf("bg-%d", m.seq)
-	task := &bgTask{id: id, command: cmdStr, start: time.Now(), cancel: cancel, cmd: cmd}
+	task := &bgTask{id: id, command: cmdStr, start: time.Now(), cancel: cancel}
 	m.tasks[id] = task
 	m.mu.Unlock()
 
-	cmd.Stdout = task
-	cmd.Stderr = task
-
-	if err := cmd.Start(); err != nil {
+	if err := m.launch(ctx, task, cmdStr, dir); err != nil {
 		cancel()
 		m.mu.Lock()
 		delete(m.tasks, id)
@@ -258,7 +267,7 @@ func (m *bgTaskManager) Start(cmdStr, workDir string) (string, error) {
 	}
 
 	xgo.GoSafe("bgtask.wait", func() {
-		err := cmd.Wait()
+		err := m.wait(task)
 		task.mu.Lock()
 		task.done = true
 		if err != nil {
@@ -285,6 +294,87 @@ func (m *bgTaskManager) Start(cmdStr, workDir string) (string, error) {
 	})
 
 	return id, nil
+}
+
+// launch starts the child and records how to reach it later.
+//
+// When a backend is installed the process is created inside the boundary. A
+// launch failure is returned to the caller instead of being retried
+// unconfined: a background task is the easiest way to outlive the agent loop,
+// so it is precisely the place where "run it the unconfined way after all"
+// would undo the boundary.
+func (m *bgTaskManager) launch(ctx context.Context, task *bgTask, cmdStr, dir string) error {
+	if r := sandbox.Active(); r != nil {
+		h, err := r.Start(ctx, backgroundArgv(cmdStr), sandbox.Spec{
+			Dir: dir,
+			// Stream into the same 1 MiB ring the unconfined path writes to, so
+			// task_output sees identical framing either way.
+			OnOutput: func(p []byte) { _, _ = task.Write(p) },
+		})
+		if err != nil {
+			return fmt.Errorf("后台任务无法在沙箱内启动（%s）: %w；为避免绕过隔离已取消执行", r.Name(), err)
+		}
+		task.mu.Lock()
+		task.h = h
+		task.mu.Unlock()
+		return nil
+	}
+
+	cmd := backgroundCmd(ctx, cmdStr)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	cmd.Stdout = task
+	cmd.Stderr = task
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	task.mu.Lock()
+	task.cmd = cmd
+	task.mu.Unlock()
+	return nil
+}
+
+// wait blocks until the child exits and normalises the outcome. The confined
+// backend reports a non-zero exit as a Result rather than an error, so the
+// exit code is turned back into the same "exit status N" text os/exec
+// produces — callers and the UI treat both paths identically.
+func (m *bgTaskManager) wait(task *bgTask) error {
+	task.mu.Lock()
+	h, cmd := task.h, task.cmd
+	task.mu.Unlock()
+	if h != nil {
+		res, err := h.Wait()
+		if err != nil {
+			return err
+		}
+		if res.ExitCode != 0 {
+			return fmt.Errorf("exit status %d", res.ExitCode)
+		}
+		return nil
+	}
+	if cmd == nil {
+		return fmt.Errorf("后台任务没有可等待的进程")
+	}
+	return cmd.Wait()
+}
+
+// backgroundArgv builds the shell vector for a confined background command.
+// The shell choice mirrors the unconfined path (cmd.exe on Windows, sh
+// elsewhere) so switching confinement on does not silently change semantics.
+func backgroundArgv(cmdStr string) []string {
+	if runtime.GOOS == "windows" {
+		return []string{"cmd", "/C", cmdStr}
+	}
+	return []string{"sh", "-c", cmdStr}
+}
+
+// backgroundCmd builds the os/exec form of the same vector.
+func backgroundCmd(ctx context.Context, cmdStr string) *exec.Cmd {
+	if runtime.GOOS == "windows" {
+		return executil.CommandContext(ctx, "cmd", "/C", cmdStr)
+	}
+	return executil.CommandContext(ctx, "sh", "-c", cmdStr)
 }
 
 // Get returns the task with the given id, or nil.
@@ -320,10 +410,11 @@ func (m *bgTaskManager) KillAll() {
 	defer m.mu.Unlock()
 	for _, t := range m.tasks {
 		t.mu.Lock()
-		if !t.done && t.cmd != nil && t.cmd.Process != nil {
-			_ = t.cmd.Process.Kill()
-		}
+		live := !t.done
 		t.mu.Unlock()
+		if live {
+			t.killProcess()
+		}
 		t.cancel()
 	}
 }

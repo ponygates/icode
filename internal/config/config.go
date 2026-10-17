@@ -389,8 +389,9 @@ type SandboxCfg struct {
 	Mode string `yaml:"mode,omitempty" json:"mode,omitempty"`
 
 	// WritablePaths lists extra directories the confined process may write to.
-	// The working directory and the system temp directory are always included.
-	// Toolchain caches (GOPATH, GOCACHE, npm cache) usually belong here.
+	// The working directory is granted separately (see GrantWorkspace); the
+	// child also gets a private temp directory of its own. Toolchain caches
+	// (GOPATH, GOCACHE, npm cache) usually belong here.
 	WritablePaths []string `yaml:"writable_paths,omitempty" json:"writable_paths,omitempty"`
 
 	// Network is deny | allow. deny is the default; allow grants the platform's

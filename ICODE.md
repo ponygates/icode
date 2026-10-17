@@ -2,7 +2,7 @@
 
 ## 项目描述
 
-iCode 是一个多模型 AI 编码助手，提供 CLI（TUI）、桌面版（WebView2/浏览器）与 VS Code 扩展三端统一体验。开箱支持 14 个 LLM 提供商、60+ 模型，缓存优先架构可实现最高 94% token 节省。Go 语言编写，使用 cobra CLI 框架，附带 WebView2（Windows）/ 浏览器（macOS·Linux）桌面应用与 VS Code 扩展。一键自动更新模型：刷新后自动检测新增/下架模型，连续 2 次确认标记下架，文档页富化补充元数据。**当前版本 v0.3.0**（版本归零基线，历史 v0.2.x–v0.53.x 的整合，详见 CHANGELOG.md 与 docs/archive/）。
+iCode 是一个多模型 AI 编码助手，提供 CLI（TUI）、桌面版（WebView2/浏览器）与 VS Code 扩展三端统一体验。开箱支持 14 个 LLM 提供商、60+ 模型，缓存优先架构可实现最高 94% token 节省。Go 语言编写，使用 cobra CLI 框架，附带 WebView2（Windows）/ 浏览器（macOS·Linux）桌面应用与 VS Code 扩展。一键自动更新模型：刷新后自动检测新增/下架模型，连续 2 次确认标记下架，文档页富化补充元数据。**当前版本 v0.3.1**（版本归零基线，历史 v0.2.x–v0.53.x 的整合，详见 CHANGELOG.md 与 docs/archive/）。
 
 ## 构建命令
 
@@ -203,7 +203,7 @@ v0.7–v0.53 的逐批增强记录（WorkBuddy 桥接、多模态工具、Cache-
 
 1. **非 Windows 平台托盘/热键**: macOS / Linux 提供系统托盘 + 菜单 + 全局热键 `Ctrl+Shift+Space`（CGO，需目标 OS 原生构建）。**已知限制**：① macOS 需辅助功能权限，真机待点测；② Linux Wayland 不暴露全局热键协议，注册失败时回退托盘菜单；③ 本 Windows 开发环境无法交叉编译验证 macOS/Linux GUI 构建。
 2. **托盘真机验证**: 原生托盘/热键仅在无头环境验证编译与纯函数单测，真实交互待点测。
-3. **操作系统级沙箱（Windows 已落地）**: CSRF/同源防护、fetch SSRF 拦截（`internal/netsec`）、文件工具目录沙箱（`AllowedPaths`）、配置/工具注册表加锁、API Key 脱敏**均已落地**（v0.1.3 起）。bash 的内核边界在 **v0.3.0** 补上：`internal/sandbox` + Windows AppContainer，模型命令在工作区可读写、系统临时目录隔离、`~/.ssh` 与用户桌面**由操作系统拒绝**（不再依赖正则）。配置项 `sandbox.mode`（auto/on/off）、`writable_paths`、`network`、`grant_workspace`。**仍未完成**：Linux（bwrap → Landlock 回退）与 macOS（`sandbox-exec`）后端、后台任务 `bgtask` 接入、设置页开关与后端状态显示。首次启用会向工作目录写入一条 AppContainer ACE（可用 `sandbox.RevokeWorkspace` 撤销）。
+3. **操作系统级沙箱（Windows 已落地）**: CSRF/同源防护、fetch SSRF 拦截（`internal/netsec`）、文件工具目录沙箱（`AllowedPaths`）、配置/工具注册表加锁、API Key 脱敏**均已落地**（v0.1.3 起）。bash 的内核边界在 **v0.3.0** 补上：`internal/sandbox` + Windows AppContainer，模型命令在工作区可读写、系统临时目录隔离、`~/.ssh` 与用户桌面**由操作系统拒绝**（不再依赖正则）。**v0.3.1** 把后台任务 `bgtask` 也接入（此前 `run_in_background` 是唯一能绕过边界的模型入口），并新增 `GET/PUT /api/sandbox` 与设置页「安全沙箱」状态区（区分 runtime 与 config，保存后需重启生效）。配置项 `sandbox.mode`（auto/on/off）、`writable_paths`、`network`、`grant_workspace`。**仍未完成**：Linux（bwrap → Landlock 回退）与 macOS（`sandbox-exec`）后端、纯交互式 `!` 命令接入、工作区授权 UI（撤销按钮）。首次启用会向工作目录写入一条 AppContainer ACE（可用 `sandbox.RevokeWorkspace` 撤销）。
 4. **前端巨型组件**: `ChatPage.tsx` 2,434 行 / `SettingsPage.tsx` 1,828 行 / `i18n/index.ts` 2,495 行——长期健康项，拆分回归风险高，等专项迭代。
 
 ## 约定

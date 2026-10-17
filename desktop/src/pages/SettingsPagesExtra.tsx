@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Trash2, Shield, Wrench, FileText, Terminal, Search, GitBranch, HardDrive } from 'lucide-react';
 import { useAppStore } from '../stores/appStore';
 import PlumBlossom from '../components/PlumBlossom';
+import { SandboxSection } from '../components/SandboxSection';
 import { useTranslation } from 'react-i18next';
 
 const lbl: React.CSSProperties = {
@@ -196,12 +197,13 @@ export function PageTools({ store }: { store: StoreState }) {
           style={{ ...selectStyle, width: 120 }} />
       </Section>
       <Section title={t('tools.sandbox')}>
-        <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+        <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.6, marginBottom: 12 }}>
           {t('tools.sandboxDesc')}
-          <div style={{ marginTop: 8, padding: 12, background: 'var(--bg-primary)', borderRadius: 8, fontSize: 11 }}>
-            {t('tools.blockedCmds')}<br/>
-            {t('tools.editableScope')}
-          </div>
+        </div>
+        <SandboxSection />
+        <div style={{ marginTop: 12, padding: 12, background: 'var(--bg-primary)', borderRadius: 8, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.7 }}>
+          {t('tools.blockedCmds')}<br/>
+          {t('tools.editableScope')}
         </div>
       </Section>
       <Section title={t('tools.knowledgeTitle')}>

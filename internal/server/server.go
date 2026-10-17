@@ -149,6 +149,9 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 	// Health & status
 	mux.HandleFunc("/api/health", s.handleHealth)
 	mux.HandleFunc("/api/status", s.handleStatus)
+	// OS-level confinement of model-issued shell commands: what is in force
+	// right now, and the settings that decide it at the next launch.
+	mux.HandleFunc("/api/sandbox", s.requireAPITokenForMutating(s.handleSandbox))
 
 	// App update check
 	mux.HandleFunc("/api/update/check", s.handleUpdateCheck)

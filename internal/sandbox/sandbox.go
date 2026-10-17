@@ -17,6 +17,7 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 )
 
@@ -186,8 +187,11 @@ func defaultWritablePaths() []string {
 // Init resolves cfg into a Runner, installs it, and returns human-readable
 // notices the caller should surface. A nil Runner with a nil error means "run
 // unconfined, and say so".
-func Init(cfg Config) (Runner, []string, error) {
+func Init(cfg Config) (runner Runner, notices []string, err error) {
 	cfg.WritablePaths = append(cfg.WritablePaths, defaultWritablePaths()...)
+	// Record what actually happened before any early return, so Status() can
+	// never describe a boundary that was not installed.
+	defer func() { recordInit(cfg, runner, notices) }()
 
 	if cfg.Mode == ModeOff {
 		SetActive(nil)
@@ -196,20 +200,69 @@ func Init(cfg Config) (Runner, []string, error) {
 		}, nil
 	}
 
-	r, notices, err := newPlatformRunner(cfg)
-	if err != nil || r == nil || !r.Available() {
-		if err != nil {
-			notices = append(notices, err.Error())
+	r, n, rerr := newPlatformRunner(cfg)
+	if rerr != nil || r == nil || !r.Available() {
+		if rerr != nil {
+			n = append(n, rerr.Error())
 		}
 		if cfg.Mode == ModeOn {
 			SetActive(nil)
-			return nil, notices, ErrUnsupported
+			return nil, n, ErrUnsupported
 		}
 		SetActive(nil)
-		notices = append(notices, "no kernel sandbox available: commands run unconfined")
-		return nil, notices, nil
+		n = append(n, "no kernel sandbox available: commands run unconfined")
+		return nil, n, nil
 	}
 
 	SetActive(r)
-	return r, notices, nil
+	return r, n, nil
+}
+
+// StatusInfo is a description of the confinement actually in force. Settings UI and
+// status output read this instead of the configuration, because a configured
+// sandbox and an installed one are not the same thing.
+type StatusInfo struct {
+	Enabled   bool     `json:"enabled"`
+	Backend   string   `json:"backend,omitempty"`
+	Available bool     `json:"available"`
+	Mode      string   `json:"mode"`
+	Network   string   `json:"network"`
+	Notices   []string `json:"notices,omitempty"`
+}
+
+var initState struct {
+	mu      sync.Mutex
+	mode    Mode
+	network NetworkPolicy
+	notices []string
+}
+
+func recordInit(cfg Config, runner Runner, notices []string) {
+	initState.mu.Lock()
+	initState.mode = cfg.Mode
+	initState.network = cfg.Network
+	initState.notices = append([]string(nil), notices...)
+	initState.mu.Unlock()
+}
+
+// Status reports the confinement in force right now.
+func Status() StatusInfo {
+	st := StatusInfo{}
+	initState.mu.Lock()
+	st.Mode = string(initState.mode)
+	st.Network = string(initState.network)
+	st.Notices = append([]string(nil), initState.notices...)
+	initState.mu.Unlock()
+	if st.Mode == "" {
+		st.Mode = string(ModeAuto)
+	}
+	if st.Network == "" {
+		st.Network = string(NetworkDeny)
+	}
+	if r := Active(); r != nil {
+		st.Enabled = true
+		st.Backend = r.Name()
+		st.Available = r.Available()
+	}
+	return st
 }
