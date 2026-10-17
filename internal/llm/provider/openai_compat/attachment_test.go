@@ -106,3 +106,76 @@ func TestBuildRequestBody_ToolMessageIgnoresAttachment(t *testing.T) {
 		t.Fatalf("tool message must stay plain text, got %T", body.Messages[0].Content)
 	}
 }
+
+// A PDF must never vanish silently. Chat Completions endpoints vary in their
+// file-part support, so the request carries an explicit note the model can act
+// on ("content not readable") instead of pretending no attachment was sent.
+func TestBuildRequestBody_PDFIsSurfacedNotDropped(t *testing.T) {
+	p := newTestProvider()
+	req := types.ChatRequest{
+		Model: "m",
+		Messages: []types.Message{
+			{
+				Role:    types.RoleUser,
+				Content: "summarise this",
+				Attachments: []types.Attachment{
+					{Type: "pdf", MIMEType: "application/pdf", Data: "JVBERi0=", Name: "contract.pdf"},
+				},
+			},
+		},
+	}
+	r, err := p.buildRequestBody(req, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		Messages []struct {
+			Content any `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.NewDecoder(r).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	parts, ok := body.Messages[0].Content.([]any)
+	if !ok {
+		t.Fatalf("expected content array, got %T", body.Messages[0].Content)
+	}
+	var note string
+	for _, part := range parts {
+		if m, ok := part.(map[string]any); ok && m["type"] == "text" {
+			if s, _ := m["text"].(string); strings.Contains(s, "contract.pdf") {
+				note = s
+			}
+		}
+	}
+	if note == "" {
+		t.Fatalf("PDF attachment was dropped without any note: %v", parts)
+	}
+	if !strings.Contains(note, "未能读取") {
+		t.Errorf("note must state the content was not read, got %q", note)
+	}
+}
+
+// MIME-only PDFs (Type left empty) still take the PDF path.
+func TestBuildRequestBody_PDFByMIME(t *testing.T) {
+	p := newTestProvider()
+	req := types.ChatRequest{
+		Model: "m",
+		Messages: []types.Message{{
+			Role:        types.RoleUser,
+			Content:     "read",
+			Attachments: []types.Attachment{{MIMEType: "application/pdf", Data: "JVBERi0=", Name: "a.pdf"}},
+		}},
+	}
+	r, _ := p.buildRequestBody(req, false)
+	var body struct {
+		Messages []struct {
+			Content any `json:"content"`
+		} `json:"messages"`
+	}
+	json.NewDecoder(r).Decode(&body)
+	parts, ok := body.Messages[0].Content.([]any)
+	if !ok || len(parts) < 2 {
+		t.Fatalf("MIME-only PDF should still produce a text note, got %v", body.Messages[0].Content)
+	}
+}

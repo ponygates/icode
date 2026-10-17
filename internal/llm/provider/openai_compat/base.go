@@ -1078,9 +1078,13 @@ type usageInfo struct {
 // openAIContent renders a message's content for the OpenAI Chat Completions
 // format. When a message carries image attachments and is a normal (non-tool)
 // message, the content becomes a content-part array: the text (if present)
-// followed by image_url parts. Tool and tool-result messages, and any
-// non-image attachment types, are left as plain text so existing text
-// conversations are never disturbed.
+// followed by image_url parts.
+//
+// PDFs are NOT sent inline here: Chat Completions support for `file` parts is
+// vendor-specific and sending one to an endpoint that does not understand it
+// fails the whole request. Dropping it silently is worse — the model then
+// answers as if no document had been attached — so a visible note is emitted
+// instead. Anthropic uses native document blocks (see anthropicContent).
 func openAIContent(msg types.Message) any {
 	if msg.Role == types.RoleTool || len(msg.ToolCalls) > 0 || len(msg.Attachments) == 0 {
 		return msg.Content
@@ -1090,7 +1094,8 @@ func openAIContent(msg types.Message) any {
 		parts = append(parts, map[string]any{"type": "text", "text": msg.Content})
 	}
 	for _, att := range msg.Attachments {
-		if att.Type == "image" && att.Data != "" {
+		switch {
+		case att.Type == "image" && att.Data != "":
 			mime := att.MIMEType
 			if mime == "" {
 				mime = "image/png"
@@ -1100,6 +1105,15 @@ func openAIContent(msg types.Message) any {
 				"image_url": map[string]any{
 					"url": fmt.Sprintf("data:%s;base64,%s", mime, att.Data),
 				},
+			})
+		case att.IsPDF():
+			name := att.Name
+			if name == "" {
+				name = "PDF"
+			}
+			parts = append(parts, map[string]any{
+				"type": "text",
+				"text": fmt.Sprintf("[附件：%s（当前模型端点不支持内联 PDF，内容未能读取）]", name),
 			})
 		}
 	}

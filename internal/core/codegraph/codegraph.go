@@ -1,7 +1,8 @@
 // Package codegraph builds a lightweight symbol index for the project.
 //
 // It extracts function/type/struct/interface/variable definitions from
-// source files and makes them searchable. Supports Go and TypeScript/JS.
+// source files and makes them searchable. Supports Go, TypeScript/JS,
+// Python, Rust, Java, Kotlin and C#.
 package codegraph
 
 import (
@@ -101,7 +102,8 @@ func (g *Graph) Build(rootDir string) error {
 		}
 		ext := filepath.Ext(path)
 		switch ext {
-		case ".go", ".ts", ".tsx", ".js", ".jsx":
+		case ".go", ".ts", ".tsx", ".js", ".jsx",
+			".py", ".rs", ".java", ".kt", ".cs":
 		default:
 			return nil
 		}
@@ -160,9 +162,97 @@ var (
 	tsArrowRe = regexp.MustCompile(`(?:export\s+)?(?:const|let|var)\s+(\w+)\s*[:=]\s*(?:async\s*)?\(`)
 )
 
+// Python patterns
+var (
+	pyFuncRe  = regexp.MustCompile(`^(?:async\s+)?def\s+(\w+)\s*\(`)
+	pyClassRe = regexp.MustCompile(`^class\s+(\w+)`)
+	pyVarRe   = regexp.MustCompile(`^(?:[A-Z_][A-Z0-9_]*)\s*=`)
+)
+
+// Rust patterns
+var (
+	rsFuncRe   = regexp.MustCompile(`^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+(\w+)`)
+	rsStructRe = regexp.MustCompile(`^(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum|union)\s+(\w+)`)
+	rsTraitRe  = regexp.MustCompile(`^(?:pub(?:\([^)]*\))?\s+)?trait\s+(\w+)`)
+	rsTypeRe   = regexp.MustCompile(`^(?:pub(?:\([^)]*\))?\s+)?type\s+(\w+)`)
+	rsVarRe    = regexp.MustCompile(`^(?:pub(?:\([^)]*\))?\s+)?(?:const|static)\s+(\w+)`)
+)
+
+// Java / Kotlin / C# patterns. Modifiers are listed explicitly, and control
+// flow is rejected below: matching any "two words then (" line would index
+// ordinary calls (`return foo(`) as definitions.
+var (
+	jvmTypeRe = regexp.MustCompile(`^(?:[\w@]+\s+)*(?:class|interface|enum|record|struct|object)\s+(\w+)`)
+	jvmFuncRe = regexp.MustCompile(`^(?:@\w+\s+)*(?:(?:public|private|protected|internal|static|final|abstract|synchronized|override|virtual|async|suspend|open|native|default|strictfp|sealed|readonly|const|extern|unsafe|partial)\s+)*[\w<>\[\],.?]+\s+(\w+)\s*\(`)
+	ktFunRe   = regexp.MustCompile(`^(?:[\w@]+\s+)*(?:public|private|protected|internal|suspend|override|open|inline|operator|infix|tailrec|external|actual|expect)?\s*fun\s+(?:<[^>]+>\s*)?(\w+)\s*\(`)
+	jvmVarRe  = regexp.MustCompile(`^(?:public|private|protected|internal|static|final|const|readonly)\s+(?:static\s+)?[\w<>\[\],.?]+\s+(\w+)\s*(?:=|;)`)
+	jvmCtrlRe = regexp.MustCompile(`^(?:return|if|for|while|switch|catch|throw|new|else|do|try|using|lock|await|yield|case|when)\b`)
+)
+
+func extractJVMSymbols(line string, lineNum int, path string) []Symbol {
+	if jvmCtrlRe.MatchString(line) {
+		return nil
+	}
+	var syms []Symbol
+	if m := jvmTypeRe.FindStringSubmatch(line); len(m) > 1 {
+		kind := SymbolStruct
+		if strings.Contains(line, "interface") {
+			kind = SymbolInterface
+		}
+		syms = append(syms, Symbol{Name: m[1], Kind: kind, FilePath: path, Line: lineNum})
+		return syms
+	}
+	if m := ktFunRe.FindStringSubmatch(line); len(m) > 1 {
+		syms = append(syms, Symbol{Name: m[1], Kind: SymbolFunc, FilePath: path, Line: lineNum})
+		return syms
+	}
+	if m := jvmFuncRe.FindStringSubmatch(line); len(m) > 1 {
+		syms = append(syms, Symbol{Name: m[1], Kind: SymbolFunc, FilePath: path, Line: lineNum})
+		return syms
+	}
+	if m := jvmVarRe.FindStringSubmatch(line); len(m) > 1 {
+		syms = append(syms, Symbol{Name: m[1], Kind: SymbolVar, FilePath: path, Line: lineNum})
+		return syms
+	}
+	return syms
+}
+
+func extractPythonSymbols(line string, lineNum int, path string) []Symbol {
+	if m := pyClassRe.FindStringSubmatch(line); len(m) > 1 {
+		return []Symbol{{Name: m[1], Kind: SymbolStruct, FilePath: path, Line: lineNum}}
+	}
+	if m := pyFuncRe.FindStringSubmatch(line); len(m) > 1 {
+		return []Symbol{{Name: m[1], Kind: SymbolFunc, FilePath: path, Line: lineNum}}
+	}
+	if m := pyVarRe.FindStringSubmatch(line); len(m) > 1 {
+		return []Symbol{{Name: m[1], Kind: SymbolVar, FilePath: path, Line: lineNum}}
+	}
+	return nil
+}
+
+func extractRustSymbols(line string, lineNum int, path string) []Symbol {
+	if m := rsTraitRe.FindStringSubmatch(line); len(m) > 1 {
+		return []Symbol{{Name: m[1], Kind: SymbolInterface, FilePath: path, Line: lineNum}}
+	}
+	if m := rsStructRe.FindStringSubmatch(line); len(m) > 1 {
+		return []Symbol{{Name: m[1], Kind: SymbolStruct, FilePath: path, Line: lineNum}}
+	}
+	if m := rsTypeRe.FindStringSubmatch(line); len(m) > 1 {
+		return []Symbol{{Name: m[1], Kind: SymbolType, FilePath: path, Line: lineNum}}
+	}
+	if m := rsFuncRe.FindStringSubmatch(line); len(m) > 1 {
+		return []Symbol{{Name: m[1], Kind: SymbolFunc, FilePath: path, Line: lineNum}}
+	}
+	if m := rsVarRe.FindStringSubmatch(line); len(m) > 1 {
+		return []Symbol{{Name: m[1], Kind: SymbolVar, FilePath: path, Line: lineNum}}
+	}
+	return nil
+}
+
 func extractSymbols(line string, lineNum int, path string) []Symbol {
 	trimmed := strings.TrimSpace(line)
-	if trimmed == "" || strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") {
+	if trimmed == "" || strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") ||
+		strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "*") {
 		return nil
 	}
 
@@ -174,6 +264,12 @@ func extractSymbols(line string, lineNum int, path string) []Symbol {
 		syms = extractGoSymbols(trimmed, lineNum, path)
 	case ".ts", ".tsx", ".js", ".jsx":
 		syms = extractTSSymbols(trimmed, lineNum, path)
+	case ".py":
+		syms = extractPythonSymbols(trimmed, lineNum, path)
+	case ".rs":
+		syms = extractRustSymbols(trimmed, lineNum, path)
+	case ".java", ".kt", ".cs":
+		syms = extractJVMSymbols(trimmed, lineNum, path)
 	}
 
 	return syms

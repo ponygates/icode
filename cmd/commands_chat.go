@@ -95,6 +95,9 @@ func (c *chatCallback) OnSend(text string, attachments []types.Attachment) {
 			// A plan-mode turn finished — arm the confirmation prompt so the
 			// next Enter executes the plan (Esc cancels).
 			c.tui.SetPlanPending(true)
+		case types.EventModeChanged:
+			// The model entered plan mode itself (enter_plan_mode tool).
+			c.tui.AddMessage(tui.RoleSystem, "已切换到计划模式（只读）")
 		case types.EventToolUse:
 			c.lastTool = event.ToolCall.Name
 			// Strip empty/no-op parameter objects so the conversation

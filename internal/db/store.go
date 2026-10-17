@@ -22,6 +22,9 @@ import (
 // Store implements types.SessionStore with SQLite persistence.
 type Store struct {
 	db *sql.DB
+	// fts reports whether the FTS5 index is available. When it is not (build
+	// without FTS5), search falls back to LIKE rather than failing.
+	fts bool
 }
 
 // Config configures the database connection.
@@ -196,7 +199,60 @@ func (s *Store) migrate() error {
 	if _, err := s.db.Exec(`ALTER TABLE automation_runs ADD COLUMN tokens INTEGER NOT NULL DEFAULT 0`); err != nil {
 		log.Printf("warning: additive column migration skipped: %v", err)
 	}
+	s.initFTS()
 	return nil
+}
+
+// initFTS builds the full-text index used by SearchMessagesFiltered.
+//
+// It is deliberately best-effort: SQLite builds without FTS5 simply keep the
+// LIKE path, so search never becomes a startup failure. The index is external
+// content (messages is the source of truth) with the trigram tokenizer —
+// unicode61 treats a whole CJK sentence as one token, which makes Chinese
+// search useless.
+func (s *Store) initFTS() {
+	stmts := []string{
+		`CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+			content,
+			content='messages',
+			content_rowid='rowid',
+			tokenize='trigram'
+		)`,
+		`CREATE TRIGGER IF NOT EXISTS messages_fts_ai AFTER INSERT ON messages BEGIN
+			INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
+		END`,
+		`CREATE TRIGGER IF NOT EXISTS messages_fts_ad AFTER DELETE ON messages BEGIN
+			INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+		END`,
+		`CREATE TRIGGER IF NOT EXISTS messages_fts_au AFTER UPDATE ON messages BEGIN
+			INSERT INTO messages_fts(messages_fts, rowid, content) VALUES('delete', old.rowid, old.content);
+			INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
+		END`,
+	}
+	for _, stmt := range stmts {
+		if _, err := s.db.Exec(stmt); err != nil {
+			log.Printf("warning: FTS5 unavailable, falling back to LIKE search: %v", err)
+			s.fts = false
+			return
+		}
+	}
+
+	// Backfill exactly once for databases created before FTS existed. Triggers
+	// keep new rows in sync afterwards.
+	var marker string
+	err := s.db.QueryRow(`SELECT value FROM config WHERE key = 'fts_rebuilt_v1'`).Scan(&marker)
+	if err == sql.ErrNoRows {
+		if _, err := s.db.Exec(`INSERT INTO messages_fts(messages_fts) VALUES('rebuild')`); err != nil {
+			log.Printf("warning: FTS5 backfill failed, falling back to LIKE search: %v", err)
+			s.fts = false
+			return
+		}
+		if _, err := s.db.Exec(`INSERT INTO config(key, value, updated_at) VALUES('fts_rebuilt_v1', '1', ?)`,
+			time.Now().UTC().Format(time.RFC3339)); err != nil {
+			log.Printf("warning: FTS5 backfill marker not persisted: %v", err)
+		}
+	}
+	s.fts = true
 }
 
 // ============================================================================
@@ -463,25 +519,124 @@ func (s *Store) loadMessages(sessionID string) ([]types.Message, error) {
 	return messages, nil
 }
 
+// SearchOptions narrows a message search. Zero values mean "no restriction".
+type SearchOptions struct {
+	Query     string
+	SessionID string
+	Role      string
+	From      time.Time
+	To        time.Time
+	Limit     int
+}
+
 // SearchMessages searches message content across all sessions using LIKE.
-// Results are ordered by most recent first, limited to `limit` rows.
+// Kept for callers that only need the simple form; new code should prefer
+// SearchMessagesFiltered.
 func (s *Store) SearchMessages(query string, limit int) ([]types.SearchResult, error) {
+	return s.SearchMessagesFiltered(SearchOptions{Query: query, Limit: limit})
+}
+
+// SearchMessagesFiltered runs a ranked full-text search when FTS5 is
+// available, and falls back to LIKE otherwise. FTS5's trigram tokenizer needs
+// at least three characters, so shorter queries always take the LIKE path.
+func (s *Store) SearchMessagesFiltered(opts SearchOptions) ([]types.SearchResult, error) {
+	query := strings.TrimSpace(opts.Query)
+	if query == "" {
+		return []types.SearchResult{}, nil
+	}
+	limit := opts.Limit
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
-	pattern := "%" + query + "%"
+	if s.fts && len([]rune(query)) >= 3 {
+		results, err := s.searchFTS(query, opts, limit)
+		if err == nil {
+			return results, nil
+		}
+		// A malformed query (or an index built by an older SQLite) must not
+		// break search entirely — degrade to the substring scan.
+		log.Printf("warning: FTS search failed, falling back to LIKE: %v", err)
+	}
+	return s.searchLike(query, opts, limit)
+}
+
+func (s *Store) searchLike(query string, opts SearchOptions, limit int) ([]types.SearchResult, error) {
+	where := []string{"m.content LIKE ?"}
+	args := []any{"%" + query + "%"}
+	if opts.SessionID != "" {
+		where = append(where, "m.session_id = ?")
+		args = append(args, opts.SessionID)
+	}
+	if opts.Role != "" {
+		where = append(where, "m.role = ?")
+		args = append(args, opts.Role)
+	}
+	if !opts.From.IsZero() {
+		where = append(where, "m.timestamp >= ?")
+		args = append(args, opts.From.UTC().Format(time.RFC3339))
+	}
+	if !opts.To.IsZero() {
+		where = append(where, "m.timestamp <= ?")
+		args = append(args, opts.To.UTC().Format(time.RFC3339))
+	}
+	args = append(args, limit)
+
 	rows, err := s.db.Query(`SELECT m.id, m.session_id, COALESCE(s.title, ''), m.role, m.content, m.timestamp
 		FROM messages m
 		LEFT JOIN sessions s ON m.session_id = s.id
-		WHERE m.content LIKE ?
+		WHERE `+strings.Join(where, " AND ")+`
 		ORDER BY m.timestamp DESC
-		LIMIT ?`, pattern, limit)
+		LIMIT ?`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("search messages: %w", err)
 	}
 	defer rows.Close()
+	return scanSearchRows(rows, query)
+}
 
+func (s *Store) searchFTS(query string, opts SearchOptions, limit int) ([]types.SearchResult, error) {
+	// Quote the whole query as a phrase: raw FTS syntax (a stray `-` or `:`)
+	// would otherwise be parsed as an operator and error out. Doubling embedded
+	// quotes is the documented escape.
+	match := `"` + strings.ReplaceAll(query, `"`, `""`) + `"`
+
+	where := []string{"messages_fts MATCH ?"}
+	args := []any{match}
+	if opts.SessionID != "" {
+		where = append(where, "m.session_id = ?")
+		args = append(args, opts.SessionID)
+	}
+	if opts.Role != "" {
+		where = append(where, "m.role = ?")
+		args = append(args, opts.Role)
+	}
+	if !opts.From.IsZero() {
+		where = append(where, "m.timestamp >= ?")
+		args = append(args, opts.From.UTC().Format(time.RFC3339))
+	}
+	if !opts.To.IsZero() {
+		where = append(where, "m.timestamp <= ?")
+		args = append(args, opts.To.UTC().Format(time.RFC3339))
+	}
+	args = append(args, limit)
+
+	rows, err := s.db.Query(`SELECT m.id, m.session_id, COALESCE(s.title, ''), m.role, m.content, m.timestamp
+		FROM messages_fts
+		JOIN messages m ON m.rowid = messages_fts.rowid
+		LEFT JOIN sessions s ON m.session_id = s.id
+		WHERE `+strings.Join(where, " AND ")+`
+		ORDER BY bm25(messages_fts)
+		LIMIT ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanSearchRows(rows, query)
+}
+
+func scanSearchRows(rows *sql.Rows, query string) ([]types.SearchResult, error) {
 	var results []types.SearchResult
+	qLower := strings.ToLower(query)
 	for rows.Next() {
 		var r types.SearchResult
 		var ts string
@@ -490,10 +645,7 @@ func (s *Store) SearchMessages(query string, limit int) ([]types.SearchResult, e
 			return nil, fmt.Errorf("scan search result: %w", err)
 		}
 		r.Timestamp = parseStoredTime("search result timestamp", ts)
-		// Find first match position (simple search)
-		lower := strings.ToLower(r.Content)
-		qLower := strings.ToLower(query)
-		r.MatchPos = strings.Index(lower, qLower)
+		r.MatchPos = strings.Index(strings.ToLower(r.Content), qLower)
 		results = append(results, r)
 	}
 	return results, rows.Err()

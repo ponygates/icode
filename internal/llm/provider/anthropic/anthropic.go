@@ -713,8 +713,9 @@ func (p *Provider) buildMessagesBody(req types.ChatRequest, stream bool) (io.Rea
 
 // anthropicContent renders a message's content for the Anthropic Messages API.
 // Image attachments on a normal message are emitted as image source blocks
-// alongside the text; messages without attachments stay plain text so existing
-// conversations are unaffected.
+// alongside the text; PDFs become native `document` blocks (Anthropic reads
+// text and page images itself). Messages without attachments stay plain text
+// so existing conversations are unaffected.
 func anthropicContent(msg types.Message) any {
 	if len(msg.Attachments) == 0 {
 		return msg.Content
@@ -724,7 +725,8 @@ func anthropicContent(msg types.Message) any {
 		blocks = append(blocks, map[string]any{"type": "text", "text": msg.Content})
 	}
 	for _, att := range msg.Attachments {
-		if att.Type == "image" && att.Data != "" {
+		switch {
+		case att.Type == "image" && att.Data != "":
 			mt := att.MIMEType
 			if mt == "" {
 				mt = "image/png"
@@ -734,6 +736,15 @@ func anthropicContent(msg types.Message) any {
 				"source": map[string]any{
 					"type":       "base64",
 					"media_type": mt,
+					"data":       att.Data,
+				},
+			})
+		case att.IsPDF() && att.Data != "":
+			blocks = append(blocks, map[string]any{
+				"type": "document",
+				"source": map[string]any{
+					"type":       "base64",
+					"media_type": "application/pdf",
 					"data":       att.Data,
 				},
 			})

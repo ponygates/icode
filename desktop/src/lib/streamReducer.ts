@@ -34,6 +34,7 @@ export type StreamEvent =
   | { type: 'tool_progress'; content?: string }
   | { type: 'permission' }
   | { type: 'plan_proposal' }
+  | { type: 'mode_changed'; mode?: string }
   | { type: 'done' }
   | { type: 'error'; content?: string };
 
@@ -41,6 +42,7 @@ export type StreamEffect =
   | { type: 'system-message'; content: string }
   | { type: 'permission' }
   | { type: 'plan-proposal' }
+  | { type: 'mode-changed'; mode: string }
   | { type: 'settle'; content: string }
   | { type: 'error-settle'; content: string };
 
@@ -81,6 +83,13 @@ export function applyStreamEvent(state: StreamState, event: StreamEvent): Reduce
 
     case 'plan_proposal':
       return { state, flush: false, effects: [{ type: 'plan-proposal' }] };
+
+    case 'mode_changed':
+      return {
+        state,
+        flush: false,
+        effects: event.mode ? [{ type: 'mode-changed', mode: event.mode }] : [],
+      };
 
     case 'permission':
       return { state, flush: false, effects: [{ type: 'permission' }] };

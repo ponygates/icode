@@ -56,6 +56,10 @@ func NewRegistry() *Registry {
 
 	r.Register(&AskUserTool{})
 
+	// Model-initiated planning (Claude Code EnterPlanMode parity). The engine
+	// intercepts this by name; the tool definition is what makes it visible.
+	r.Register(&EnterPlanModeTool{})
+
 	r.Register(&AskUserFormTool{})
 
 	r.Register(&GitDiffTool{})

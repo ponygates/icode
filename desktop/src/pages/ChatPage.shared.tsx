@@ -54,6 +54,7 @@ export type ChatEvent =
   | { type: 'tool_progress'; content: string }
   | { type: 'permission'; permission?: PermissionRequest; Permission?: PermissionRequest }
   | { type: 'plan_proposal' }
+  | { type: 'mode_changed'; mode?: string }
   | { type: 'done'; meta?: { usage?: UsageInfo } }
   | { type: 'error'; content: string };
 
@@ -63,7 +64,7 @@ export interface ChatPayload {
   content: string;
   model: string;
   provider: string;
-  attachments?: Array<{ type: string; mime: string; data: string }>;
+  attachments?: Array<{ type: string; mime: string; data: string; name?: string }>;
 }
 
 // Fields worth surfacing in a tool-call chip — keeps the bubble informative

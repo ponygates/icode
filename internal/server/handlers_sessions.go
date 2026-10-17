@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ponygates/icode/internal/core/sessionum"
+	"github.com/ponygates/icode/internal/db"
 	"github.com/ponygates/icode/internal/types"
 )
 
@@ -31,7 +32,35 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			limit = 20
 		}
 	}
-	results, err := s.store.SearchMessages(query, limit)
+	opts := db.SearchOptions{
+		Query:     query,
+		SessionID: r.URL.Query().Get("session_id"),
+		Role:      r.URL.Query().Get("role"),
+		Limit:     limit,
+	}
+	if v := r.URL.Query().Get("from"); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			opts.From = t
+		}
+	}
+	if v := r.URL.Query().Get("to"); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			opts.To = t
+		}
+	}
+	// The filtered/ranked search is an optional capability: stores used in
+	// tests (and older embedders) may only implement the plain form. Probe for
+	// it instead of widening the shared SessionStore interface and breaking
+	// every implementation.
+	var results []types.SearchResult
+	var err error
+	if fs, ok := s.store.(interface {
+		SearchMessagesFiltered(db.SearchOptions) ([]types.SearchResult, error)
+	}); ok {
+		results, err = fs.SearchMessagesFiltered(opts)
+	} else {
+		results, err = s.store.SearchMessages(query, limit)
+	}
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return

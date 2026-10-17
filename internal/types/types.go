@@ -5,6 +5,7 @@ package types
 import (
 	"context"
 	"io"
+	"strings"
 	"time"
 )
 
@@ -37,12 +38,23 @@ type Message struct {
 }
 
 // Attachment represents inline content (images, PDFs, etc.) attached to
-// a message. Currently only image attachments are supported.
+// a message. Image attachments are sent natively to every provider; PDFs are
+// sent natively to providers that support document blocks (Anthropic) and are
+// otherwise surfaced as an explicit text note rather than silently dropped.
 type Attachment struct {
 	Type     string `json:"type"`               // "image", "pdf"
-	MIMEType string `json:"mime"`               // "image/png", "image/jpeg", …
+	MIMEType string `json:"mime"`               // "image/png", "application/pdf", …
 	Data     string `json:"data"`               // base64-encoded content
+	Name     string `json:"name,omitempty"`     // original file name, for display and notes
 	AltText  string `json:"alt_text,omitempty"` // optional description
+}
+
+// IsPDF reports whether the attachment carries a PDF document.
+func (a Attachment) IsPDF() bool {
+	if a.Type == "pdf" {
+		return true
+	}
+	return strings.EqualFold(a.MIMEType, "application/pdf")
 }
 
 type MessageMeta struct {
@@ -167,6 +179,7 @@ type ThinkingConfig struct {
 type StreamEvent struct {
 	Type       StreamEventType `json:"type"`
 	Content    string          `json:"content"`
+	Mode       string          `json:"mode,omitempty"`
 	ToolCall   *LiveToolCall   `json:"tool_call,omitempty"`
 	Meta       StreamMeta      `json:"meta,omitempty"`
 	Permission *PermissionReq  `json:"permission,omitempty"`
@@ -192,6 +205,10 @@ const (
 	// EventPlanProposal is emitted when a plan-mode turn finishes without tool
 	// calls — the reply is a plan awaiting the user's go/no-go confirmation.
 	EventPlanProposal StreamEventType = "plan_proposal"
+	// EventModeChanged tells the UI that the engine switched permission modes
+	// (currently: the model entering plan mode via the enter_plan_mode tool),
+	// so the mode badge stops lying until the next manual switch.
+	EventModeChanged StreamEventType = "mode_changed"
 )
 
 // PermissionReq is emitted when the engine needs interactive approval for a

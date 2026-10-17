@@ -545,3 +545,46 @@ func TestChat_TimeoutModel(t *testing.T) {
 		t.Errorf("provider timeout field = %v, want 120s", p.timeout)
 	}
 }
+
+// Anthropic reads PDFs natively, so a PDF attachment must become a document
+// block (base64) rather than being dropped or sent as an image.
+func TestBuildMessagesBody_PDFDocumentBlock(t *testing.T) {
+	p := New("sk-test", "")
+	body, err := p.buildMessagesBody(types.ChatRequest{
+		Model: "claude-sonnet-5",
+		Messages: []types.Message{{
+			Role:    types.RoleUser,
+			Content: "summarise",
+			Attachments: []types.Attachment{
+				{Type: "pdf", MIMEType: "application/pdf", Data: "JVBERi0=", Name: "contract.pdf"},
+			},
+		}},
+		MaxTokens: 1024,
+	}, false)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	m := decodeBody(t, body)
+	msgs, _ := m["messages"].([]any)
+	if len(msgs) != 1 {
+		t.Fatalf("want 1 message, got %d", len(msgs))
+	}
+	first, _ := msgs[0].(map[string]any)
+	blocks, ok := first["content"].([]any)
+	if !ok {
+		t.Fatalf("content should be block array, got %T", first["content"])
+	}
+	var doc map[string]any
+	for _, b := range blocks {
+		if bm, ok := b.(map[string]any); ok && bm["type"] == "document" {
+			doc = bm
+		}
+	}
+	if doc == nil {
+		t.Fatalf("no document block emitted: %v", blocks)
+	}
+	src, _ := doc["source"].(map[string]any)
+	if src["type"] != "base64" || src["media_type"] != "application/pdf" || src["data"] != "JVBERi0=" {
+		t.Fatalf("unexpected document source: %v", src)
+	}
+}

@@ -1,6 +1,8 @@
 package db
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -280,5 +282,100 @@ func TestStore_MigrateIdempotent(t *testing.T) {
 	s := newTestStore(t)
 	if err := s.migrate(); err != nil {
 		t.Errorf("migrate on already-migrated DB should be idempotent: %v", err)
+	}
+}
+
+// FTS5 must be available in the pure-Go driver; otherwise search silently
+// degrades to a full scan on every query.
+func TestStore_FTSIsInitialised(t *testing.T) {
+	s := newTestStore(t)
+	if !s.fts {
+		t.Fatal("FTS5 index unavailable — search would fall back to LIKE")
+	}
+}
+
+// The trigram tokenizer is what makes Chinese search work at all: unicode61
+// treats a whole CJK phrase as a single token. A 4-character substring must
+// hit without matching the surrounding words exactly.
+func TestStore_SearchChineseSubstring(t *testing.T) {
+	s := newTestStore(t)
+	sess := &types.Session{ID: "s-cn", Title: "合同", Metadata: map[string]any{}}
+	if err := s.Create(sess); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	msgs := []string{
+		"客户询问重大疾病保险的等待期是多少",
+		"今天下午三点开会讨论续期方案",
+		"重大疾病保险条款需要逐条解释",
+	}
+	for i, content := range msgs {
+		if err := s.AppendMessage("s-cn", types.Message{
+			ID: fmt.Sprintf("m%d", i), Role: types.RoleUser, Content: content,
+		}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+
+	got, err := s.SearchMessagesFiltered(SearchOptions{Query: "重大疾病", Limit: 10})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 hits for 重大疾病, got %d", len(got))
+	}
+	for _, r := range got {
+		if !strings.Contains(r.Content, "重大疾病") {
+			t.Errorf("hit without the substring: %q", r.Content)
+		}
+	}
+}
+
+// Filters must be applied in SQL, not after the limit — otherwise a filter
+// that matches few rows can come back empty even though matches exist.
+func TestStore_SearchFilters(t *testing.T) {
+	s := newTestStore(t)
+	for _, id := range []string{"sa", "sb"} {
+		if err := s.Create(&types.Session{ID: id, Title: id, Metadata: map[string]any{}}); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
+	_ = s.AppendMessage("sa", types.Message{ID: "a1", Role: types.RoleUser, Content: "alpha beta gamma"})
+	_ = s.AppendMessage("sb", types.Message{ID: "b1", Role: types.RoleAssistant, Content: "alpha beta gamma"})
+
+	bySession, err := s.SearchMessagesFiltered(SearchOptions{Query: "alpha beta", SessionID: "sa", Limit: 10})
+	if err != nil {
+		t.Fatalf("search by session: %v", err)
+	}
+	if len(bySession) != 1 || bySession[0].MessageID != "a1" {
+		t.Fatalf("session filter failed: %+v", bySession)
+	}
+
+	byRole, err := s.SearchMessagesFiltered(SearchOptions{Query: "alpha beta", Role: string(types.RoleAssistant), Limit: 10})
+	if err != nil {
+		t.Fatalf("search by role: %v", err)
+	}
+	if len(byRole) != 1 || byRole[0].MessageID != "b1" {
+		t.Fatalf("role filter failed: %+v", byRole)
+	}
+
+	future, _ := s.SearchMessagesFiltered(SearchOptions{
+		Query: "alpha beta", From: time.Now().Add(24 * time.Hour), Limit: 10,
+	})
+	if len(future) != 0 {
+		t.Fatalf("time filter failed, got %d hits", len(future))
+	}
+}
+
+// Short queries (<3 runes) cannot use trigram FTS; they must still work.
+func TestStore_SearchShortQueryFallsBack(t *testing.T) {
+	s := newTestStore(t)
+	_ = s.Create(&types.Session{ID: "s-short", Title: "t", Metadata: map[string]any{}})
+	_ = s.AppendMessage("s-short", types.Message{ID: "m1", Role: types.RoleUser, Content: "go build"})
+	got, err := s.SearchMessagesFiltered(SearchOptions{Query: "go", Limit: 10})
+	if err != nil {
+		t.Fatalf("short query: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1 hit for short query, got %d", len(got))
 	}
 }

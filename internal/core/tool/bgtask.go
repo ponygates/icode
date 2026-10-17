@@ -101,11 +101,25 @@ type bgTaskManager struct {
 	seq   int
 	tasks map[string]*bgTask
 
+	// maxRunning caps concurrent live processes (0 = use the default). Without
+	// a cap, a model that keeps launching builds/log tails can exhaust a small
+	// machine's memory and process table with no way back.
+	maxRunning int
+
+	// keepFinished caps retained finished tasks so their buffers (up to 1 MiB
+	// each) do not accumulate for the whole process lifetime.
+	keepFinished int
+
 	// completeHook, when set, is invoked after a background task finishes so
 	// the host UI (TUI / simple UI / desktop) can surface a "task done"
 	// notification. Fields: task id, error message ("" on success).
 	completeHook func(id, errMsg string)
 }
+
+const (
+	defaultMaxRunningBgTasks = 8
+	defaultKeepFinishedTasks = 16
+)
 
 var bgTasks = &bgTaskManager{tasks: map[string]*bgTask{}}
 
@@ -140,8 +154,75 @@ func SetCompleteHook(fn func(id, errMsg string)) {
 	bgTasks.mu.Unlock()
 }
 
+// runningLocked counts live tasks. Caller holds m.mu.
+func (m *bgTaskManager) runningLocked() int {
+	n := 0
+	for _, t := range m.tasks {
+		t.mu.Lock()
+		if !t.done {
+			n++
+		}
+		t.mu.Unlock()
+	}
+	return n
+}
+
+// pruneLocked drops the oldest finished tasks once the retained count exceeds
+// keepFinished. Running tasks are never touched. Caller holds m.mu.
+func (m *bgTaskManager) pruneLocked() {
+	keep := m.keepFinished
+	if keep <= 0 {
+		keep = defaultKeepFinishedTasks
+	}
+	type finished struct {
+		id    string
+		start time.Time
+	}
+	var done []finished
+	for id, t := range m.tasks {
+		t.mu.Lock()
+		if t.done {
+			done = append(done, finished{id: id, start: t.start})
+		}
+		t.mu.Unlock()
+	}
+	if len(done) <= keep {
+		return
+	}
+	// Oldest first.
+	for i := 0; i < len(done); i++ {
+		for j := i + 1; j < len(done); j++ {
+			if done[j].start.Before(done[i].start) {
+				done[i], done[j] = done[j], done[i]
+			}
+		}
+	}
+	for _, f := range done[:len(done)-keep] {
+		delete(m.tasks, f.id)
+	}
+}
+
+// acquireSlot enforces the concurrency cap and prunes stale finished tasks.
+// It returns an actionable error (not a bare "limit reached") when full.
+func (m *bgTaskManager) acquireSlot() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	limit := m.maxRunning
+	if limit <= 0 {
+		limit = defaultMaxRunningBgTasks
+	}
+	if running := m.runningLocked(); running >= limit {
+		return fmt.Errorf("后台任务已达上限（%d 个正在运行）。请先用 task_output 的 kill=true 结束一个，或等它自然结束", limit)
+	}
+	m.pruneLocked()
+	return nil
+}
+
 // Start launches cmdStr in the background and returns its task id.
 func (m *bgTaskManager) Start(cmdStr, workDir string) (string, error) {
+	if err := m.acquireSlot(); err != nil {
+		return "", err
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 
 	var cmd *exec.Cmd

@@ -185,8 +185,46 @@ func TestExtractSymbolsSkipsCommentsAndBlank(t *testing.T) {
 		}
 	}
 	// Unknown extensions produce nothing even for obvious definitions.
-	if syms := extractSymbols("func Alpha() {}", 1, "x.py"); len(syms) != 0 {
-		t.Errorf("extractSymbols on .py = %v, want none (ext not dispatched)", syms)
+	if syms := extractSymbols("func Alpha() {}", 1, "x.txt"); len(syms) != 0 {
+		t.Errorf("extractSymbols on .txt = %v, want none (ext not dispatched)", syms)
+	}
+}
+
+func TestExtractSymbolsOtherLanguages(t *testing.T) {
+	cases := []struct {
+		line string
+		ext  string
+		name string
+		kind SymbolKind
+	}{
+		{"def parse_config(path):", ".py", "parse_config", SymbolFunc},
+		{"async def fetch_all(self):", ".py", "fetch_all", SymbolFunc},
+		{"class Router(Base):", ".py", "Router", SymbolStruct},
+		{"pub async fn serve(&self) -> Result<()> {", ".rs", "serve", SymbolFunc},
+		{"pub struct Config {", ".rs", "Config", SymbolStruct},
+		{"pub trait Provider {", ".rs", "Provider", SymbolInterface},
+		{"public static void main(String[] args) {", ".java", "main", SymbolFunc},
+		{"public final class SessionStore {", ".java", "SessionStore", SymbolStruct},
+		{"fun handleRequest(req: Request) {", ".kt", "handleRequest", SymbolFunc},
+		{"public async Task<IActionResult> GetAsync()", ".cs", "GetAsync", SymbolFunc},
+	}
+	for _, c := range cases {
+		syms := extractSymbols(c.line, 7, "x"+c.ext)
+		if len(syms) == 0 {
+			t.Errorf("%s: no symbol extracted from %q", c.ext, c.line)
+			continue
+		}
+		if syms[0].Name != c.name || syms[0].Kind != c.kind {
+			t.Errorf("%s: got %s/%s, want %s/%s", c.ext,
+				syms[0].Name, syms[0].Kind, c.name, c.kind)
+		}
+	}
+
+	// Control flow must never be mistaken for a definition.
+	for _, line := range []string{"return foo(", "if (ready) {", "for (int i = 0;", "await run("} {
+		if syms := extractSymbols(line, 1, "x.java"); len(syms) != 0 {
+			t.Errorf("control flow indexed as symbol: %q -> %v", line, syms)
+		}
 	}
 }
 

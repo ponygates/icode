@@ -29,6 +29,7 @@ import {
   ROW_ESTIMATE, ROW_OVERSCAN, type MessageWindow, type Anchor,
 } from '../lib/messageWindow';
 import { applyStreamEvent, initialStreamState, type StreamState } from '../lib/streamReducer';
+import { toAttachmentPayload } from '../lib/attachments';
 import { planApproval, popHead, dropSession, type Decision, type ApprovalEffect, type PermEntry } from '../lib/approval';
 
 import {
@@ -43,6 +44,8 @@ interface ChatPageProps {
   sessionId?: string;
 }
 
+// toAttachmentPayload lives in lib/attachments so it can be unit-tested
+// without mounting this 2,400-line component.
 const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
   // Embedded panes skip the shell and the global-only side effects below.
   const embedded = sessionId !== undefined;
@@ -62,7 +65,7 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
   const pendingPermission = permQueue[0] || null;
   // Zoomed image attachment (lightbox)
   const [lightbox, setLightbox] = useState<string | null>(null);
-  const [attachedImages, setAttachedImages] = useState<{ mime: string; data: string }[]>([]);
+  const [attachedFiles, setAttachedFiles] = useState<{ mime: string; data: string; name?: string }[]>([]);
   const [gitBranch, setGitBranch] = useState('');
   const [branchCopied, setBranchCopied] = useState(false);
   const [cwdPath, setCwdPath] = useState('');
@@ -71,6 +74,7 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
   const [now, setNow] = useState(() => Date.now());
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   // Per-session input history for ↑/↓ browsing (mirrors the TUI). The draft
   // holds whatever the user typed before starting to browse so ↓ can restore it.
   const historyRef = useRef<string[]>([]);
@@ -641,7 +645,7 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
     const text = (override ?? input).trim();
     // Allow image-only sends: a pasted screenshot with no caption is valid.
     // (The caption check used to block it — Ctrl+V → Enter did nothing.)
-    if ((!text && attachedImages.length === 0) || isStreaming) return;
+    if ((!text && attachedFiles.length === 0) || isStreaming) return;
 
     // Record the submitted text in the input history (↑/↓ browser).
     historyRef.current.push(text);
@@ -717,8 +721,8 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
     const userMsg: Message = {
       id: Date.now().toString(36),
       role: 'user', content: text, timestamp: Date.now(),
-      attachments: attachedImages.length > 0
-        ? attachedImages.map(img => ({ type: 'image', mime: img.mime, data: img.data }))
+      attachments: attachedFiles.length > 0
+        ? toAttachmentPayload(attachedFiles)
         : undefined,
     };
     addMessage(sid, userMsg);
@@ -794,6 +798,10 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
         } else if (eff.type === 'plan-proposal') {
           // Plan-mode turn finished — arm the confirmation bar (per-session).
           setPlanPending({ sid });
+        } else if (eff.type === 'mode-changed') {
+          // The model switched modes server-side (enter_plan_mode). Update the
+          // badge directly — calling setMode() would POST the change back.
+          useAppStore.setState({ mode: eff.mode });
         }
       }
 
@@ -896,9 +904,9 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
       const outcome = await executeSlash(text);
       if (outcome.type === 'rewrite') {
         const payload: ChatPayload = { session_id: sid, content: outcome.text, model, provider };
-        if (attachedImages.length > 0) {
-          payload.attachments = attachedImages.map(img => ({ type: 'image', mime: img.mime, data: img.data }));
-          setAttachedImages([]);
+        if (attachedFiles.length > 0) {
+          payload.attachments = toAttachmentPayload(attachedFiles);
+          setAttachedFiles([]);
         }
         await streamChat(url, payload, onEvent, sid);
         setInput('');
@@ -954,9 +962,9 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
           if (data?.chat) {
             // Command expands into a model turn (e.g. /review) — stream it.
             const payload: ChatPayload = { session_id: sid, content: data.content || text, model, provider };
-            if (attachedImages.length > 0) {
-              payload.attachments = attachedImages.map(img => ({ type: 'image', mime: img.mime, data: img.data }));
-              setAttachedImages([]);
+            if (attachedFiles.length > 0) {
+              payload.attachments = toAttachmentPayload(attachedFiles);
+              setAttachedFiles([]);
             }
             await streamChat(url, payload, onEvent, sid);
           } else {
@@ -973,9 +981,9 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
 
     if (url) {
       const payload: ChatPayload = { session_id: sid, content: text, model, provider };
-      if (attachedImages.length > 0) {
-        payload.attachments = attachedImages.map(img => ({ type: 'image', mime: img.mime, data: img.data }));
-        setAttachedImages([]);
+      if (attachedFiles.length > 0) {
+        payload.attachments = toAttachmentPayload(attachedFiles);
+        setAttachedFiles([]);
       }
       console.log('[iCode] sending to', url, 'model:', model, 'provider:', provider);
       await streamChat(url, payload, onEvent, sid);
@@ -984,7 +992,7 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
     }
 
     if (!settled) { settled = true; setStreaming(sid, false); }
-  }, [input, activeSessionId, isStreaming, selectedModel, currentModel, attachedImages]);
+  }, [input, activeSessionId, isStreaming, selectedModel, currentModel, attachedFiles]);
   handleSendRef.current = handleSend;
 
   // Accept a plan-mode proposal: leave read-only plan mode and start executing
@@ -1899,20 +1907,34 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
       )}
 
       {/* Attached image previews */}
-      {attachedImages.length > 0 && (
+      {attachedFiles.length > 0 && (
         <div style={{
           padding: '8px 16px', display: 'flex', gap: 8, flexWrap: 'wrap',
           borderTop: '1px solid var(--border-color)', background: 'var(--bg-secondary)',
         }}>
-          {attachedImages.map((img, i) => (
+          {attachedFiles.map((img, i) => (
             <div key={i} style={{ position: 'relative', display: 'inline-block' }}>
-              <img
-                src={`data:${img.mime};base64,${img.data}`}
-                alt="pasted"
-                style={{ height: 64, borderRadius: 6, border: '1px solid var(--border-color)' }}
-              />
+              {img.mime === 'application/pdf' ? (
+                <div style={{
+                  height: 64, minWidth: 120, maxWidth: 200, padding: '0 10px',
+                  borderRadius: 6, border: '1px solid var(--border-color)',
+                  display: 'flex', alignItems: 'center', gap: 6,
+                  background: 'var(--bg-primary)', fontSize: 11, color: 'var(--text-secondary)',
+                }}>
+                  <FileText size={16} aria-hidden />
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {img.name || 'PDF'}
+                  </span>
+                </div>
+              ) : (
+                <img
+                  src={`data:${img.mime};base64,${img.data}`}
+                  alt={img.name || 'pasted'}
+                  style={{ height: 64, borderRadius: 6, border: '1px solid var(--border-color)' }}
+                />
+              )}
               <button
-                onClick={() => setAttachedImages(prev => prev.filter((_, j) => j !== i))}
+                onClick={() => setAttachedFiles(prev => prev.filter((_, j) => j !== i))}
                 style={{
                   position: 'absolute', top: -6, right: -6, width: 18, height: 18,
                   borderRadius: '50%', border: 'none', background: 'var(--error)',
@@ -2024,16 +2046,16 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
               const items = e.clipboardData?.items;
               if (!items) return;
               for (let i = 0; i < items.length; i++) {
-                if (items[i].type.startsWith('image/')) {
-                  const file = items[i].getAsFile();
-                  if (!file) continue;
-                  const reader = new FileReader();
-                  reader.onload = () => {
-                    const base64 = (reader.result as string).split(',')[1];
-                    setAttachedImages(prev => [...prev, { mime: items[i].type, data: base64 }]);
-                  };
-                  reader.readAsDataURL(file);
-                }
+                const mime = items[i].type;
+                if (!mime.startsWith('image/') && mime !== 'application/pdf') continue;
+                const file = items[i].getAsFile();
+                if (!file) continue;
+                const reader = new FileReader();
+                reader.onload = () => {
+                  const base64 = (reader.result as string).split(',')[1];
+                  setAttachedFiles(prev => [...prev, { mime, data: base64, name: file.name || undefined }]);
+                };
+                reader.readAsDataURL(file);
               }
             }}
             placeholder={t('chat.placeholder')}
@@ -2100,13 +2122,34 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
           display: 'flex', alignItems: 'center', gap: 4, marginTop: 6,
           fontSize: 10, color: 'var(--text-muted)',
         }}>
-          <button className="interactive" aria-label={t('chat.addAttachmentAriaLabel', '添加附件')} style={{
-            padding: '3px 8px', borderRadius: 4, fontSize: 10,
-            background: 'transparent', border: 'none', color: 'var(--text-muted)',
-            display: 'flex', alignItems: 'center', gap: 3,
-          }}>
+          <button className="interactive" aria-label={t('chat.addAttachmentAriaLabel', '添加附件')}
+            onClick={() => fileInputRef.current?.click()}
+            style={{
+              padding: '3px 8px', borderRadius: 4, fontSize: 10,
+              background: 'transparent', border: 'none', color: 'var(--text-muted)',
+              display: 'flex', alignItems: 'center', gap: 3,
+            }}>
             <Plus size={10} aria-hidden />
           </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*,application/pdf"
+            multiple
+            style={{ display: 'none' }}
+            onChange={(e) => {
+              const files = Array.from(e.target.files || []);
+              for (const file of files) {
+                const reader = new FileReader();
+                reader.onload = () => {
+                  const base64 = (reader.result as string).split(',')[1];
+                  setAttachedFiles(prev => [...prev, { mime: file.type || 'application/octet-stream', data: base64, name: file.name }]);
+                };
+                reader.readAsDataURL(file);
+              }
+              e.target.value = '';
+            }}
+          />
           {[
             { v: 'plan', label: t('chat.modePlan') },
             { v: 'auto', label: t('chat.modeNormal') },

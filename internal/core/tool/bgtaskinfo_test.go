@@ -125,7 +125,10 @@ func TestCancelShellTask(t *testing.T) {
 	if !CancelShellTask(id) {
 		t.Fatal("cancel running task returned false")
 	}
-	waitFor(t, 5*time.Second, func() bool {
+	// 15s, not 5s: taskkill /T has to walk the process tree, and on a loaded
+	// dev box the rest of the suite can starve this goroutine. The assertion
+	// is about eventual state, not latency.
+	waitFor(t, 15*time.Second, func() bool {
 		for _, info := range ListBgTaskInfos() {
 			if info.ID == id {
 				return info.Status == "cancelled"

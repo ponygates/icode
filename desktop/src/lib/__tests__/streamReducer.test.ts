@@ -75,4 +75,12 @@ describe('applyStreamEvent — settle transitions', () => {
     expect(applyStreamEvent(base, { type: 'plan_proposal' }).effects)
       .toEqual([{ type: 'plan-proposal' }]);
   });
+
+  it('propagates a server-side mode switch so the badge stops lying', () => {
+    const base = initialStreamState();
+    expect(applyStreamEvent(base, { type: 'mode_changed', mode: 'plan' }).effects)
+      .toEqual([{ type: 'mode-changed', mode: 'plan' }]);
+    // A malformed event must not produce a bogus mode.
+    expect(applyStreamEvent(base, { type: 'mode_changed' }).effects).toEqual([]);
+  });
 });

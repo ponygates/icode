@@ -245,8 +245,10 @@ cd vscode && npm run compile
 ## 路线图
 
 - [x] **0.1.0 基线**：多模型接入、缓存优先优化、38 工具、三端体验、安全隐私、技能/MCP/RAG 生态（历史 53 个版本的整合，详见 [CHANGELOG](CHANGELOG.md)）
-- [ ] **下一阶段**：后端安全与并发加固（CSRF/同源防护、fetch SSRF 拦截、文件工具目录沙箱、配置/工具注册表加锁、API Key 脱敏）
-- [ ] **长期**：前端巨型组件拆分（ChatPage/SettingsPage）、更多国内厂商实时接入、技能市场社区化
+- [x] **0.1.3 后端加固**：CSRF/同源防护、fetch SSRF 拦截、文件工具目录沙箱、配置/工具注册表加锁、API Key 脱敏、提权端点 Bearer token（均已在 CHANGELOG v0.1.3 记录）
+- [x] **0.2.0 能力补齐**：PDF 文档输入（Anthropic 原生 document block）、模型主动进入计划模式、FTS5 会话检索、后台任务资源上限、多语言符号索引（Python/Rust/Java/Kotlin/C#）
+- [ ] **下一阶段（P0）**：bash 的操作系统级沙箱（Linux Landlock / macOS Seatbelt / Windows AppContainer），对标 Codex CLI 与 Claude Code
+- [ ] **长期**：前端巨型组件拆分（ChatPage/SettingsPage）、浏览器工具升级为可交互 CDP、任务级评测体系、更多国内厂商实时接入、技能市场社区化
 
 ## 许可证
 

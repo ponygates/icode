@@ -2,6 +2,61 @@
 
 > **版本说明**：v0.1.0 是一次**版本归零与结构整理**——将历史迭代（v0.2.x–v0.53.x）的全部成果整合为统一的 0.1.0 功能基线。完整的历史版本记录见 [docs/archive/CHANGELOG_HISTORY.md](docs/archive/CHANGELOG_HISTORY.md)，历次对标审查与差距分析见 [docs/archive/](docs/archive/)。
 
+## v0.2.0 — 第五轮审查落地：PDF 输入 / 模型主动规划 / FTS5 检索 / 多语言索引 / 资源上限 (2026-10-17)
+
+> 依据 [docs/项目审查_2026-10-17.md](docs/项目审查_2026-10-17.md) 的只读审查结论，优先落地「链路断裂」与「工程健康」两类问题。操作系统级沙箱、可交互浏览器、前端拆分、任务级评测仍待专项批次（理由见报告）。
+
+### A · 多模态输入：PDF 不再是死链路
+
+- **根因**：`types.Attachment` 早就声明了 `"pdf"`，但 `openai_compat` 与 `anthropic` 的编码函数都只有 `type == "image"` 分支——PDF 被**静默丢弃**，模型回答时完全不知道有附件。
+- **Anthropic 原生读取**：PDF 附件编码为 `{"type":"document","source":{"type":"base64","media_type":"application/pdf"}}`，模型可直接读正文与页面。
+- **OpenAI 兼容端点**：Chat Completions 的 `file` part 支持因厂商而异，贸然发送会让整条请求 400；改为发送**可见文本说明**「附件：xxx.pdf（当前模型端点不支持内联 PDF，内容未能读取）」，让模型与用户都知道发生了什么。
+- **桌面入口**：附件按钮此前是**空按钮**（无 onClick）。现接入隐藏文件选择器，支持图片与 PDF 多选；粘贴也接受 PDF；PDF 以文件卡片（图标 + 文件名）展示而非破图。
+- **`read_file` 明确拒绝 PDF**：不再把二进制塞进上下文产生乱码，改为提示「作为附件发送或先转文本」。
+- 新增 `Attachment.Name` 与 `Attachment.IsPDF()`；服务端契约同步 `name` 字段。
+
+### B · 模型主动进入计划模式（Claude Code EnterPlanMode parity）
+
+- 新增 `enter_plan_mode` 工具：模型判断需求较大/有歧义时，可自主切到只读模式，调研后输出计划，等用户接受再执行——此前只能由用户手动 `/plan`。
+- 引擎在 hooks/权限之前拦截该工具（切到**更少**权限不应再走审批），切换 `gate` 并发出新的 `mode_changed` 事件。
+- 桌面收到事件后直接更新模式徽章（不再回写 API）；TUI 显示系统提示。已有的「接受计划 / 放弃」确认条、接受后自动继续执行保持不变。
+- 子代理调用该工具会得到明确错误，不会偷偷改父会话模式。
+
+### C · 会话检索升级为 FTS5
+
+- 新增 FTS5 外部内容索引 `messages_fts`（`content='messages'`，触发器同步增删改），**trigram 分词**——`unicode61` 会把整句中文当成一个 token，中文搜索等于不可用。
+- `SearchMessagesFiltered` 支持 `session_id` / `role` / `from` / `to` 过滤与 `bm25` 相关性排序；短于 3 字的查询自动回退 LIKE（trigram 限制）；FTS 不可用时整体回退 LIKE，搜索永不被索引拖挂。
+- 首次启动一次性 `rebuild` 回填历史消息，之后由触发器增量维护；`/api/search` 接受新增过滤参数。
+
+### D · 后台任务资源上限
+
+- 并发上限默认 8：超限返回可操作错误（提示用 `task_output kill=true` 结束一个），避免模型连续起构建/日志任务耗尽小内存机器。
+- 保留最近 16 个已完成任务（`task_output` 仍可读），更老的自动回收——此前每个任务最多 1 MiB 缓冲会随进程寿命无限累积。
+- 取消测试的等待窗口从 5s 放宽到 15s：`taskkill /T` 要走进程树，满载机器上 5s 会假失败。
+
+### E · 多语言符号索引
+
+- CodeGraph 从 Go + TS/JS 扩展到 **Python / Rust / Java / Kotlin / C#**（`.py/.rs/.java/.kt/.cs`）。
+- Java/Kotlin/C# 的函数正则要求明确的修饰符 + 返回类型，并显式排除 `return/if/for/while/switch/catch/...`，避免把普通调用索引成定义。
+- 更新了原先「`.py` 不产出符号」的断言，改为正向覆盖。
+
+### F · 文档真源对齐
+
+- `ICODE.md` 版本号从过期的 v0.1.0 修正为 v0.2.0。
+- README 路线图与 `ICODE.md` 竞品差距节此前把 CSRF/SSRF/目录沙箱/注册表锁/密钥脱敏列为「下一阶段」，实际 v0.1.3 已全部落地——已改为「已完成」，并把真正剩余的 **bash OS 级沙箱**单列为 P0。
+- 新增 `docs/项目审查_2026-10-17.md`（第五轮审查报告）。
+
+### 未在本版完成（明确记录，不虚报）
+
+| 项 | 原因 | 建议 |
+|---|---|---|
+| bash 操作系统级沙箱 | 三平台内核接口差异大，且本机无法验证 macOS/Linux；半成品沙箱比没有更危险 | 独立分支，Linux Landlock → macOS Seatbelt → Windows AppContainer 逐个验收 |
+| 可交互浏览器（CDP） | 需引入 WebSocket 依赖并真机验证点击/填表 | 单独批次，保留 dump 兜底 |
+| 前端巨型组件拆分 | ChatPage 2,434 行，拆分回归风险高 | 先抽 `useChatStream`/`MessageList`/`Composer`，配 10 条关键测试 |
+| 任务级评测体系 | 需要真实仓库任务与验收脚本，设计成本高于代码 | 先做 5 个种子任务跑通链路，再扩到 20–30 |
+| 金额级花费上限 | 需要跨会话日聚合与 UI 入口，否则是死配置 | 与设置页一起做 |
+| 结构化日志 / OTel | 改动面大 | 先做本地滚动日志 + 回合 span |
+
 ## v0.1.4 — 五批次落地：技能生态市场化 / 多会话协作 / 流式健壮性 / 桌面后台任务视图 (2026-10-06)
 
 > 依据竞品研究（Claude Code v2.1.289 / opencode v2 / Reasonix / WorkBuddy）制定五批次方案并全部落地：A 生态市场化 → B 多会话协作 → C 健壮性 → D 体验 → E 质量债。全项目 57 包测试绿。

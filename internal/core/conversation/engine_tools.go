@@ -333,6 +333,29 @@ func (e *Engine) executeTool(
 ) *types.ToolResult {
 	ctx = tool.WithSessionID(ctx, sessionID)
 
+	// Model-initiated planning. Handled before hooks/permission: switching to
+	// a READ-ONLY mode is never a privileged action, and it must not be gated
+	// behind the very approval flow it exists to avoid.
+	if tc.Name == "enter_plan_mode" {
+		if e.gate == nil {
+			return &types.ToolResult{Success: false, Error: "当前会话未启用权限门，无法切换到计划模式"}
+		}
+		if e.gate.Mode() == permission.ModePlan {
+			return &types.ToolResult{Success: true, Content: "当前已处于计划模式（只读）。请继续调研并给出可执行的计划。"}
+		}
+		e.gate.SetMode(permission.ModePlan)
+		// Tell the UI so its mode badge reflects reality immediately.
+		select {
+		case out <- types.StreamEvent{Type: types.EventModeChanged, Mode: string(permission.ModePlan)}:
+		default:
+		}
+		return &types.ToolResult{
+			Success: true,
+			Content: "已切换到计划模式（只读）。接下来请只做调研，不要修改任何文件；" +
+				"完成后直接给出计划：目标 / 步骤 / 涉及文件 / 风险 / 验证方式。用户接受后才会执行。",
+		}
+	}
+
 	// Live-output forwarding: tools that support incremental streaming (bash)
 	// emit EventToolProgress so the UI can render output in real time. The
 	// UI layer throttles repaints; here we just relay chunks as-is. Progress

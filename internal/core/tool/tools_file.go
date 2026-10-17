@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -56,6 +57,16 @@ func (t *ReadFileTool) Execute(ctx context.Context, args string) (*types.ToolRes
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return &types.ToolResult{Success: false, Content: "", Error: err.Error()}, nil
+	}
+	// PDFs are binary containers: returning their raw bytes burns context and
+	// shows the model mojibake. Say so plainly and point at the working path
+	// (attach the file, or convert it to text first) instead of pretending.
+	if bytes.HasPrefix(data, []byte("%PDF")) || strings.EqualFold(filepath.Ext(path), ".pdf") {
+		return &types.ToolResult{
+			Success: false,
+			Error: "read_file 无法解析 PDF（二进制格式）。请把 PDF 作为附件发送" +
+				"（Anthropic 模型可直接读取），或先用工具转换为文本后再读取。",
+		}, nil
 	}
 	// Read-before-edit guard: the model has now seen this file, so later
 	// edit/write/search_replace calls on it pass without the escape hatch.
