@@ -152,6 +152,9 @@ func (s *Server) Start(ctx context.Context) (int, error) {
 	// OS-level confinement of model-issued shell commands: what is in force
 	// right now, and the settings that decide it at the next launch.
 	mux.HandleFunc("/api/sandbox", s.requireAPITokenForMutating(s.handleSandbox))
+	// Directories whose DACL currently carries an entry for the sandbox
+	// identity. Listed so the change is visible; deletable so it is undoable.
+	mux.HandleFunc("/api/sandbox/grants", s.requireAPITokenForMutating(s.handleSandboxGrants))
 
 	// App update check
 	mux.HandleFunc("/api/update/check", s.handleUpdateCheck)

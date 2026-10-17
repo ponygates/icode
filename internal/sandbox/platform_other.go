@@ -12,7 +12,14 @@ func newPlatformRunner(cfg Config) (Runner, []string, error) {
 	return nil, nil, nil
 }
 
-// RevokeWorkspace is a no-op outside Windows.
+// revokePlatform reports that revocation is not implemented here. Returning a
+// nil error would let the UI claim it removed a grant that never existed.
+func revokePlatform(dir string) (bool, error) {
+	return false, errors.New("sandbox: revoke is only implemented on Windows")
+}
+
+// RevokeWorkspace is the package-level form of revokePlatform.
 func RevokeWorkspace(dir string) error {
-	return errors.New("sandbox: revoke is only implemented on Windows")
+	_, err := Revoke(dir)
+	return err
 }

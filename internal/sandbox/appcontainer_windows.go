@@ -243,9 +243,28 @@ func (r *acRunner) ensureAccess(dir string) error {
 		if err := grantACE(abs, r.sid); err != nil {
 			return err
 		}
+		// The ACE is now in the DACL. Recording it is bookkeeping: if it
+		// fails, the grant still exists and the user cannot see it, so the
+		// failure is surfaced through Status notices rather than swallowed.
+		if err := RecordGrant(abs); err != nil {
+			noteRecordFailure(abs, err)
+		}
 	}
 	r.granted[abs] = true
 	return nil
+}
+
+// forgetPath drops a cached grant so the next command re-reads the DACL. It is
+// called after a revocation, where the cached "already granted" answer is now
+// wrong and would make the next command fail with a bare access-denied error.
+func (r *acRunner) forgetPath(path string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for k := range r.granted {
+		if samePath(k, path) {
+			delete(r.granted, k)
+		}
+	}
 }
 
 // hasACE inspects the object's DACL for any entry carrying our AppContainer
@@ -329,14 +348,33 @@ func ensureNulDeviceAccess(sid *windows.SID) (granted bool, err error) {
 	return true, nil
 }
 
-// RevokeWorkspace removes the AppContainer ACE from dir. Exposed so settings can
-// offer an explicit "revoke sandbox access" action.
-func RevokeWorkspace(dir string) error {
+// revokePlatform removes the container ACE from dir and reports whether one
+// was there. It answers the question rather than assuming: a path that was
+// never granted should be described as clean, not as "revoked".
+func revokePlatform(dir string) (bool, error) {
 	sid, _, err := ensureProfile(profileName)
 	if err != nil {
-		return err
+		return false, err
 	}
-	return revokeACE(dir, sid)
+	has, err := hasACE(dir, sid.String())
+	if err != nil {
+		return false, err
+	}
+	if !has {
+		return false, nil
+	}
+	if err := revokeACE(dir, sid); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// RevokeWorkspace removes the AppContainer ACE from dir and drops it from the
+// grant record. Kept as a package-level entry point for callers that only have
+// a path.
+func RevokeWorkspace(dir string) error {
+	_, err := Revoke(dir)
+	return err
 }
 
 // Start launches argv inside the AppContainer.

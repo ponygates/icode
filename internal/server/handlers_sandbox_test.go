@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"runtime"
 	"testing"
 )
 
@@ -94,7 +95,45 @@ func TestSandboxSaveRequestsRestart(t *testing.T) {
 	}
 }
 
-// TestSandboxNetworkIsNormalised prevents an arbitrary string from reaching the
+// TestSandboxGrantsAreListed covers the "make the change visible" half: the
+// settings page has to be able to show which directories carry an entry for
+// the sandbox identity.
+func TestSandboxGrantsAreListed(t *testing.T) {
+	isolateHome(t)
+	_, base := newSecurityTestServer(t)
+
+	var body struct {
+		Grants    []map[string]any `json:"grants"`
+		Revocable bool             `json:"revocable"`
+	}
+	httpDo(t, http.MethodGet, base+"/api/sandbox/grants", "", http.StatusOK, &body)
+	if body.Grants == nil {
+		t.Fatalf("grants must be an empty array, not null: the UI renders it directly")
+	}
+	if !body.Revocable {
+		t.Fatalf("revocable = false on %s; only the platform decides this", runtime.GOOS)
+	}
+}
+
+// TestSandboxRevokeRequiresAPath keeps a malformed request from reaching the
+// filesystem layer, where an empty path would resolve to the process directory.
+func TestSandboxRevokeRequiresAPath(t *testing.T) {
+	isolateHome(t)
+	_, base := newSecurityTestServer(t)
+
+	httpDo(t, http.MethodDelete, base+"/api/sandbox/grants", `{"path":"  "}`, http.StatusBadRequest, nil)
+	httpDo(t, http.MethodDelete, base+"/api/sandbox/grants", `{"path":`, http.StatusBadRequest, nil)
+}
+
+// TestSandboxGrantsRejectOtherMethods: a GET-only resource that accepts POST
+// would let a form submission appear to revoke access while doing nothing.
+func TestSandboxGrantsRejectOtherMethods(t *testing.T) {
+	isolateHome(t)
+	_, base := newSecurityTestServer(t)
+
+	httpDo(t, http.MethodPost, base+"/api/sandbox/grants", `{"path":"C:\\x"}`, http.StatusMethodNotAllowed, nil)
+}
+
 // backend, where it would be compared for equality and silently treated as deny
 // while the settings page echoed the user's text back as if accepted.
 func TestSandboxNetworkIsNormalised(t *testing.T) {

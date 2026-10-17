@@ -90,6 +90,12 @@ func TestGrantACEKeepsExistingEntries(t *testing.T) {
 
 func newTestRunner(t *testing.T) *acRunner {
 	t.Helper()
+	// Point the grant record at a temp file: a test that writes ACEs must not
+	// leave entries in the user's real ~/.icode/sandbox_grants.json.
+	oldGrantPath := grantFilePath
+	grantFilePath = filepath.Join(t.TempDir(), "sandbox_grants.json")
+	t.Cleanup(func() { grantFilePath = oldGrantPath })
+
 	raw, _, err := newPlatformRunner(Config{
 		GrantWorkspace: true,
 		Network:        NetworkDeny,
@@ -119,6 +125,74 @@ func run(t *testing.T, r *acRunner, dir string, argv ...string) Result {
 		t.Fatalf("wait %v: %v", argv, err)
 	}
 	return res
+}
+
+// TestRevokeRemovesGrantAndCache exercises the whole undo path: the ACE is
+// recorded when written, removed from the DACL on revoke, dropped from the
+// record, and — the part that is easy to miss — evicted from the runner's
+// in-memory cache so the next command re-grants instead of failing with a bare
+// access-denied error.
+func TestRevokeRemovesGrantAndCache(t *testing.T) {
+	r := newTestRunner(t)
+	SetActive(r)
+	t.Cleanup(func() { SetActive(nil) })
+
+	work := t.TempDir()
+	if res := run(t, r, work, "cmd.exe", "/c", "echo one> a.txt"); res.ExitCode != 0 {
+		t.Fatalf("initial run failed: exit=%d output=%q", res.ExitCode, res.Output)
+	}
+
+	grants, err := ListGrants()
+	if err != nil {
+		t.Fatalf("list grants: %v", err)
+	}
+	found := false
+	for _, g := range grants {
+		if samePath(g.Path, work) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the workspace was granted but not recorded: %+v", grants)
+	}
+
+	revoked, err := Revoke(work)
+	if err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	if !revoked {
+		t.Fatalf("revoke reported nothing to remove, but the ACE was just written")
+	}
+	if has, err := hasACE(work, r.sidString); err != nil || has {
+		t.Fatalf("container SID still in the DACL after revoke (has=%v err=%v)", has, err)
+	}
+	if grants, _ := ListGrants(); len(grants) != 0 {
+		t.Fatalf("grant record survived the revoke: %+v", grants)
+	}
+
+	// The cache must have been invalidated: the next command has to re-grant
+	// rather than trust the stale "already granted" answer.
+	if res := run(t, r, work, "cmd.exe", "/c", "echo two> b.txt"); res.ExitCode != 0 {
+		t.Fatalf("run after revoke failed: exit=%d output=%q", res.ExitCode, res.Output)
+	}
+	if has, _ := hasACE(work, r.sidString); !has {
+		t.Fatalf("the workspace was not re-granted on the next command")
+	}
+}
+
+// TestRevokeReportsNothingToRemove keeps the UI honest: revoking a directory
+// that never carried the entry must not be reported as a successful undo.
+func TestRevokeReportsNothingToRemove(t *testing.T) {
+	newTestRunner(t)
+	work := t.TempDir()
+
+	revoked, err := Revoke(work)
+	if err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	if revoked {
+		t.Fatalf("revoke claimed it removed an entry that was never there")
+	}
 }
 
 // TestConfinedProcessCannotReadUserProfile proves the boundary is enforced by

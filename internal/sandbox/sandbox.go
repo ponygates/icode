@@ -264,5 +264,8 @@ func Status() StatusInfo {
 		st.Backend = r.Name()
 		st.Available = r.Available()
 	}
+	if msg := recordFailureNotice(); msg != "" {
+		st.Notices = append(st.Notices, msg)
+	}
 	return st
 }
