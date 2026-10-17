@@ -314,6 +314,12 @@ func (m *bgTaskManager) launch(ctx context.Context, task *bgTask, cmdStr, dir st
 		if err != nil {
 			return fmt.Errorf("后台任务无法在沙箱内启动（%s）: %w；为避免绕过隔离已取消执行", r.Name(), err)
 		}
+		// The grant happened at Start, so it has to be reported here rather
+		// than at completion: a background task can run for hours, and the
+		// user should not learn about a permission change only when it ends.
+		if notice := sandbox.GrantNotice(sandbox.TakeNewGrants()); notice != "" {
+			_, _ = task.Write([]byte("\n" + notice + "\n"))
+		}
 		task.mu.Lock()
 		task.h = h
 		task.mu.Unlock()

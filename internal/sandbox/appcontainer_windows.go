@@ -369,14 +369,6 @@ func revokePlatform(dir string) (bool, error) {
 	return true, nil
 }
 
-// RevokeWorkspace removes the AppContainer ACE from dir and drops it from the
-// grant record. Kept as a package-level entry point for callers that only have
-// a path.
-func RevokeWorkspace(dir string) error {
-	_, err := Revoke(dir)
-	return err
-}
-
 // Start launches argv inside the AppContainer.
 func (r *acRunner) Start(ctx context.Context, argv []string, spec Spec) (Handle, error) {
 	if len(argv) == 0 {

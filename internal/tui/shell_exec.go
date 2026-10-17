@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"strings"
 
 	"github.com/ponygates/icode/internal/executil"
 	"github.com/ponygates/icode/internal/sandbox"
@@ -52,16 +53,26 @@ func runUserShell(ctx context.Context, dir, cmdStr string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("沙箱拒绝执行该命令: %w", err)
 	}
+	// A grant is written during Start, and the user is watching this command
+	// right now — which makes it the one moment the note is certain to be read.
+	notice := sandbox.GrantNotice(sandbox.TakeNewGrants())
 	res, waitErr := h.Wait()
+	out := string(res.Output)
+	if notice != "" {
+		if out != "" && !strings.HasSuffix(out, "\n") {
+			out += "\n"
+		}
+		out += notice + "\n"
+	}
 	if waitErr != nil {
-		return string(res.Output), waitErr
+		return out, waitErr
 	}
 	if res.ExitCode != 0 {
 		// Same text os/exec produces, so callers that print err.Error() do
 		// not need to know which path ran.
-		return string(res.Output), fmt.Errorf("exit status %d", res.ExitCode)
+		return out, fmt.Errorf("exit status %d", res.ExitCode)
 	}
-	return string(res.Output), nil
+	return out, nil
 }
 
 // userShellNotice explains the gap when the sandbox is on but "!" is not. It

@@ -14,7 +14,13 @@ func useTempGrantStore(t *testing.T) string {
 	path := filepath.Join(t.TempDir(), "sandbox_grants.json")
 	old := grantFilePath
 	grantFilePath = path
-	t.Cleanup(func() { grantFilePath = old })
+	// The announcement queue is package state; a test that leaves an entry
+	// behind would make the next one pass or fail for the wrong reason.
+	TakeNewGrants()
+	t.Cleanup(func() {
+		grantFilePath = old
+		TakeNewGrants()
+	})
 	return path
 }
 
@@ -190,5 +196,46 @@ func TestRevokeCleansUpADeletedDirectory(t *testing.T) {
 	grants, _ := ListGrants()
 	if len(grants) != 0 {
 		t.Fatalf("the record for a deleted directory survived: %+v", grants)
+	}
+}
+
+// A grant is announced exactly once. Repeating it on every command that reuses
+// the same workspace would train the user to ignore the line, which is the same
+// as not showing it.
+func TestEachGrantIsAnnouncedOnce(t *testing.T) {
+	useTempGrantStore(t)
+	dir := t.TempDir()
+
+	if err := RecordGrant(dir); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	first := TakeNewGrants()
+	if len(first) != 1 || first[0] != dir {
+		t.Fatalf("first announcement = %v, want [%s]", first, dir)
+	}
+
+	if err := RecordGrant(dir); err != nil {
+		t.Fatalf("re-record: %v", err)
+	}
+	if again := TakeNewGrants(); len(again) != 0 {
+		t.Fatalf("re-record was announced again: %v", again)
+	}
+}
+
+// The record is the evidence. If it could not be written, the caller is told
+// through a notice instead, and announcing a grant that is not on file would
+// leave the user unable to find or revoke it.
+func TestGrantThatCannotBeRecordedIsNotAnnounced(t *testing.T) {
+	path := useTempGrantStore(t)
+	// Point the store at a directory: every write to it fails.
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+
+	if err := RecordGrant(t.TempDir()); err == nil {
+		t.Fatal("record reported success although it could not write the file")
+	}
+	if got := TakeNewGrants(); len(got) != 0 {
+		t.Fatalf("unrecorded grant was announced: %v", got)
 	}
 }

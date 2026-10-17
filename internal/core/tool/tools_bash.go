@@ -297,6 +297,7 @@ func runConfined(ctx context.Context, r sandbox.Runner, cmdStr, workDir string, 
 
 	res, waitErr := h.Wait()
 	content := capBashOutput(string(res.Output))
+	content = announceGrants(ctx, content)
 
 	if waitErr != nil {
 		return &types.ToolResult{Success: false, Content: content, Error: waitErr.Error()}, nil
@@ -316,4 +317,26 @@ func runConfined(ctx context.Context, r sandbox.Runner, cmdStr, workDir string, 
 		}, nil
 	}
 	return &types.ToolResult{Success: true, Content: content}, nil
+}
+
+// announceGrants appends a line about any sandbox grant this command caused.
+//
+// A grant is a lasting change to the user's disk made as a side effect of
+// running a command, and telling them to go look in settings relies on them
+// knowing it happened at all. They do not. The line is also pushed through the
+// live-progress channel, because the UI renders a bash command from that stream
+// rather than from the final result.
+func announceGrants(ctx context.Context, content string) string {
+	granted := sandbox.TakeNewGrants()
+	notice := sandbox.GrantNotice(granted)
+	if notice == "" {
+		return content
+	}
+	if progress := ProgressFromContext(ctx); progress != nil {
+		progress("\n" + notice + "\n")
+	}
+	if content != "" && !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+	return content + notice + "\n"
 }

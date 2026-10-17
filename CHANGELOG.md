@@ -2,6 +2,47 @@
 
 > **版本说明**：v0.1.0 是一次**版本归零与结构整理**——将历史迭代（v0.2.x–v0.53.x）的全部成果整合为统一的 0.1.0 功能基线。完整的历史版本记录见 [docs/archive/CHANGELOG_HISTORY.md](docs/archive/CHANGELOG_HISTORY.md)，历次对标审查与差距分析见 [docs/archive/](docs/archive/)。
 
+## v0.3.4 — 沙箱（批次 5：Linux / macOS 后端 + 首次授权当场可见）(2026-10-17)
+
+> 前三批只覆盖了 Windows。在 Linux 和 macOS 上，`mode: auto` 什么都保护不了——它老老实实说"没有后端"，但那意味着这两个平台的用户拿到的是一个只存在于文档里的安全承诺。这一版把后端补齐，并且把「首次授权」这件最容易被含糊掉的事摆到命令输出里。
+
+### A · Linux：bubblewrap
+
+- 新增 `internal/sandbox/platform_linux.go`。选 bwrap 而不是 Landlock，原因是 Landlock 只能收不能给：它没法在拒绝写入的进程上再开一个可写目录，而沙箱必须让工作区可写。bwrap 用一次挂载命名空间同时表达两半——`/` 只读、工作区 bind 成可写。
+- 边界内容：`--ro-bind / /` + `--dev /dev` + `--proc /proc` + `--tmpfs /tmp`，工作区与工具链缓存在挂载后 bind 成可写，`--unshare-pid/ipc/uts` 隔开可见范围，默认 `--unshare-net`。`TMPDIR` 重指向私有 tmpfs，否则写入会落到沙箱内不可写的真实 `/tmp`。
+- **不改任何文件权限**。Windows 必须往目录 ACL 里写 ACE，Linux 靠在进程自己的命名空间里表达同一条授权，所以这里没有授权记录可列、也没有东西需要撤销——这件事直接写在启动 notice 里，免得看过 Windows 版本的人以为也改了磁盘。
+
+### B · macOS：sandbox-exec
+
+- 新增 `internal/sandbox/platform_darwin.go`。SBPL 以 `(deny default)` 起步，放行进程、信号、sysctl、mach-lookup、共享内存这些"任何二进制启动都要用"的原语，再单独开写权限。
+- 能做的：写限制在工作区 + 工具链缓存 + 用户的 0700 `$TMPDIR`；默认断网；`~/.ssh`、`~/.aws`、`~/.gnupg`、`~/.config/gh`、`~/.icode`、`Library/Keychains` 逐个 deny 读。
+- **做不到的**：读不能整体限制。全盘放行再挖掉几个洞是唯一能让日常工具跑起来的形式，所以 notice 里明说"读视为不受限，只有凭据目录被单独拒绝"，而不是让表格看起来比实际更严。
+- SBPL 的规则是**最后匹配者生效**，所以凭据 deny 必须写在 `(allow file-read*)` 之后。写反了不会报错，只会静默失效——测试断言的正是这条顺序，不只是"存在"。
+
+### C · 自检决定可用性
+
+- 两个后端都在构造时跑一次**真实调用**：用与运行时完全相同的构造逻辑跑 `/bin/sh -c "exit 0"`。探针通过才返回 runner；runner 非 nil 就等于可用，`Available()` 不再需要猜。
+- 这抓的是两类只有真跑才暴露的问题：`bwrap` 不存在或**非特权 user namespace 被禁用**（Ubuntu 23.10 起的 AppArmor 限制），以及 SBPL 语法错误。用简化版探针会漏掉第二类——探针通过而真跑失败，比没有探针更糟。
+- 自检失败的处理沿用既有语义：`auto` 降级并说明原因，`on` 直接拒绝执行 shell 命令。**没有一条路径会静默回退**。
+
+### D · 首次授权，在命令输出里说
+
+- 之前三批留下的最后一处含糊：默认 `mode: auto`，第一次在某目录跑命令时后端就写了 ACE，而用户既没被问、也没被告知，只能事后翻设置页才知道。
+- 现在 `sandbox.RecordGrant` 把新授权记进一个待公告队列，`TakeNewGrants` 取出即清。bash 工具、后台任务、`!` 命令三条路径在执行点取一次，把一行「沙箱已为 X 添加访问权限，可在设置中撤销」写进**这条命令自己的输出**——并通过实时进度通道发一遍，因为 UI 渲染 bash 靠的是那条流而不是最终结果。
+- 只在**真正新增**时公告；复用已有授权不重复。没写进记录文件的授权也不公告——那种情况本来就走 notice 报错了，再公告一次等于让用户去找一条查不到、也撤不掉的行。
+- 启动失败不公告：`Start` 就失败时没有授权发生，多说一句只会让人以为磁盘被改了。
+
+### E · 凭证卫生
+
+- `.gitignore` 补上 `*.token`、`.netrc`、`.pypirc`、`credentials.json`、`gha-creds-*.json`、`*.pem`、`*.p12`（已确认不会误伤已跟踪文件）。
+- 工作树中已无明文 PAT，仅测试夹具里的假样例（`ghp_abcdefghijklmnopqrstuvwxyz`）。但泄露仍留在两个历史提交（`93995c8`、`b772d7c`）里，**只能靠轮换使旧值失效**——清理历史会改写全部 commit hash，对已发布的仓库代价更大。轮换步骤见下方"待办"。
+
+### 验证说明
+
+- **Windows / Linux 后端已端到端验证**；**macOS 后端仅交叉编译 + 单元测试**（`GOOS=darwin` 编译与 vet 通过），尚未在 Mac 上实机跑过。README 已按此标注，不把未验证的东西写成已验证。
+- 新增测试：Linux 6 项（只读根、工作区内可写、网络开关、TMPDIR 落在私有 tmpfs、不存在的可写路径被丢弃、命令分隔符位置）、macOS 7 项（deny default、写白名单、凭据 deny 的顺序、网络两态、路径转义、只列真实存在的凭据目录）、授权公告 2 项（只报一次、写失败不报）。
+- `go build ./...`、`go vet ./...`、`gofmt`、`go test ./...` 全绿（Windows 侧）；`GOOS=linux` 与 `GOOS=darwin` 下 `go build ./internal/sandbox` 与 `go vet ./internal/sandbox` 均通过（全量交叉编译在 Linux 上仅卡在第三方 `systray` 的 cgo 依赖，与本次改动无关）。
+
 ## v0.3.3 — 沙箱（批次 4：`!` 命令范围 + 说清边界）(2026-10-17)
 
 > 三个能到达 shell 的入口——bash 工具、后台任务、用户 `!` 命令——前两个已经封上，第三个一直开着，而且是**静默地开着**。最糟的不是它没受限，是「沙箱已启用」这句话让人以为它也受限了。这一版不是简单地把它关进去，而是让范围变成明确的、由用户决定的事。

@@ -53,6 +53,17 @@ release/
 # Environment files with secrets
 .env*
 
+# Credential files that must never be committed. A GitHub token was committed
+# once and had to be rotated; this is the cheap half of not repeating it (the
+# other half is rotating anything that ever leaks).
+*.token
+.netrc
+.pypirc
+credentials.json
+gha-creds-*.json
+*.pem
+*.p12
+
 # Deprecated desktop launcher artifacts
 desktop-launcher.exe
 build-desktop-backend.js

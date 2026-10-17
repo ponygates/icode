@@ -139,7 +139,52 @@ func RecordGrant(dir string) error {
 		}
 	}
 	st.Grants = append(st.Grants, Grant{Path: path, GrantedAt: time.Now().UTC()})
-	return writeGrants(st)
+	if err := writeGrants(st); err != nil {
+		return err
+	}
+	// Only a grant that was actually persisted is announced. A record that
+	// failed to write is reported through the notices instead, and telling
+	// the user about it twice would be noise.
+	newGrantMu.Lock()
+	newGrants = append(newGrants, path)
+	newGrantMu.Unlock()
+	return nil
+}
+
+// newGrants holds directories granted since the caller last asked. A confined
+// command changes the user's disk as a side effect of being run, and the user
+// is looking at that command's output at that exact moment — which makes it the
+// one place where a note is both useful and impossible to miss. Settings shows
+// the full list; this is what makes the first change visible without opening
+// settings at all.
+var (
+	newGrantMu sync.Mutex
+	newGrants  []string
+)
+
+// TakeNewGrants returns the directories granted since the previous call and
+// clears the list, so each grant is announced exactly once. A command that
+// reuses an existing grant reports nothing.
+func TakeNewGrants() []string {
+	newGrantMu.Lock()
+	defer newGrantMu.Unlock()
+	if len(newGrants) == 0 {
+		return nil
+	}
+	out := newGrants
+	newGrants = nil
+	return out
+}
+
+// GrantNotice renders the line shown to the user when a command caused a grant.
+// It names the undo path: a permission the user cannot find is one they cannot
+// reasonably be said to have agreed to.
+func GrantNotice(granted []string) string {
+	if len(granted) == 0 {
+		return ""
+	}
+	return "沙箱已为以下目录添加访问权限（在隔离中运行命令所需，可在「设置 → 沙箱」撤销）：" +
+		strings.Join(granted, "、")
 }
 
 // ForgetGrant drops dir from the record without touching its DACL. Callers
@@ -214,6 +259,13 @@ func forgetActivePath(path string) {
 	if f, ok := Active().(pathForgetter); ok {
 		f.forgetPath(path)
 	}
+}
+
+// RevokeWorkspace is the path-only form of Revoke, for callers that do not
+// care whether anything was actually removed.
+func RevokeWorkspace(dir string) error {
+	_, err := Revoke(dir)
+	return err
 }
 
 // Revoke works out whether dir currently carries an ACE for the sandbox

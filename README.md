@@ -158,9 +158,19 @@ sandbox:
   confine_user_shell: false
 ```
 
-Confinement is enforced by the kernel — AppContainer on Windows; Linux (bubblewrap / Landlock) and macOS (sandbox-exec) backends are not implemented yet, and on those platforms `mode: auto` runs unconfined and says so rather than pretending.
+Confinement is enforced by the kernel. Each backend describes what it actually restricts:
 
-Because a confined command cannot read or write outside what it has been granted, iCode writes an inheritable access-control entry into each project directory it runs in. Those entries are listed under **Settings → Security sandbox → Granted directories** and can be revoked one by one; the record lives in `~/.icode/sandbox_grants.json`.
+| Platform | Backend | Needs | Boundary |
+|---|---|---|---|
+| Windows | AppContainer | — | no filesystem access outside the granted directories, no network unless allowed |
+| Linux | bubblewrap | `bwrap` in `PATH` | mount namespace: `/` read-only, the workspace bound read-write, private `/tmp`, network namespace unless allowed |
+| macOS | `sandbox-exec` | built in | writes limited to the workspace and toolchain caches, network denied, credential stores unreadable |
+
+A backend is installed only after a self-test that runs a harmless command through the exact invocation it will use at runtime. If that fails — `bwrap` missing, unprivileged user namespaces disabled, a profile that will not parse — `mode: auto` runs unconfined and says so, and `mode: on` refuses to run shell commands at all. Neither falls back silently.
+
+The Windows and Linux backends have been verified end to end. The macOS backend compiles and passes its unit tests but has not been run on a Mac yet; treat its boundary as unverified until it is.
+
+Because a confined command on Windows cannot read or write outside what it has been granted, iCode writes an inheritable access-control entry into each project directory it runs in. Those entries are listed under **Settings → Security sandbox → Granted directories** and can be revoked one by one; the record lives in `~/.icode/sandbox_grants.json`. The first time a directory is granted, the command's own output says so — a permission the user can only discover by running `icacls` is not one they agreed to. The Linux and macOS backends change no filesystem permissions at all: they express the same grant inside the process's namespace, so there is nothing to list or undo.
 
 ## MCP Integration
 
