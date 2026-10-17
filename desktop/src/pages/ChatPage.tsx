@@ -1,7 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import i18n from '../i18n';
-import { useAppStore, Message, Attachment, type Model } from '../stores/appStore';
+import { useAppStore, Message, Attachment } from '../stores/appStore';
 import { Send, Plus, Trash2, Eraser, MessageSquare, Cpu, Shield, Square, ShieldAlert, GitBranch, FileText, RefreshCw, Edit3, Download, FileJson, Upload, ChevronDown, Mic } from 'lucide-react';
 import Markdown from '../components/Markdown';
 import CommandPalette, { useCommandPalette } from '../components/CommandPalette';
@@ -31,9 +30,13 @@ import {
 import { applyStreamEvent, initialStreamState, type StreamState } from '../lib/streamReducer';
 import { toAttachmentPayload } from '../lib/attachments';
 import { planApproval, popHead, dropSession, type Decision, type ApprovalEffect, type PermEntry } from '../lib/approval';
+// Transport + pure helpers extracted from this file (SSE framing, cost
+// estimate, PCM→WAV) so they can be unit-tested without mounting the page.
+import { streamChat, abortSessionStream, encodeWav, estimateCost } from '../lib/chatStream';
+import { discoverBackend } from '../lib/backendDiscovery';
 
 import {
-  type PermissionRequest, type UsageInfo, type PlanInfo, type ChatEvent, type ChatPayload,
+  type PermissionRequest, type UsageInfo, type ChatEvent, type ChatPayload,
   summarizeToolArgs, MessageList, Pill, Stat,
 } from './ChatPage.shared';
 
@@ -695,27 +698,12 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
       sid = useAppStore.getState().activeSessionId;
       if (!sid) return;
     }
-    // Force a fresh health-check to discover the backend if needed
-    const current = useAppStore.getState();
-    let url = current.backendUrl;
+    // Resolve the backend lazily: the desktop webview may have booted from
+    // disk, so the real base URL is only learned from the first healthy probe.
+    let url = useAppStore.getState().backendUrl;
     if (!url) {
-      // Try same-origin discovery inline
-      const origin = window.location.origin;
-      if (origin && origin !== 'null' && !origin.startsWith('file://')) {
-        try {
-          const hr = await fetch(`${origin}/api/health`);
-          if (hr.ok) { url = origin; setBackendUrl(origin); }
-        } catch {}
-      }
-      if (!url) {
-        // Last ditch: try localhost ports
-        for (const p of [57356, 57357, 8080, 3000, 9090]) {
-          try {
-            const hr = await fetch(`http://127.0.0.1:${p}/api/health`);
-            if (hr.ok) { url = `http://127.0.0.1:${p}`; setBackendUrl(url); break; }
-          } catch {}
-        }
-      }
+      const found = await discoverBackend({ origin: window.location.origin });
+      if (found.url) { url = found.url; setBackendUrl(found.url); }
     }
 
     const userMsg: Message = {
@@ -1052,13 +1040,9 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
   // stopSessionStream aborts one session's in-flight stream (no-op if it
   // isn't streaming) and tells the backend to stop generating server-side.
   const stopSessionStream = useCallback((sid: string) => {
-    const entry = sessionStreams.get(sid);
-    if (entry) {
-      // Mark the abort as user-initiated so streamChat's AbortError catch
-      // shows a "stopped" notice instead of the misleading timeout text.
-      entry.userStopped = true;
-      entry.ctrl.abort();
-    }
+    // The transport marks the abort as user-initiated, so its AbortError path
+    // reports "stopped" rather than the misleading timeout message.
+    abortSessionStream(sid);
     setStreaming(sid, false);
     setPermQueue(q => q.filter(p => p.sid !== sid));
     if (window.icode?.stopChat) {
@@ -2355,123 +2339,7 @@ const ChatPage: React.FC<ChatPageProps> = ({ sessionId } = {}) => {
   );
 };
 
-// encodeWav packs captured PCM float samples into a 16-bit mono RIFF/WAVE
-// blob (44-byte header), the format every ASR provider path expects.
-function encodeWav(chunks: Float32Array[], sampleRate: number): Blob {
-  let total = 0;
-  for (const c of chunks) total += c.length;
-  const pcm = new DataView(new ArrayBuffer(44 + total * 2));
-  const w = (off: number, s: string) => { for (let i = 0; i < s.length; i++) pcm.setUint8(off + i, s.charCodeAt(i)); };
-  w(0, 'RIFF');
-  pcm.setUint32(4, 36 + total * 2, true);
-  w(8, 'WAVE');
-  w(12, 'fmt ');
-  pcm.setUint32(16, 16, true);
-  pcm.setUint16(20, 1, true);          // PCM
-  pcm.setUint16(22, 1, true);          // mono
-  pcm.setUint32(24, sampleRate, true);
-  pcm.setUint32(28, sampleRate * 2, true); // byte rate
-  pcm.setUint16(32, 2, true);          // block align
-  pcm.setUint16(34, 16, true);         // bits per sample
-  w(36, 'data');
-  pcm.setUint32(40, total * 2, true);
-  let off = 44;
-  for (const c of chunks) {
-    for (let i = 0; i < c.length; i++, off += 2) {
-      const s = Math.max(-1, Math.min(1, c[i]));
-      pcm.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-    }
-  }
-  return new Blob([pcm.buffer], { type: 'audio/wav' });
-}
+// encodeWav / streamChat / estimateCost / the per-session abort registry now
+// live in lib/chatStream.ts — see the import at the top of this file.
 
-// Active streams keyed by session id — one AbortController per session so
-// several tabs can generate in parallel and each can be stopped individually
-// (the stop button / Esc only aborts the stream of the visible session).
-const sessionStreams = new Map<string, { ctrl: AbortController; userStopped: boolean }>();
-
-/**
- * streamChat — POST /api/chat, read SSE stream, fire onEvent per message.
- * Includes 120s timeout, empty-stream guard, and AbortError handling.
- * sessionKey identifies the stream for stop/user-stop bookkeeping.
- */
-async function streamChat(
-  baseUrl: string,
-  payload: ChatPayload,
-  onEvent: (e: ChatEvent) => void,
-  sessionKey?: string,
-) {
-  const ctrl = new AbortController();
-  if (sessionKey) sessionStreams.set(sessionKey, { ctrl, userStopped: false });
-  const t = setTimeout(() => ctrl.abort(), 120_000);
-
-  try {
-    const res = await fetch(`${baseUrl}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      signal: ctrl.signal,
-    });
-
-    if (!res.ok || !res.body) {
-      const text = await res.text().catch(() => '');
-      onEvent({ type: 'error', content: text || `HTTP ${res.status}` });
-      return;
-    }
-
-    const reader = res.body.getReader();
-    const dec = new TextDecoder();
-    let buf = '';
-    let fired = false;
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      const lines = buf.split('\n');
-      buf = lines.pop() || '';
-      for (const line of lines) {
-        const s = line.trim();
-        if (!s.startsWith('data:')) continue;
-        const json = s.slice(5).trim();
-        if (!json) continue;
-        try { fired = true; onEvent(JSON.parse(json)); } catch {}
-      }
-    }
-
-    if (!fired) {
-      onEvent({ type: 'error', content: i18n.t('chat.noResponse') });
-    }
-  } catch (e) {
-    if (e instanceof DOMException && e.name === 'AbortError') {
-      // User-initiated stop (Esc / stop button) aborts the fetch — show a
-      // neutral "stopped" line instead of the misleading timeout message.
-      const entry = sessionKey ? sessionStreams.get(sessionKey) : null;
-      onEvent({ type: 'error', content: entry?.userStopped ? i18n.t('chat.stopped') : i18n.t('chat.timeoutError') });
-    } else {
-      onEvent({ type: 'error', content: e instanceof Error ? e.message : String(e) });
-    }
-  } finally {
-    clearTimeout(t);
-    if (sessionKey) sessionStreams.delete(sessionKey);
-  }
-}
-
-function estimateCost(usage: UsageInfo | null | undefined, model: Model | null | undefined): string {
-  if (!usage || (!usage.PromptTokens && !usage.prompt_tokens && !usage.TotalTokens && !usage.total_tokens))
-    return '\xA50.00';
-  const input = usage.PromptTokens || usage.prompt_tokens || 0;
-  const output = usage.CompletionTokens || usage.completion_tokens || 0;
-  // Use model's actual pricing if available
-  const plans = (model?.plans as PlanInfo[] | undefined) ||
-    (model as { Plans?: PlanInfo[] } | undefined)?.Plans ||
-    [];
-  const plan = plans.find((p) => p.type === 'token' || (p.name ? /token|coding/i.test(p.name) : false));
-  if (plan?.cost) {
-    const ip = plan.cost.input || 0;
-    const op = plan.cost.output || 0;
-    return '\xA5' + ((input * ip + output * op) / 1000).toFixed(4);
-  }
-  return '\xA5' + ((input * 0.00014 + output * 0.00028) / 1000).toFixed(4);
-}
 export default ChatPage;

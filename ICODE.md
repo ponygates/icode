@@ -2,7 +2,7 @@
 
 ## 项目描述
 
-iCode 是一个多模型 AI 编码助手，提供 CLI（TUI）、桌面版（WebView2/浏览器）与 VS Code 扩展三端统一体验。开箱支持 14 个 LLM 提供商、60+ 模型，缓存优先架构可实现最高 94% token 节省。Go 语言编写，使用 cobra CLI 框架，附带 WebView2（Windows）/ 浏览器（macOS·Linux）桌面应用与 VS Code 扩展。一键自动更新模型：刷新后自动检测新增/下架模型，连续 2 次确认标记下架，文档页富化补充元数据。**当前版本 v0.2.0**（版本归零基线，历史 v0.2.x–v0.53.x 的整合，详见 CHANGELOG.md 与 docs/archive/）。
+iCode 是一个多模型 AI 编码助手，提供 CLI（TUI）、桌面版（WebView2/浏览器）与 VS Code 扩展三端统一体验。开箱支持 14 个 LLM 提供商、60+ 模型，缓存优先架构可实现最高 94% token 节省。Go 语言编写，使用 cobra CLI 框架，附带 WebView2（Windows）/ 浏览器（macOS·Linux）桌面应用与 VS Code 扩展。一键自动更新模型：刷新后自动检测新增/下架模型，连续 2 次确认标记下架，文档页富化补充元数据。**当前版本 v0.2.1**（版本归零基线，历史 v0.2.x–v0.53.x 的整合，详见 CHANGELOG.md 与 docs/archive/）。
 
 ## 构建命令
 

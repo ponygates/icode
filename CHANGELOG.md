@@ -2,6 +2,38 @@
 
 > **版本说明**：v0.1.0 是一次**版本归零与结构整理**——将历史迭代（v0.2.x–v0.53.x）的全部成果整合为统一的 0.1.0 功能基线。完整的历史版本记录见 [docs/archive/CHANGELOG_HISTORY.md](docs/archive/CHANGELOG_HISTORY.md)，历次对标审查与差距分析见 [docs/archive/](docs/archive/)。
 
+## v0.2.1 — ChatPage 拆分第一批：传输层与后端发现独立成模块 (2026-10-17)
+
+> v0.2.0 的「未完成」表里写着「先抽 `useChatStream`/`MessageList`/`Composer`，配 10 条关键测试」。本版完成其中**风险最低、覆盖收益最大**的一块：把流式传输与后端发现从 2,477 行的页面里搬出来，并补上此前完全缺失的测试。
+
+### A · SSE 传输独立为 `lib/chatStream.ts`
+
+- `streamChat` / `sessionStreams` / `encodeWav` / `estimateCost` 原本是 `ChatPage.tsx` 末尾的模块级函数，**无法在不挂载整页的情况下测试**。
+- 拆帧规则（一帧被 TCP 切成两半、一帧多条、注释行、空的 `data:`）、空流保护、Abort 语义（用户停止 vs 超时）、120s 超时，现在各有独立用例。
+- 新增 `abortSessionStream(sessionKey)`，把「标记 userStopped 再 abort」收敛到一处；页面里的停止按钮改为调用它，不再直接操作 Map 内部结构。
+
+### B · 后端发现独立为 `lib/backendDiscovery.ts`
+
+- 原逻辑内联在发送路径里：先试同源 `/api/health`，再按 `57356/57357/8080/3000/9090` 顺序探端口，失败静默。
+- 抽出 `discoverBackend({ explicit, origin, fetchImpl })`，返回 `{ url, source }`。`file://` 与 `"null"` 来源不再发起注定失败的请求；显式配置的 URL 不发任何探测请求。
+- `fetchImpl` 可注入，测试不需要起真服务。
+
+### C · 类型下沉
+
+- `ChatEvent` / `ChatPayload` / `UsageInfo` / `PlanInfo` / `PermissionRequest` 从 `ChatPage.shared.tsx` 移到 `lib/chatTypes.ts`，传输层不必为了命名一个 payload 去 import 一个 `.tsx`。
+- `ChatPage.shared.tsx` 保留同名 re-export，现有 import 路径全部不变。
+
+### D · 收益
+
+| 指标 | 前 | 后 |
+|---|---|---|
+| `ChatPage.tsx` | 2,477 行 | 2,345 行 |
+| 涉及模块 | 单体 | 4 个（页面 + 类型 + 传输 + 发现） |
+| 新增测试 | 0 | **20 条**（流式 15 / 发现 5） |
+| 前端测试总数 | 177 | **197** |
+
+未动 `MessageList`（上一轮已拆）与 `Composer`：输入框与附件队列深度耦合着 JSX 与语音状态，拆它需要连同渲染一起改，留待下一批单独做。
+
 ## v0.2.0 — 第五轮审查落地：PDF 输入 / 模型主动规划 / FTS5 检索 / 多语言索引 / 资源上限 (2026-10-17)
 
 > 依据 [docs/项目审查_2026-10-17.md](docs/项目审查_2026-10-17.md) 的只读审查结论，优先落地「链路断裂」与「工程健康」两类问题。操作系统级沙箱、可交互浏览器、前端拆分、任务级评测仍待专项批次（理由见报告）。
