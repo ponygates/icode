@@ -15,6 +15,7 @@ import (
 
 	"github.com/ponygates/icode/internal/executil"
 	"github.com/ponygates/icode/internal/llm/tokenopt"
+	"github.com/ponygates/icode/internal/sandbox"
 	"github.com/ponygates/icode/internal/types"
 )
 
@@ -151,6 +152,14 @@ func (t *BashTool) Execute(ctx context.Context, args string) (*types.ToolResult,
 	}
 
 	timeoutSec := resolveBashTimeoutSec(args)
+
+	// Confined path: when a backend is installed, the command runs inside the
+	// OS boundary. Failure to launch is reported, never silently retried
+	// unconfined — a sandbox that quietly steps aside is worse than none.
+	if r := sandbox.Active(); r != nil {
+		return runConfined(ctx, r, cmdStr, workDir, timeoutSec)
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
 	defer cancel()
 
@@ -233,4 +242,69 @@ func (t *BashTool) Execute(ctx context.Context, args string) (*types.ToolResult,
 	}
 
 	return &types.ToolResult{Success: true, Content: capBashOutput(string(output))}, nil
+}
+
+// runConfined executes cmdStr inside the installed sandbox backend. It mirrors
+// the unconfined path's timeout, output cap and live streaming so the model
+// sees the same shape of result — the only difference is that an escape
+// attempt now fails at the kernel boundary instead of succeeding.
+//
+// A launch failure is surfaced as a tool error. Falling back to an unconfined
+// retry would make the sandbox look present while being optional in practice.
+func runConfined(ctx context.Context, r sandbox.Runner, cmdStr, workDir string, timeoutSec int) (*types.ToolResult, error) {
+	dir := ""
+	if workDir != "" {
+		if absDir, err := filepath.Abs(workDir); err == nil {
+			if info, err := os.Stat(absDir); err == nil && info.IsDir() {
+				dir = absDir
+			}
+		}
+	}
+	if dir == "" {
+		if wd, err := os.Getwd(); err == nil {
+			dir = wd
+		}
+	}
+
+	shellName, shellArgs := resolveBashShell()
+	argv := append([]string{shellName}, shellArgs...)
+	argv = append(argv, cmdStr)
+
+	var onOutput func([]byte)
+	if progress := ProgressFromContext(ctx); progress != nil {
+		onOutput = func(p []byte) { progress(string(p)) }
+	}
+
+	runCtx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
+	defer cancel()
+
+	h, err := r.Start(runCtx, argv, sandbox.Spec{Dir: dir, OnOutput: onOutput})
+	if err != nil {
+		return &types.ToolResult{
+			Success: false,
+			Error:   fmt.Sprintf("confined execution via %s failed: %v", r.Name(), err),
+		}, nil
+	}
+
+	res, waitErr := h.Wait()
+	content := capBashOutput(string(res.Output))
+
+	if waitErr != nil {
+		return &types.ToolResult{Success: false, Content: content, Error: waitErr.Error()}, nil
+	}
+	if runCtx.Err() == context.DeadlineExceeded {
+		return &types.ToolResult{
+			Success: false,
+			Content: content,
+			Error:   fmt.Sprintf("command timed out after %d seconds", timeoutSec),
+		}, nil
+	}
+	if res.ExitCode != 0 {
+		return &types.ToolResult{
+			Success: false,
+			Content: content,
+			Error:   fmt.Sprintf("exit status %d", res.ExitCode),
+		}, nil
+	}
+	return &types.ToolResult{Success: true, Content: content}, nil
 }

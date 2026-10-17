@@ -2,6 +2,67 @@
 
 > **版本说明**：v0.1.0 是一次**版本归零与结构整理**——将历史迭代（v0.2.x–v0.53.x）的全部成果整合为统一的 0.1.0 功能基线。完整的历史版本记录见 [docs/archive/CHANGELOG_HISTORY.md](docs/archive/CHANGELOG_HISTORY.md)，历次对标审查与差距分析见 [docs/archive/](docs/archive/)。
 
+## v0.3.0 — 操作系统级沙箱（批次 1：Windows AppContainer + bash 工具接入）(2026-10-17)
+
+> 审查报告 P0-1 的落地。此前 bash 的全部防护都在**进程创建之前**：权限门只看命令字符串，23 条正则追不上构造型命令，`exec.Command` 跑的是完整用户权限。这一版把边界挪到内核，命令能不能通过规则变得无关紧要——越界操作由操作系统直接拒绝。
+
+### A · 新增 `internal/sandbox`
+
+- 平台无关核心：`Mode`（auto/on/off）、`NetworkPolicy`（deny/allow）、`Spec`/`Result`/`Handle`/`Runner` 接口、`Init` 统一探测与降级、包级 `Active()`。
+- **降级语义**：`auto` 不支持就告警后继续；`on` 不支持则**拒绝执行**；`off` 显式关闭并提示。`Init` 返回 notices 由调用方展示，不做静默降级。
+- `ParseMode` 对未知值回退 `auto`——配置写错不能悄悄把沙箱关掉。
+
+### B · Windows AppContainer 后端（`appcontainer_windows.go`）
+
+- 自建 `CreateProcessW` + `STARTUPINFOEX`（Go 的 `os/exec` 不支持 `SECURITY_CAPABILITIES`），一次 profile 创建、全程复用。
+- 工作区按需授权：读取现有 DACL → `SetEntriesInAcl` 合并 → `SetNamedSecurityInfo` 写回，**保留原有全部 ACE**（测试用 SID 集合比对守住这条）。
+- 子进程环境：注入独立临时目录（`%TEMP%\icode-sandbox`）+ `TMP`/`TEMP` 重定向，**不授权整个 `%TEMP%`**——否则沙箱能读其他进程的临时文件。
+- 取消语义在 backend 内实现：`ctx.Done` 直接 `TerminateProcess`，调用方只管 `Wait`。
+
+### C · 三个只有实测才会发现的问题
+
+1. **`SECURITY_CAPABILITIES.Reserved` 是 `DWORD`**。写成 `uint64` 让结构体从 24 字节变 32，`UpdateProcThreadAttribute` 返回 `ERROR_INVALID_PARAMETER`（"参数错误"），完全指不出原因。
+2. **传 UTF-16 环境块必须同时置 `CREATE_UNICODE_ENVIRONMENT`**。否则系统按 ANSI 解析，每个条目都解码成空名，`CreateProcess` 报 `ERROR_ENVVAR_NOT_FOUND`（203）。
+3. **AppContainer 打不开 `NUL` 设备**。`\Device\Null` 的 DACL 只有 `Everyone / SYSTEM / Administrators / Restricted Code`，没有 AppContainer 组；而 Go 工具链计算 build ID 时会 `open NUL`，导致 `go build` 直接失败。已通过给该设备补一条容器 SID 的 ACE 解决（设备不存数据，不扩大实际暴露面）；DACL 不可写时降级为"沙箱内不能构建"，并在 notices 里说明。
+
+另外两个 Go 陷阱：`envBlock` 的 `*uint16` 转 `uintptr` 后必须 `runtime.KeepAlive`，否则 GC 可能在 `CreateProcess` 期间回收环境块（表现为子进程卡死）；`ConvertSidToStringSidW` 在 advapi32 而非 kernel32。
+
+### D · bash 工具接入
+
+- `BashTool.Execute` 在 `sandbox.Active() != nil` 时走 `runConfined`：同样的超时上限、输出截断、流式进度，只有边界不同。
+- **启动失败不回退到无沙箱执行**——静默降级会让沙箱看起来存在、实际可选，比没有更糟。
+
+### E · 配置
+
+```yaml
+sandbox:
+  mode: auto            # auto | on | off
+  writable_paths: []    # 额外可写目录（工作区与 Go 缓存自动处理）
+  network: deny         # deny | allow
+  grant_workspace: true # 允许为工作区写入 ACE
+```
+
+### F · 实测结果（本机 Windows 10 Pro / x64）
+
+| 用例 | 结果 |
+|---|---|
+| `type %USERPROFILE%\icode-sandbox-probe.txt` | 拒绝 ✅ |
+| `dir %USERPROFILE%` | 拒绝 ✅ |
+| `echo x > C:\Windows\Temp\...` | 拒绝 ✅ |
+| 工作区写文件 / 读授权前已存在的子文件 | 正常 ✅ |
+| `echo hi > NUL`、`type NUL` | 正常 ✅（补 ACE 后） |
+| `go build` 一个最小 module | 成功产出二进制 ✅ |
+| `Kill()` 终止 `ping` 长任务 | 立即退出 ✅ |
+
+测试：新增 **19 项**（沙箱包 16 + bash 工具端到端 3）。
+
+### G · 未完成（明确列出）
+
+- **后台任务（`bgtask`）与用户 `!` 命令尚未接入**。前者在批次 2，后者按设计不沙箱（用户自己敲的命令，威胁模型不同）。
+- **Linux / macOS 后端未实现**，`newPlatformRunner` 在非 Windows 返回不支持——本机无法验证，不写未验证的代码充数。
+- 设置页尚无沙箱开关与后端状态显示，当前只能改 YAML。
+- 首次启用会向项目目录写入一条 AppContainer ACE（可撤销，`sandbox.RevokeWorkspace` 已提供，尚未接到 UI）。
+
 ## v0.2.2 — ChatPage 拆分第二批：Composer 独立 + 键盘行为测试 (2026-10-17)
 
 > 承接 v0.2.1 的拆分。上批只搬了「没有 JSX」的传输层，这批把输入区整体搬成受控组件，并补上此前一条都没有的键盘行为回归测试。

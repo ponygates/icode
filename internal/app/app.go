@@ -31,6 +31,7 @@ import (
 	"github.com/ponygates/icode/internal/mcp"
 	"github.com/ponygates/icode/internal/mesh"
 	"github.com/ponygates/icode/internal/notify"
+	"github.com/ponygates/icode/internal/sandbox"
 	"github.com/ponygates/icode/internal/scheduler"
 	"github.com/ponygates/icode/internal/types"
 	"github.com/ponygates/icode/internal/xgo"
@@ -57,12 +58,17 @@ func blog(format string, args ...any) {
 
 // App is the top-level application container.
 type App struct {
-	Cfg        *config.Config
-	Reg        *registry.Impl
-	SessStore  types.SessionStore
-	DB         *db.Store // SQLite-backed store (may be nil)
-	Engine     *conversation.Engine
-	Gate       *permission.Gate
+	Cfg       *config.Config
+	Reg       *registry.Impl
+	SessStore types.SessionStore
+	DB        *db.Store // SQLite-backed store (may be nil)
+	Engine    *conversation.Engine
+	Gate      *permission.Gate
+	// Sandbox is the OS-level confinement backend for shell commands, nil when
+	// the platform has none or the user disabled it. It is separate from Gate:
+	// Gate decides whether a command may run, Sandbox decides what the process
+	// can reach once it does.
+	Sandbox    sandbox.Runner
 	Updater    *modelupdate.Service
 	LSPManager *lsp.Manager // nil when LSP disabled
 	// MeshCancel stops the cross-machine message forwarder (nil when the
@@ -199,6 +205,23 @@ func Bootstrap() (*App, error) {
 	}
 	// Strike-counter escalation: N consecutive blocks force manual mode.
 	app.Gate.SetStrikeThreshold(cfg.Permission.StrikeThreshold)
+
+	// OS-level confinement for model-issued shell commands. Independent of the
+	// gate above. Notices are logged at startup so a missing backend can never
+	// be mistaken for protection that is actually in place.
+	sb, sandboxNotices, sandboxErr := sandbox.Init(sandbox.Config{
+		Mode:           sandbox.ParseMode(cfg.Sandbox.Mode),
+		WritablePaths:  cfg.Sandbox.WritablePaths,
+		Network:        sandbox.ParseNetwork(cfg.Sandbox.Network),
+		GrantWorkspace: cfg.Sandbox.GrantWorkspace == nil || *cfg.Sandbox.GrantWorkspace,
+	})
+	app.Sandbox = sb
+	for _, n := range sandboxNotices {
+		blog("[iCode] sandbox: %s", n)
+	}
+	if sandboxErr != nil {
+		blog("[iCode] sandbox: %v", sandboxErr)
+	}
 	// Parameter-level hard rules (config [permission.rules]): first match
 	// wins and overrides every other decision path, so patterns like
 	// "Bash(git push:*)" → ask are enforced even in auto/yolo modes.

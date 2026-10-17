@@ -63,6 +63,7 @@ type Config struct {
 	TUI           TUICfg                 `yaml:"tui" json:"tui"`
 	Tools         ToolsCfg               `yaml:"tools" json:"tools"`
 	Permission    PermissionCfg          `yaml:"permission" json:"permission"`
+	Sandbox       SandboxCfg             `yaml:"sandbox,omitempty" json:"sandbox,omitempty"`
 	Server        ServerCfg              `yaml:"server" json:"server"`
 	Scheduler     SchedulerCfg           `yaml:"scheduler" json:"scheduler"`
 	Update        UpdateCfg              `yaml:"update" json:"update"`
@@ -375,6 +376,33 @@ type ToolsCfg struct {
 	BudgetGlobalChars int      `yaml:"budget_global_chars" json:"budget_global_chars"`
 	AllowedPaths      []string `yaml:"allowed_paths" json:"allowed_paths"`
 	DeniedCommands    []string `yaml:"denied_commands" json:"denied_commands"`
+}
+
+// SandboxCfg configures operating-system level confinement for model-issued
+// shell commands. It is deliberately separate from PermissionCfg: the gate
+// decides whether a command may run at all, the sandbox decides what the
+// process can reach once it does. One can be strict while the other is loose.
+type SandboxCfg struct {
+	// Mode is auto | on | off. auto enables confinement when the platform
+	// supports it and warns before falling back; on refuses to run shell
+	// commands without a backend; off disables confinement explicitly.
+	Mode string `yaml:"mode,omitempty" json:"mode,omitempty"`
+
+	// WritablePaths lists extra directories the confined process may write to.
+	// The working directory and the system temp directory are always included.
+	// Toolchain caches (GOPATH, GOCACHE, npm cache) usually belong here.
+	WritablePaths []string `yaml:"writable_paths,omitempty" json:"writable_paths,omitempty"`
+
+	// Network is deny | allow. deny is the default; allow grants the platform's
+	// client capability wholesale, since per-host rules are not expressible.
+	Network string `yaml:"network,omitempty" json:"network,omitempty"`
+
+	// GrantWorkspace permits the backend to add an inheritable access-control
+	// entry for the working directory. Without it a confined process cannot
+	// even use the project directory as its cwd, so it defaults to true — but
+	// the user is always told when an ACE is written. Set false to opt out and
+	// supply writable_paths instead.
+	GrantWorkspace *bool `yaml:"grant_workspace,omitempty" json:"grant_workspace,omitempty"`
 }
 
 // PermissionCfg tunes the permission gate's escalation behaviour.
@@ -703,6 +731,11 @@ func Default() *Config {
 		},
 		Permission: PermissionCfg{
 			StrikeThreshold: 3,
+		},
+		Sandbox: SandboxCfg{
+			Mode:           "auto",
+			Network:        "deny",
+			GrantWorkspace: boolPtr(true),
 		},
 		Routing: RoutingCfg{
 			Mode: "embedding", // local, zero-token semantic routing by default
