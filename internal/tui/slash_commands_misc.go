@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/ponygates/icode/internal/config"
-	"github.com/ponygates/icode/internal/executil"
 )
 
 // projectMemoryPath returns the project-level memory file (ICODE.md) path.
@@ -114,22 +113,17 @@ func (t *TUI) execShell(cmdStr string) {
 		return
 	}
 	t.add(RoleTool, "bash "+cmdStr)
+	t.userShellNotice()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	var cmd *exec.Cmd
-	if strings.Contains(strings.ToLower(os.Getenv("OS")), "windows") {
-		cmd = executil.CommandContext(ctx, "cmd", "/C", cmdStr)
-	} else {
-		cmd = executil.CommandContext(ctx, "sh", "-c", cmdStr)
-	}
-	output, err := cmd.CombinedOutput()
+	output, err := runUserShell(ctx, t.workingDir(), cmdStr)
 	if err != nil {
 		t.add(RoleError, err.Error())
 	}
 	if len(output) > 0 {
-		t.AppendToolResult(strings.TrimRight(string(output), "\n"))
+		t.AppendToolResult(strings.TrimRight(output, "\n"))
 	}
 }
 

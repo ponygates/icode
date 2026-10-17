@@ -404,6 +404,18 @@ type SandboxCfg struct {
 	// the user is always told when an ACE is written. Set false to opt out and
 	// supply writable_paths instead.
 	GrantWorkspace *bool `yaml:"grant_workspace,omitempty" json:"grant_workspace,omitempty"`
+
+	// ConfineUserShell extends confinement to commands the user types with the
+	// "!" prefix in the TUI. It defaults to false on purpose: those commands
+	// are typed at the keyboard by the person who already owns the shell, and
+	// confining them breaks ordinary work — `git push` needs the network, an
+	// editor launch needs access well outside the project. The model-issued
+	// commands this sandbox exists for are unaffected by this setting.
+	//
+	// Setting it true puts "!" under exactly the same boundary as a model
+	// command, which is useful when the terminal output is being pasted in
+	// from elsewhere.
+	ConfineUserShell *bool `yaml:"confine_user_shell,omitempty" json:"confine_user_shell,omitempty"`
 }
 
 // PermissionCfg tunes the permission gate's escalation behaviour.

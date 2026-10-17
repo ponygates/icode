@@ -15,12 +15,16 @@ export interface SandboxState {
     mode: string;
     network: string;
     notices?: string[];
+    // Whether "!" commands are inside the boundary too. Separate from enabled
+    // because a confined sandbox can still leave them unrestricted.
+    confine_user_shell?: boolean;
   };
   config: {
     mode: string;
     network: string;
     writable_paths: string[];
     grant_workspace: boolean;
+    confine_user_shell: boolean;
   };
   restart_required: boolean;
 }
@@ -83,14 +87,14 @@ export function SandboxSection() {
   const runtime = state?.runtime;
   const configuredMode = state?.config.mode || 'auto';
 
-  const save = async (mode: string) => {
+  const save = async (patch: Record<string, unknown>) => {
     setSaving(true);
     setRestartHint(false);
     try {
       const r = await fetch(`${backendUrl}/api/sandbox`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode }),
+        body: JSON.stringify(patch),
       });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       setState(await r.json());
@@ -112,13 +116,13 @@ export function SandboxSection() {
       setPendingMode(mode);
       return;
     }
-    void save(mode);
+    void save({ mode });
   };
 
   const confirmConsent = () => {
     const mode = pendingMode;
     setPendingMode(null);
-    if (mode) void save(mode);
+    if (mode) void save({ mode });
   };
 
   const revoke = async (path: string) => {
@@ -208,6 +212,36 @@ export function SandboxSection() {
 
       <div style={{ fontSize: 10, color: 'var(--text-muted)', lineHeight: 1.6 }}>
         {t(`tools.sandboxModeHint_${configuredMode}`)}
+      </div>
+
+      {/* The third shell entry point. It stays unrestricted by default —
+          these commands are typed by the machine's owner, and confinement
+          would break git push and editor launches. Saying so out loud beats
+          letting "sandbox is on" imply more than it does. */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <label style={{
+          display: 'flex', alignItems: 'center', gap: 8,
+          cursor: saving ? 'default' : 'pointer',
+        }}>
+          <input
+            type="checkbox"
+            checked={!!state?.config.confine_user_shell}
+            disabled={saving || !state}
+            onChange={(e) => void save({ confine_user_shell: e.target.checked })}
+            style={{ margin: 0, cursor: 'inherit' }}
+          />
+          <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)' }}>
+            {t('tools.sandboxUserShellTitle')}
+          </span>
+        </label>
+        <div style={{ fontSize: 10, color: 'var(--text-muted)', lineHeight: 1.6, paddingLeft: 22 }}>
+          {t('tools.sandboxUserShellDesc')}
+        </div>
+        {runtime?.enabled && !runtime.confine_user_shell && (
+          <div style={{ fontSize: 10, color: 'var(--warning)', paddingLeft: 22, lineHeight: 1.6 }}>
+            {t('tools.sandboxUserShellGap')}
+          </div>
+        )}
       </div>
 
       {restartHint && (

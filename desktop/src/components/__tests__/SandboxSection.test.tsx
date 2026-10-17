@@ -28,14 +28,21 @@ const enabledState = {
   runtime: {
     enabled: true, backend: 'appcontainer', available: true,
     mode: 'auto', network: 'deny', notices: ['created AppContainer profile iCode.Sandbox'],
+    confine_user_shell: false,
   },
-  config: { mode: 'auto', network: 'deny', writable_paths: [], grant_workspace: true },
+  config: {
+    mode: 'auto', network: 'deny', writable_paths: [], grant_workspace: true,
+    confine_user_shell: false,
+  },
   restart_required: false,
 };
 
 const disabledState = {
-  runtime: { enabled: false, available: false, mode: 'auto', network: 'deny' },
-  config: { mode: 'auto', network: 'deny', writable_paths: [], grant_workspace: true },
+  runtime: { enabled: false, available: false, mode: 'auto', network: 'deny', confine_user_shell: false },
+  config: {
+    mode: 'auto', network: 'deny', writable_paths: [], grant_workspace: true,
+    confine_user_shell: false,
+  },
   restart_required: false,
 };
 
@@ -73,10 +80,13 @@ beforeEach(() => {
 
     if (method === 'PUT') {
       if (nextStatus !== 200) return jsonRes({ error: 'boom' }, nextStatus);
-      const body = JSON.parse(String(init?.body || '{}'));
+      const patch = JSON.parse(String(init?.body || '{}'));
+      const base = sandboxState as typeof enabledState;
+      // The backend merges the patch into the stored config; mirroring that
+      // here keeps the rendered state honest after a save.
       return jsonRes({
-        ...(sandboxState as typeof enabledState),
-        config: { ...(sandboxState as typeof enabledState).config, mode: body.mode ?? 'auto' },
+        ...base,
+        config: { ...base.config, ...patch },
         restart_required: true,
       });
     }
@@ -212,6 +222,46 @@ describe('SandboxSection revocation', () => {
     const btn = screen.getByText('tools.sandboxGrantsRevoke').closest('button')!;
     expect(btn.disabled).toBe(true);
     expect(screen.getByText('tools.sandboxGrantsUnsupported')).toBeTruthy();
+  });
+});
+
+describe('SandboxSection user shell scope', () => {
+  it('leaves user commands unrestricted by default and says so', async () => {
+    render(<SandboxSection />);
+    await screen.findByText('tools.sandboxActive');
+
+    const box = screen.getByRole('checkbox') as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    // The gap is named rather than glossed over: "sandbox enabled" does not
+    // mean the user's own ! commands are confined.
+    expect(screen.getByText('tools.sandboxUserShellGap')).toBeTruthy();
+  });
+
+  it('saves the opt-in and keeps reporting the live gap until a restart', async () => {
+    render(<SandboxSection />);
+    await screen.findByText('tools.sandboxActive');
+
+    fireEvent.click(screen.getByRole('checkbox'));
+
+    await waitFor(() => {
+      const put = calls.find((c) => c.method === 'PUT');
+      expect(put).toBeTruthy();
+      expect(JSON.parse(put!.body!)).toEqual({ confine_user_shell: true });
+    });
+    expect(screen.getByText('tools.sandboxRestartHint')).toBeTruthy();
+    // The badge and the gap note follow runtime, not config. The running
+    // process still has the old scope, so claiming otherwise would be the
+    // exact false assurance this section is meant to prevent.
+    expect(screen.getByText('tools.sandboxUserShellGap')).toBeTruthy();
+  });
+
+  it('does not warn about the gap when no sandbox is installed', async () => {
+    sandboxState = disabledState;
+    render(<SandboxSection />);
+    await screen.findByText('tools.sandboxInactive');
+    // There is nothing to fall short of: no boundary exists at all, which the
+    // inactive hint already states.
+    expect(screen.queryByText('tools.sandboxUserShellGap')).toBeNull();
   });
 });
 

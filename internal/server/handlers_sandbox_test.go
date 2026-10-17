@@ -95,6 +95,54 @@ func TestSandboxSaveRequestsRestart(t *testing.T) {
 	}
 }
 
+// TestSandboxConfineUserShellPersists covers the third shell entry point: the
+// setting has to survive a save, and the response has to admit that it needs a
+// restart, because the intent is read once at startup.
+func TestSandboxConfineUserShellPersists(t *testing.T) {
+	isolateHome(t)
+	_, base := newSecurityTestServer(t)
+
+	type configView struct {
+		Config struct {
+			ConfineUserShell bool `json:"confine_user_shell"`
+		} `json:"config"`
+		RestartRequired bool `json:"restart_required"`
+	}
+
+	var saved configView
+	httpDo(t, http.MethodPut, base+"/api/sandbox", `{"confine_user_shell":true}`, http.StatusOK, &saved)
+	if !saved.Config.ConfineUserShell {
+		t.Fatalf("saved response does not echo confine_user_shell=true")
+	}
+	if !saved.RestartRequired {
+		t.Fatalf("changing the user-shell scope must report restart_required")
+	}
+
+	var after configView
+	httpDo(t, http.MethodGet, base+"/api/sandbox", "", http.StatusOK, &after)
+	if !after.Config.ConfineUserShell {
+		t.Fatalf("confine_user_shell did not persist")
+	}
+}
+
+// TestSandboxConfineUserShellDefaultsOff pins the default that keeps
+// "! git push" working. Flipping it would be a silent breaking change for
+// every existing user, so the default is asserted rather than assumed.
+func TestSandboxConfineUserShellDefaultsOff(t *testing.T) {
+	isolateHome(t)
+	_, base := newSecurityTestServer(t)
+
+	var body struct {
+		Config struct {
+			ConfineUserShell bool `json:"confine_user_shell"`
+		} `json:"config"`
+	}
+	httpDo(t, http.MethodGet, base+"/api/sandbox", "", http.StatusOK, &body)
+	if body.Config.ConfineUserShell {
+		t.Fatalf("confine_user_shell defaults to true; user commands would break")
+	}
+}
+
 // TestSandboxGrantsAreListed covers the "make the change visible" half: the
 // settings page has to be able to show which directories carry an entry for
 // the sandbox identity.

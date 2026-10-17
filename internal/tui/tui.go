@@ -250,6 +250,9 @@ type TUI struct {
 	// zenMode hides tool-output noise — all tool cards render folded so the
 	// user sees only the conversation (OpenCode Zen parity).
 	zenMode bool
+	// noticedShellScope records that the "! commands are not confined" note
+	// has been shown. Saying it before every command would make it noise.
+	noticedShellScope bool
 	// voiceRec is the live CLI microphone capture (/voice toggle).
 	voiceRec *voice.Recorder
 	// gitBranch caches the workspace branch for the status bar; refreshed

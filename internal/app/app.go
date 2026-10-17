@@ -210,10 +210,11 @@ func Bootstrap() (*App, error) {
 	// gate above. Notices are logged at startup so a missing backend can never
 	// be mistaken for protection that is actually in place.
 	sb, sandboxNotices, sandboxErr := sandbox.Init(sandbox.Config{
-		Mode:           sandbox.ParseMode(cfg.Sandbox.Mode),
-		WritablePaths:  cfg.Sandbox.WritablePaths,
-		Network:        sandbox.ParseNetwork(cfg.Sandbox.Network),
-		GrantWorkspace: cfg.Sandbox.GrantWorkspace == nil || *cfg.Sandbox.GrantWorkspace,
+		Mode:             sandbox.ParseMode(cfg.Sandbox.Mode),
+		WritablePaths:    cfg.Sandbox.WritablePaths,
+		Network:          sandbox.ParseNetwork(cfg.Sandbox.Network),
+		GrantWorkspace:   cfg.Sandbox.GrantWorkspace == nil || *cfg.Sandbox.GrantWorkspace,
+		ConfineUserShell: cfg.Sandbox.ConfineUserShell != nil && *cfg.Sandbox.ConfineUserShell,
 	})
 	app.Sandbox = sb
 	for _, n := range sandboxNotices {

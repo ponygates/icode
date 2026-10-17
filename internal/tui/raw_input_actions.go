@@ -5,11 +5,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"runtime"
 	"strings"
 	"time"
-
-	"github.com/ponygates/icode/internal/executil"
 )
 
 // toggleTranscript implements Ctrl+O (Claude Code's transcript viewer): expand
@@ -142,6 +139,7 @@ func (t *TUI) backgroundCurrentTurn() bool {
 // the agent as a user turn so it can react (Claude Code parity).
 func (t *TUI) runShellMode(cmdStr string) {
 	t.add(RoleSystem, "$ "+cmdStr)
+	t.userShellNotice()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -211,19 +209,27 @@ func (t *TUI) runShellMode(cmdStr string) {
 
 // execShellCapture runs cmdStr through the platform shell and returns its
 // combined output. It honours ctx cancellation (Ctrl+C kills the process).
+//
+// Confinement is decided in runUserShell, which also handles the opt-in
+// sandbox.confine_user_shell setting.
 func (t *TUI) execShellCapture(ctx context.Context, cmdStr string) string {
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		cmd = executil.CommandContext(ctx, "cmd", "/C", cmdStr)
-	} else {
-		cmd = executil.CommandContext(ctx, "sh", "-c", cmdStr)
-	}
-	out, err := cmd.CombinedOutput()
+	out, err := runUserShell(ctx, t.workingDir(), cmdStr)
 	if err != nil && ctx.Err() == nil {
 		// Include the exit-status hint; the output itself stays first.
-		return string(out) + fmt.Sprintf("\n（退出码: %v）", err)
+		return out + fmt.Sprintf("\n（退出码: %v）", err)
 	}
-	return string(out)
+	return out
+}
+
+// workingDir resolves the directory "!" commands run in. An error is reported
+// as empty, which makes runUserShell refuse rather than guess: inheriting the
+// parent's cwd would hand the container token a directory it cannot open.
+func (t *TUI) workingDir() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return wd
 }
 
 func (t *TUI) drainStream() {

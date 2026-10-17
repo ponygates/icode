@@ -64,6 +64,41 @@ func TestInitModeOffReturnsNotice(t *testing.T) {
 	}
 }
 
+// TestInitRecordsUserShellIntent checks that the opt-in is recorded on every
+// path, including the ones that install nothing. The TUI reads it later to
+// decide whether "!" belongs inside the boundary, and a missed record would
+// silently answer "no" to a setting the user turned on.
+func TestInitRecordsUserShellIntent(t *testing.T) {
+	t.Cleanup(func() {
+		SetActive(nil)
+		_, _, _ = Init(Config{Mode: ModeOff})
+	})
+
+	_, _, _ = Init(Config{Mode: ModeOff, ConfineUserShell: true})
+	if !ConfineUserShell() {
+		t.Fatalf("Init(off, confine=true) did not record the intent")
+	}
+	_, _, _ = Init(Config{Mode: ModeOff, ConfineUserShell: false})
+	if ConfineUserShell() {
+		t.Fatalf("Init(off, confine=false) left the intent set")
+	}
+}
+
+// TestStatusReportsUserShellOnlyWhenInstalled keeps the status honest: an
+// intent recorded without a backend is not a boundary, and reporting it as one
+// is exactly the false assurance the sandbox is supposed to remove.
+func TestStatusReportsUserShellOnlyWhenInstalled(t *testing.T) {
+	t.Cleanup(func() {
+		SetActive(nil)
+		_, _, _ = Init(Config{Mode: ModeOff})
+	})
+
+	_, _, _ = Init(Config{Mode: ModeOff, ConfineUserShell: true})
+	if st := Status(); st.ConfineUserShell {
+		t.Fatalf("Status claims user commands are confined with no runner installed")
+	}
+}
+
 func TestSpecZeroValueIsNotConfinedByIdentity(t *testing.T) {
 	// Guard against a future backend treating an empty Spec as "already
 	// prepared" — an empty Dir must still be handled explicitly.

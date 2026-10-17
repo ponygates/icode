@@ -29,10 +29,11 @@ func (s *Server) handleSandbox(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, s.sandboxState())
 	case http.MethodPut:
 		var body struct {
-			Mode           *string  `json:"mode"`
-			Network        *string  `json:"network"`
-			WritablePaths  []string `json:"writable_paths"`
-			GrantWorkspace *bool    `json:"grant_workspace"`
+			Mode             *string  `json:"mode"`
+			Network          *string  `json:"network"`
+			WritablePaths    []string `json:"writable_paths"`
+			GrantWorkspace   *bool    `json:"grant_workspace"`
+			ConfineUserShell *bool    `json:"confine_user_shell"`
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -63,6 +64,10 @@ func (s *Server) handleSandbox(w http.ResponseWriter, r *http.Request) {
 			if body.GrantWorkspace != nil {
 				v := *body.GrantWorkspace
 				s.cfg.Sandbox.GrantWorkspace = &v
+			}
+			if body.ConfineUserShell != nil {
+				v := *body.ConfineUserShell
+				s.cfg.Sandbox.ConfineUserShell = &v
 			}
 			return s.cfg.SaveLocked(config.DefaultPath())
 		}); err != nil {
@@ -134,6 +139,7 @@ func (s *Server) handleSandboxGrants(w http.ResponseWriter, r *http.Request) {
 func (s *Server) sandboxState() map[string]any {
 	st := sandbox.Status()
 	grant := true
+	confineShell := false
 	var writable []string
 	var mode, network string
 	s.cfg.WithRLock(func() {
@@ -143,14 +149,18 @@ func (s *Server) sandboxState() map[string]any {
 		if s.cfg.Sandbox.GrantWorkspace != nil {
 			grant = *s.cfg.Sandbox.GrantWorkspace
 		}
+		if s.cfg.Sandbox.ConfineUserShell != nil {
+			confineShell = *s.cfg.Sandbox.ConfineUserShell
+		}
 	})
 	return map[string]any{
 		"runtime": st,
 		"config": map[string]any{
-			"mode":            mode,
-			"network":         network,
-			"writable_paths":  writable,
-			"grant_workspace": grant,
+			"mode":               mode,
+			"network":            network,
+			"writable_paths":     writable,
+			"grant_workspace":    grant,
+			"confine_user_shell": confineShell,
 		},
 		"restart_required": false,
 	}
